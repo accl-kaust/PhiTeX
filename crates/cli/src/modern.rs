@@ -1243,6 +1243,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
             return crate::EXIT_INTERNAL;
         }
     };
+    spin.built(r.pages(), &r.out.pages_changed);
     status.set("writing the outputs");
     phitex_tex::timeline::lap("cli: the build returned");
     let main = match s.write(&r, true) {

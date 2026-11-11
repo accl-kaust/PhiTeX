@@ -646,15 +646,32 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
 
 /// `rows` as a tree under `head`: `├─ name  value`, the last `└─`; a
 /// value wider than the terminal goes on under itself, broken at its
-/// ` · `s.
+/// ` · `s, and a line still wider (a part too long for any line, a
+/// terminal too narrow) cut at the terminal's edge.
 fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<String> {
-    let cols = crate::keys::width().unwrap_or(100).max(50);
+    tree_at(
+        st,
+        head,
+        rows,
+        crate::keys::width().unwrap_or(100).saturating_sub(1),
+    )
+}
+
+/// [`tree`] at `cols` columns.
+fn tree_at(
+    st: crate::ui::Style,
+    head: String,
+    rows: &[(String, String)],
+    cols: usize,
+) -> Vec<String> {
+    let cols = cols.max(1);
     let mut out = vec![head];
     for (k, (name, value)) in rows.iter().enumerate() {
         let last = k + 1 == rows.len();
         let branch = if last { "└─" } else { "├─" };
         let stem = if last { "  " } else { "│ " };
-        let room = cols.saturating_sub(2 + 3 + 15).max(20);
+        // (the indent, the branch and the name's column before the value)
+        let room = cols.saturating_sub(2 + 3 + 15).max(10);
         let mut lines: Vec<String> = vec![String::new()];
         for part in value.split(" · ") {
             let cur = lines.last_mut().expect("a line");
@@ -680,7 +697,15 @@ fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<St
             }
         }
     }
-    out
+    out.into_iter()
+        .map(|l| {
+            if crate::ui::width(&l) > cols {
+                crate::ui::clip(&crate::ui::plain(&l), cols)
+            } else {
+                l
+            }
+        })
+        .collect()
 }
 
 /// `cold / wall` as `14×` or `2.5×`, when an edit beat the cold build.
@@ -1062,9 +1087,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         }
     }
     // (the pages a cold build streams, where a viewer shows them: each
-    // drawn from its own file until the build is in)
+    // drawn from its own file until the build is in; a page streamed again
+    // with another hash shown redone in the live tree. Only where the
+    // viewer listens: a listener makes the clean build stream its pages,
+    // work the tree alone does not pay for)
     if let Some(v) = view.as_ref().map(View::viewer) {
+        let ui = ui.clone();
         status.meter().on_streamed(Box::new(move |p, pages| {
+            ui.streamed(p.page, p.hash);
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
                 v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
@@ -1345,7 +1375,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             (a, b) => a.or(b),
         };
         let mut r = match ran {
-            Ok(r) => r,
+            Ok(r) => {
+                spin.built(r.pages(), &r.out.pages_changed);
+                r
+            }
             Err(m) => {
                 spin.done();
                 building.store(false, Ordering::Relaxed);
@@ -2706,6 +2739,33 @@ fn build_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past a narrow terminal: a part too long for any line
+    /// and the name's column cut at its edge.
+    #[test]
+    fn rows_never_run_past_a_narrow_terminal() {
+        let st = crate::ui::Style {
+            color: false,
+            tty: false,
+        };
+        let rows = vec![
+            (
+                "memory".to_owned(),
+                "1.2 GB resident · 300 MB values · 2 collections".to_owned(),
+            ),
+            (
+                "hints".to_owned(),
+                "a-single-part-far-wider-than-any-terminal-line-is-cut-at-the-edge".to_owned(),
+            ),
+        ];
+        for cols in [20, 39, 60] {
+            let out = tree_at(st, "build 2  main.tex:4  12.0 ms".to_owned(), &rows, cols);
+            assert!(
+                out.iter().all(|l| crate::ui::width(l) <= cols),
+                "{cols}: {out:#?}"
+            );
+        }
+    }
 
     /// A stats row too wide for the terminal (no terminal in a test: 100
     /// columns) goes on under its value, broken at its ` · `s, every

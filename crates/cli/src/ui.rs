@@ -253,20 +253,241 @@ pub struct Ui {
     pub json: bool,
     bottom: Arc<Mutex<Bottom>>,
     tap: Arc<Mutex<Tap>>,
+    /// The pages of the build the spinner shows ([`Ui::streamed`]).
+    pages: Arc<Mutex<PageLog>>,
 }
 
 /// A spinner while a build runs, until [`Spin::done`].
 pub struct Spin {
     bottom: Arc<Mutex<Bottom>>,
     tap: Arc<Mutex<Tap>>,
+    pages: Arc<Mutex<PageLog>>,
     stop: Arc<AtomicBool>,
     updater: Option<std::thread::JoinHandle<()>>,
+}
+
+/// The pages of the build the spinner shows, for its live tree
+/// ([`PageLog::lines`]):
+///
+/// - A clean build's pages as they are typeset (the engine's highest page
+///   reached, looked at each tick, [`PageLog::observe`]), `○` with its
+///   time: it may still change, for PhiTeX settles the read-back files
+///   (the contents, `\ref`, the index) inside the one evaluation, re-making
+///   the pages whose read-back values changed.
+/// - A page made again with another hash ([`PageLog::streamed`], the
+///   pages the engine streams) is `↻ redone`.
+/// - `✓` once the build is over ([`PageLog::end`]): every page is final
+///   then, and only then. Marking each page `✓` while the build runs
+///   needs the engine to say which pages nothing pending can reach any
+///   more ("settled up to page N" on its progress), which is 1.0.1 (#18).
+/// - An edit (the last build made pages) lists no page while it runs,
+///   and at its end only the pages it changed (`↻ page 4`).
+#[derive(Default)]
+pub struct PageLog {
+    /// The engine's evaluation, and its highest page, last seen, and when.
+    eval: u64,
+    page: u64,
+    at: Duration,
+    /// The pages the last build made (0: none, a clean build).
+    before: usize,
+    /// A clean build's pages, from 1.
+    rows: Vec<PageRow>,
+    /// The build is over: its pages, and those that differ from the last
+    /// build's.
+    end: Option<(usize, Vec<usize>)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PageRow {
+    /// Its time (none: streamed before it was seen typeset).
+    took: Option<Duration>,
+    /// The hash it was streamed with last.
+    hash: Option<u64>,
+    /// Streamed again with another hash.
+    redone: bool,
+}
+
+/// The pages a line each, the latest; the earlier ones folded.
+const SHOWN: usize = 6;
+
+/// `page 4`, `pages 1–20`, `pages 2, 5–6`.
+fn pages_said(ks: &[usize]) -> String {
+    match ks {
+        [k] => format!("page {k}"),
+        _ => format!("pages {}", crate::view::ranges(ks)),
+    }
+}
+
+/// Where the build is: page `n` of the last build's `m` (0: none), never
+/// past it (the engine's highest page may count pages a later run takes
+/// back: a 32-page document's "page 33").
+fn at_page(n: u64, m: usize) -> String {
+    let m = u64::try_from(m).unwrap_or(u64::MAX);
+    if m == 0 {
+        format!("page {n}")
+    } else {
+        format!("page {} of {m}", n.min(m))
+    }
+}
+
+impl PageLog {
+    /// The engine at evaluation `eval`, its highest page `page`, at `now`
+    /// into the build, the last build's pages `before`: the pages reached
+    /// since the last look added, the time between the looks shared by
+    /// them.
+    pub fn observe(&mut self, eval: u64, page: u64, before: usize, now: Duration) {
+        if eval == 0 || self.end.is_some() {
+            return;
+        }
+        self.before = before;
+        if eval != self.eval {
+            // (a new evaluation: its pages counted from none)
+            self.eval = eval;
+            self.page = 0;
+        }
+        if page <= self.page {
+            if page == 0 {
+                self.at = now;
+            }
+            return;
+        }
+        let n = u32::try_from(page - self.page).unwrap_or(u32::MAX);
+        let took = now.saturating_sub(self.at) / n.max(1);
+        if before == 0 {
+            for k in self.page + 1..=page {
+                self.row(k).took = Some(took);
+            }
+        }
+        self.page = page;
+        self.at = now;
+    }
+
+    /// Page `k`'s row (from 1), made with those before it.
+    fn row(&mut self, k: u64) -> &mut PageRow {
+        let k = usize::try_from(k).unwrap_or(usize::MAX).max(1);
+        if self.rows.len() < k {
+            self.rows.resize(k, PageRow::default());
+        }
+        &mut self.rows[k - 1]
+    }
+
+    /// Page `page` streamed with hash `hash`: redone when it was streamed
+    /// before with another.
+    pub fn streamed(&mut self, page: u64, hash: u64) {
+        if page == 0 || self.end.is_some() {
+            return;
+        }
+        let r = self.row(page);
+        if r.hash.is_some_and(|h| h != hash) {
+            r.redone = true;
+        }
+        r.hash = Some(hash);
+    }
+
+    /// The build is over: its `pages`, final, and `changed` those that
+    /// differ from the last build's (an edit's).
+    pub fn end(&mut self, pages: usize, changed: &[usize]) {
+        self.rows.truncate(pages);
+        self.end = Some((pages, changed.to_vec()));
+    }
+
+    /// The tree's header: where the build is, or (over) its pages.
+    pub fn header(&self, page: u64) -> String {
+        match &self.end {
+            Some((1, _)) => "1 page".to_owned(),
+            Some((n, _)) => format!("{n} pages"),
+            None => at_page(page, self.before),
+        }
+    }
+
+    /// The tree's page lines, a mark and a text each.
+    pub fn lines(&self, st: Style) -> Vec<(String, String)> {
+        let redone: Vec<usize> = (1..=self.rows.len())
+            .filter(|&k| self.rows[k - 1].redone)
+            .collect();
+        if let Some((n, changed)) = &self.end {
+            // (an edit: the pages it changed, none if none did)
+            if self.before > 0 {
+                return if changed.is_empty() {
+                    vec![(st.dim("·"), st.dim("no page changed"))]
+                } else {
+                    vec![(st.cyan("↻"), pages_said(changed))]
+                };
+            }
+            if *n == 0 {
+                return Vec::new();
+            }
+            let all: Vec<usize> = (1..=*n).collect();
+            let mut text = pages_said(&all);
+            if !redone.is_empty() {
+                text.push_str(&st.dim(&format!(" · {} redone", pages_said(&redone))));
+            }
+            return vec![(st.green("✓"), text)];
+        }
+        if self.before > 0 {
+            return Vec::new();
+        }
+        let n = self.rows.len();
+        let cut = n.saturating_sub(SHOWN);
+        let mut out = Vec::new();
+        if cut > 0 {
+            let folded: Vec<usize> = (1..=cut).collect();
+            out.push((
+                st.yellow("○"),
+                format!("{} {}", pages_said(&folded), st.dim("· may change")),
+            ));
+            let again: Vec<usize> = redone.iter().copied().filter(|&k| k <= cut).collect();
+            if !again.is_empty() {
+                out.push((
+                    st.cyan("↻"),
+                    format!("{} {}", pages_said(&again), st.dim("redone")),
+                ));
+            }
+        }
+        for k in cut + 1..=n {
+            let r = self.rows[k - 1];
+            let took = r.took.map_or_else(String::new, ms);
+            let (mark, what) = if r.redone {
+                (st.cyan("↻"), "redone")
+            } else {
+                (st.yellow("○"), "may change")
+            };
+            out.push((
+                mark,
+                format!(
+                    "{} {}",
+                    pad(&format!("page {k}"), 9, false),
+                    st.dim(&format!("{} · {what}", pad(&took, 9, true)))
+                ),
+            ));
+        }
+        out
+    }
+}
+
+/// `lines` under the tree's header, `├─` each, the last `└─`.
+fn branches(st: Style, out: &mut Vec<String>, lines: &[String]) {
+    for (k, l) in lines.iter().enumerate() {
+        let branch = if k + 1 == lines.len() {
+            "└─"
+        } else {
+            "├─"
+        };
+        out.push(format!("       {} {l}", st.dim(branch)));
+    }
 }
 
 /// The live tree under the spinner's line, once a build has run a
 /// while: each phase ended with its time, the one running with its time
 /// so far, the cores busy and the memory held.
-fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -> Vec<String> {
+fn tree(
+    st: Style,
+    s: &Status,
+    tick: char,
+    load: Option<(f64, u64)>,
+    w: usize,
+    pages: &PageLog,
+) -> Vec<String> {
     let (done, now) = s.phases();
     let n = done.len() + usize::from(now.is_some());
     let mut out = Vec::with_capacity(n);
@@ -337,17 +558,16 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
         let running = rows.iter().map(|r| r.1).sum::<usize>();
         let idle = live.threads.saturating_sub(running);
         let page = p.page();
-        let at = match (page, live.pages_before) {
+        let at = match page {
             // (no piece has started: the format and the preamble load,
             // which are not counted as the document's runs)
-            (0, _) if p.format() == Some(false) => {
+            0 if p.format() == Some(false) => {
                 "making the format (once per PhiTeX update)".to_owned()
             }
-            (0, _) if p.format().is_none() => "loading the format".to_owned(),
-            (0, _) if total == 0 => "loading the preamble".to_owned(),
-            (0, _) => "before the first page".to_owned(),
-            (n, 0) => format!("page {n}"),
-            (n, m) => format!("page {n} of {m}"),
+            0 if p.format().is_none() => "loading the format".to_owned(),
+            0 if total == 0 => "loading the preamble".to_owned(),
+            0 => "before the first page".to_owned(),
+            n => pages.header(n),
         };
         if total == 0 {
             out.push(format!("       {}", st.bold(&at)));
@@ -358,15 +578,37 @@ fn tree(st: Style, s: &Status, tick: char, load: Option<(f64, u64)>, w: usize) -
                 st.dim(&format!("· {running} running · {idle} idle"))
             ));
         }
-        let shown = rows.len().min(6);
-        for (k, (row, n)) in rows.iter().take(shown).enumerate() {
-            let branch = if k + 1 == shown { "└─" } else { "├─" };
-            let times = if *n > 1 {
-                format!(" ×{n}")
-            } else {
-                String::new()
-            };
-            out.push(format!("       {} {row}{}", st.dim(branch), st.dim(&times)));
+        // (the pages typeset, then what the workers run now)
+        let page_lines = pages.lines(st);
+        let shown = rows.len().min(3);
+        let rows: Vec<String> = rows
+            .iter()
+            .take(shown)
+            .map(|(row, n)| {
+                if *n > 1 {
+                    format!("{row}{}", st.dim(&format!(" ×{n}")))
+                } else {
+                    row.clone()
+                }
+            })
+            .collect();
+        let lines: Vec<String> = page_lines
+            .into_iter()
+            .map(|(mark, text)| format!("{mark} {text}"))
+            .chain(rows)
+            .collect();
+        branches(st, &mut out, &lines);
+    } else {
+        // (the engine done, the build over: its pages, final, while the
+        // files are written)
+        let lines: Vec<String> = pages
+            .lines(st)
+            .into_iter()
+            .map(|(mark, text)| format!("{mark} {text}"))
+            .collect();
+        if !lines.is_empty() {
+            out.push(format!("       {}", st.bold(&pages.header(0))));
+            branches(st, &mut out, &lines);
         }
     }
     // (cut to the terminal: a wrapped line would break the redraw)
@@ -479,7 +721,15 @@ impl Ui {
             json,
             bottom: Arc::default(),
             tap: Arc::default(),
+            pages: Arc::default(),
         }
+    }
+
+    /// Page `page` of the build the spinner shows was streamed with hash
+    /// `hash` (the engine's stream hook, on its thread): shown redone
+    /// when it was streamed before with another.
+    pub fn streamed(&self, page: u64, hash: u64) {
+        lock(&self.pages).streamed(page, hash);
     }
 
     /// Every message from now on (and those so far) also to `sink`, as
@@ -669,6 +919,8 @@ impl Ui {
         let (bottom, tap, stopping) = (self.bottom.clone(), self.tap.clone(), stop.clone());
         let st = self.st;
         let t0 = Instant::now();
+        *lock(&self.pages) = PageLog::default();
+        let pages = self.pages.clone();
         let updater = Some(std::thread::spawn(move || {
             let mut k = 0usize;
             let mut load = Load {
@@ -678,6 +930,10 @@ impl Ui {
             while !stopping.load(Ordering::Relaxed) {
                 if k.is_multiple_of(6) {
                     load.sample();
+                }
+                if let Some(live) = status.live() {
+                    let p = &live.progress;
+                    lock(&pages).observe(p.evaluation(), p.page(), live.pages_before, t0.elapsed());
                 }
                 let text = status_line(&what, &status, t0.elapsed(), load.now);
                 if draw {
@@ -701,7 +957,7 @@ impl Ui {
                                 false
                             ) + &st.bold(&pad(&format!("{:.1} s", elapsed.as_secs_f64()), 9, true))
                         );
-                        lines.extend(tree(st, &status, tick, load.now, w));
+                        lines.extend(tree(st, &status, tick, load.now, w, &lock(&pages)));
                     }
                     let mut b = lock(&bottom);
                     b.spin = lines;
@@ -719,6 +975,7 @@ impl Ui {
         Spin {
             bottom: self.bottom.clone(),
             tap: self.tap.clone(),
+            pages: self.pages.clone(),
             stop,
             updater,
         }
@@ -801,6 +1058,16 @@ pub struct Outcome<'a> {
 }
 
 impl Spin {
+    /// The build is over (the engine returned; the files may still be
+    /// written): its `pages` all final, `changed` those that differ from
+    /// the last build's, shown at once.
+    pub fn built(&self, pages: usize, changed: &[usize]) {
+        lock(&self.pages).end(pages, changed);
+        if let Some(u) = &self.updater {
+            u.thread().unpark();
+        }
+    }
+
     pub fn done(self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(u) = self.updater {
@@ -835,6 +1102,139 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "write x.pdf and its .synctex.gz here? [y/N] "
         );
+    }
+
+    fn plain_style() -> Style {
+        Style {
+            color: false,
+            tty: false,
+        }
+    }
+
+    /// The text of `l`'s lines, each mark and text as one.
+    fn said(l: &PageLog) -> Vec<String> {
+        l.lines(plain_style())
+            .into_iter()
+            .map(|(m, t)| format!("{m} {t}"))
+            .collect()
+    }
+
+    /// A clean build's pages as they are typeset, each with its time, may
+    /// change; the earlier ones folded, the last few a line each.
+    #[test]
+    fn pages_typeset_fold_the_earlier_ones() {
+        let ms = Duration::from_millis;
+        let mut l = PageLog::default();
+        l.observe(7, 0, 0, ms(0));
+        l.observe(7, 2, 0, ms(400));
+        l.observe(7, 3, 0, ms(700));
+        assert_eq!(l.rows.len(), 3);
+        assert_eq!(l.rows[0].took, Some(ms(200)));
+        assert_eq!(l.rows[2].took, Some(ms(300)));
+        assert_eq!(
+            said(&l),
+            [
+                "○ page 1     200.0 ms · may change",
+                "○ page 2     200.0 ms · may change",
+                "○ page 3     300.0 ms · may change",
+            ]
+        );
+        l.observe(7, 30, 0, ms(3400));
+        let s = said(&l);
+        assert_eq!(s.len(), 1 + SHOWN, "{s:?}");
+        assert_eq!(s[0], "○ pages 1–24 · may change");
+        assert!(s[1].starts_with("○ page 25 "), "{s:?}");
+        assert!(s[SHOWN].starts_with("○ page 30 "), "{s:?}");
+        assert_eq!(l.header(30), "page 30");
+    }
+
+    /// When the build is over every page is final: ✓, folded, the pages
+    /// past its last (counted by a run taken back) gone.
+    #[test]
+    fn every_page_final_when_the_build_ends() {
+        let ms = Duration::from_millis;
+        let mut l = PageLog::default();
+        l.observe(1, 0, 0, ms(0));
+        l.observe(1, 33, 0, ms(3300));
+        l.end(32, &[]);
+        assert_eq!(said(&l), ["✓ pages 1–32"]);
+        assert_eq!(l.header(0), "32 pages");
+        assert_eq!(l.rows.len(), 32);
+        // (nothing seen after the end changes it)
+        l.observe(1, 40, 0, ms(4000));
+        l.streamed(3, 9);
+        assert_eq!(said(&l), ["✓ pages 1–32"]);
+        let mut one = PageLog::default();
+        one.observe(1, 1, 0, ms(10));
+        one.end(1, &[]);
+        assert_eq!(said(&one), ["✓ page 1"]);
+        assert_eq!(one.header(0), "1 page");
+    }
+
+    /// A page streamed again with another hash is redone (the contents
+    /// re-made once the headings are known); the same hash again (the
+    /// page found exact) is not.
+    #[test]
+    fn a_page_streamed_again_with_another_hash_is_redone() {
+        let ms = Duration::from_millis;
+        let mut l = PageLog::default();
+        l.observe(1, 0, 0, ms(0));
+        l.streamed(1, 11);
+        l.streamed(2, 22);
+        l.observe(1, 2, 0, ms(200));
+        l.streamed(2, 22);
+        assert!(!l.rows[1].redone);
+        l.streamed(2, 23);
+        l.observe(1, 3, 0, ms(300));
+        let s = said(&l);
+        assert!(
+            s[1].starts_with("↻ page 2 ") && s[1].ends_with("· redone"),
+            "{s:?}"
+        );
+        assert!(s[0].ends_with("· may change"), "{s:?}");
+        // (folded: its own line under the fold)
+        l.observe(1, 20, 0, ms(2000));
+        let s = said(&l);
+        assert_eq!(s[0], "○ pages 1–14 · may change");
+        assert_eq!(s[1], "↻ page 2 redone");
+        assert_eq!(s.len(), 2 + SHOWN, "{s:?}");
+        // (at the end: final, and said to have been redone)
+        l.end(20, &[]);
+        assert_eq!(said(&l), ["✓ pages 1–20 · page 2 redone"]);
+    }
+
+    /// The page the build is at never goes past the last build's last
+    /// page: a 32-page document's "page 33" is page 32 of 32.
+    #[test]
+    fn the_page_reached_is_bounded_by_the_last() {
+        assert_eq!(at_page(33, 32), "page 32 of 32");
+        assert_eq!(at_page(5, 32), "page 5 of 32");
+        assert_eq!(at_page(33, 0), "page 33");
+        let mut l = PageLog::default();
+        l.observe(4, 33, 32, Duration::from_millis(50));
+        assert_eq!(l.header(33), "page 32 of 32");
+    }
+
+    /// An edit lists no page while it runs, and at its end only the pages
+    /// it changed (or that none did), never the whole document.
+    #[test]
+    fn an_edit_lists_only_the_pages_it_changed() {
+        let ms = Duration::from_millis;
+        let mut l = PageLog::default();
+        l.observe(9, 0, 32, ms(0));
+        l.observe(9, 32, 32, ms(400));
+        assert!(said(&l).is_empty());
+        assert!(l.rows.is_empty());
+        l.end(32, &[4]);
+        assert_eq!(said(&l), ["↻ page 4"]);
+        let mut l = PageLog::default();
+        l.observe(9, 10, 32, ms(400));
+        l.end(32, &[4, 5, 9]);
+        assert_eq!(said(&l), ["↻ pages 4–5, 9"]);
+        let mut l = PageLog::default();
+        l.observe(9, 10, 32, ms(400));
+        l.end(32, &[]);
+        assert_eq!(said(&l), ["· no page changed"]);
     }
 
     #[test]
