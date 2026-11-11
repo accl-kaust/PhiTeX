@@ -76,9 +76,12 @@ pub fn version() -> &'static str {
 /// set `PHITEX_BUILT_BY` to `release` or `nightly`): such a build carries
 /// the version of the manifest it was built from, which names the
 /// release it leads to, not one it is. `phitex upgrade` offers it any
-/// release or nightly, and `--version` says it.
+/// release or nightly, and `--version` says it. A version with a
+/// nightly's suffix was written by nightly.yml whatever else it set (the
+/// scheduled nightlies built from an older nightly.yml, without the
+/// variable, are nightlies all the same): never a source build.
 pub fn source_build() -> bool {
-    option_env!("PHITEX_BUILT_BY").is_none()
+    option_env!("PHITEX_BUILT_BY").is_none() && !env!("CARGO_PKG_VERSION").contains("-nightly.")
 }
 
 #[cfg(all(feature = "jemalloc", not(any(target_family = "wasm", windows))))]
