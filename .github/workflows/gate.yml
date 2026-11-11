@@ -238,13 +238,20 @@ jobs:
           name: r-tests
           path: out/r
           retention-days: 14
+  # (the frontends' checks on the commit ci/frontends.commit pins: the
+  # editors and browsers on this tree, as release.yml runs them, so a
+  # merge to main is one a tag releases; their own binary, built
+  # alongside)
+  frontends:
+    uses: ./.github/workflows/frontends.yml
   gate:
-    needs: [build, build-cli, shard, corpus, wasm, build-tests, tests]
+    needs: [build, build-cli, shard, corpus, wasm, build-tests, tests, frontends]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "build ${{ needs.build.result }}, build-cli ${{ needs.build-cli.result }}, shards ${{ needs.shard.result }}, corpus ${{ needs.corpus.result }}, wasm ${{ needs.wasm.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}"
+          echo "build ${{ needs.build.result }}, build-cli ${{ needs.build-cli.result }}, shards ${{ needs.shard.result }}, corpus ${{ needs.corpus.result }}, wasm ${{ needs.wasm.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}, frontends ${{ needs.frontends.result }}"
           [ "${{ needs.build.result }}" = success ] && [ "${{ needs.build-cli.result }}" = success ] && [ "${{ needs.shard.result }}" = success ] &&
             [ "${{ needs.corpus.result }}" = success ] && [ "${{ needs.wasm.result }}" = success ] &&
-            [ "${{ needs.build-tests.result }}" = success ] && [ "${{ needs.tests.result }}" = success ]
+            [ "${{ needs.build-tests.result }}" = success ] && [ "${{ needs.tests.result }}" = success ] &&
+            [ "${{ needs.frontends.result }}" = success ]

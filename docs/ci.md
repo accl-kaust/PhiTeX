@@ -181,7 +181,9 @@ there is no override.
    fails on an exception or console error. The frontends' scripts are
    those of the PhiTeX-frontends commit `ci/frontends.commit` pins (moved
    on with them; a push to the branch `frontends-check` runs the checks
-   alone). No job reaches overleaf.com or deploys anything.
+   alone). No job reaches overleaf.com or deploys anything. The gate runs
+   the same checks (its job `frontends`, required by `gate`), so a pin
+   moved on dev is tested before main takes it, not first at the tag.
    **By hand before the tag** (what CI does not cover): in a fresh Chrome
    profile with the extension built from the release's commit, a
    throwaway project on overleaf.com: the Instant view shows the first
