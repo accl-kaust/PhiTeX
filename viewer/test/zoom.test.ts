@@ -170,3 +170,19 @@ test("a zoom kept is always a zoom: NaN, Infinity, out of range or a stray word 
   assert.equal(zoomOf("0.01"), "0.25");
   assert.equal(zoomOf("100"), "8");
 });
+
+test("a zoom gesture's frames reach its goal, finite at every step, in and out alike", async () => {
+  const { zoomToward } = await import("../src/panel.ts");
+  for (const goal of [0.5, 1 / 1.1, 1.1, 1.21, 3]) {
+    let f = 1;
+    for (let n = 0; n < 60 && f !== goal; n++) {
+      f = zoomToward(f, goal, 16);
+      assert.ok(Number.isFinite(f) && f > 0, `frame ${n} toward ${goal}: ${f}`);
+    }
+    assert.equal(f, goal, `settled at ${goal}`);
+  }
+  // (a frame with no time, or a broken one, is never NaN)
+  assert.equal(zoomToward(1, 1.1, 0), 1);
+  assert.ok(Number.isFinite(zoomToward(1, 1.1, NaN)));
+  assert.equal(zoomToward(NaN, 1.1, 16), 1.1);
+});

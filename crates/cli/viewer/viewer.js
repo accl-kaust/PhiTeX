@@ -4783,6 +4783,11 @@ var PATHS = {
 };
 var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
 var icon = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild;
+function zoomToward(f, goal, dt) {
+  if (!(f > 0) || !Number.isFinite(f)) return goal;
+  const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
+  return Math.abs(goal - f) / goal < 3e-3 ? goal : f * Math.pow(goal / f, k);
+}
 function zoomOf(z) {
   if (z === "fit" || z === "page") return z;
   const n = typeof z === "number" ? z : typeof z === "string" && z.trim() ? Number(z) : NaN;
@@ -6388,37 +6393,33 @@ var Panel = class {
    * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
   /**
-   * Zoom by `f` at the point (`px`, `py`) of the stage. `ease`: toward it over a few frames
-   * (a wheel's notches: each moves the goal, the zoom follows it by the time passed, most
-   * of the way in 200 ms whatever the frame rate: notches in a row one motion), else at
-   * once (a pinch's small steps, already one a frame).
+   * Zoom by `f` at the point (`px`, `py`) of the stage. Every event of a gesture moves its
+   * one goal; one frame loop brings the zoom to it. `ease`: over a few frames (a wheel's
+   * notches: the zoom follows the goal by the time passed, most of the way in 200 ms
+   * whatever the frame rate, notches in a row one motion), else at the next frame (a
+   * pinch's small steps, a high-resolution wheel's, already one a frame). A gesture's
+   * events of both kinds (a wheel's notches and its smooth deltas, mixed in Chrome) share
+   * the goal: the instant ones once cleared it while a notch's frame was pending, which
+   * then eased toward undefined, the zoom NaN.
    */
   zoomAt(f, px, py, ease4 = false) {
-    const r = this.$("#stage").getBoundingClientRect();
     let g = this.gesture;
     if (!g) {
+      const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py, v = this.$("#viewer").getBoundingClientRect();
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
     }
-    const clamp = (v) => Math.min(8, Math.max(0.25, g.from * v)) / g.from;
+    if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
+    if (!ease4) g.f = g.goal;
     const gg = g;
-    if (ease4) {
-      gg.goal = clamp((gg.goal ?? gg.f) * f);
-      let last = performance.now();
-      const step = (t) => {
-        gg.frame = 0;
-        const d = gg.goal - gg.f, k = 1 - Math.exp(-Math.max(0, t - last) / 90);
-        last = t;
-        gg.f = Math.abs(d) / gg.goal < 3e-3 ? gg.goal : gg.f * Math.pow(gg.goal / gg.f, k);
-        this.zoomLay(gg);
-        if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-      };
-      if (!gg.frame) gg.frame = requestAnimationFrame((t) => (last = t - 16, step(t)));
-    } else {
-      gg.goal = void 0;
-      gg.f = clamp(gg.f * f);
-      if (!gg.frame) gg.frame = requestAnimationFrame(() => (gg.frame = 0, this.zoomLay(gg)));
-    }
+    const step = (t) => {
+      gg.frame = 0;
+      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
+      gg.last = t;
+      this.zoomLay(gg);
+      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => (gg.last = t - 16, step(t)));
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
@@ -6447,7 +6448,7 @@ var Panel = class {
   zoomEnd() {
     const g = this.gesture;
     if (!g) return;
-    if (g.goal !== void 0 && g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = void 0;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);

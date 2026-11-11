@@ -355,6 +355,16 @@ const icon = (name: string, size = 18) =>
  * (NaN, Infinity, a number out of range, a word no menu has) is "fit": a zoom that is not a
  * number made every page's scale NaN, the pages stretched bitmaps and every zoom NaN again, kept
  * with the prefs from one load to the next. */
+/**
+ * A zoom gesture's factor `f` a frame later, `dt` ms on, toward `goal`: in log terms (a
+ * zoom in and out at the same pace), most of the way in 200 ms; there once within 0.3%.
+ */
+export function zoomToward(f: number, goal: number, dt: number): number {
+  if (!(f > 0) || !Number.isFinite(f)) return goal;
+  const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
+  return Math.abs(goal - f) / goal < 0.003 ? goal : f * Math.pow(goal / f, k);
+}
+
 export function zoomOf(z: unknown): string {
   if (z === "fit" || z === "page") return z;
   const n = typeof z === "number" ? z : typeof z === "string" && z.trim() ? Number(z) : NaN;
@@ -2193,7 +2203,7 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout>; goal?: number; ox: number; oy: number }
+    | { from: number; f: number; goal: number; last: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout>; ox: number; oy: number }
     | undefined;
 
   /**
@@ -2208,39 +2218,34 @@ export class Panel {
    * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
   /**
-   * Zoom by `f` at the point (`px`, `py`) of the stage. `ease`: toward it over a few frames
-   * (a wheel's notches: each moves the goal, the zoom follows it by the time passed, most
-   * of the way in 200 ms whatever the frame rate: notches in a row one motion), else at
-   * once (a pinch's small steps, already one a frame).
+   * Zoom by `f` at the point (`px`, `py`) of the stage. Every event of a gesture moves its
+   * one goal; one frame loop brings the zoom to it. `ease`: over a few frames (a wheel's
+   * notches: the zoom follows the goal by the time passed, most of the way in 200 ms
+   * whatever the frame rate, notches in a row one motion), else at the next frame (a
+   * pinch's small steps, a high-resolution wheel's, already one a frame). A gesture's
+   * events of both kinds (a wheel's notches and its smooth deltas, mixed in Chrome) share
+   * the goal: the instant ones once cleared it while a notch's frame was pending, which
+   * then eased toward undefined, the zoom NaN.
    */
   private zoomAt(f: number, px: number, py: number, ease = false): void {
-    const r = this.$("#stage").getBoundingClientRect();
     let g = this.gesture;
     if (!g) {
+      const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py, v = this.$("#viewer").getBoundingClientRect();
       // (the pointer in the pages' own box: the transform's origin while the gesture runs)
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
     }
-    const clamp = (v: number) => Math.min(8, Math.max(0.25, g.from * v)) / g.from;
+    if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
+    if (!ease) g.f = g.goal;
     const gg = g;
-    if (ease) {
-      gg.goal = clamp((gg.goal ?? gg.f) * f);
-      let last = performance.now();
-      const step = (t: number) => {
-        gg.frame = 0;
-        const d = gg.goal! - gg.f, k = 1 - Math.exp(-Math.max(0, t - last) / 90);
-        last = t;
-        // (in log terms: a zoom in and out at the same pace)
-        gg.f = Math.abs(d) / gg.goal! < 0.003 ? gg.goal! : gg.f * Math.pow(gg.goal! / gg.f, k);
-        this.zoomLay(gg);
-        if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-      };
-      if (!gg.frame) gg.frame = requestAnimationFrame((t) => ((last = t - 16), step(t)));
-    } else {
-      gg.goal = undefined;
-      gg.f = clamp(gg.f * f);
-      if (!gg.frame) gg.frame = requestAnimationFrame(() => ((gg.frame = 0), this.zoomLay(gg)));
-    }
+    const step = (t: number) => {
+      gg.frame = 0;
+      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
+      gg.last = t;
+      this.zoomLay(gg);
+      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => ((gg.last = t - 16), step(t)));
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
@@ -2272,7 +2277,7 @@ export class Panel {
     const g = this.gesture;
     if (!g) return;
     // (still easing toward its goal: ended once there, not cut short by a jump)
-    if (g.goal !== undefined && g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = undefined;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);
