@@ -17,6 +17,11 @@
 #                                       phitex-live checked for wasm32-wasip1-threads
 #   gate-shard.sh suites                the local suites of phitex-tex
 #   gate-shard.sh latex K N             the latex target's tests, shard K of N
+#                                       (latex, research, edits and manuals: shard
+#                                       K of N dealt by the items' measured walls,
+#                                       scripts/ci/shards.py and
+#                                       ci/shard-times.tsv; red too when an item
+#                                       is in no shard of gate.yml's or in two)
 #   gate-shard.sh research K N [shelf]  the research corpus (ci/research.json:
 #                                       the templates researchers start from,
 #                                       ci/research/), shard K of N: each built
@@ -566,15 +571,12 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     "$w/bin/latex" --list 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/all.txt"
     [ -s "$w/all.txt" ] || red "latex: the test binary lists no test"
     "$w/bin/latex" --list --ignored 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/ign.txt"
-    # (the order: GATE_LATEX_ORDER, names heaviest first, else by name;
-    # the shards deal them out in turn)
+    # (the tests dealt by their measured walls, heaviest first:
+    # scripts/ci/shards.py, ci/shard-times.tsv; every test in one shard
+    # of gate.yml's, checked)
     comm -23 "$w/all.txt" "$w/ign.txt" > "$w/run.txt"
-    if [ -n "${GATE_LATEX_ORDER:-}" ]; then
-      { tr ' ' '\n' <<< "$GATE_LATEX_ORDER" | grep -Fxf "$w/run.txt"; grep -Fxvf <(tr ' ' '\n' <<< "$GATE_LATEX_ORDER") "$w/run.txt"; } > "$w/ord.txt"
-    else
-      cp "$w/run.txt" "$w/ord.txt"
-    fi
-    awk -v k="$k" -v n="$n" '(NR-1)%n==k' "$w/ord.txt" > "$r/tests.txt"
+    python3 -I scripts/ci/shards.py pick latex "$k" "$n" < "$w/run.txt" > "$r/tests.txt" || red "latex: shards.py pick failed"
+    python3 -I scripts/ci/shards.py check --family latex --latex-names "$w/run.txt" >> "$r/red.txt" || status=red
     # (each test its own process: a hang or a crash is that test's red
     # line; the walls for the resharding)
     runtests "$w/bin/latex" "latex::" "$r/tests.txt" "$r/t-latex"
@@ -605,6 +607,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     else
       export CI_WORK=$w/ci
       mkdir -p "$CI_WORK"
+      python3 -I scripts/ci/shards.py check --family edits >> "$r/red.txt" || status=red
       python3 -I scripts/ci/editsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
         --out "$r/edits" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
         > "$r/editsweep.txt" 2>&1
@@ -617,7 +620,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     # research K N [shelf]: shard K of N of ci/research.json. The oracle
     # (TeX Live's pdflatex/xelatex, BibTeX, biber, makeindex to the
     # fixpoint) built here, GATE_RESEARCH_PAR processes at once (each a
-    # slice of the shard: its documents k, k+n, ... dealt out again); then
+    # slice of the shard by the oracles' walls, scripts/ci/shards.py); then
     # the users' CLI cold at each -j of GATE_RESEARCH_JOBS against it
     k=$1 n=$2 mode=${3:-}
     # (GATE_RESEARCH_LIST and _DOC: another list in the same form, as
@@ -650,11 +653,12 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
         echo "$rel: TeX Live's formats from its files: $(cd "$w/tl/fmt" && ls *.fmt 2>/dev/null | tr '\n' ' ') ($(( $(date +%s) - s0 )) s)" >> "$r/shelf-tree.txt"
         export CI_ORACLE_ENV=$w/tl/env.txt
       fi
+      [ "$list" = ci/research.json ] && { python3 -I scripts/ci/shards.py check --family research >> "$r/red.txt" || status=red; }
       P=${GATE_RESEARCH_PAR:-4}
       s0=$(date +%s)
       for ((i = 0; i < P; i++)); do
         python3 -I scripts/ci/manuals.py oracle --list "$list" --doc "$docs" --cache "$w/oracle" \
-          --shard "$((k + n * i))/$((n * P))" > "$r/oracle/oracle-$i.txt" 2>&1 &
+          --shard "$k/$n" --sub "$i/$P" > "$r/oracle/oracle-$i.txt" 2>&1 &
       done
       wait
       echo "oracle_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
@@ -707,6 +711,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     else
       export CI_WORK=$w/ci
       mkdir -p "$CI_WORK" "$w/no-oracle"
+      python3 -I scripts/ci/shards.py check --family manuals >> "$r/red.txt" || status=red
       s0=$(date +%s)
       python3 -I scripts/ci/sweep.py run --list ci/manuals.json --doc /usr/share/doc/texlive --cache "$w/no-oracle" --bin "$bin" \
         --out "$r/manuals" --shard "$k/$n" --engines pdflatex,xelatex --tools bibtex,biber,makeindex,glossaries \
