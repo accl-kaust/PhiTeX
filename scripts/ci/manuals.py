@@ -403,7 +403,22 @@ def shard(items, spec):
     if not spec:
         return items
     i, n = (int(x) for x in spec.split("/"))
-    return [c for k, c in enumerate(items) if k % n == i]
+    # (dealt by time, not by count: each item weighs its oracle's wall,
+    # capped at the sweep's usual 300 s limit (a run past it is stopped
+    # there), and goes, heaviest first, to the shard with the least so
+    # far, ties to the lowest; the same list gives the same shards. Dealt
+    # by count, one shard took 58 min and another 19)
+    def weight(c):
+        return min(float(c.get("oracle_wall_s") or 1.0), 300.0)
+    order = sorted(range(len(items)), key=lambda k: (-weight(items[k]), k))
+    load = [0.0] * n
+    mine = set()
+    for k in order:
+        s = min(range(n), key=lambda j: (load[j], j))
+        load[s] += weight(items[k])
+        if s == i:
+            mine.add(k)
+    return [c for k, c in enumerate(items) if k in mine]
 
 
 def cmd_oracle(args):

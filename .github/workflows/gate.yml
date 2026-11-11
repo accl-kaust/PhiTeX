@@ -47,6 +47,36 @@ jobs:
             out/r
             !out/r/store
           retention-days: 14
+  # (the users' CLI alone, for the corpus: its shards use no other
+  # binary, so they start once it is built, not after the main build's
+  # three CLIs and test binaries)
+  build-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      # (the compiler cache, on GitHub's cache: only what changed compiles)
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - run: scripts/ci/gate-gh.sh build cli
+      - run: tar -C out/r/store -cf store.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-cli
+          path: store.tar
+          retention-days: 3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-build-cli
+          path: |
+            out/r
+            !out/r/store
+          retention-days: 14
   shard:
     needs: build
     runs-on: ubuntu-24.04
@@ -89,7 +119,7 @@ jobs:
   # manuals: TeX Live's manuals, ci/manuals.json, against their oracles'
   # pinned md5s, ci/manuals-not-identical.tsv's reported apart)
   corpus:
-    needs: build
+    needs: build-cli
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -101,14 +131,18 @@ jobs:
           # (the research templates edited under the watch: scripts/ci/editsweep.py)
           - { name: edits-0, args: "edits 0 2" }
           - { name: edits-1, args: "edits 1 2" }
-          - { name: manuals-0, args: "manuals 0 8" }
-          - { name: manuals-1, args: "manuals 1 8" }
-          - { name: manuals-2, args: "manuals 2 8" }
-          - { name: manuals-3, args: "manuals 3 8" }
-          - { name: manuals-4, args: "manuals 4 8" }
-          - { name: manuals-5, args: "manuals 5 8" }
-          - { name: manuals-6, args: "manuals 6 8" }
-          - { name: manuals-7, args: "manuals 7 8" }
+          - { name: manuals-0, args: "manuals 0 12" }
+          - { name: manuals-1, args: "manuals 1 12" }
+          - { name: manuals-2, args: "manuals 2 12" }
+          - { name: manuals-3, args: "manuals 3 12" }
+          - { name: manuals-4, args: "manuals 4 12" }
+          - { name: manuals-5, args: "manuals 5 12" }
+          - { name: manuals-6, args: "manuals 6 12" }
+          - { name: manuals-7, args: "manuals 7 12" }
+          - { name: manuals-8, args: "manuals 8 12" }
+          - { name: manuals-9, args: "manuals 9 12" }
+          - { name: manuals-10, args: "manuals 10 12" }
+          - { name: manuals-11, args: "manuals 11 12" }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -118,7 +152,7 @@ jobs:
       - run: docker pull -q "$IMAGE-doc"
       - uses: actions/download-artifact@v4
         with:
-          name: store
+          name: store-cli
       - run: mkdir -p out/store && tar -C out/store -xf store.tar
       - run: IMAGE="$IMAGE-doc" scripts/ci/gate-gh.sh ${{ matrix.args }}
       - uses: actions/upload-artifact@v4
@@ -205,12 +239,12 @@ jobs:
           path: out/r
           retention-days: 14
   gate:
-    needs: [build, shard, corpus, wasm, build-tests, tests]
+    needs: [build, build-cli, shard, corpus, wasm, build-tests, tests]
     if: always()
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "build ${{ needs.build.result }}, shards ${{ needs.shard.result }}, corpus ${{ needs.corpus.result }}, wasm ${{ needs.wasm.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}"
-          [ "${{ needs.build.result }}" = success ] && [ "${{ needs.shard.result }}" = success ] &&
+          echo "build ${{ needs.build.result }}, build-cli ${{ needs.build-cli.result }}, shards ${{ needs.shard.result }}, corpus ${{ needs.corpus.result }}, wasm ${{ needs.wasm.result }}, build-tests ${{ needs.build-tests.result }}, tests ${{ needs.tests.result }}"
+          [ "${{ needs.build.result }}" = success ] && [ "${{ needs.build-cli.result }}" = success ] && [ "${{ needs.shard.result }}" = success ] &&
             [ "${{ needs.corpus.result }}" = success ] && [ "${{ needs.wasm.result }}" = success ] &&
             [ "${{ needs.build-tests.result }}" = success ] && [ "${{ needs.tests.result }}" = success ]
