@@ -347,6 +347,8 @@ export class Viewer {
     this.peekFrom = at.k;
     const to = at.link[4];
     el.classList.toggle("url", typeof to === "string");
+    // (a web address's window: no citation's cards left from the last one shown)
+    if (typeof to === "string") el.classList.remove("cite");
     // (shown before it is drawn: a hidden window has no width to draw at, and keeps no scroll)
     el.hidden = false;
     if (typeof to === "string") {

@@ -465,6 +465,7 @@ var Viewer = class _Viewer {
     this.peekFrom = at.k;
     const to = at.link[4];
     el.classList.toggle("url", typeof to === "string");
+    if (typeof to === "string") el.classList.remove("cite");
     el.hidden = false;
     if (typeof to === "string") {
       el.querySelector(".pu").textContent = to;
