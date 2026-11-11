@@ -310,19 +310,14 @@ impl Key {
 /// The keys, at the status line's right end.
 pub const BAR: &str = "h: keys";
 
-/// The keys, for `h`.
+/// The keys, for `h`: each line short (it shares the terminal's width
+/// with its key).
 pub const HELP: &[(&str, &str)] = &[
     ("r, Enter", "build again now"),
     ("o", "open the viewer (or the --open program on the output)"),
     ("p", "show the last build's errors again"),
-    (
-        "w",
-        "the warnings, now and after every build (again: hide them)",
-    ),
-    (
-        "s",
-        "how the build went (phases, reuse, parallelism, memory), now and after every build (again: hide it)",
-    ),
+    ("w", "warnings, after every build (w again: off)"),
+    ("s", "build stats, after every build (s again: off)"),
     ("c", "clear the screen"),
     ("h, ?", "these keys"),
     ("q, Ctrl-C", "quit"),
