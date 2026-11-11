@@ -120,11 +120,34 @@ impl Edits {
                 }
                 return Applied::Nothing;
             }
-            // (the citation under a point, when asked: no cards rather
-            // than an error, whatever the document holds)
+            // (the citation under a point, when asked: its keys and their
+            // entries from hyperref's links, exact; labels from the .aux;
+            // none where there is no citation link, never an error)
             Ask::Cites { page, x, y } => {
                 if let Some(v) = viewer {
-                    let cites = s.cites_at(page, f32::from_bits(x), f32::from_bits(y));
+                    let links = v.cite_links(
+                        page,
+                        f64::from(f32::from_bits(x)),
+                        f64::from(f32::from_bits(y)),
+                    );
+                    let cites = if links.is_empty() {
+                        Value::Null
+                    } else {
+                        let (labels, numbers) = s.cite_labels();
+                        Value::Array(
+                            links
+                                .into_iter()
+                                .map(|(key, p, top)| {
+                                    json!({
+                                        "key": key,
+                                        "label": labels.get(&key),
+                                        "number": numbers.get(&key),
+                                        "at": [p, top],
+                                    })
+                                })
+                                .collect(),
+                        )
+                    };
                     v.put_cites(page, x, y, json!({ "cites": cites }));
                 }
                 return Applied::Nothing;

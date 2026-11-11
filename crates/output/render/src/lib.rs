@@ -118,11 +118,13 @@ pub enum Target {
 }
 
 /// A link: its box (points from the page's top left: left, top, right,
-/// bottom) and its target.
+/// bottom), its target, and the name of its destination where it goes
+/// to a named one (hyperref's `cite.KEY`, `section.2`, ...).
 #[derive(Clone, Debug)]
 pub struct Link {
     pub rect: [f64; 4],
     pub target: Target,
+    pub name: Option<String>,
 }
 
 /// A page as the viewer shows it: its size in pixels and in points, its
@@ -682,11 +684,18 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
             v[0].max(v[2]) - mb.x0,
             h - (v[1].min(v[3]) - mb.y0),
         ];
+        let mut name = None;
         let mut dest = |o: Object<'_>| -> Option<Target> {
             match o {
                 Object::Array(a) => dest_of(pages, &a),
-                Object::String(s) => names.place(pdf, pages, s.as_bytes()),
-                Object::Name(n) => names.place(pdf, pages, n.as_str().as_bytes()),
+                Object::String(s) => {
+                    name = Some(String::from_utf8_lossy(s.as_bytes()).into_owned());
+                    names.place(pdf, pages, s.as_bytes())
+                }
+                Object::Name(n) => {
+                    name = Some(n.as_str().to_owned());
+                    names.place(pdf, pages, n.as_str().as_bytes())
+                }
                 _ => None,
             }
             .map(|(p, y)| Target::Page(p, y))
@@ -709,7 +718,7 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
             a.get::<Object<'_>>(b"Dest").and_then(&mut dest)
         };
         if let Some(target) = target {
-            out.push(Link { rect, target });
+            out.push(Link { rect, target, name });
         }
     }
     out
@@ -994,6 +1003,22 @@ impl Renderer {
             }
         }
         let out = doc.texts.get(&k).cloned();
+        self.doc = Some(doc);
+        out
+    }
+
+    /// Page `k`'s links (points from its top left), nothing drawn.
+    pub fn links(&mut self, pdf: &Arc<[u8]>, k: usize) -> Vec<Link> {
+        let Some(mut doc) = self.open(pdf) else {
+            return Vec::new();
+        };
+        let out = {
+            let pages = doc.pdf.pages();
+            match pages.get(k) {
+                Some(page) => links_of(&doc.pdf, pages, page, &mut doc.names),
+                None => Vec::new(),
+            }
+        };
         self.doc = Some(doc);
         out
     }

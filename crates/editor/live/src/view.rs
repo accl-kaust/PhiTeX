@@ -491,7 +491,12 @@ impl Viewer {
                 let [a, b, c, d] = l.rect;
                 match &l.target {
                     Target::Uri(u) => json!([a, b, c, d, u]),
-                    Target::Page(p, y) => json!([a, b, c, d, p, y]),
+                    // (the destination's name last where it has one:
+                    // hyperref's `cite.KEY`, `section.2`)
+                    Target::Page(p, y) => match &l.name {
+                        Some(n) => json!([a, b, c, d, p, y, n]),
+                        None => json!([a, b, c, d, p, y]),
+                    },
                 }
             })
             .collect();
@@ -837,6 +842,33 @@ impl Viewer {
     /// `{"cites": null}` (no citation there).
     pub fn put_cites(&self, page: usize, x: u32, y: u32, answer: Value) {
         lock(&self.pages).cites.insert((page, x, y), answer);
+    }
+
+    /// The citation links under point (`x`, `y`) of page `k` (points from
+    /// its top left, a point's slack around each link's box), as hyperref
+    /// makes them: each a link to the named destination `cite.KEY`. Each
+    /// key in the links' order, with where its link goes (its entry: page
+    /// from 0, its top). Exact, read from the PDF: a document without
+    /// hyperref's citation links has none.
+    pub fn cite_links(&self, k: usize, x: f64, y: f64) -> Vec<(String, usize, Option<f64>)> {
+        let Some(pdf) = self.pdf() else {
+            return Vec::new();
+        };
+        let links = lock(&self.strips).links(&pdf, k);
+        links
+            .iter()
+            .filter(|l| {
+                let [a, b, c, d] = l.rect;
+                x >= a - 1.0 && x <= c + 1.0 && y >= b - 1.0 && y <= d + 1.0
+            })
+            .filter_map(|l| {
+                let key = l.name.as_deref()?.strip_prefix("cite.")?.to_owned();
+                match l.target {
+                    phitex_render::Target::Page(p, top) => Some((key, p, top)),
+                    phitex_render::Target::Uri(_) => None,
+                }
+            })
+            .collect()
     }
 
     pub fn take_asks(&self) -> Vec<Ask> {

@@ -5528,20 +5528,19 @@ fn watch_streaming_writes_the_clean_builds_file() {
     );
 }
 
-/// The viewer's `cites` op (citation cards): a point on a citation's
-/// glyphs gives the `\cite`'s keys in its order, each with its label
-/// from the `.aux` and the page and height of its `\bibitem`; a point on
-/// other text gives none; a page or point that is not there gives none,
-/// never an error.
+/// The viewer's `cites` op (citation cards): a point on a citation link
+/// (hyperref's: a link to the named destination `cite.KEY`) gives that
+/// key, its label and number from the `.aux`, and where the link goes
+/// (its entry); a point on other text, a page that is not there, a bad
+/// request give none, never an error. Plain pdfTeX, its links made as
+/// hyperref makes them: a test binary's LaTeX format takes minutes.
 #[test]
 #[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
 fn watch_cites_under_a_point() {
     use serde_json::json;
     let _one = one();
-    // (plain TeX, its own \\cite and \\bibitem, the labels in the .aux
-    // as LaTeX writes them: a test binary's LaTeX format takes minutes)
     let text = plain()
-        + "\\immediate\\openout1=doc.aux \\immediate\\write1{\\string\\bibcite{knuth}{1}}\\immediate\\write1{\\string\\bibcite{lamport}{2}}\\immediate\\write1{\\string\\bibcite{texbook}{{3}{1984}{{Knuth}}{{}}}}\\immediate\\closeout1\n\\def\\cite#1{[1, 2]}\n\\def\\citep#1{(Knuth, 1984; Lamport, 1994)}\n\\def\\bibitem#1{\\par}\nPlain words first. See \\cite{knuth,lamport} here.\\par\nThe system itself is in \\citep{texbook,lamport} today.\\par\n\\bibitem{knuth} Donald Knuth. Breaking paragraphs.\n\\bibitem{texbook} Donald Knuth. The TeXbook, 1984.\n\\bibitem{lamport} Leslie Lamport. LaTeX, 1994.\n\\bye\n";
+        + "\\pdfoutput=1 \\pdfpagewidth=8.5in \\pdfpageheight=11in \\pdfhorigin=1in \\pdfvorigin=1in\n\\immediate\\openout1=doc.aux \\immediate\\write1{\\string\\bibcite{knuth}{1}}\\immediate\\write1{\\string\\bibcite{lamport}{{2}{1994}{{Lamport}}{{}}}}\\immediate\\write1{\\string\\bibcite{texbook}{{3}{1984}{{Knuth}}{{}}}}\\immediate\\closeout1\n\\def\\cl#1#2{\\pdfstartlink goto name{cite.#1}#2\\pdfendlink}\nPlain words first. See \\cl{knuth}{[1]} here.\\par\nThe system itself is in (\\cl{texbook}{Knuth, 1984}; \\cl{lamport}{Lamport, 1994}) today.\\par\n\\vskip 2in\n\\pdfdest name{cite.knuth} xyz\\relax Donald Knuth. Breaking paragraphs.\\par\n\\pdfdest name{cite.texbook} xyz\\relax Donald Knuth. The TeXbook.\\par\n\\pdfdest name{cite.lamport} xyz\\relax Leslie Lamport. LaTeX.\\par\n\\bye\n";
     let dir = scratch("watch-cites");
     std::fs::write(dir.join("doc.tex"), &text).expect("the document");
     let root = dir.canonicalize().expect("the directory");
@@ -5579,7 +5578,6 @@ fn watch_cites_under_a_point() {
         .collect();
     let mut viewer = Viewer::connect(&url);
     viewer.until(|v| v["event"] == "settled");
-    // (asked again while pending, as a browser asks)
     let mut id = 10;
     let mut ask = |viewer: &mut Viewer, req: serde_json::Value| {
         let end = Instant::now() + Duration::from_secs(60);
@@ -5594,133 +5592,57 @@ fn watch_cites_under_a_point() {
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    let orig = ask(&mut viewer, json!({"op": "origins", "page": 0}))["json"].clone();
-    let words = |k: &str| -> Vec<u32> {
-        let s = orig[k].as_str().expect("base64");
-        let val = |c: u8| match c {
-            b'A'..=b'Z' => u32::from(c - b'A'),
-            b'a'..=b'z' => u32::from(c - b'a') + 26,
-            b'0'..=b'9' => u32::from(c - b'0') + 52,
-            b'+' => 62,
-            _ => 63,
-        };
-        let mut bytes = Vec::new();
-        for ch in s.as_bytes().chunks(4) {
-            let n = ch.iter().take_while(|&&c| c != b'=').count();
-            let mut acc = 0u32;
-            for (i, &c) in ch.iter().enumerate() {
-                acc |= if i < n { val(c) } else { 0 } << (18 - 6 * i);
-            }
-            let b = acc.to_be_bytes();
-            bytes.extend_from_slice(&b[1..n.max(1)]);
-        }
-        bytes
-            .chunks(4)
-            .filter(|w| w.len() == 4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-            .collect()
-    };
-    let files = orig["files"].as_array().expect("files").clone();
-    let doc = u32::try_from(files.iter().position(|f| f == "doc.tex").expect("doc.tex")).unwrap();
-    let (file, start, xs, ys) = (words("file"), words("start"), words("x"), words("y"));
-    let at = |what: &str| {
-        let from = u32::try_from(text.find(what).expect("in the text")).unwrap();
-        let to = from + u32::try_from(what.len()).unwrap();
-        let i = (0..file.len())
-            .find(|&i| file[i] == doc && start[i] >= from && start[i] < to)
-            .unwrap_or_else(|| panic!("a glyph from {what:?}: {orig}"));
-        (f32::from_bits(xs[i]), f32::from_bits(ys[i]))
-    };
-    let (cx, cy) = at("\\cite{knuth,lamport}");
-    let got = ask(
-        &mut viewer,
-        json!({"op": "cites", "page": 0, "x": cx + 1.0, "y": cy - 2.0}),
-    );
-    let cites = got["json"]["cites"]
+    // (the links as the viewer draws them: each with its destination's name)
+    let frame = ask(&mut viewer, json!({"op": "frame", "page": 0, "scale": 1.0}));
+    let links: Vec<serde_json::Value> = frame["json"]["links"]
         .as_array()
-        .unwrap_or_else(|| panic!("cites: {got}"))
+        .unwrap_or_else(|| panic!("links: {frame}"))
         .clone();
-    let keys: Vec<&str> = cites.iter().filter_map(|e| e["key"].as_str()).collect();
-    assert_eq!(keys, ["knuth", "lamport"], "{got}");
-    assert_eq!(cites[0]["label"], "1", "{got}");
-    assert_eq!(cites[1]["label"], "2", "{got}");
-    assert_eq!(cites[0]["at"][0], 0, "the entry's page: {got}");
-    assert!(
-        cites[0]["at"][1]
-            .as_f64()
-            .is_some_and(|ey| ey > f64::from(cy)),
-        "the entry below the citation: {got}"
-    );
-    assert!(
-        cites[1]["at"][1].as_f64() > cites[0]["at"][1].as_f64(),
-        "lamport's entry after knuth's: {got}"
-    );
-    // (a citation's words that are in the bibliography too, matched
-    // there: the citation all the same, on its words and its punctuation)
-    let at_word = |what: &str, nth: usize| {
-        let from = u32::try_from(text.find("today").expect("the line")).unwrap();
-        // (glyphs on the \\citep line: the ones left of "today")
-        let today = (0..file.len())
-            .find(|&i| file[i] == doc && start[i] >= from)
-            .expect("today's glyph");
-        let base = ys[today];
-        let mut on: Vec<usize> = (0..file.len()).filter(|&i| ys[i] == base).collect();
-        on.sort_by(|&a, &b| f32::from_bits(xs[a]).total_cmp(&f32::from_bits(xs[b])));
-        let _ = what;
-        let i = on[nth];
-        (f32::from_bits(xs[i]), f32::from_bits(ys[i]))
-    };
-    let line_len = {
-        let from = u32::try_from(text.find("today").expect("the line")).unwrap();
-        let today = (0..file.len())
-            .find(|&i| file[i] == doc && start[i] >= from)
-            .expect("today's glyph");
-        (0..file.len()).filter(|&i| ys[i] == ys[today]).count()
-    };
-    // ("The system itself is in" is 19 glyphs, then "(Knuth, 1984;
-    // Lamport, 1994)", 25 more, then "today.")
-    for (what, nth) in [("(", 19), ("K", 20), ("1984", 26), ("L", 31), (")", 43)] {
-        assert!(nth < line_len, "{line_len} glyphs on the line");
-        let (wx, wy) = at_word(what, nth);
-        let a = ask(
-            &mut viewer,
-            json!({"op": "cites", "page": 0, "x": wx + 1.0, "y": wy - 2.0}),
-        );
-        let keys: Vec<&str> = a["json"]["cites"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{what}: {a}"))
+    let link = |key: &str| {
+        links
             .iter()
-            .filter_map(|e| e["key"].as_str())
-            .collect();
-        assert_eq!(keys, ["texbook", "lamport"], "on {what}: {a}");
-        assert_eq!(a["json"]["cites"][0]["number"], "3", "{a}");
-        assert_eq!(a["json"]["cites"][0]["label"], "Knuth (1984)", "{a}");
-    }
-    for (what, nth) in [("in", 18), ("today", 44)] {
-        let (wx, wy) = at_word(what, nth);
-        let a = ask(
-            &mut viewer,
-            json!({"op": "cites", "page": 0, "x": wx + 1.0, "y": wy - 2.0}),
+            .find(|l| l[6] == format!("cite.{key}"))
+            .unwrap_or_else(|| panic!("a link to cite.{key}: {links:?}"))
+            .clone()
+    };
+    for (key, label, number) in [
+        ("knuth", json!("1"), json!("1")),
+        ("texbook", json!("Knuth (1984)"), json!("3")),
+        ("lamport", json!("Lamport (1994)"), json!("2")),
+    ] {
+        let lk = link(key);
+        let (px, py) = (
+            f64::midpoint(lk[0].as_f64().unwrap(), lk[2].as_f64().unwrap()),
+            f64::midpoint(lk[1].as_f64().unwrap(), lk[3].as_f64().unwrap()),
         );
-        assert_eq!(a["json"]["cites"], json!(null), "the prose's {what}: {a}");
+        let got = ask(
+            &mut viewer,
+            json!({"op": "cites", "page": 0, "x": px, "y": py}),
+        );
+        let c = &got["json"]["cites"];
+        assert_eq!(c.as_array().map(Vec::len), Some(1), "on {key}: {got}");
+        assert_eq!(c[0]["key"], key, "{got}");
+        assert_eq!(c[0]["label"], label, "{got}");
+        assert_eq!(c[0]["number"], number, "{got}");
+        assert_eq!(c[0]["at"][0], lk[4], "the link's own page: {got}");
+        assert_eq!(c[0]["at"][1], lk[5], "the link's own place: {got}");
+        assert!(
+            c[0]["at"][1].as_f64() > Some(py),
+            "the entry below the citation: {got}"
+        );
     }
-    // (other text, a page not there, a point off every glyph: none)
-    let (px, py) = at("Plain words");
-    let p = ask(
-        &mut viewer,
-        json!({"op": "cites", "page": 0, "x": px + 1.0, "y": py - 2.0}),
-    );
-    assert_eq!(p["json"]["cites"], json!(null), "{p}");
-    let n = ask(
-        &mut viewer,
+    // (plain words, between two links, a page not there, a bad request: none)
+    let k = link("knuth");
+    let left = k[0].as_f64().unwrap() - 40.0;
+    let mid = f64::midpoint(k[1].as_f64().unwrap(), k[3].as_f64().unwrap());
+    for req in [
+        json!({"op": "cites", "page": 0, "x": left, "y": mid}),
         json!({"op": "cites", "page": 7, "x": 1, "y": 1}),
-    );
-    assert_eq!(n["json"]["cites"], json!(null), "{n}");
-    let bad = ask(&mut viewer, json!({"op": "cites", "page": 0, "x": "x"}));
-    assert!(
-        bad["json"]["cites"].is_null() || bad["json"]["cites"].is_array(),
-        "{bad}"
-    );
+        json!({"op": "cites", "page": 0, "x": "x"}),
+    ] {
+        let a = ask(&mut viewer, req);
+        assert_eq!(a["json"]["cites"], json!(null), "{a}");
+    }
     lsp_send(
         &mut to,
         &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
