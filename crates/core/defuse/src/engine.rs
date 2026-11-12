@@ -1192,6 +1192,9 @@ impl Engine {
         let mut st = CommitStats::default();
         commit::file_effect(self, None, n, None, &mut st);
         self.note_stats(None, &st);
+        // (what it defines now is not known: the readers it reached wait
+        // for it, `sched::hold_for`)
+        n.edited.store(true, Ordering::Release);
         mark_dirty(
             self,
             None,
@@ -1231,6 +1234,7 @@ impl Engine {
                 continue;
             }
             if pred(n.op(), &n.args(), &self.values) {
+                n.edited.store(true, Ordering::Release);
                 mark_dirty(
                     self,
                     None,

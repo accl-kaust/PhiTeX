@@ -249,6 +249,13 @@ pub(crate) struct Node {
     /// settle (`sched::hold_for`). A node of a chain, or one that never ran,
     /// is listed in `Engine::movers`.
     pub(crate) moves: AtomicBool,
+    /// Its text was replaced, or it was asked to run again, by the client
+    /// (`Engine::replace`, `Engine::refresh_where`) and it has not
+    /// committed since: what it defines now is not known, so a reader its
+    /// last commit's definitions reached waits for it (`sched::hold_for`),
+    /// whatever order the last evaluation's commits came in. Cleared by
+    /// its next commit.
+    pub(crate) edited: AtomicBool,
     /// It is the front of a node an edit removed (`sched::mark_front`):
     /// the first after it to run again, those after it waiting for it
     /// in `Engine::movers` until it commits (`sched::clear_front`).
@@ -357,6 +364,7 @@ impl Node {
             full_ns: AtomicU64::new(0),
             refuted: AtomicBool::new(false),
             moves: AtomicBool::new(false),
+            edited: AtomicBool::new(false),
             front: AtomicBool::new(false),
             held: AtomicBool::new(false),
             effect: AtomicU32::new(0),

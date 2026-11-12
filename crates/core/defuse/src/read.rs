@@ -1614,11 +1614,18 @@ pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 
 /// An unsettled node among those whose definitions `r`, `me`'s last run,
 /// read, that moved a reader at its last commit (`Node::moves`): it may
-/// move them again. The page loop's rests do not count.
+/// move them again; or that an edit asked to run again and that has not
+/// committed since (`Node::edited`): what it defines is not known. The
+/// page loop's rests do not count. Not the edited node's own `moves`,
+/// which the last evaluation's commit order set: a reader of 64 edited
+/// definers waited for those whose last commit came after it had read
+/// and ran beside the rest, again at each of their commits
+/// (`block_heads::a_blocks_definers_run_before_the_readers_they_re_ask`,
+/// -j8).
 pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     r.sources.iter().copied().find(|&by| {
         eng.placed_node(by).is_some_and(|x| {
-            x.moves.load(Ordering::Acquire)
+            (x.moves.load(Ordering::Acquire) || x.edited.load(Ordering::Acquire))
                 && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
                 && x.unit == me.unit
                 && !x.held_panic.load(Ordering::Acquire)
