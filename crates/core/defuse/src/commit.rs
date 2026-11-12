@@ -7713,6 +7713,96 @@ mod tests {
     }
 
     #[test]
+    fn two_closes_one_commit_filed_reask_the_readers_after_both() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // As above, but one commit files both closes (a node's and its new
+        // placement's) and walks them: its walks took the other close for
+        // its own, no race, and each stopped where the other agreed with
+        // it. R read f inside the scope and now finds none (msc at four
+        // threads: a reader kept `[14, 1, 0, 1, 1, ()]` but now none, a
+        // paragraph set at the full width).
+        let e = Engine::new();
+        let opens = e.register(Arc::new(Opens));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, opens, vec![f, v.int(7)]);
+        let x = e.push(u, reads, vec![f]);
+        let y = e.push(u, reads, vec![f]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(7));
+        let close = crate::api::Brackets {
+            closes: 1,
+            opens: 0,
+            before: false,
+        };
+        let _filing = super::Filing::begin();
+        let file = |n: NodeId| {
+            let node = e.node(n);
+            let (_, mut inner) = super::own_write(&e, node).expect("on the line");
+            super::file_brackets(&e, &mut inner, node, node.pos_hint(), close).expect("a change")
+        };
+        let (ox, oy) = (file(x), file(y));
+        let mut st = super::CommitStats::default();
+        super::reask_after_effect(&e, None, e.node(x), e.node(x).pos_hint(), ox, close, &mut st);
+        super::reask_after_effect(&e, None, e.node(y), e.node(y).pos_hint(), oy, close, &mut st);
+        assert_ne!(
+            e.node(r).state(),
+            crate::node::State::Clean,
+            "R kept f, which both closes hide from it"
+        );
+    }
+
+    #[test]
+    fn a_walk_owed_from_a_label_goes_from_there_when_the_node_is_lifted() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // D defines f before R. A commit of D takes f back under its lock,
+        // its walk to go after it; D is lifted and lands after R before
+        // that walk goes, so the walk starts where D then stands, past R.
+        // R read D's f and now finds none: it has to run again (layout_d
+        // at four threads: a page's finisher took its \@currlist back and
+        // was moved past a paragraph whose append stood on it, its floats
+        // listed twice, "Float(s) lost").
+        let e = Engine::new();
+        let def = e.register(Arc::new(Def));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f, v.int(5)]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(5));
+        let dn = e.node(d);
+        let walking = super::Walking::new(dn);
+        {
+            let (_, mut inner) = super::own_write(&e, dn).expect("on the line");
+            let p = dn.pos_hint();
+            let m = inner.defs.get_mut(&crate::values::Field(f)).expect("f filed");
+            assert!(m.remove(&p).is_some(), "D's f at its label");
+            walking.add(std::iter::once(crate::values::Field(f)));
+        }
+        let mut st = super::CommitStats::default();
+        assert!(super::relocate(
+            &e,
+            None,
+            d,
+            dn,
+            super::Target::After(r),
+            &Default::default(),
+            &mut st
+        ));
+        drop(walking);
+        assert_ne!(
+            e.node(r).state(),
+            crate::node::State::Clean,
+            "R kept the f D took back where it stood"
+        );
+    }
+
+    #[test]
     fn a_node_removed_claims_nothing_after() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // C, claiming nothing, is removed; a run of it still going then
