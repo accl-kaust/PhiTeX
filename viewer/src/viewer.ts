@@ -676,14 +676,16 @@ export class Viewer {
   // ---- A citation read from the pages themselves: the bibliography as typeset ----
 
   /** Page `k`'s text lines (the text layer's), in points from its top left, top to bottom. */
-  private pageLines(k: number): { t: string; x0: number; y0: number; x1: number; y1: number }[] {
+  private pageLines(k: number): { t: string; x0: number; y0: number; x1: number; y1: number; b: number }[] {
     const s = this.slots[k];
     if (!s) return [];
     const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
     return [...s.el.querySelectorAll("text")]
       .map((t) => {
         const r = t.getBoundingClientRect();
-        return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0: (r.top - b.top) * sy, x1: (r.right - b.left) * sx, y1: (r.bottom - b.top) * sy };
+        // (b: the line's baseline, the text's own y in the page's points (its SVG's viewBox))
+        const y0 = (r.top - b.top) * sy, y1 = (r.bottom - b.top) * sy, base = Number(t.getAttribute("y"));
+        return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0, x1: (r.right - b.left) * sx, y1, b: Number.isFinite(base) ? base : y1 };
       })
       .filter((l) => l.t)
       .sort((a, c) => a.y0 - c.y0 || a.x0 - c.x0);
@@ -881,18 +883,19 @@ export class Viewer {
     return waiting ? null : out;
   }
 
-  /** The bibliography's entry whose first line has its baseline at `y` on page `k` (the engine's place for it): its label, its text, its line's top. */
+  /**
+   * The bibliography's entry the engine places at `y` on page `k`: its label, its text, its
+   * line's top. `y` is where the entry's link goes, its destination's top, which hyperref
+   * raises above the entry's first baseline (\Hy@raisedlink, \HyperRaiseLinkDefault): the
+   * entry is the first text line whose baseline is at or below it. Read as the baseline and
+   * matched to the line around it, the place was the line above's, the previous entry's:
+   * every card one entry early, the first none.
+   */
   private entryOn(k: number, y: number): { label: string; text: string; top: number } | null {
     const lines = this.pageLines(k);
-    // (the lowest line that starts above the baseline and reaches it: the entry's own, not
-    // a heading just above it (References over the first entry reached the first's baseline too))
     let i = -1;
-    lines.forEach((l, j) => l.y0 - 2 <= y && y <= l.y1 + 2 && (i < 0 || l.y0 > lines[i].y0) && (i = j));
-    if (i < 0) {
-      const near = lines.map((l, j) => [Math.abs((l.y0 + l.y1) / 2 - y), j] as const).sort((a, b) => a[0] - b[0])[0];
-      if (!near || near[0] > 12) return null;
-      i = near[1];
-    }
+    lines.forEach((l, j) => l.b >= y && (i < 0 || l.b < lines[i].b || (l.b === lines[i].b && l.x0 < lines[i].x0)) && (i = j));
+    if (i < 0) return null;
     const first = lines[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines.length && out.length < 8; j++) {
       const l = lines[j];

@@ -186,3 +186,28 @@ test("a zoom gesture's frames reach its goal, finite at every step, in and out a
   assert.ok(Number.isFinite(zoomToward(1, 1.1, NaN)));
   assert.equal(zoomToward(NaN, 1.1, 16), 1.1);
 });
+
+test("a citation's card is its own entry's: the first line whose baseline is at or below its destination", () => {
+  const { v } = setup(1);
+  // (the demo's bibliography as the page's text lines read it (points from the page's top; b
+  // the baseline), and where the engine puts each entry: its link's destination, raised)
+  const lines = [
+    ["which pages change. The PDF matches pdfTEX's at every step.", 544.8, 557.1, 71.1, 554.5],
+    ["References", 575, 590.8, 72, 587],
+    ["[1] U. A. Acar. Self-Adjusting Computation. PhD thesis, 2005.", 602.8, 615.1, 72, 612.2],
+    ["[2] M. A. Hammer, Y. P. Khoo, M. Hicks, J. S. Foster. Adapton: composable, demand-driven", 623.8, 636.1, 72, 633.2],
+    ["incremental computation. PLDI, 2014.", 637.4, 649.7, 89, 646.8],
+    ["[3] D. E. Knuth. The TEXbook. Addison-Wesley, 1984.", 658.3, 670.6, 72, 667.7],
+  ].map(([t, y0, y1, x0, b]) => ({ t: t as string, x0: x0 as number, x1: 500, y0: y0 as number, y1: y1 as number, b: b as number }));
+  const vv = v as unknown as { pageLines: () => typeof lines; entryOn: (k: number, y: number) => { label: string; text: string } | null };
+  vv.pageLines = () => lines;
+  // (acar2005's and hammer2014's destinations, as the engine gave them: before, card 1 had
+  // no entry and card 2 was Acar's, every card one entry early)
+  const acar = vv.entryOn(0, 595.24), hammer = vv.entryOn(0, 618.94);
+  assert.equal(acar?.label, "1");
+  assert.match(acar!.text, /Self-Adjusting Computation/);
+  assert.equal(hammer?.label, "2");
+  assert.match(hammer!.text, /Adapton: composable, demand-driven incremental computation/);
+  // (past the last baseline: none)
+  assert.equal(vv.entryOn(0, 680), null);
+});
