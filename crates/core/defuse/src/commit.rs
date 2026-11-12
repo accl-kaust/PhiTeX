@@ -974,7 +974,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a removed node's front has run, an edited node has: what it
     // defines is known now)
     crate::sched::clear_front(eng, node);
-    node.edited.store(false, Ordering::Release);
+    crate::sched::clear_edited(eng, node);
     // (whether its definitions reach readers outside its settling layer
     // at once: before any walk of this commit asks, `sched::settles_edge`)
     if !p.unchanged {
@@ -2895,7 +2895,7 @@ pub(crate) fn commit_stood(
     };
     let mut st = CommitStats::default();
     crate::sched::clear_front(eng, node);
-    node.edited.store(false, Ordering::Release);
+    crate::sched::clear_edited(eng, node);
     reask_stops(eng, ww, stops, node.id, &mut st);
     // (the fields a commit before it left unwalked: this run stands on
     // what that one filed, and they are walked now)
@@ -4570,6 +4570,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         // (gone, it commits no more: none waits for it)
         crate::sched::clear_front(eng, node);
         crate::sched::clear_move(eng, node);
+        crate::sched::clear_edited(eng, node);
         if let Some(o) = node.last.lock().as_ref() {
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }

@@ -1612,6 +1612,36 @@ pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     })
 }
 
+/// The last node before `me` in its unit that an edit asked to run again
+/// and that has not committed since (`Node::edited`); none where every such
+/// node has.
+pub(crate) fn edited_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let open: Vec<NodeId> = eng
+        .edited
+        .lock()
+        .iter()
+        .copied()
+        .filter(|&x| {
+            x != me.id
+                && eng.placed_node(x).is_some_and(|n| {
+                    n.unit == me.unit
+                        && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                        && !n.held_panic.load(Ordering::Acquire)
+                })
+        })
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    on_one_layout(eng, || {
+        let to = pos_of(eng, me.id)?;
+        open.iter()
+            .filter_map(|&x| pos_of(eng, x).filter(|&p| p < to).map(|p| (p, x)))
+            .max_by_key(|&(p, _)| p)
+            .map(|(_, x)| x)
+    })
+}
+
 /// An unsettled node among those whose definitions `r`, `me`'s last run,
 /// read, that moved a reader at its last commit (`Node::moves`): it may
 /// move them again; or that an edit asked to run again and that has not

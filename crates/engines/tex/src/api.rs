@@ -9551,19 +9551,36 @@ impl Build {
     }
 
     /// The page chain: the wakes that ended at the last page's
-    /// finisher (its routine), from the first, in nodes. Each page's loop
-    /// rest waits for the routine of the page before it (no fold past a
-    /// give-back not known), so on a clean build it grows with the pages,
+    /// finisher (its routine), from the first page node on them, in
+    /// nodes: the page layer's own (loop rests and finishers). Each page's
+    /// loop rest waits for the routine of the page before it (no fold past
+    /// a give-back not known), so on a clean build it grows with the pages,
     /// the same in DVI and PDF; the critical path traced from whichever
     /// node committed last ([`Stats::critical_path`]) sees it only where
-    /// that node is on it.
+    /// that node is on it. Not the text nodes that woke its first page
+    /// node: which of them is last to wake it (the text's last piece, or
+    /// the first page's routine before it) is the commits' order, and
+    /// counted, a text that ran ahead of the first page's routine made the
+    /// chain one rest and one routine longer than one that did not
+    /// (census_plain's para400 133 or 131 nodes for 66 pages, by run).
     #[must_use]
     pub fn page_chain(&self) -> usize {
         let e = &self.g.eng;
+        let page = |n: phitex_defuse::NodeId| {
+            e.node_info(n)
+                .is_some_and(|i| i.op == "finish" || i.op == "pages")
+        };
         e.order(self.unit)
             .into_iter()
             .rfind(|&n| e.node_info(n).is_some_and(|i| i.op == "finish"))
-            .map_or(0, |n| e.chain_to(n).len())
+            .map_or(0, |n| {
+                let chain = e.chain_to(n);
+                chain.len()
+                    - chain
+                        .iter()
+                        .rposition(|(x, _)| !page(*x))
+                        .map_or(0, |k| k + 1)
+            })
     }
 
     /// The live nodes of operation `op`.
