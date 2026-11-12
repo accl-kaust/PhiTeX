@@ -7,8 +7,10 @@
 # with minisign, GitHub's build provenance for each, and the GitHub release
 # made with all of them.
 #
-# Signing runs in the environment `release`: its secret MINISIGN_SECRET_KEY
-# (the key file's text; MINISIGN_PASSWORD if it has one) is given only to
+# Signing runs in the environment `release`: its secrets MINISIGN_SECRET_KEY
+# (the key file's text) and MINISIGN_PASSWORD (its password: the key
+# D15F554581F5B4BF has one; v1.0's first signing failed for want of it, as
+# "Wrong password for that key") are given only to
 # a run from a v* tag, and only after the user approves that run.
 #
 # The frontends' checks (frontends.yml) on the x86_64 Linux binary built
@@ -194,7 +196,8 @@ jobs:
           cd dist
           sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
-          [ -n "$KEY" ] || { echo "no MINISIGN_SECRET_KEY: the release is not signed"; exit 1; }
+          [ -n "$KEY" ] || { echo "no MINISIGN_SECRET_KEY in the environment release: the release is not signed"; exit 1; }
+          [ -n "$PASS" ] || { echo "no MINISIGN_PASSWORD in the environment release (the key's password): the release is not signed"; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
           umask 077
           printf '%s\n' "$KEY" > "$RUNNER_TEMP/minisign.key"
