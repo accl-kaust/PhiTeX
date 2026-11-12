@@ -5996,7 +5996,7 @@ fn watch_compare_time() {
     std::thread::spawn(move || {
         for l in lines {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l)
-                && v["event"] == "diff"
+                && (v["event"] == "diff" || v.get("build").is_some())
             {
                 let _ = tx.send((Instant::now(), v));
             }
@@ -6004,12 +6004,31 @@ fn watch_compare_time() {
     });
     let mut viewer = Viewer::connect(&url);
     for round in ["first", "second"] {
+        // (the second after an edit of the document, built: the diff's
+        // session's next build an edit too)
+        if round == "second" {
+            let bytes: Vec<u8> = edited
+                .replace("A sentence added for", "A sentence added since for")
+                .chars()
+                .map(|c| u8::try_from(c).expect("a byte"))
+                .collect();
+            std::fs::write(dir.join(&main), bytes).expect("the second edit");
+            loop {
+                let (_, v) = diffs.recv().expect("the build");
+                if v["event"] == "build" && v["build"] == 2 {
+                    break;
+                }
+            }
+        }
         let t = Instant::now();
         viewer.ask(&json!({"id": 1, "op": "diff_start", "rev": "HEAD"}));
         let mut first_page = None;
         let (end, ev) = loop {
             if let Ok(d) = diffs.try_recv() {
-                break d;
+                if d.1["event"] == "diff" {
+                    break d;
+                }
+                continue;
             }
             match viewer.ws.read() {
                 Ok(tungstenite::Message::Text(m)) => {
