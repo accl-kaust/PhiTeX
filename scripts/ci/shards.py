@@ -128,11 +128,12 @@ def estimate(phases):
 
 def deal(us, n):
     """The units dealt to n shards, heaviest (the sum of its phases)
-    first: each to a shard whose estimate it does not raise if there is
-    one (a long -j1 build's shard has three lanes free beside it), else to
-    the shard that ends soonest with it; ties to the one that ends soonest
-    before, then the lowest. Returns the shards' lists of units and their
-    estimated walls."""
+    first, each to the shard that ends soonest with it, ties to the one
+    that ends soonest before, then the lowest. (Not into a long -j1
+    build's free lanes: the other heavy builds put there beside it ran
+    1.6 to 2 times their measured walls, lie-hasse's 1556 s for 991, run
+    43117787891; a wall is measured beside the usual mix of light ones.)
+    Returns the shards' lists of units and their estimated walls."""
     order = sorted(range(len(us)), key=lambda i: (-sum(w for _, w in us[i][3]), us[i][0]))
     state = [dict() for _ in range(n)]
     est = [0.0] * n
@@ -145,7 +146,7 @@ def deal(us, n):
                 a, m = ph.get(p, (0.0, 0.0))
                 ph[p] = (a + w, max(m, w))
             e = estimate(ph)
-            key = (e > est[s] + 1e-9, e, est[s], s)
+            key = (e, est[s], s)
             if best is None or key < best[0]:
                 best = (key, s, ph, e)
         _, s, ph, e = best
