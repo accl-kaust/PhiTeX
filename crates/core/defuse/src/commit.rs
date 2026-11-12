@@ -4692,6 +4692,11 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
     }
+    // (what it filed taken back, while a commit of it may still walk: the
+    // re-asks for this are others than that commit's, `sched::asked_before`)
+    if !changed_defs.is_empty() || !changed_contribs.is_empty() {
+        node.restated.fetch_add(1, Ordering::AcqRel);
+    }
     ix.apply(eng, seg, &inner);
     drop(inner);
     crate::obs::long_hold("retract", changed_defs.len(), t_held);
@@ -6196,6 +6201,9 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
     }
     inner.sum_depth();
     let g = eng.scope_changed();
+    // (a change of what it filed: a re-ask for it is another than one for
+    // a change before, `sched::asked_before`)
+    node.restated.fetch_add(1, Ordering::AcqRel);
     if bracket_trace() {
         let o = old.unwrap_or_default();
         eprintln!(

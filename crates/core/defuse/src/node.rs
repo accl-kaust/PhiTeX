@@ -209,10 +209,13 @@ pub(crate) struct Node {
     /// committing node, that commit's run serial, the node's `restated`
     /// then and the field (`sched::asked_before`).
     pub(crate) asks: Mx<Vec<(NodeId, u32, u32, Field)>>,
-    /// Counts the times a value it filed was put right in place after it
-    /// was filed (a relation counted again from its input,
-    /// `commit::settle_rel`, `commit::walk_here`): a re-ask for its change
-    /// made before carried the older value (`sched::asked_before`).
+    /// Counts the times what it filed changed other than by a commit's
+    /// filing of its run: a value put right in place (a relation counted
+    /// again from its input, `commit::settle_rel`, `commit::walk_here`),
+    /// its brackets filed (`commit::file_brackets`, by its commit or a
+    /// claim's), its products taken back (`commit::retract_products`). A
+    /// re-ask for a change made before carried the older state
+    /// (`sched::asked_before`).
     pub(crate) restated: AtomicU32,
     /// Counts its commits, a run's and a stand's (`commit::commit_stood`,
     /// which keeps the record and its serial): the commit a re-ask came
