@@ -1612,13 +1612,50 @@ pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     })
 }
 
+/// The last node before `me` in its unit that an edit asked to run again
+/// and that has not committed since (`Node::edited`); none where every such
+/// node has.
+pub(crate) fn edited_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let open: Vec<NodeId> = eng
+        .edited
+        .lock()
+        .iter()
+        .copied()
+        .filter(|&x| {
+            x != me.id
+                && eng.placed_node(x).is_some_and(|n| {
+                    n.unit == me.unit
+                        && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                        && !n.held_panic.load(Ordering::Acquire)
+                })
+        })
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    on_one_layout(eng, || {
+        let to = pos_of(eng, me.id)?;
+        open.iter()
+            .filter_map(|&x| pos_of(eng, x).filter(|&p| p < to).map(|p| (p, x)))
+            .max_by_key(|&(p, _)| p)
+            .map(|(_, x)| x)
+    })
+}
+
 /// An unsettled node among those whose definitions `r`, `me`'s last run,
 /// read, that moved a reader at its last commit (`Node::moves`): it may
-/// move them again. The page loop's rests do not count.
+/// move them again; or that an edit asked to run again and that has not
+/// committed since (`Node::edited`): what it defines is not known. The
+/// page loop's rests do not count. Not the edited node's own `moves`,
+/// which the last evaluation's commit order set: a reader of 64 edited
+/// definers waited for those whose last commit came after it had read
+/// and ran beside the rest, again at each of their commits
+/// (`block_heads::a_blocks_definers_run_before_the_readers_they_re_ask`,
+/// -j8).
 pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     r.sources.iter().copied().find(|&by| {
         eng.placed_node(by).is_some_and(|x| {
-            x.moves.load(Ordering::Acquire)
+            (x.moves.load(Ordering::Acquire) || x.edited.load(Ordering::Acquire))
                 && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
                 && x.unit == me.unit
                 && !x.held_panic.load(Ordering::Acquire)

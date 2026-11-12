@@ -4567,6 +4567,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         // (gone, it commits no more: none waits for it)
         crate::sched::clear_front(eng, node);
         crate::sched::clear_move(eng, node);
+        crate::sched::clear_edited(eng, node);
         if let Some(o) = node.last.lock().as_ref() {
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }

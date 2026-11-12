@@ -204,6 +204,11 @@ pub struct Engine {
     /// chain (`Node::moves`), and how many. A hint for the order of runs.
     pub(crate) movers: crate::lock::Mx<crate::values::FxHashSet<NodeId>>,
     pub(crate) movers_n: AtomicU64,
+    /// The nodes an edit asked to run again that have not committed since
+    /// (`Node::edited`), and how many: a node that has never run waits for
+    /// the last of them before it (`sched::hold_for`).
+    pub(crate) edited: crate::lock::Mx<crate::values::FxHashSet<NodeId>>,
+    pub(crate) edited_n: AtomicU64,
     /// An evaluation has ended: there is a last run's graph to order the
     /// next one's runs by (`sched::work`).
     pub(crate) holds_on: std::sync::atomic::AtomicBool,
@@ -454,6 +459,8 @@ impl Engine {
             frontier: AtomicU64::new(0),
             movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
             movers_n: AtomicU64::new(0),
+            edited: crate::lock::Mx::new(crate::values::FxHashSet::default()),
+            edited_n: AtomicU64::new(0),
             holds_on: std::sync::atomic::AtomicBool::new(false),
             rerun_holds: std::sync::atomic::AtomicBool::new(false),
             created_movers: std::sync::atomic::AtomicBool::new(false),
@@ -1192,6 +1199,9 @@ impl Engine {
         let mut st = CommitStats::default();
         commit::file_effect(self, None, n, None, &mut st);
         self.note_stats(None, &st);
+        // (what it defines now is not known: the readers it reached, and
+        // the nodes after it never run, wait for it, `sched::hold_for`)
+        crate::sched::mark_edited(self, n);
         mark_dirty(
             self,
             None,
@@ -1231,6 +1241,7 @@ impl Engine {
                 continue;
             }
             if pred(n.op(), &n.args(), &self.values) {
+                crate::sched::mark_edited(self, n);
                 mark_dirty(
                     self,
                     None,

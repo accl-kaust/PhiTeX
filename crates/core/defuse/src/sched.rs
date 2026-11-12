@@ -2466,6 +2466,28 @@ pub(crate) fn clear_front(eng: &Engine, node: &Node) {
     }
 }
 
+/// An edit asked `n` to run again (`Engine::replace`, `Engine::refresh_where`):
+/// what it defines now is not known until it commits (`Node::edited`).
+pub(crate) fn mark_edited(eng: &Engine, n: &Node) {
+    let op = eng.op(n.op());
+    if op.works_at_frontier() || op.final_only() {
+        return;
+    }
+    if !n.edited.swap(true, Ordering::AcqRel) && eng.edited.lock().insert(n.id) {
+        eng.edited_n.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// An edited node's commit, or its removal (`mark_edited`).
+pub(crate) fn clear_edited(eng: &Engine, node: &Node) {
+    if node.edited.load(Ordering::Relaxed)
+        && node.edited.swap(false, Ordering::AcqRel)
+        && eng.edited.lock().remove(&node.id)
+    {
+        eng.edited_n.fetch_sub(1, Ordering::Release);
+    }
+}
+
 /// The unsettled node `node` should wait for, by the last evaluation's
 /// graph: one before it that has never run or moved a read of its chain
 /// (`read::mover_before`), or that its last run read from and that moved a
@@ -2493,7 +2515,19 @@ fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
     {
         return Some(x);
     }
-    let r = node.run_record()?;
+    // (one that has never run reads what the nodes before it define, and
+    // an edited one among them, yet to commit, may define otherwise now:
+    // it waits for the last such before it. Run sooner, it read the edited
+    // node's old definitions, say its first load of a font, which the
+    // edit moved to this node, and ran again when that one committed: an
+    // inserted paragraph beside the edited `\begin{document}` piece,
+    // microtype's italic paragraphs re-asked twice at -j8, once at -j1,
+    // `a_fonts_expansion_list_reader_does_not_run_again_when_a_first_ask_moves`)
+    let Some(r) = node.run_record() else {
+        return (eng.edited_n.load(Ordering::Acquire) != 0)
+            .then(|| crate::read::edited_before(eng, node))
+            .flatten();
+    };
     crate::read::open_definer_before(eng, node, &r).or_else(|| crate::read::derived_target_open(eng, node, &r))
 }
 
@@ -2902,6 +2936,13 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             continue;
         }
         node.committing.store(false, Ordering::Release);
+        // (an edited node committed, or taken: what it defines is known now.
+        // Not at its commit's start: a reader let go then ran before the
+        // commit's definitions were filed and again after, block_heads at
+        // -j8 201 runs for 200 readers)
+        if to != State::Dirty {
+            clear_edited(eng, node);
+        }
         // (not open any more: the readers filed at it after its commit
         // took its stops, re-asked)
         if to != State::Dirty {

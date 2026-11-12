@@ -47,8 +47,12 @@ impl Operation for Sum {
 
 /// 64 definers (`f_i` := 0), then 200 readers of all of them. An edit
 /// sets every `f_i` := 1: the 64 run first, each reader once after them,
-/// at one thread; at eight, a reader runs at most twice (one that started
-/// before the last definer of another worker's block committed).
+/// at one thread and at eight. A reader re-asked by the first definer to
+/// commit waits for the edited definers its last run read
+/// (`Node::edited`), whatever order the clean build's commits came in:
+/// before, it waited only for those whose last commit had moved a reader,
+/// and ran beside the rest, again at each of their commits (421 runs for
+/// 200 readers at -j8 on a 4-core runner, GitHub gate run 41201269355).
 #[test]
 fn a_blocks_definers_run_before_the_readers_they_re_ask() {
     const DEFS: usize = 64;
@@ -73,10 +77,10 @@ fn a_blocks_definers_run_before_the_readers_they_re_ask() {
             assert_eq!(e.output(*r).and_then(|x| v.as_int(x)), Some(DEFS as i64), "-j{threads}");
         }
         let runs = sum.0.load(Ordering::SeqCst);
-        let bound = if threads == 1 { READERS } else { 2 * READERS };
+        eprintln!("-j{threads}: {runs} reader runs for {READERS} readers");
         assert!(
-            runs <= bound,
-            "-j{threads}: {runs} reader runs for {READERS} readers (at most {bound}): the readers ran between the definers: {rep:?}"
+            runs == READERS,
+            "-j{threads}: {runs} reader runs for {READERS} readers: the readers ran between the definers: {rep:?}"
         );
         assert!(
             e.check_invariants().is_empty(),
