@@ -1715,7 +1715,7 @@ mod tests {
         assert_eq!(e[0]["diff"]["shown"], false);
         // (a page of the diff streamed while the document's are shown: kept, not told)
         v.diff_stream_page(0, 7, vec![1; 10], 1, true);
-        assert!(take().is_empty());
+        assert_eq!(take(), Vec::<Value>::new());
         assert_eq!(pages(&v), json!([]));
         // (the diff shown: its pages so far with the pages, then each one told)
         v.diff_shown(true);
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(all["json"]["inexact"], json!([1]));
         // (the document's own streamed meanwhile: kept, not told, not shown)
         v.stream_page(0, 9, vec![3; 10], 1, true);
-        assert!(take().is_empty());
+        assert_eq!(take(), Vec::<Value>::new());
         assert_eq!(pages(&v), json!([named(7), named(8)]));
         // (the diff's build in: its pages, the streamed ones dropped)
         v.diff(
