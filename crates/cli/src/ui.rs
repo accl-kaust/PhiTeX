@@ -1223,8 +1223,8 @@ mod tests {
         let mut l = PageLog::default();
         l.observe(9, 0, 32, ms(0));
         l.observe(9, 32, 32, ms(400));
-        assert!(said(&l).is_empty());
-        assert!(l.rows.is_empty());
+        assert_eq!(said(&l), Vec::<String>::new());
+        assert_eq!(l.rows, []);
         l.end(32, &[4]);
         assert_eq!(said(&l), ["↻ page 4"]);
         let mut l = PageLog::default();
