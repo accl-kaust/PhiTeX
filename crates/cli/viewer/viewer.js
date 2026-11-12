@@ -2088,6 +2088,8 @@ header:active { cursor: grabbing; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
+.zooming .phx-text { display: none; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
@@ -4786,7 +4788,7 @@ var icon = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width
 function zoomToward(f, goal, dt) {
   if (!(f > 0) || !Number.isFinite(f)) return goal;
   const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
-  return Math.abs(goal - f) / goal < 3e-3 ? goal : f * Math.pow(goal / f, k);
+  return Math.abs(goal - f) / goal < 1e-3 ? goal : f * Math.pow(goal / f, k);
 }
 function zoomOf(z) {
   if (z === "fit" || z === "page") return z;
@@ -6382,17 +6384,6 @@ var Panel = class {
   */
   gesture;
   /**
-   * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
-   * where it is, as pdf.js's viewer does: the pages laid out at the zoom
-   * once a frame while the gesture goes on, the place under the pointer
-   * kept by its page, and drawn at it as soon as the core can (Viewer.ask:
-   * a page once at a time, the zoom it rests at last); their old bitmaps
-   * stretched until then. Once it rests (250 ms, longer than a wheel's
-   * notches are apart) the zoom is saved and told. The pages were scaled
-   * by one transform until the gesture rested, and only then drawn: every
-   * zoom showed stretched bitmaps for 250 ms and a drawing more.
-   */
-  /**
    * Zoom by `f` at the point (`px`, `py`) of the stage. Every event of a gesture moves its
    * one goal; one frame loop brings the zoom to it. `ease`: over a few frames (a wheel's
    * notches: the zoom follows the goal by the time passed, most of the way in 200 ms
@@ -6406,8 +6397,8 @@ var Panel = class {
     let g = this.gesture;
     if (!g) {
       const r = this.$("#stage").getBoundingClientRect();
-      const x = r.left + px, y = r.top + py, v = this.$("#viewer").getBoundingClientRect();
-      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
+      const x = r.left + px, y = r.top + py;
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
     }
     if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
     if (!ease4) g.f = g.goal;
@@ -6424,25 +6415,23 @@ var Panel = class {
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
   /**
-   * The gesture's zoom now. While it runs: the pages scaled by a transform about the
-   * pointer, laid out at no frame (a layout a frame, the pages' boxes and the place under
-   * the pointer read back, cost each frame its time: 30 frames a second and less). `final`:
-   * the pages laid out at it, the place under the pointer where it was, those drawn at
-   * another zoom asked for, the transform gone.
+   * The gesture's zoom now, as pdf.js's viewer zooms: the pages laid out at it each frame
+   * (their old bitmaps stretched to their new boxes), the place under the pointer kept
+   * there; one layout a frame, read by keepAt (snap reads no box of a page drawn at a
+   * scale), the pages' text out of it. `final`: those drawn at another zoom asked for. Scaled by a transform about
+   * the pointer while the gesture ran and laid out only when it rested, the pages were
+   * not what the layout made of them (a narrow page is centred, the gaps between pages
+   * keep their size, pages come into view as it zooms out): they jumped when it rested.
    */
   zoomLay(g, final = false) {
     this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
-    const v = this.$("#viewer");
-    if (!final) {
-      Object.assign(v.style, { transformOrigin: `${g.ox}px ${g.oy}px`, transform: `scale(${g.f})`, willChange: "transform" });
-      return;
-    }
-    Object.assign(v.style, { transformOrigin: "", transform: "", willChange: "" });
-    this.$("#stage").classList.remove("fit");
+    const st = this.$("#stage");
+    st.classList.remove("fit");
+    st.classList.toggle("zooming", !final);
     this.viewer.redraw(true);
     if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
-    this.viewer.redraw();
+    if (final) this.viewer.redraw();
   }
   /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
   zoomEnd() {
@@ -9255,6 +9244,7 @@ var COMMITS_CSS = `
 .phx-commits .row.inrange { background: rgba(62,99,221,.10); }
 .phx-commits .row.from, .phx-commits .row.to { background: rgba(62,99,221,.22); }
 .phx-commits .row.drag { background: rgba(62,99,221,.16); }
+.phx-commits .row.aim { box-shadow: inset 3px 0 0 rgba(62,99,221,.55); }
 .phx-commits svg { flex: none; overflow: visible; }
 .phx-commits .txt { overflow: hidden; text-overflow: ellipsis; padding-left: 4px; }
 .phx-commits .sha { font: 11px ui-monospace, monospace; opacity: .65; margin-right: 6px; }
@@ -9293,8 +9283,9 @@ var Commits = class {
     this.el.addEventListener("pointermove", (e) => {
       if (this.anchor === null || this.drag) return;
       const over = this.rowAt(e.clientX, e.clientY);
-      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor });
+      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor }, "aim");
     });
+    this.el.addEventListener("pointerleave", () => this.anchor !== null && !this.drag && this.paintDrag(null, "aim"));
     this.el.addEventListener("dblclick", (e) => {
       this.anchor = null;
       this.paintDrag();
@@ -9415,12 +9406,20 @@ var Commits = class {
     this.el.addEventListener("pointermove", move);
     this.el.addEventListener("pointerup", up);
   }
-  /** The rows a drag spans, marked as it goes. */
-  paintDrag(d = this.drag) {
+  /**
+   * The rows a drag spans, marked as it goes (`drag`: filled, a range being chosen), or
+   * those a second click would choose, from the first end to the pointer (`aim`: a bar at
+   * their edge only). Filled as a drag's were, they read as a range chosen: with From
+   * clicked and To the working tree already, a pointer passing over the rows seemed to
+   * have selected them.
+   */
+  paintDrag(d = this.drag, kind = "drag") {
     const [a, b] = d ? [Math.min(d.from, d.over), Math.max(d.from, d.over)] : [0, -2];
     for (const r of this.el.querySelectorAll(".row")) {
       const i = r.dataset.i === void 0 ? -1 : Number(r.dataset.i);
-      r.classList.toggle("drag", !!d?.moved && i >= a && i <= b);
+      const on = !!d?.moved && i >= a && i <= b;
+      r.classList.toggle("drag", kind === "drag" && on);
+      r.classList.toggle("aim", kind === "aim" && on);
     }
   }
   click(e) {
