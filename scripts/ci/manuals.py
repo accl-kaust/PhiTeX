@@ -5,7 +5,7 @@ will compare `phitex` with (the PDF and the files the job reads back; not
 the .log).
 
     manuals.py discover --doc DIR --out CANDIDATES.json
-    manuals.py oracle   --list FILE --doc DIR --cache DIR [--shard I/N]
+    manuals.py oracle   --list FILE --doc DIR --cache DIR [--shard K/N [--sub I/P]]
     manuals.py pin      --list CANDIDATES.json --cache DIR --out ci/manuals.json
 
 `discover` picks the candidates (one main document per package directory,
@@ -399,30 +399,15 @@ def load_list(path):
     return data.get("manuals") or data.get("documents") or data.get("candidates")
 
 
-def shard(items, spec):
-    if not spec:
-        return items
-    i, n = (int(x) for x in spec.split("/"))
-    # (dealt by time, not by count: each item weighs its oracle's wall,
-    # capped at the sweep's usual 300 s limit (a run past it is stopped
-    # there), and goes, heaviest first, to the shard with the least so
-    # far, ties to the lowest; the same list gives the same shards. Dealt
-    # by count, one shard took 58 min and another 19)
-    def weight(c):
-        return min(float(c.get("oracle_wall_s") or 1.0), 300.0)
-    order = sorted(range(len(items)), key=lambda k: (-weight(items[k]), k))
-    load = [0.0] * n
-    mine = set()
-    for k in order:
-        s = min(range(n), key=lambda j: (load[j], j))
-        load[s] += weight(items[k])
-        if s == i:
-            mine.add(k)
-    return [c for k, c in enumerate(items) if k in mine]
-
-
 def cmd_oracle(args):
-    items = shard(load_list(args.list), args.shard)
+    import shards
+    # (shard K/N of the list as the sweep deals it (shards.py), and of
+    # that, with --sub I/P, the I-th of P slices by the oracles' walls:
+    # P oracle processes on one shard's documents)
+    family = args.family or shards.family_of(args.list)
+    items = shards.docs(family, load_list(args.list), args.shard)
+    if args.sub:
+        items = shards.sub(family, items, args.sub)
     if args.ids:
         items = [c for c in items if c["id"] in args.ids.split(",")]
     for c in items:
@@ -489,6 +474,8 @@ def main():
     p.add_argument("--cache", required=True)
     p.add_argument("--new-cache")
     p.add_argument("--shard")
+    p.add_argument("--sub", help="I/P: the I-th of P slices of the shard, by the oracles' walls")
+    p.add_argument("--family", help="the times the shards are dealt by (shards.py): the list's stem unless given")
     p.add_argument("--ids")
     p = sub.add_parser("pin")
     p.add_argument("--list", required=True)

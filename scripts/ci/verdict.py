@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The verdict of a corpus shard (gate-shard.sh research and manuals):
-each document of shard K of N of LIST against its results at every -j
-(sweep.py run's OUT/<id>-j<J>.json).
+each document of shard K of N of LIST (shards.py) against its results at
+every -j of JOBS the shard builds it at (sweep.py run's OUT/<id>-j<J>.json).
 
     verdict.py LIST K/N JOBS OUT [--lane TEXT] [--known FILE --known-out FILE] [--slow FILE]
 
@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import manuals  # noqa: E402
+import shards  # noqa: E402
 
 
 def line(d, j, r, lane):
@@ -58,6 +59,7 @@ def main():
     ap.add_argument("jobs")
     ap.add_argument("out")
     ap.add_argument("--lane", default="")
+    ap.add_argument("--family", help="the times the shards are dealt by (shards.py): the list's stem unless given")
     ap.add_argument("--prefix", default="")
     ap.add_argument("--known")
     ap.add_argument("--known-out")
@@ -67,10 +69,14 @@ def main():
     slow = listed(a.slow)
     lane = f" ({a.lane})" if a.lane else ""
     kout = []
-    for d in manuals.shard(manuals.load_list(a.list), a.shard):
+    family = a.family or shards.family_of(a.list)
+    # (each document of the shard at the -j it is built at here: a
+    # manual's builds at each -j are dealt apart, shards.py)
+    for d, js in shards.mine(family, manuals.load_list(a.list), a.shard, a.jobs):
+        js = [str(j) for j in js]
         # (each not identical: its status and its line)
         bad, no_oracle = [], None
-        for j in a.jobs.split(","):
+        for j in js:
             try:
                 r = json.loads((Path(a.out) / f"{d['id']}-j{j}.json").read_text())
             except (OSError, ValueError):
@@ -87,7 +93,7 @@ def main():
         if no_oracle:
             bad.insert(0, ("no-oracle", None, no_oracle))
         # (one known at a -j alone, `ID -jJ`: its results there go apart, the rest stay)
-        for j in a.jobs.split(","):
+        for j in js:
             why = known.get(f"{d['id']} -j{j}")
             if why is None:
                 continue
@@ -98,7 +104,7 @@ def main():
         if d["id"] in known:
             kout.extend(f"{b} (known: {known[d['id']]})" for _, _, b in bad)
             if not bad:
-                kout.append(f"{d['id']}{lane}: identical now at -j {a.jobs} (known: {known[d['id']]})")
+                kout.append(f"{d['id']}{lane}: identical now at -j {','.join(js)} (known: {known[d['id']]})")
         elif d["id"] in slow:
             # (a slow one: its timeouts are expected and go apart; a PDF
             # that differs, an error, a missing result stay red)
@@ -108,7 +114,7 @@ def main():
                 else:
                     print(a.prefix + b)
             if not bad:
-                kout.append(f"{d['id']}{lane}: within its limit now at -j {a.jobs} (slow: {slow[d['id']]})")
+                kout.append(f"{d['id']}{lane}: within its limit now at -j {','.join(js)} (slow: {slow[d['id']]})")
         else:
             for _, _, b in bad:
                 print(a.prefix + b)
