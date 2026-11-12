@@ -318,6 +318,17 @@ fn pages_said(ks: &[usize]) -> String {
     }
 }
 
+/// [`pages_said`], or their count when they are many runs apart
+/// (`160 pages`): a line, not a list.
+fn pages_brief(ks: &[usize]) -> String {
+    let runs = 1 + ks.windows(2).filter(|w| w[1] != w[0] + 1).count();
+    if runs <= 4 {
+        pages_said(ks)
+    } else {
+        format!("{} pages", ks.len())
+    }
+}
+
 /// Where the build is: page `n` of the last build's `m` (0: none), never
 /// past it (the engine's highest page may count pages a later run takes
 /// back: a 32-page document's "page 33").
@@ -411,7 +422,7 @@ impl PageLog {
                 return if changed.is_empty() {
                     vec![(st.dim("·"), st.dim("no page changed"))]
                 } else {
-                    vec![(st.cyan("↻"), pages_said(changed))]
+                    vec![(st.cyan("↻"), pages_brief(changed))]
                 };
             }
             if *n == 0 {
@@ -420,7 +431,7 @@ impl PageLog {
             let all: Vec<usize> = (1..=*n).collect();
             let mut text = pages_said(&all);
             if !redone.is_empty() {
-                text.push_str(&st.dim(&format!(" · {} redone", pages_said(&redone))));
+                text.push_str(&st.dim(&format!(" · {} redone", pages_brief(&redone))));
             }
             return vec![(st.green("✓"), text)];
         }
@@ -440,7 +451,7 @@ impl PageLog {
             if !again.is_empty() {
                 out.push((
                     st.cyan("↻"),
-                    format!("{} {}", pages_said(&again), st.dim("redone")),
+                    format!("{} {}", pages_brief(&again), st.dim("redone")),
                 ));
             }
         }
@@ -1201,6 +1212,16 @@ mod tests {
         // (at the end: final, and said to have been redone)
         l.end(20, &[]);
         assert_eq!(said(&l), ["✓ pages 1–20 · page 2 redone"]);
+        // (many, far apart: counted, a line not a list)
+        let mut l = PageLog::default();
+        l.observe(1, 40, 0, ms(4000));
+        for k in [2, 5, 9, 13, 17, 30] {
+            l.streamed(k, 1);
+            l.streamed(k, 2);
+        }
+        assert_eq!(said(&l)[1], "↻ 6 pages redone");
+        l.end(40, &[]);
+        assert_eq!(said(&l), ["✓ pages 1–40 · 6 pages redone"]);
     }
 
     /// The page the build is at never goes past the last build's last
@@ -1231,6 +1252,10 @@ mod tests {
         l.observe(9, 10, 32, ms(400));
         l.end(32, &[4, 5, 9]);
         assert_eq!(said(&l), ["↻ pages 4–5, 9"]);
+        let mut l = PageLog::default();
+        l.observe(9, 10, 32, ms(400));
+        l.end(32, &[1, 3, 5, 7, 9]);
+        assert_eq!(said(&l), ["↻ 5 pages"]);
         let mut l = PageLog::default();
         l.observe(9, 10, 32, ms(400));
         l.end(32, &[]);
