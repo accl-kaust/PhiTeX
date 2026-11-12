@@ -6393,8 +6393,17 @@ impl Drop for Filing {
 /// end, each found to see what it saw (windycity's clean build at -j1:
 /// ~14 000 scope-kind readers, up to 3.4 s a commit, 61 s of the
 /// build's 110 s in re-asks).
-fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<(SegId, Pos)>, g: u64, me: u64) -> Option<SegId> {
-    if eng.scope_gen.load(Ordering::Acquire) == g {
+fn first_bracket_change_since(
+    eng: &Engine,
+    by: NodeId,
+    at: Pos,
+    last: Option<(SegId, Pos)>,
+    g: u64,
+    me: u64,
+) -> Option<SegId> {
+    let moved = eng.scope_gen.load(Ordering::Acquire) != g;
+    let stop = last.map(|x| x.1);
+    if !moved && stop.is_none() {
         return None;
     }
     let first = eng.seg_for_pos(at).map(|s| s.id);
@@ -6405,7 +6414,7 @@ fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<(SegId, Pos)>,
     // the other's close agreed with it, and the readers past both kept the
     // scope kind the scope's opener defined: msc at -j4, a reader's
     // `[14, 1, 0, 1, 1, ()]` but now none, a paragraph set at the full width)
-    if Filing::own_other_in(eng, me, g, at, last.map(|x| x.1)) {
+    if moved && Filing::own_other_in(eng, me, g, at, stop) {
         return first;
     }
     let last = last.map(|x| x.0);
@@ -6413,7 +6422,30 @@ fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<(SegId, Pos)>,
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
-        if inner.brk_since_other_than(me) > g {
+        if moved && inner.brk_since_other_than(me) > g {
+            return Some(sid);
+        }
+        // (a bracket in the region filed before this change whose own walk
+        // reckoned on it, begun since or still to go: that walk found this
+        // change where it stops, and this one stops at it; the readers
+        // past both read before either. A close filed, then another before
+        // it whose walk stopped at the first, where the depths agree again,
+        // while the first's walk, begun after, found the depth the second
+        // made and its region empty: amsldoc at -j16, readers after both
+        // kept `[14, 1, 0, 1, 1, ()]`)
+        if stop.is_some()
+            && inner
+                .brackets
+                .range((Excluded(at), stop.map_or(Unbounded, Included)))
+                .any(|(_, &(n, _))| {
+                    n != by && {
+                        let x = eng.node(n);
+                        let h = x.bracket_gen.load(Ordering::Acquire);
+                        let walked = x.bracket_walked.load(Ordering::Acquire);
+                        h < g && (walked >= g || walked < h)
+                    }
+                })
+        {
             return Some(sid);
         }
         let lo = seg.lo;
@@ -6736,6 +6768,10 @@ fn reask_after_effect_with(
         })
     };
     let d0 = i64::from(read::depth_at(eng, at));
+    // (the brackets this walk reckons on: every change counted by now,
+    // read after the depth at `at`, `first_bracket_change_since`)
+    by.bracket_walked
+        .fetch_max(eng.scope_gen.load(Ordering::Acquire), Ordering::AcqRel);
     let (co, cn) = ((d0 - i64::from(old.closes)).max(0), (d0 - i64::from(new.closes)).max(0));
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
     // (the scopes both sides share: the common ones under the node's
@@ -6824,7 +6860,7 @@ fn reask_after_effect_with(
     let raced = if end.is_some_and(|(_, q)| q == at) {
         None
     } else {
-        first_bracket_change_since(eng, at, end, g, Filing::current())
+        first_bracket_change_since(eng, by.id, at, end, g, Filing::current())
     };
     if let Some(from) = raced {
         // (the readers of the region from the first segment where one

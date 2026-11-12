@@ -286,6 +286,11 @@ pub(crate) struct Node {
     /// that change trusts where depths agree again only if no other
     /// change was filed since (`commit::reask_after_effect_at`).
     pub(crate) bracket_gen: AtomicU64,
+    /// The scope count when a walk after a change of its brackets last
+    /// began reckoning on them (`commit::reask_after_effect_with`): below
+    /// `bracket_gen`, its last change's walk is still to go
+    /// (`commit::first_bracket_change_since`).
+    pub(crate) bracket_walked: AtomicU64,
     /// The nodes whose reads are anchored at it (`At::Before`,
     /// `At::AfterOwn`), and the witnesses filed at it
     /// ([`crate::guard::Foreign`]): a walk past it asks their records, its
@@ -373,6 +378,7 @@ impl Node {
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
+            bracket_walked: AtomicU64::new(0),
             foreign: Mx::new(crate::guard::Foreign::default()),
             has_foreign: AtomicBool::new(false),
             moved: AtomicBool::new(false),
