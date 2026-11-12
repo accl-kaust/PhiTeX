@@ -1844,7 +1844,11 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
 /// between the two re-asks was asked only for it, and the second re-ask
 /// is the one that carries the change (a relation counted again from an
 /// input that moved under it, `commit::settle_rel`: a name built from a
-/// stepped counter kept the counter's older value at -j8, 1 build in 15).
+/// stepped counter kept the counter's older value at -j8, 1 build in 15;
+/// a close a claim took back while the commit that filed it still walked:
+/// a reader re-run between the two walks read inside no scope, and the
+/// second walk's re-ask, for the scope back, was taken for the first's,
+/// amsldoc at -j16, `[14, 1, 0, 1, 1, ()]` read as none).
 fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
     let (Some(by), Cause::Changed { field, .. } | Cause::Range { field, .. }) = (wake.by, &wake.cause) else {
         return false;

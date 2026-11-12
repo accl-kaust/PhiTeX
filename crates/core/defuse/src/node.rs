@@ -174,6 +174,13 @@ pub(crate) struct Node {
     /// next commit, of whatever kind, or its removal walks them
     /// (`commit::flush_unwalked`), against what each reader read.
     pub(crate) unwalked: Mx<Vec<Field>>,
+    /// The fields a walk under way goes from the node's label for (a
+    /// commit's after its lock, `commit::flush_unwalked`'s), each with that
+    /// walk's token (`commit::Walking`), dropped once it is done. A
+    /// relocation lifting the node meanwhile walks them from the label it
+    /// leaves (`commit::lift`): the walk itself starts where the node
+    /// stands when it goes.
+    pub(crate) walking: Mx<Vec<(Field, u64)>>,
     /// `unwalked` is not empty: what the node has filed is its stale
     /// run's, and its next commit is coming (`Ctx::wait_for_settling`).
     pub(crate) transient: AtomicBool,
@@ -202,10 +209,13 @@ pub(crate) struct Node {
     /// committing node, that commit's run serial, the node's `restated`
     /// then and the field (`sched::asked_before`).
     pub(crate) asks: Mx<Vec<(NodeId, u32, u32, Field)>>,
-    /// Counts the times a value it filed was put right in place after it
-    /// was filed (a relation counted again from its input,
-    /// `commit::settle_rel`, `commit::walk_here`): a re-ask for its change
-    /// made before carried the older value (`sched::asked_before`).
+    /// Counts the times what it filed changed other than by a commit's
+    /// filing of its run: a value put right in place (a relation counted
+    /// again from its input, `commit::settle_rel`, `commit::walk_here`),
+    /// its brackets filed (`commit::file_brackets`, by its commit or a
+    /// claim's), its products taken back (`commit::retract_products`). A
+    /// re-ask for a change made before carried the older state
+    /// (`sched::asked_before`).
     pub(crate) restated: AtomicU32,
     /// Counts its commits, a run's and a stand's (`commit::commit_stood`,
     /// which keeps the record and its serial): the commit a re-ask came
@@ -283,6 +293,11 @@ pub(crate) struct Node {
     /// that change trusts where depths agree again only if no other
     /// change was filed since (`commit::reask_after_effect_at`).
     pub(crate) bracket_gen: AtomicU64,
+    /// The scope count when a walk after a change of its brackets last
+    /// began reckoning on them (`commit::reask_after_effect_with`): below
+    /// `bracket_gen`, its last change's walk is still to go
+    /// (`commit::first_bracket_change_since`).
+    pub(crate) bracket_walked: AtomicU64,
     /// The nodes whose reads are anchored at it (`At::Before`,
     /// `At::AfterOwn`), and the witnesses filed at it
     /// ([`crate::guard::Foreign`]): a walk past it asks their records, its
@@ -344,6 +359,7 @@ impl Node {
             window_pass: AtomicBool::new(false),
             frontier_pass: AtomicBool::new(false),
             unwalked: Mx::new(Vec::new()),
+            walking: Mx::new(Vec::new()),
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
@@ -370,6 +386,7 @@ impl Node {
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
+            bracket_walked: AtomicU64::new(0),
             foreign: Mx::new(crate::guard::Foreign::default()),
             has_foreign: AtomicBool::new(false),
             moved: AtomicBool::new(false),
