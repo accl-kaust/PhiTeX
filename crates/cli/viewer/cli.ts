@@ -343,7 +343,6 @@ const panel = new Panel(
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
     onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
     // (the problems' filters: kept the same way)
-    onProblemsHidden: (kinds) => void sock.request({ op: "prefs", set: { "problems-hidden": kinds } }),
   },
   // (the panel's settings: this browser's)
   {
@@ -936,7 +935,6 @@ const prefs = async () => {
   const r = await sock.request({ op: "prefs" });
   if (!r.ok) return;
   panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
-  panel.problemsHidden(((r.json?.["problems-hidden"] ?? []) as string[]).filter((x) => typeof x === "string"));
   // (the panel's own choices, as the user's file has them)
   panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
   follow = String(r.json?.follow ?? "cursor");

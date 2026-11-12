@@ -359,8 +359,7 @@ mod tests {
     }
 }
 
-/// A problem's kind, for the problems' filters (the viewer's, and what
-/// `watch --lsp` publishes, both `problems-hidden`): `error`; a box's
+/// A problem's kind, for the viewer's problems' filters: `error`; a box's
 /// `overfull` ("Overfull \\hbox", "Tight \\vbox") or `underfull`
 /// ("Underfull", "Loose"); a `reference` (an undefined reference or
 /// citation, LaTeX's, BibTeX's); a `font` (a missing character, a

@@ -66,9 +66,6 @@ pub struct Config {
     pub watch_write: Option<bool>,
     /// The viewer's feature tips seen (yours only, set by the viewer).
     pub tips_seen: Option<Vec<String>>,
-    /// The kinds of problem the viewer does not show (yours only, set by
-    /// the viewer's filters).
-    pub problems_hidden: Option<Vec<String>>,
     /// The engine's threads (yours only: a machine's, not a document's; 0:
     /// the default, one), `-j` over it; read when the build starts.
     pub threads: Option<usize>,
@@ -121,7 +118,6 @@ const KEYS: &[&str] = &[
     "update-channel",
     "watch-write",
     "tips-seen",
-    "problems-hidden",
     "threads",
     "follow",
     "dark-pdf",
@@ -252,6 +248,16 @@ fn parse_named(text: &str, name: &str) -> Result<Config, String> {
         .keys()
         .filter(|k| !KEYS.contains(&k.as_str()))
         .cloned()
+        .collect();
+    let unknown: Vec<String> = unknown
+        .into_iter()
+        .filter(|k| {
+            let retired = RETIRED.contains(&k.as_str());
+            if retired {
+                table.remove(k);
+            }
+            !retired
+        })
         .collect();
     let mut warnings = Vec::new();
     for k in unknown {
@@ -504,7 +510,13 @@ pub fn projects_may(key: &str) -> bool {
 
 /// The viewer's preferences the user's `phitex.toml` keeps (the `prefs`
 /// op): their keys, each a list of names.
-pub const PREFS: &[&str] = &["tips-seen", "problems-hidden"];
+pub const PREFS: &[&str] = &["tips-seen"];
+
+/// Keys an earlier PhiTeX wrote that this one reads as nothing, without a
+/// warning: `problems-hidden` (1.0's viewer kept its problems' filters
+/// here, for every document; they are each document's now, kept by the
+/// viewer).
+const RETIRED: &[&str] = &["problems-hidden"];
 
 /// The settings the viewer's Settings dialog sets, each on or off (in the
 /// user's file; never a command, which a page could make run: `editor`,
@@ -587,7 +599,6 @@ pub fn prefs(
     let c = parse_named(&text, &p.display().to_string())?;
     Ok(serde_json::json!({
         "tips-seen": c.tips_seen.unwrap_or_default(),
-        "problems-hidden": c.problems_hidden.unwrap_or_default(),
         "watch-write": c.watch_write.unwrap_or(false),
         "synctex": c.synctex,
         "update-check": c.update_check.unwrap_or(false),
@@ -1057,7 +1068,6 @@ const USERS_ALONE: &[&str] = &[
     "update-check",
     "update-channel",
     "tips-seen",
-    "problems-hidden",
     "threads",
     "follow",
     "dark-pdf",
@@ -1161,7 +1171,6 @@ pub fn without_permissions(mut project: Config, root: &Path) -> Config {
     project.update_check = None;
     project.update_channel = None;
     project.tips_seen = None;
-    project.problems_hidden = None;
     project.threads = None;
     project.follow = None;
     project.dark_pdf = None;
@@ -1275,7 +1284,6 @@ impl Config {
             update_channel: self.update_channel.or(under.update_channel),
             watch_write: self.watch_write.or(under.watch_write),
             tips_seen: self.tips_seen.or(under.tips_seen),
-            problems_hidden: self.problems_hidden.or(under.problems_hidden),
             threads: self.threads.or(under.threads),
             follow: self.follow.or(under.follow),
             dark_pdf: self.dark_pdf.or(under.dark_pdf),
@@ -1644,7 +1652,6 @@ mod tests {
                 update_channel: None,
                 watch_write: None,
                 tips_seen: None,
-                problems_hidden: None,
                 threads: None,
                 follow: None,
                 dark_pdf: None,

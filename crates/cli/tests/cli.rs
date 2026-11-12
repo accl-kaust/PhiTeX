@@ -2473,6 +2473,70 @@ fn watch_plain_edit() {
     );
 }
 
+/// `phitex watch`, headless: the user's phitex.toml changed in a viewer's
+/// preference only (a problems' filter, as the viewer writes it) is no
+/// new session: the next build is the edit's, not a clean build again.
+/// A change the target reads (`synctex`) is one.
+#[test]
+fn watch_a_viewer_preference_is_no_new_session() {
+    let _one = one();
+    let text = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("story.tex");
+    let dir = scratch("watch-prefs");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let user = dir.join("user.toml");
+    std::fs::write(&user, "opening = \"random\"\n").expect("the user's file");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .env("PHITEX_CONFIG", &user)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "story.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    std::fs::write(
+        &user,
+        "opening = \"random\"\nproblems-hidden = [\"other\"]\n",
+    )
+    .expect("a viewer's preference");
+    // (the watch's file events settle: a new session would start now)
+    std::thread::sleep(Duration::from_millis(1500));
+    let at = text.find(" the ").expect("a word");
+    let line = text[..at].matches('\n').count() + 1;
+    let edited = format!("{} thy {}", &text[..at], &text[at + 5..]);
+    std::fs::write(dir.join("story.tex"), &edited).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    assert_eq!(
+        ev["edit"],
+        format!("story.tex:{line}"),
+        "the build after a viewer's preference is not the edit's: {ev}"
+    );
+    // (a setting a build reads: a new session, its clean build)
+    std::fs::write(
+        &user,
+        "opening = \"random\"\nproblems-hidden = [\"other\"]\nsynctex = false\n",
+    )
+    .expect("a build's setting");
+    let ev = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
 /// `phitex watch`, headless: a save that renames the old file away and
 /// writes a new one in pieces (vim's `backupcopy=no`, many editors) is
 /// one edit of the whole new text: no build starts while no file is at

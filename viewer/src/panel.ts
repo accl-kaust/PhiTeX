@@ -186,8 +186,6 @@ export interface PanelEvents {
    * them back with viewPrefs().
    */
   onPref?<K extends keyof ViewPrefs>(key: K, value: ViewPrefs[K]): Promise<string | void> | string | void;
-  /** The kinds of problem hidden (the problems' filters), every one: kept by the host (the watch: the user's phitex.toml). */
-  onProblemsHidden?(kinds: string[]): void;
   /** A project file's text as built (for Copy for an AI assistant: its lines around a problem, the main file's preamble), or null. */
   onSource(file: string): Promise<string | null>;
   /** The feature tips seen, every one so far: kept by the host where every port and browser reads them (the watch: the user's phitex.toml); absent, this browser's storage alone. */
@@ -2106,30 +2104,32 @@ export class Panel {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
   }
 
-  /** The kinds of problem not shown (the filters): this browser's, and the host's (problemsHidden). */
-  private hiddenKinds = (() => {
-    try {
-      return new Set<Kind>(JSON.parse(localStorage.getItem("phitex.kinds.hidden") ?? "[]"));
-    } catch {
-      return new Set<Kind>();
+  /** The kinds of problem not shown (the filters): this document's (builtKey: the page's address and its main file), kept in this browser; another document's are its own. */
+  private kindsOf: { key: string; hidden: Set<Kind> } | null = null;
+  private get hiddenKinds(): Set<Kind> {
+    const key = `phitex.kinds.hidden.${this.builtKey()}`;
+    if (this.kindsOf?.key !== key) {
+      let hidden = new Set<Kind>();
+      try {
+        const v: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+        if (Array.isArray(v)) hidden = new Set(v.filter((k): k is Kind => KINDS.some(([x]) => x === k)));
+      } catch {
+        /* (none kept: every kind shown) */
+      }
+      this.kindsOf = { key, hidden };
     }
-  })();
-
-  /** The kinds hidden as the host keeps them (the watch: the user's phitex.toml, on every port and document). */
-  problemsHidden(kinds: string[]): void {
-    this.hiddenKinds = new Set(kinds.filter((k) => KINDS.some(([x]) => x === k)) as Kind[]);
-    if (this.lastStatus) this.status(this.lastStatus);
+    return this.kindsOf.hidden;
   }
 
-  /** A kind's filter clicked: shown or hidden, everywhere, and kept. */
+  /** A kind's filter clicked: shown or hidden in this document, and kept for it. */
   private toggleKind(k: Kind): void {
-    if (!this.hiddenKinds.delete(k)) this.hiddenKinds.add(k);
+    const hidden = this.hiddenKinds;
+    if (!hidden.delete(k)) hidden.add(k);
     try {
-      localStorage.setItem("phitex.kinds.hidden", JSON.stringify([...this.hiddenKinds]));
+      localStorage.setItem(this.kindsOf!.key, JSON.stringify([...hidden]));
     } catch {
-      /* (the host's copy only) */
+      /* (this page's life only) */
     }
-    this.ev.onProblemsHidden?.([...this.hiddenKinds]);
     if (this.lastStatus) this.status(this.lastStatus);
   }
 
