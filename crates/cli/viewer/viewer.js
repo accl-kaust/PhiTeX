@@ -730,7 +730,8 @@ var Viewer = class _Viewer {
     const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
     return [...s.el.querySelectorAll("text")].map((t) => {
       const r = t.getBoundingClientRect();
-      return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0: (r.top - b.top) * sy, x1: (r.right - b.left) * sx, y1: (r.bottom - b.top) * sy };
+      const y0 = (r.top - b.top) * sy, y1 = (r.bottom - b.top) * sy, base = Number(t.getAttribute("y"));
+      return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0, x1: (r.right - b.left) * sx, y1, b: Number.isFinite(base) ? base : y1 };
     }).filter((l) => l.t).sort((a, c) => a.y0 - c.y0 || a.x0 - c.x0);
   }
   /** An entry's label, where the bibliography prints one at its line's start ("[4]", "[Knu84]"). */
@@ -904,16 +905,19 @@ var Viewer = class _Viewer {
     }
     return waiting ? null : out;
   }
-  /** The bibliography's entry whose first line has its baseline at `y` on page `k` (the engine's place for it): its label, its text, its line's top. */
+  /**
+   * The bibliography's entry the engine places at `y` on page `k`: its label, its text, its
+   * line's top. `y` is where the entry's link goes, its destination's top, which hyperref
+   * raises above the entry's first baseline (\Hy@raisedlink, \HyperRaiseLinkDefault): the
+   * entry is the first text line whose baseline is at or below it. Read as the baseline and
+   * matched to the line around it, the place was the line above's, the previous entry's:
+   * every card one entry early, the first none.
+   */
   entryOn(k, y) {
     const lines2 = this.pageLines(k);
     let i = -1;
-    lines2.forEach((l, j) => l.y0 - 2 <= y && y <= l.y1 + 2 && (i < 0 || l.y0 > lines2[i].y0) && (i = j));
-    if (i < 0) {
-      const near = lines2.map((l, j) => [Math.abs((l.y0 + l.y1) / 2 - y), j]).sort((a, b) => a[0] - b[0])[0];
-      if (!near || near[0] > 12) return null;
-      i = near[1];
-    }
+    lines2.forEach((l, j) => l.b >= y && (i < 0 || l.b < lines2[i].b || l.b === lines2[i].b && l.x0 < lines2[i].x0) && (i = j));
+    if (i < 0) return null;
     const first = lines2[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
       const l = lines2[j];
