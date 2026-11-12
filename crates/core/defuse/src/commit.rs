@@ -6211,6 +6211,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         );
     }
     inner.note_brackets(g, Filing::current());
+    Filing::note(node.id, g);
     node.bracket_gen.store(g, Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
@@ -6307,6 +6308,9 @@ pub(crate) struct Filing {
 
 thread_local! {
     static FILING: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The changes of brackets the commits under way on this thread
+    /// filed: (filing, node, scope count), [`Filing::note`].
+    static OWN_BRACKETS: std::cell::RefCell<Vec<(u64, NodeId, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 static FILINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -6322,11 +6326,45 @@ impl Filing {
     pub(crate) fn current() -> u64 {
         FILING.with(std::cell::Cell::get)
     }
+
+    /// Notes a change of `node`'s brackets at scope count `g` by the
+    /// commit under way, if any.
+    fn note(node: NodeId, g: u64) {
+        let me = Filing::current();
+        if me != 0 {
+            OWN_BRACKETS.with(|v| v.borrow_mut().push((me, node, g)));
+        }
+    }
+
+    /// Whether commit `me` filed a change of brackets other than the one at
+    /// scope count `g` at a node standing from `at` to `stop` (None: the
+    /// line's end): two of one commit's changes are each walked on the
+    /// brackets with the other filed, and the region of the first may hold
+    /// the second ([`first_bracket_change_since`]).
+    fn own_other_in(eng: &Engine, me: u64, g: u64, at: Pos, stop: Option<Pos>) -> bool {
+        me != 0
+            && OWN_BRACKETS.with(|v| {
+                v.borrow().iter().any(|&(c, n, h)| {
+                    c == me
+                        && h != g
+                        && eng.placed_node(n).is_some_and(|x| {
+                            let p = x.pos_hint();
+                            x.state() != State::Gone && p >= at && stop.is_none_or(|s| p <= s)
+                        })
+                })
+            })
+    }
 }
 
 impl Drop for Filing {
     fn drop(&mut self) {
-        FILING.with(|f| f.set(self.prev));
+        let me = FILING.with(|f| f.replace(self.prev));
+        OWN_BRACKETS.with(|v| {
+            let mut v = v.borrow_mut();
+            if !v.is_empty() {
+                v.retain(|x| x.0 != me);
+            }
+        });
     }
 }
 
@@ -6347,11 +6385,22 @@ impl Drop for Filing {
 /// end, each found to see what it saw (windycity's clean build at -j1:
 /// ~14 000 scope-kind readers, up to 3.4 s a commit, 61 s of the
 /// build's 110 s in re-asks).
-fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64, me: u64) -> Option<SegId> {
+fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<(SegId, Pos)>, g: u64, me: u64) -> Option<SegId> {
     if eng.scope_gen.load(Ordering::Acquire) == g {
         return None;
     }
     let first = eng.seg_for_pos(at).map(|s| s.id);
+    // (another change its own commit filed in the region: each walk of the
+    // two reckons on the other filed, and the readers in both regions read
+    // before either. Two closes a commit filed, its node's and a new
+    // placement's, after a scope its readers read inside, each stopped where
+    // the other's close agreed with it, and the readers past both kept the
+    // scope kind the scope's opener defined: msc at -j4, a reader's
+    // `[14, 1, 0, 1, 1, ()]` but now none, a paragraph set at the full width)
+    if Filing::own_other_in(eng, me, g, at, last.map(|x| x.1)) {
+        return first;
+    }
+    let last = last.map(|x| x.0);
     let mut cur = first;
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
@@ -6767,7 +6816,7 @@ fn reask_after_effect_with(
     let raced = if end.is_some_and(|(_, q)| q == at) {
         None
     } else {
-        first_bracket_change_since(eng, at, end.map(|(sid, _)| sid), g, Filing::current())
+        first_bracket_change_since(eng, at, end, g, Filing::current())
     };
     if let Some(from) = raced {
         // (the readers of the region from the first segment where one
