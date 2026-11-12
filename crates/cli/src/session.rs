@@ -114,10 +114,16 @@ impl Session {
         {
             note(&w);
         }
+        // (a job named otherwise than its main file, Compare's `JOB-diff`
+        // beside the document's own session: records of its own, which
+        // name its own files)
+        let stem = job.path.file_stem().map(|s| s.to_string_lossy());
+        let other = (stem.as_deref() != Some(job.jobname.as_str())).then(|| job.jobname.clone());
         let store = cache.map(|cache| {
             Arc::new(Kept {
                 cache,
                 doc: job.path.clone(),
+                job: other,
             }) as Arc<dyn Store>
         });
         let out = Arc::new(Out {
@@ -321,12 +327,24 @@ struct Kept {
     cache: Cache,
     /// The main file, whose directory in the cache is the document's.
     doc: PathBuf,
+    /// The job's name where it is not the main file's (none: the main
+    /// file's): the document's records are its job's (the files its job
+    /// writes and reads back are named by it), each kept apart.
+    job: Option<String>,
 }
 
 impl Kept {
     fn path(&self, key: Key<'_>) -> PathBuf {
         match key {
-            Key::Doc(f) => self.cache.doc_dir(&self.doc).join(f),
+            Key::Doc(f) => {
+                let dir = self.cache.doc_dir(&self.doc);
+                match &self.job {
+                    Some(j) => {
+                        dir.join(format!("{f}-{:016x}", tex::Fnv::new().add(j.as_bytes()).0))
+                    }
+                    None => dir.join(f),
+                }
+            }
             Key::Format(n, f) => self.cache.format_file(n, f),
         }
     }

@@ -5654,3 +5654,395 @@ fn watch_cites_under_a_point() {
     );
     let _ = child.wait();
 }
+
+/// The file `name` the viewer at `url` serves (`diff.tex`, `diff.pdf`).
+fn http_get(url: &str, name: &str) -> Vec<u8> {
+    let rest = url.trim().strip_prefix("http://").expect("an http URL");
+    let (addr, path) = rest.split_once('/').expect("a path");
+    let mut s = std::net::TcpStream::connect(addr).expect("the viewer answers");
+    write!(
+        s,
+        "GET /{path}{name} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .expect("the request");
+    let mut all = Vec::new();
+    std::io::Read::read_to_end(&mut s, &mut all).expect("the answer");
+    let at = all
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("a head");
+    assert!(
+        all.starts_with(b"HTTP/1.1 200"),
+        "{name}: {}",
+        String::from_utf8_lossy(&all[..at])
+    );
+    all.split_off(at + 4)
+}
+
+/// `git` in `dir`, as a test's committer, its status checked.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "user.name=PhiTeX Test",
+            "-c",
+            "user.email=test@phitex.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A LaTeX document of some pages: paragraph `k`'s words given by `para`.
+fn compare_doc(para: impl Fn(usize) -> String) -> String {
+    let mut t = String::from("\\documentclass{article}\n\\begin{document}\n");
+    for k in 0..40 {
+        if k % 8 == 0 {
+            let _ = writeln!(t, "\\section{{Part {}}}", k / 8 + 1);
+        }
+        t.push_str(&para(k));
+        t.push_str("\n\n");
+    }
+    t.push_str("\\end{document}\n");
+    t
+}
+
+/// A paragraph of the compared document: its own words, `first` its
+/// first.
+fn compare_para(k: usize, first: &str) -> String {
+    let mut p = format!("{first} paragraph {k}.");
+    for i in 0..18 {
+        let _ = write!(
+            p,
+            " Sentence {i} of paragraph {k} says what a sentence says, at some length."
+        );
+    }
+    p
+}
+
+/// The marked-up document `tex` (latexdiff's, the viewer's `diff.tex`)
+/// built clean as `JOB-diff.tex` by `phitex build`: its PDF.
+fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
+    let d = scratch(name);
+    std::fs::write(d.join(format!("{job}-diff.tex")), tex).expect("the marked-up document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &d)
+        .args(["build", "-j", "4", &format!("{job}-diff.tex")])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build of the marked-up document failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read(d.join(format!("{job}-diff.pdf"))).expect("the clean PDF")
+}
+
+/// Compare (the viewer's diff against a git revision) streams the
+/// marked-up document's pages as its build typesets them, as a clean
+/// build streams the document's: its changes told before it is typeset,
+/// its build's progress told, each page shipped told (`page`) while the
+/// diff is shown and drawn from its own file (a word the edit deleted,
+/// on no page of the document's, on it), and the diff's build in after
+/// them; its PDF the one a clean build of the marked-up text writes,
+/// byte for byte. A second Compare (after a stop and an edit) is an edit
+/// of the diff's session, not a clean build, and exact too.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
+fn watch_compare_streams_its_pages() {
+    use serde_json::json;
+    let _one = one();
+    let dir = scratch("watch-compare");
+    // (the first paragraph's first word its own: on no other page)
+    let old = compare_doc(|k| compare_para(k, if k == 0 { "Firstly" } else { "Alpha" }));
+    std::fs::write(dir.join("paper.tex"), &old).expect("the document");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "paper.tex"]);
+    git(&dir, &["commit", "-q", "-m", "the first version"]);
+    // (the first paragraph's first word replaced, a paragraph added later)
+    let new = compare_doc(|k| match k {
+        0 => compare_para(k, "Initially"),
+        20 => compare_para(k, "Alpha") + "\n\nA paragraph added since the commit.",
+        _ => compare_para(k, "Alpha"),
+    });
+    std::fs::write(dir.join("paper.tex"), &new).expect("the edit");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--write", "--json", "-j", "4", "paper.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let mut viewer = Viewer::connect(&url);
+    let doc_pages = viewer.ask(&json!({"id": 1, "op": "pages"}))["json"]["pages"]
+        .as_array()
+        .cloned()
+        .expect("the document's pages");
+    viewer.events.clear();
+    let t0 = Instant::now();
+    let a = viewer.ask(&json!({"id": 2, "op": "diff_start", "rev": "HEAD"}));
+    assert_eq!(a["ok"], true, "{a}");
+    // (its events until its build is in: the `settled` after its pages)
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut first: Option<(u64, serde_json::Value, Duration)> = None;
+    loop {
+        let e = viewer.until(|v| v.get("event").is_some() && v.get("id").is_none());
+        if e["event"] == "page" && first.is_none() {
+            let k = e["k"].as_u64().expect("k");
+            let f = viewer.ask(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
+            assert_eq!(f["ok"], true, "page {k} streamed, its frame: {f}");
+            first = Some((k, f["json"].clone(), t0.elapsed()));
+            events.push(e);
+            events.append(&mut viewer.events);
+            continue;
+        }
+        events.append(&mut viewer.events);
+        let done = e["event"] == "settled" && events.iter().any(|v| v["event"] == "page");
+        events.push(e);
+        if done {
+            break;
+        }
+    }
+    let settled_at = t0.elapsed();
+    let kinds: Vec<&str> = events.iter().filter_map(|e| e["event"].as_str()).collect();
+    let at = |what: &str| kinds.iter().position(|k| *k == what);
+    // (its changes told first, before any page: the diff bar's count at once)
+    let told = &events[at("diff").expect("the diff told")];
+    let changes = told["diff"]["changes"].as_array().map_or(0, Vec::len);
+    assert!(changes >= 2, "{told}");
+    assert!(at("diff") < at("page"), "{kinds:?}");
+    // (its build's progress, as a build's)
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "progress" && e["phase"] == "typesetting"),
+        "no progress told: {kinds:?}"
+    );
+    let (k, streamed, first_at) = first.expect("a page streamed");
+    let text = streamed["text"].to_string();
+    assert!(
+        text.contains("Firstly") && text.contains("Initially"),
+        "page {k} streamed is not the diff's (the deleted word and its replacement on it): {text}"
+    );
+    let pages = viewer.ask(&json!({"id": 4, "op": "pages"}))["json"]["pages"]
+        .as_array()
+        .cloned()
+        .expect("the diff's pages");
+    assert!(pages.len() > 3, "{} pages", pages.len());
+    assert_ne!(pages, doc_pages, "the document's pages, not the diff's");
+    for e in events.iter().filter(|e| e["event"] == "page") {
+        let i = usize::try_from(e["k"].as_u64().expect("k")).expect("k");
+        assert_ne!(e["hash"], pages[i], "page {i} streamed named as settled");
+    }
+    eprintln!(
+        "compare: {} pages streamed; the first (page {}) at {:.0} ms, settled at {:.0} ms",
+        events.iter().filter(|e| e["event"] == "page").count(),
+        k + 1,
+        first_at.as_secs_f64() * 1e3,
+        settled_at.as_secs_f64() * 1e3
+    );
+    let diff = until(&mut lines, "event", &"diff".into(), &mut seen);
+    assert_eq!(diff["changes"], changes, "{diff}");
+    assert_eq!(diff["errors"], 0, "{diff}");
+    assert_eq!(diff["cold"], true, "the first Compare: {diff}");
+    // (its PDF: a clean build's of the marked-up text)
+    let tex = http_get(&url, "diff.tex");
+    let want = clean_diff_pdf("watch-compare-clean", "paper", &tex);
+    let got = std::fs::read(dir.join("paper-diff.pdf")).expect("the diff's PDF");
+    assert!(
+        got == want,
+        "the diff's PDF is not a clean build's of its text: {}",
+        first_difference(&got, &want)
+    );
+    assert_eq!(http_get(&url, "diff.pdf"), got, "the diff's PDF served");
+    // (stopped, the document edited, compared again: an edit of the
+    // diff's session, its PDF still a clean build's)
+    let a = viewer.ask(&json!({"id": 5, "op": "diff_stop"}));
+    assert_eq!(a["ok"], true, "{a}");
+    std::thread::sleep(Duration::from_millis(50));
+    let edited = new.replace(
+        "Sentence 3 of paragraph 30",
+        "Sentence three of paragraph 30",
+    );
+    std::fs::write(dir.join("paper.tex"), &edited).expect("the second edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    let a = viewer.ask(&json!({"id": 6, "op": "diff_start", "rev": "HEAD"}));
+    assert_eq!(a["ok"], true, "{a}");
+    let diff = until(&mut lines, "event", &"diff".into(), &mut seen);
+    assert!(
+        diff["changes"].as_u64() > u64::try_from(changes).ok(),
+        "the edit is a change more: {diff}"
+    );
+    assert_eq!(diff["cold"], false, "the second Compare, an edit: {diff}");
+    let tex = http_get(&url, "diff.tex");
+    let want = clean_diff_pdf("watch-compare-clean2", "paper", &tex);
+    let got = std::fs::read(dir.join("paper-diff.pdf")).expect("the diff's PDF");
+    assert!(
+        got == want,
+        "the second diff's PDF is not a clean build's of its text: {}",
+        first_difference(&got, &want)
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
+/// A measurement, not a check (`--ignored`): Compare on the document
+/// `PHITEX_CMP_MAIN` in the folder `PHITEX_CMP_DIR` (copied to a scratch
+/// folder, committed to a new git repository, then edited: a sentence
+/// added a third of the way into its body, a word changed two thirds of
+/// the way), `phitex watch` with the arguments `PHITEX_CMP_ARGS`: the time
+/// from the Compare asked to the diff's first page streamed to the viewer
+/// and to its build's end (the watch's `diff` event), the first Compare
+/// and a second (after a stop).
+#[test]
+#[ignore = "a measurement: PHITEX_CMP_DIR, PHITEX_CMP_MAIN, PHITEX_CMP_ARGS"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "a measurement: its setup and both Compares in one"
+)]
+fn watch_compare_time() {
+    use serde_json::json;
+    let src = PathBuf::from(std::env::var("PHITEX_CMP_DIR").expect("PHITEX_CMP_DIR"));
+    let main = std::env::var("PHITEX_CMP_MAIN").expect("PHITEX_CMP_MAIN");
+    let args = std::env::var("PHITEX_CMP_ARGS").unwrap_or_default();
+    let dir = scratch("cmp-time");
+    let st = Command::new("cp")
+        .arg("-r")
+        .arg(format!("{}/.", src.display()))
+        .arg(&dir)
+        .status()
+        .expect("cp");
+    assert!(st.success());
+    let _ = std::fs::remove_dir_all(dir.join(".git"));
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", "as it was"]);
+    let text = std::fs::read(dir.join(&main)).expect("the main file");
+    let text: String = text.iter().map(|&c| char::from(c)).collect();
+    let body = text.find("\\begin{document}").expect("a body");
+    let third = body + (text.len() - body) / 3;
+    // (a paragraph's end in the main file's body, else before its end)
+    let para = text[third..].find("\n\n").map_or_else(
+        || text.rfind("\\end{document}").expect("an end"),
+        |p| third + p,
+    );
+    let mut edited = text.clone();
+    let two = body + 2 * (text.len() - body) / 3;
+    if let Some(w) = edited[two..].find(" the ") {
+        edited.replace_range(two + w..two + w + 5, " a ");
+    }
+    edited.insert_str(para, "\n\nA sentence added for the comparison.");
+    let bytes: Vec<u8> = edited
+        .chars()
+        .map(|c| u8::try_from(c).expect("a byte"))
+        .collect();
+    std::fs::write(dir.join(&main), bytes).expect("the edit");
+    let mut child = Command::new("timeout")
+        .arg("3600")
+        .arg(env!("CARGO_BIN_EXE_phitex"))
+        .current_dir(&dir)
+        .env("PHITEX_CACHE_DIR", cache())
+        .env("SOURCE_DATE_EPOCH", "0")
+        .env("FORCE_SOURCE_DATE", "1")
+        .env_remove("PHITEX_COMPAT")
+        .arg("watch")
+        .arg("--json")
+        .args(args.split_whitespace())
+        .arg(&main)
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let t0 = Instant::now();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let b = until(&mut lines, "build", &1.into(), &mut seen);
+    eprintln!(
+        "cmp {main} {args}: the document's clean build in {:.0} ms ({} pages)",
+        t0.elapsed().as_secs_f64() * 1e3,
+        b["pages"]
+    );
+    // (the watch's `diff` events, timed as they come)
+    let (tx, diffs) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in lines {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l)
+                && v["event"] == "diff"
+            {
+                let _ = tx.send((Instant::now(), v));
+            }
+        }
+    });
+    let mut viewer = Viewer::connect(&url);
+    for round in ["first", "second"] {
+        let t = Instant::now();
+        viewer.ask(&json!({"id": 1, "op": "diff_start", "rev": "HEAD"}));
+        let mut first_page = None;
+        let (end, ev) = loop {
+            if let Ok(d) = diffs.try_recv() {
+                break d;
+            }
+            match viewer.ws.read() {
+                Ok(tungstenite::Message::Text(m)) => {
+                    let v: serde_json::Value = serde_json::from_str(m.as_str()).expect("JSON");
+                    if v["event"] == "page" && first_page.is_none() {
+                        first_page = Some((v["k"].as_u64().unwrap_or(0) + 1, t.elapsed()));
+                    }
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(e) => panic!("the viewer's socket: {e}"),
+            }
+        };
+        let total = end - t;
+        eprintln!(
+            "cmp {main} {args}: {round} Compare: first diff page {}; diff built at {:.0} ms ({ev})",
+            first_page.map_or_else(
+                || format!(
+                    "none streamed (shown at {:.0} ms, its build in)",
+                    total.as_secs_f64() * 1e3
+                ),
+                |(k, d)| format!("page {k} at {:.0} ms", d.as_secs_f64() * 1e3)
+            ),
+            total.as_secs_f64() * 1e3
+        );
+        viewer.ask(&json!({"id": 2, "op": "diff_stop"}));
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}

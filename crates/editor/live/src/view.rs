@@ -239,6 +239,10 @@ struct Diff {
     /// Its pages' glyph origins, in the user's files (the host maps them
     /// through the diff's map): served while the diff is shown.
     origins: Option<Origins>,
+    /// The pages its build streamed while it runs ([`Viewer::diff_stream_page`]),
+    /// until it is in ([`Viewer::diff`]): the diff's own, never the
+    /// document's, shown while the diff is.
+    streamed: Streamed,
 }
 
 /// The pages of the last build.
@@ -327,6 +331,66 @@ struct Streamed {
     inexact: std::collections::BTreeSet<usize>,
     /// The bytes of the files kept ([`STREAM_KEEP`]).
     bytes: usize,
+}
+
+impl Streamed {
+    /// Page `k` streamed ([`Viewer::stream_page`]'s arguments): kept, and
+    /// the `page` event to tell (none: nothing new to tell, or past
+    /// [`STREAM_KEEP`]).
+    fn put(
+        &mut self,
+        k: usize,
+        hash: u64,
+        pdf: Vec<u8>,
+        pages: u64,
+        exact: bool,
+    ) -> Option<String> {
+        let h = hash ^ STREAMED;
+        if self.hashes.get(k) == Some(&Some(h)) {
+            if !(exact && self.inexact.remove(&k)) {
+                return None;
+            }
+        } else if pdf.is_empty() {
+            return None;
+        } else {
+            let old = self.pdfs.get(&k).map_or(0, |p| p.len());
+            let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
+            if !first && self.bytes - old + pdf.len() > STREAM_KEEP {
+                return None;
+            }
+            if self.hashes.len() <= k {
+                self.hashes.resize(k + 1, None);
+            }
+            self.hashes[k] = Some(h);
+            self.bytes = self.bytes - old + pdf.len();
+            self.pdfs.insert(k, Arc::from(pdf));
+            if exact {
+                self.inexact.remove(&k);
+            } else {
+                self.inexact.insert(k);
+            }
+        }
+        let n = pages.max(u64::try_from(k).unwrap_or(u64::MAX).saturating_add(1));
+        Some(
+            json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n, "exact": exact})
+                .to_string(),
+        )
+    }
+
+    /// `hashes` with the pages streamed over them (a viewer that asks
+    /// while the build runs is shown them), and those drawn otherwise
+    /// than the build's file will.
+    fn over(&self, mut hashes: Vec<u64>) -> (Vec<u64>, Vec<usize>) {
+        if hashes.len() < self.hashes.len() {
+            hashes.resize(self.hashes.len(), 0);
+        }
+        for (k, h) in self.hashes.iter().enumerate() {
+            if let Some(h) = h {
+                hashes[k] = *h;
+            }
+        }
+        (hashes, self.inexact.iter().copied().collect())
+    }
 }
 
 /// The most bytes of streamed pages' files kept until the build is in (a
@@ -470,8 +534,17 @@ impl Viewer {
         if !(0.05..=16.0).contains(&scale) {
             return None;
         }
-        // (a page streamed while the build runs: its file of its own)
-        let streamed = lock(&self.streamed).pdfs.get(&k).cloned();
+        // (a page streamed while the build runs: its file of its own; the
+        // diff's own while the diff is shown)
+        let streamed = {
+            let d = lock(&self.diff);
+            if d.shown {
+                d.streamed.pdfs.get(&k).cloned()
+            } else {
+                drop(d);
+                lock(&self.streamed).pdfs.get(&k).cloned()
+            }
+        };
         let (pdf, at) = match streamed {
             Some(p) => (p, 0),
             None => (self.pdf()?, k),
@@ -605,12 +678,14 @@ impl Viewer {
     /// The PDF the viewer loads (`doc.pdf`): the diff's while its pages
     /// are the ones shown, else the last build's.
     pub fn pdf(&self) -> Option<Arc<[u8]>> {
+        // (one lock at a time: the answers take the pages' before the
+        // diff's)
         let d = lock(&self.diff);
         if d.shown {
-            d.pdf.clone()
-        } else {
-            lock(&self.pages).pdf.clone()
+            return d.pdf.clone();
         }
+        drop(d);
+        lock(&self.pages).pdf.clone()
     }
 
     /// The diff's PDF and marked-up text (none: no diff yet).
@@ -721,8 +796,47 @@ impl Viewer {
         *lock(&self.log) = Some(log);
     }
 
+    /// A diff's build begins: its state (its changes, known before it is
+    /// typeset) and marked-up text; the browsers told. It has no pages
+    /// until its build is in ([`Viewer::diff`]) but those it streams
+    /// ([`Viewer::diff_stream_page`]): the last diff's PDF, pages and
+    /// origins are another text's, dropped (a viewer keeps showing what it
+    /// shows until a page comes).
+    pub fn diff_begins(&self, state: Value, tex: String) {
+        let mut d = lock(&self.diff);
+        d.streamed = Streamed::default();
+        d.tex = Some(tex);
+        d.pdf = None;
+        d.hashes = Vec::new();
+        d.origins = None;
+        d.state = state;
+        let shown = d.shown;
+        if let Some(o) = d.state.as_object_mut() {
+            o.insert("shown".into(), Value::Bool(shown));
+        }
+        let msg = json!({"event": "diff", "diff": d.state}).to_string();
+        drop(d);
+        self.emit(&msg);
+    }
+
+    /// Page `k` (from 0) of the diff's build streamed while it runs, as
+    /// [`Viewer::stream_page`] is the document's: kept until the diff's
+    /// build is in, and told (`{"event":"page",...}`) while the diff's
+    /// pages are the ones shown. A viewer that shows the diff after it
+    /// is given them with the pages ([`Viewer::diff_shown`]'s `settled`).
+    pub fn diff_stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
+        let mut d = lock(&self.diff);
+        let told = d.streamed.put(k, hash, pdf, pages, exact);
+        let shown = d.shown;
+        drop(d);
+        if let Some(e) = told.filter(|_| shown) {
+            self.emit(&e);
+        }
+    }
+
     /// The diff is (still) under way: its state, PDF, pages and text; the
-    /// browsers told, and given its pages if they are the ones shown.
+    /// browsers told, and given its pages if they are the ones shown (the
+    /// pages it streamed, its own from now on).
     pub fn diff(
         &self,
         state: Value,
@@ -732,7 +846,8 @@ impl Viewer {
         origins: Option<Origins>,
     ) {
         let mut d = lock(&self.diff);
-        let redraw = d.shown && (d.hashes != hashes || d.pdf.is_none());
+        let streamed = !std::mem::take(&mut d.streamed).hashes.is_empty();
+        let redraw = d.shown && (d.hashes != hashes || d.pdf.is_none() || streamed);
         d.pdf = pdf;
         d.hashes = hashes;
         d.tex = Some(tex);
@@ -883,41 +998,14 @@ impl Viewer {
     /// `{"event":"page","k":K,"hash":H,"pages":N,"exact":E}` (`H` as
     /// [`STREAMED`] says). The same page again tells nothing, but where it
     /// was not exact and now is (`pdf` empty: the page told before, now
-    /// known exact): told again, exact.
+    /// known exact): told again, exact. Told only while the document's
+    /// pages are the ones shown, not the diff's ([`Viewer::diff_shown`]
+    /// gives them to the viewer when they are again).
     pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
-        let h = hash ^ STREAMED;
-        {
-            let mut st = lock(&self.streamed);
-            if st.hashes.get(k) == Some(&Some(h)) {
-                if !(exact && st.inexact.remove(&k)) {
-                    return;
-                }
-            } else if pdf.is_empty() {
-                return;
-            } else {
-                let old = st.pdfs.get(&k).map_or(0, |p| p.len());
-                let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
-                if !first && st.bytes - old + pdf.len() > STREAM_KEEP {
-                    return;
-                }
-                if st.hashes.len() <= k {
-                    st.hashes.resize(k + 1, None);
-                }
-                st.hashes[k] = Some(h);
-                st.bytes = st.bytes - old + pdf.len();
-                st.pdfs.insert(k, Arc::from(pdf));
-                if exact {
-                    st.inexact.remove(&k);
-                } else {
-                    st.inexact.insert(k);
-                }
-            }
+        let told = lock(&self.streamed).put(k, hash, pdf, pages, exact);
+        if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
+            self.emit(&e);
         }
-        let n = pages.max(u64::try_from(k).unwrap_or(u64::MAX).saturating_add(1));
-        self.emit(
-            &json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n, "exact": exact})
-                .to_string(),
-        );
     }
 
     /// The pages streamed so far (from 0; none: not streamed).
@@ -1140,29 +1228,14 @@ impl Viewer {
         let state = || {
             let p = lock(&s.pages);
             let d = lock(&s.diff);
-            let mut hashes = if d.shown {
-                d.hashes.clone()
-            } else {
-                p.hashes.clone()
-            };
             // (the pages streamed while the build runs, over the last
-            // build's: a viewer that asks then is shown them)
-            if !d.shown {
-                let st = lock(&s.streamed);
-                if hashes.len() < st.hashes.len() {
-                    hashes.resize(st.hashes.len(), 0);
-                }
-                for (k, h) in st.hashes.iter().enumerate() {
-                    if let Some(h) = h {
-                        hashes[k] = *h;
-                    }
-                }
-            }
-            // (those streamed drawn otherwise than the build's file will)
-            let inexact: Vec<usize> = if d.shown {
-                Vec::new()
+            // build's: a viewer that asks then is shown them, and those
+            // drawn otherwise than the build's file will; the diff's own
+            // while it is shown)
+            let (hashes, inexact) = if d.shown {
+                d.streamed.over(d.hashes.clone())
             } else {
-                lock(&s.streamed).inexact.iter().copied().collect()
+                lock(&s.streamed).over(p.hashes.clone())
             };
             (hashes, p.history, p.ms, inexact)
         };
@@ -1610,6 +1683,82 @@ mod tests {
     }
 
     use super::*;
+
+    /// The diff's pages streamed while its build runs: kept apart from the
+    /// document's, told (`page`) only while the diff is shown, and answered
+    /// by `pages` then; the document's streamed meanwhile not told while
+    /// the diff is shown. Its build in, its own pages from then on; the
+    /// document's shown again with what they streamed.
+    #[test]
+    fn a_diffs_pages_stream_while_it_is_shown() {
+        let v = Viewer::default();
+        let got: Arc<Mutex<Vec<Value>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| {
+                lock(&got).push(serde_json::from_str(t).unwrap());
+            }));
+        }
+        let take = || std::mem::take(&mut *lock(&got));
+        let pages = |v: &Viewer| -> Value {
+            serde_json::from_str::<Value>(&v.answer(&json!({"id": 1, "op": "pages"}))).unwrap()
+                ["json"]["pages"]
+                .clone()
+        };
+        let named = |h: u64| json!(format!("{:016x}", h ^ STREAMED));
+        // (begun: its changes told before it is typeset, nothing shown yet)
+        v.diff_begins(json!({"label": "a → b", "changes": [{}]}), "diff".into());
+        let e = take();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0]["event"], "diff");
+        assert_eq!(e[0]["diff"]["changes"], json!([{}]));
+        assert_eq!(e[0]["diff"]["shown"], false);
+        // (a page of the diff streamed while the document's are shown: kept, not told)
+        v.diff_stream_page(0, 7, vec![1; 10], 1, true);
+        assert!(take().is_empty());
+        assert_eq!(pages(&v), json!([]));
+        // (the diff shown: its pages so far with the pages, then each one told)
+        v.diff_shown(true);
+        let e = take();
+        assert_eq!(e.last().unwrap()["event"], "settled", "{e:?}");
+        assert_eq!(pages(&v), json!([named(7)]));
+        v.diff_stream_page(1, 8, vec![2; 10], 2, false);
+        let e = take();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(
+            e[0],
+            json!({"event": "page", "k": 1, "hash": named(8), "pages": 2, "exact": false})
+        );
+        let all: Value = serde_json::from_str(&v.answer(&json!({"id": 2, "op": "pages"}))).unwrap();
+        assert_eq!(all["json"]["pages"], json!([named(7), named(8)]));
+        assert_eq!(all["json"]["inexact"], json!([1]));
+        // (the document's own streamed meanwhile: kept, not told, not shown)
+        v.stream_page(0, 9, vec![3; 10], 1, true);
+        assert!(take().is_empty());
+        assert_eq!(pages(&v), json!([named(7), named(8)]));
+        // (the diff's build in: its pages, the streamed ones dropped)
+        v.diff(
+            json!({"label": "a → b", "changes": [{}]}),
+            None,
+            vec![0x11, 0x12, 0x13],
+            "diff".into(),
+            None,
+        );
+        let e = take();
+        assert_eq!(
+            e.iter().map(|e| e["event"].clone()).collect::<Vec<_>>(),
+            [json!("diff"), json!("settled")]
+        );
+        assert_eq!(
+            pages(&v),
+            json!(["0000000000000011", "0000000000000012", "0000000000000013"])
+        );
+        // (the document's again: with what it streamed)
+        v.diff_shown(false);
+        assert_eq!(pages(&v), json!([named(9)]));
+        v.stream_page(1, 10, vec![4; 10], 2, true);
+        assert_eq!(take().last().unwrap()["event"], "page");
+    }
 
     #[test]
     fn lines_and_columns() {
