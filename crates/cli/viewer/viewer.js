@@ -9799,6 +9799,19 @@ var panel = new Panel(
   const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
   if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
 }
+var PAGE_PREFS = (() => {
+  try {
+    return JSON.parse(document.getElementById("phitex-prefs")?.textContent ?? "null");
+  } catch {
+    return null;
+  }
+})();
+function panelPrefs(p) {
+  if (!p) return;
+  panel.tipsSeen((p["tips-seen"] ?? []).filter((x) => typeof x === "string"));
+  panel.viewPrefs({ "dark-pdf": p["dark-pdf"], opening: p.opening, underline: p.underline !== false });
+}
+panelPrefs(PAGE_PREFS);
 var pane = document.createElement("div");
 pane.style.cssText = "position:fixed;inset:0";
 document.body.append(pane);
@@ -10251,12 +10264,14 @@ async function watchSettings() {
     { title: "Where", rows: [{ id: "w-file", label: "Your settings", help: "Every document and port: `phitex config` lists them all", kind: "info", value: file }] }
   ];
 }
+var applyPrefs = (p) => {
+  panelPrefs(p);
+  follow = String(p?.follow ?? "cursor");
+};
+if (PAGE_PREFS) follow = String(PAGE_PREFS.follow ?? "cursor");
 var prefs = async () => {
   const r = await sock.request({ op: "prefs" });
-  if (!r.ok) return;
-  panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
-  panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
-  follow = String(r.json?.follow ?? "cursor");
+  if (r.ok) applyPrefs(r.json);
 };
 var opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());

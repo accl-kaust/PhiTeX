@@ -787,6 +787,12 @@ impl Viewer {
         *lock(&self.prefs) = Some(prefs);
     }
 
+    /// The user's preferences as they are now (the `prefs` op's answer,
+    /// nothing set): none without a host's, or when they can't be read.
+    pub fn prefs_now(&self) -> Option<Value> {
+        lock(&self.prefs).as_ref().and_then(|f| f(None).ok())
+    }
+
     /// What the host tells for the `info` op ([`InfoFn`]).
     pub fn on_info(&self, info: InfoFn) {
         *lock(&self.info) = Some(info);

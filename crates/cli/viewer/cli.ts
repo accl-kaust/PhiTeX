@@ -390,6 +390,27 @@ const panel = new Panel(
   const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
   if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
 }
+/**
+ * The user's preferences as the watch put them in the page (`#phitex-prefs`,
+ * crates/cli/src/view.rs): known before the first build's opening plays,
+ * which played the default's while the socket connected. The `prefs` op
+ * answers them again once it is open.
+ */
+const PAGE_PREFS = ((): any => {
+  try {
+    return JSON.parse(document.getElementById("phitex-prefs")?.textContent ?? "null");
+  } catch {
+    return null;
+  }
+})();
+/** The panel's part of the user's preferences (`p`: the `prefs` op's answer) applied. */
+function panelPrefs(p: any): void {
+  if (!p) return;
+  panel.tipsSeen(((p["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
+  // (the panel's own choices, as the user's file has them)
+  panel.viewPrefs({ "dark-pdf": p["dark-pdf"], opening: p.opening, underline: p.underline !== false });
+}
+panelPrefs(PAGE_PREFS);
 // (the whole window: docked in a pane that fills it)
 const pane = document.createElement("div");
 pane.style.cssText = "position:fixed;inset:0";
@@ -930,14 +951,16 @@ async function watchSettings(): Promise<SettingsGroup[]> {
   ];
 }
 
+/** The user's viewer preferences (the `prefs` op's answer, `any` as `request` gives it) applied. */
+const applyPrefs = (p: any) => {
+  panelPrefs(p);
+  follow = String(p?.follow ?? "cursor");
+};
+if (PAGE_PREFS) follow = String(PAGE_PREFS.follow ?? "cursor");
 /** The user's viewer preferences, as the watch keeps them (`prefs`). */
 const prefs = async () => {
   const r = await sock.request({ op: "prefs" });
-  if (!r.ok) return;
-  panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
-  // (the panel's own choices, as the user's file has them)
-  panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
-  follow = String(r.json?.follow ?? "cursor");
+  if (r.ok) applyPrefs(r.json);
 };
 const opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());

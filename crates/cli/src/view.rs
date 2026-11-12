@@ -43,6 +43,23 @@ use crate::ws;
 const INDEX: &[u8] = include_bytes!("../viewer/index.html");
 const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
 
+/// The viewer's page with the user's preferences in it (`prefs`: the `prefs`
+/// op's answer), read by its script before anything is drawn: the first
+/// build's opening is the one chosen, not the default's while the socket
+/// connects. `<` written `<`, so the JSON can't end its script element.
+fn index_with(prefs: Option<&Value>) -> Vec<u8> {
+    let page = String::from_utf8_lossy(INDEX);
+    let Some(p) = prefs else {
+        return INDEX.to_vec();
+    };
+    let json = p.to_string().replace('<', "\\u003c");
+    let tag = format!("<script id=\"phitex-prefs\" type=\"application/json\">{json}</script>\n");
+    match page.find("<script type=\"module\"") {
+        Some(at) => format!("{}{tag}{}", &page[..at], &page[at..]).into_bytes(),
+        None => INDEX.to_vec(),
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -327,7 +344,8 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
     let rest = rest.to_owned();
     match rest.as_str() {
         "" | "index.html" => {
-            let _ = ws::respond(&mut w, "200 OK", "text/html; charset=utf-8", INDEX);
+            let page = index_with(s.viewer.prefs_now().as_ref());
+            let _ = ws::respond(&mut w, "200 OK", "text/html; charset=utf-8", &page);
         }
         // (whether the watch is here, before the browser opens a WebSocket)
         "ping" => {
@@ -600,5 +618,20 @@ mod tests {
         assert_eq!(a, doc_port(std::path::Path::new("/x/paper/main.tex")));
         assert!(PORTS.contains(&a));
         assert_ne!(a, doc_port(std::path::Path::new("/x/thesis/main.tex")));
+    }
+
+    #[test]
+    fn the_page_carries_the_users_choices_before_its_script() {
+        let p = serde_json::json!({ "opening": "badapple", "x": "</script><b>" });
+        let page = String::from_utf8(index_with(Some(&p))).unwrap();
+        let tag = page.find("<script id=\"phitex-prefs\"").unwrap();
+        assert!(tag < page.find("<script type=\"module\"").unwrap());
+        // (a `<` in a value can't end the element early)
+        assert_eq!(page.matches("</script>").count(), 2);
+        let json = &page[page[tag..].find('>').unwrap() + tag + 1..];
+        let json = &json[..json.find("</script>").unwrap()];
+        assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap(), p);
+        // (no host's preferences: the page as built)
+        assert_eq!(index_with(None), INDEX);
     }
 }
