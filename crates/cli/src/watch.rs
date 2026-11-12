@@ -816,6 +816,14 @@ fn reconfigured(
 /// ends, or the editor's settings call for another (its target and
 /// options).
 #[allow(clippy::too_many_lines)]
+/// What a target resolved to, every field of it but what reading the
+/// settings warned of: two equal ones build the same.
+fn build_of(t: &Target) -> String {
+    let mut t = t.clone();
+    t.warnings.clear();
+    format!("{t:?}")
+}
+
 fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
     let st = ui.st;
     let lsp = kept.lsp.clone();
@@ -827,6 +835,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // is the only way to see them; `copy-pdf` copies the file written.
     // Writing, the PDF comes with its .synctex.gz unless that was turned off)
     let writing = o.write || t.watch_write || !o.view || t.copy_pdf.is_some();
+    // (the target as resolved, and where: a settings' file that changed and
+    // resolves to both again changed nothing a build reads)
+    let resolved = (build_of(t), std::env::current_dir().ok());
     let mut t2 = t.clone();
     if writing && !t.synctex_said {
         t2.synctex = true;
@@ -2357,7 +2368,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 for w in &t2.warnings {
                                     ui.warning(w);
                                 }
-                                next = Some(((t2, o.clone(), dir), "the settings changed"));
+                                // (only when what was resolved differs: the
+                                // viewer's own preferences (its filters, the
+                                // tips seen) are kept in the user's
+                                // phitex.toml, and a click on one is no new
+                                // session)
+                                if (build_of(&t2), Some(dir.clone())) != resolved {
+                                    next = Some(((t2, o.clone(), dir), "the settings changed"));
+                                }
                             }
                             Err(e) => ui.error(&format!(
                                 "the settings ({}): {e}",
