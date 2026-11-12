@@ -4456,6 +4456,7 @@ var read = () => frames ??= (async () => {
   }
   return out;
 })();
+var preload = () => void read();
 var MORPH = 1150;
 var SETTLE = 220;
 var ease3 = (k) => k < 0.5 ? 4 * k * k * k : 1 - (-2 * k + 2) ** 3 / 2;
@@ -4650,6 +4651,9 @@ function lookOf(v) {
   if (v === "random" || v === "all" || v === "off") return v;
   const ids = looksIn(v);
   return ids.length ? lookFrom(ids) : "random";
+}
+function ready(look2) {
+  if (looksIn(look2).includes("badapple")) preload();
 }
 function play(look2, first, last, sheet, dark, doc) {
   const ids = looksIn(look2);
@@ -5455,14 +5459,14 @@ var Panel = class {
    * stopped, says so): which engine to run it with, as buttons.
    */
   engineCard(want, error) {
-    const ready = ENGINES[want].ready;
+    const ready2 = ENGINES[want].ready;
     const card = this.card();
     card.classList.add("engine");
     card.style.setProperty("--sev", "var(--ph-info)");
     card.insertAdjacentHTML("beforeend", `<div class="btns"></div>`);
     card.querySelector("h3").textContent = error ? `This project needs ${want === "lualatex" ? "LuaLaTeX" : "XeLaTeX or LuaLaTeX"}` : `This project runs with ${ENGINES[want].label}`;
     card.querySelector(".count").textContent = error ?? "Its preamble loads a package that pdfLaTeX can't run (fontspec, unicode-math, polyglossia, \u2026), or the engine was chosen for it.";
-    card.querySelector(".note").textContent = ready ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
+    card.querySelector(".note").textContent = ready2 ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
     const btns = card.querySelector(".btns");
     const offer = this.engineNow?.engine === want ? ["pdflatex"] : want === "xelatex" ? ["xelatex", "lualatex"] : [want];
     for (const e of offer) {
@@ -5930,7 +5934,8 @@ var Panel = class {
     const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
-    const warm = !now && this.prefs.built.includes(this.builtKey());
+    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
+    const warm = !now && was !== void 0 && (!was.includes(" ") || was.split(" ")[1] === this.look);
     const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
     this.anim = anim;
     if (!warm) this.lastLook = id;
@@ -5950,9 +5955,9 @@ var Panel = class {
   }
   /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
   builtHere() {
-    const k = this.builtKey(), was = this.prefs.built ?? [];
-    if (was[0] === k) return;
-    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
+    if (was[0] === e) return;
+    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
     this.save();
   }
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
@@ -6003,8 +6008,18 @@ var Panel = class {
     });
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
-    void a.done(this.$("#viewer").querySelector(".slot canvas") ?? void 0).then(stop);
-    setTimeout(stop, 1600);
+    const viewer = this.$("#viewer");
+    let exited = false;
+    const exit = () => {
+      if (exited || this.anim !== a) return;
+      exited = true;
+      mo.disconnect();
+      void a.done(viewer.querySelector(".slot canvas") ?? void 0).then(stop);
+      setTimeout(stop, 1600);
+    };
+    const mo = new MutationObserver(() => viewer.querySelector(".slot canvas") && exit());
+    if (viewer.querySelector(".slot canvas")) exit();
+    else mo.observe(viewer, { childList: true, subtree: true }), setTimeout(exit, 800);
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
@@ -6734,7 +6749,7 @@ var Panel = class {
         set: async (v) => {
           const l = lookFrom(String(v).split(","));
           const why = await ev.onPref?.("opening", l);
-          if (!why) this.look = l;
+          if (!why) this.lookIs(l);
           return why;
         },
         tile: (id, box) => {
@@ -6797,7 +6812,7 @@ var Panel = class {
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p) {
     if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
-    if (p.opening) this.look = lookOf(p.opening);
+    if (p.opening) this.lookIs(lookOf(p.opening));
     if (p.underline !== void 0 && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
   /** Repaints so far: the first is the first build's. */
@@ -6828,6 +6843,11 @@ var Panel = class {
   }
   /** The loading animation (the host keeps the choice: viewPrefs). */
   look = "random";
+  /** The looks chosen: what they read ahead read now. */
+  lookIs(l) {
+    this.look = l;
+    ready(l);
+  }
   /** The last one played (random plays another). */
   lastLook = null;
   /** The host page's own theme (theme()): undefined, never said. */

@@ -27,7 +27,7 @@ import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
-import { LOOKS, lookFrom, lookOf, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
+import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -294,7 +294,7 @@ export interface PanelPrefs {
   backs: boolean;
   flashes: boolean;
   newTabs: boolean;
-  /** The documents built in this panel before (a hash of the page's address and the main file's name), newest first: opened again, no opening plays. */
+  /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
   built: string[];
 }
 
@@ -1671,7 +1671,10 @@ export class Panel {
     // (a document built here before, opened again (a reload, the editor reopened): its steps
     // on a still sheet, no opening played: the animation is for a document's first build.
     // A Rebuild asked for plays it)
-    const warm = !now && this.prefs.built.includes(this.builtKey());
+    // (unless the looks chosen changed since this document was last opened: the new choice
+    // plays once, the next open's. Picked and the document opened again, it played nothing)
+    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
+    const warm = !now && was !== undefined && (!was.includes(" ") || was.split(" ")[1] === this.look);
     const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
     this.anim = anim;
     if (!warm) this.lastLook = id;
@@ -1695,9 +1698,10 @@ export class Panel {
 
   /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
   private builtHere(): void {
-    const k = this.builtKey(), was = this.prefs.built ?? [];
-    if (was[0] === k) return;
-    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    // (each "key looks": the looks chosen when it was opened, so that a new choice plays once)
+    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
+    if (was[0] === e) return;
+    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
     this.save();
   }
 
@@ -1759,9 +1763,22 @@ export class Panel {
     // (each its own sheet's: a later opening's sheet, up meanwhile, is never closed by this one's)
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
-    // (the first page as drawn, for an exit that becomes it: Bad Apple's morph)
-    void a.done(this.$("#viewer").querySelector<HTMLCanvasElement>(".slot canvas") ?? undefined).then(stop);
-    setTimeout(stop, 1600);
+    // (the first page as drawn, for an exit that becomes it: Bad Apple's morph. The sheet goes
+    // down when the pages are laid out, before the first is drawn: the exit waits for its
+    // canvas, else Bad Apple's frames melted into blank paper; at most 800 ms, a page that
+    // never comes (an error before any page) ends it without one)
+    const viewer = this.$("#viewer");
+    let exited = false;
+    const exit = () => {
+      if (exited || this.anim !== a) return;
+      exited = true;
+      mo.disconnect();
+      void a.done(viewer.querySelector<HTMLCanvasElement>(".slot canvas") ?? undefined).then(stop);
+      setTimeout(stop, 1600);
+    };
+    const mo = new MutationObserver(() => viewer.querySelector(".slot canvas") && exit());
+    if (viewer.querySelector(".slot canvas")) exit();
+    else mo.observe(viewer, { childList: true, subtree: true }), setTimeout(exit, 800);
   }
 
   /** The sheet gone (played out, or a card in its place). */
@@ -2583,7 +2600,7 @@ export class Panel {
         set: async (v) => {
           const l = lookFrom(String(v).split(","));
           const why = await ev.onPref?.("opening", l);
-          if (!why) this.look = l;
+          if (!why) this.lookIs(l);
           return why;
         },
         tile: (id, box) => {
@@ -2651,7 +2668,7 @@ export class Panel {
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p: Partial<ViewPrefs>): void {
     if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
-    if (p.opening) this.look = lookOf(p.opening);
+    if (p.opening) this.lookIs(lookOf(p.opening));
     if (p.underline !== undefined && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
 
@@ -2693,6 +2710,11 @@ export class Panel {
 
   /** The loading animation (the host keeps the choice: viewPrefs). */
   private look: OpeningLook = "random";
+  /** The looks chosen: what they read ahead read now. */
+  private lookIs(l: OpeningLook): void {
+    this.look = l;
+    lookReady(l);
+  }
   /** The last one played (random plays another). */
   private lastLook: string | null = null;
 
