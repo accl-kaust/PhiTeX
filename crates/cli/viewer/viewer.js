@@ -6302,27 +6302,29 @@ var Panel = class {
   problemsKey() {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
   }
-  /** The kinds of problem not shown (the filters): this browser's, and the host's (problemsHidden). */
-  hiddenKinds = (() => {
-    try {
-      return new Set(JSON.parse(localStorage.getItem("phitex.kinds.hidden") ?? "[]"));
-    } catch {
-      return /* @__PURE__ */ new Set();
+  /** The kinds of problem not shown (the filters): this document's (builtKey: the page's address and its main file), kept in this browser; another document's are its own. */
+  kindsOf = null;
+  get hiddenKinds() {
+    const key = `phitex.kinds.hidden.${this.builtKey()}`;
+    if (this.kindsOf?.key !== key) {
+      let hidden = /* @__PURE__ */ new Set();
+      try {
+        const v = JSON.parse(localStorage.getItem(key) ?? "[]");
+        if (Array.isArray(v)) hidden = new Set(v.filter((k) => KINDS.some(([x]) => x === k)));
+      } catch {
+      }
+      this.kindsOf = { key, hidden };
     }
-  })();
-  /** The kinds hidden as the host keeps them (the watch: the user's phitex.toml, on every port and document). */
-  problemsHidden(kinds) {
-    this.hiddenKinds = new Set(kinds.filter((k) => KINDS.some(([x]) => x === k)));
-    if (this.lastStatus) this.status(this.lastStatus);
+    return this.kindsOf.hidden;
   }
-  /** A kind's filter clicked: shown or hidden, everywhere, and kept. */
+  /** A kind's filter clicked: shown or hidden in this document, and kept for it. */
   toggleKind(k) {
-    if (!this.hiddenKinds.delete(k)) this.hiddenKinds.add(k);
+    const hidden = this.hiddenKinds;
+    if (!hidden.delete(k)) hidden.add(k);
     try {
-      localStorage.setItem("phitex.kinds.hidden", JSON.stringify([...this.hiddenKinds]));
+      localStorage.setItem(this.kindsOf.key, JSON.stringify([...hidden]));
     } catch {
     }
-    this.ev.onProblemsHidden?.([...this.hiddenKinds]);
     if (this.lastStatus) this.status(this.lastStatus);
   }
   /** The problems' list opened or closed. */
@@ -9730,9 +9732,8 @@ var panel = new Panel(
       return [`PhiTeX ${r.ok ? String(r.json?.version ?? "?") : "?"} \xB7 phitex watch`];
     },
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
-    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
+    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } })
     // (the problems' filters: kept the same way)
-    onProblemsHidden: (kinds) => void sock.request({ op: "prefs", set: { "problems-hidden": kinds } })
   },
   // (the panel's settings: this browser's)
   {
@@ -10234,7 +10235,6 @@ var prefs = async () => {
   const r = await sock.request({ op: "prefs" });
   if (!r.ok) return;
   panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
-  panel.problemsHidden((r.json?.["problems-hidden"] ?? []).filter((x) => typeof x === "string"));
   panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
   follow = String(r.json?.follow ?? "cursor");
 };
