@@ -9562,7 +9562,7 @@ impl Build {
     /// the first page's routine before it) is the commits' order, and
     /// counted, a text that ran ahead of the first page's routine made the
     /// chain one rest and one routine longer than one that did not
-    /// (census_plain's para400 133 or 131 nodes for 66 pages, by run).
+    /// (`census_plain`'s para400 133 or 131 nodes for 66 pages, by run).
     #[must_use]
     pub fn page_chain(&self) -> usize {
         let e = &self.g.eng;
