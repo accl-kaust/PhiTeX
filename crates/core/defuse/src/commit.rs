@@ -3774,6 +3774,13 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     }
 }
 
+/// (`PHITEX_BRACKET_TRACE=1`, profile) Whether bracket filings and the
+/// walks after them are printed (`bracket-trace:` lines).
+fn bracket_trace() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::obs::enabled() && *P.get_or_init(|| std::env::var_os("PHITEX_BRACKET_TRACE").is_some())
+}
+
 /// (`PHITEX_FIELD_TRACE=<prefix>`, observe) Whether `f`'s name begins with
 /// the prefix: its definitions, committed reads, end walks and removals
 /// are printed (`ftrace:` lines).
@@ -6189,6 +6196,20 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
     }
     inner.sum_depth();
     let g = eng.scope_changed();
+    if bracket_trace() {
+        let o = old.unwrap_or_default();
+        eprintln!(
+            "bracket-trace: file node {} ({}) pos {} old ({},{}) new ({},{}) gen {g} t {}",
+            node.id.raw(),
+            eng.op(node.op()).name(),
+            pos.0,
+            o.closes,
+            o.opens,
+            b.closes,
+            b.opens,
+            eng.now_ns()
+        );
+    }
     inner.note_brackets(g, Filing::current());
     node.bracket_gen.store(g, Ordering::Release);
     eng.bump(eng.depth_field);
@@ -6809,6 +6830,22 @@ fn reask_after_effect_with(
         }
     }
     st.scope_asked += readers.len() as u64;
+    if bracket_trace() {
+        eprintln!(
+            "bracket-trace: walk by {} at {} old ({},{}) new ({},{}) end {:?} raced {:?} all {} readers {} t {}",
+            by.id.raw(),
+            at.0,
+            old.closes,
+            old.opens,
+            new.closes,
+            new.opens,
+            end.map(|(_, q)| q.0),
+            raced.map(|x| x.0),
+            reach.all,
+            readers.len(),
+            eng.now_ns()
+        );
+    }
     {
         let _memo = read::WalkMemo::new();
         for (f, r) in &readers {
