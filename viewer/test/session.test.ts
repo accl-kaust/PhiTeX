@@ -261,3 +261,46 @@ test("a core's error in plain words: its tag dropped, a raw error a crash", () =
   assert.equal(plainWhy("core trapped (lost): This document needs more than the 4 GiB of memory PhiTeX can use in a browser."), "This document needs more than the 4 GiB of memory PhiTeX can use in a browser.");
   assert.equal(plainWhy("phitex watch exited"), "phitex watch exited.");
 });
+
+// `phitex watch`'s Compare (the watch's diff): the diff shown before it is
+// typeset (its `settled`: the pages answered are the diff's, none yet), then
+// each of its pages as its build ships it (`page`), then its build in
+// (`settled`). The view keeps the document's pages until the diff's first
+// page comes, then shows the diff's pages as they come, a page not exact
+// marked, and the diff's own once its build is in.
+test("a diff's pages streamed into a view that showed the document's", async () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  let emit!: (e: unknown) => void;
+  // (what the watch answers `pages` with: the pages shown, those streamed over them)
+  let shown: { pages: string[]; inexact: number[] } = { pages: [], inexact: [] };
+  const core = {
+    request: async (r: { op: string }) => (r.op === "pages" ? { ok: true, json: shown } : { ok: false }),
+    onEvent: (cb: (e: unknown) => void) => (emit = cb),
+  };
+  const laid: { hashes: string[]; previews: string[] }[] = [];
+  const sink = new Proxy(
+    { layout: (hs: string[], pv: Set<string>) => laid.push({ hashes: [...hs], previews: [...pv] }) },
+    { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) },
+  );
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined, remote: { source: () => undefined } });
+  const w = s as unknown as { opened: boolean; hashes: string[]; chain: Promise<unknown> };
+  w.opened = true;
+  w.hashes = ["d0", "d1", "d2"];
+  // (the diff shown, nothing typeset yet: the document's pages kept)
+  emit({ event: "settled", since_ms: null });
+  await w.chain;
+  assert.deepEqual(laid, []);
+  // (its pages as they ship: shown, the one not exact marked)
+  emit({ event: "page", k: 0, hash: "x0", pages: 1, exact: true });
+  emit({ event: "page", k: 1, hash: "x1", pages: 2, exact: false });
+  assert.deepEqual(laid, [
+    { hashes: ["x0"], previews: [] },
+    { hashes: ["x0", "x1"], previews: ["x1"] },
+  ]);
+  // (its build in: its own pages)
+  shown = { pages: ["f0", "f1", "f2"], inexact: [] };
+  emit({ event: "settled", since_ms: null });
+  await w.chain;
+  assert.deepEqual(laid.at(-1), { hashes: ["f0", "f1", "f2"], previews: [] });
+  assert.deepEqual(w.hashes, ["f0", "f1", "f2"]);
+});

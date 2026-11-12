@@ -134,6 +134,14 @@ impl Look {
 
 /// A diff under way: against which version, how it looks, the live diff,
 /// and the marked-up document's own session.
+///
+/// The session is the watch's for its life once made: a later Compare
+/// (another pair of versions, the same after a stop) is an edit of the
+/// marked-up text it last built, not a clean build. The first is a clean
+/// build: the engine starts no session from another's state (its build is
+/// one graph of values that cannot be copied, and the diff's job is named
+/// otherwise, `JOB-diff`, a value of the job's start that the document's
+/// whole build read).
 pub struct Compare {
     pub rev: String,
     /// The other side (none: the files as they are, diffed at each edit).
@@ -143,6 +151,11 @@ pub struct Compare {
     old: Flat,
     live: Live,
     session: Session,
+    /// Whether the diff is on (the viewer's Compare): off, its session
+    /// kept for the next one.
+    pub active: bool,
+    /// The marked-up text to build next (none: the last one built).
+    next: Option<String>,
     /// The marked-up text last built, and its PDF and pages.
     pub tex: String,
     pub pdf: Option<Arc<[u8]>>,
@@ -167,9 +180,59 @@ fn flat(files: &dyn Files, main: &str, which: &str) -> Result<Flat, String> {
     phitex_diff::flatten(files, main).map_err(|_| format!("the {which} version has no {main}"))
 }
 
+/// The two versions a Compare diffs, read.
+struct Pair {
+    rev: String,
+    to: Option<String>,
+    old: Flat,
+    new: Flat,
+}
+
+impl Pair {
+    /// Version `rev` of `main` and `to` (none: the files as they are,
+    /// `now`), flattened.
+    fn of(
+        src: &dyn Versions,
+        rev: &str,
+        to: Option<&str>,
+        now: &dyn Files,
+        main: &str,
+    ) -> Result<Pair, String> {
+        let theirs = match to {
+            Some(t) => Some(src.files(t)?),
+            None => None,
+        };
+        let new_files: &dyn Files = match &theirs {
+            Some(f) => f.as_ref(),
+            None => now,
+        };
+        // (latexdiff's markup is LaTeX's: a plain document can't take it)
+        if !new_files
+            .read(main)
+            .unwrap_or_default()
+            .contains("\\documentclass")
+        {
+            return Err(format!(
+                "{main} is not a LaTeX document: the diff's markup (latexdiff's \\DIFadd, \\DIFdel) needs LaTeX"
+            ));
+        }
+        let old_files = src.files(rev)?;
+        let old = flat(old_files.as_ref(), main, "old").unwrap_or_default();
+        let new = flat(new_files, main, "new")?;
+        Ok(Pair {
+            rev: rev.to_owned(),
+            to: to.map(str::to_owned),
+            old,
+            new,
+        })
+    }
+}
+
 impl Compare {
     /// Diff version `rev` of `main` against `to` (none: the files as they
-    /// are, `now`) and build the marked-up document as job `JOB-diff`.
+    /// are, `now`), the marked-up document to build ([`Compare::build`])
+    /// as job `JOB-diff` by a session whose status is `status` (its
+    /// progress, its pages streamed: the watch's listeners on it).
     ///
     /// # Errors
     ///
@@ -189,40 +252,24 @@ impl Compare {
         status: Arc<Status>,
         write: bool,
     ) -> Result<Compare, String> {
-        // (latexdiff's markup is LaTeX's: a plain document can't take it)
-        let new_main = match to {
-            Some(t) => src.files(t)?.read(main),
-            None => now.read(main),
-        }
-        .unwrap_or_default();
-        if !new_main.contains("\\documentclass") {
-            return Err(format!(
-                "{main} is not a LaTeX document: the diff's markup (latexdiff's \\DIFadd, \\DIFdel) needs LaTeX"
-            ));
-        }
-        let old_files = src.files(rev)?;
-        let old =
-            flat(old_files.as_ref(), main, "old").or_else(|_| Ok::<_, String>(Flat::default()))?;
-        let look = Look::default();
-        let live = Live::new(Baseline::from_flat(old.clone(), &look.options()));
+        let pair = Pair::of(src, rev, to, now, main)?;
         let mut j = job.clone();
         j.jobname = format!("{}-diff", job.jobname);
         // (the diff's .aux and .toc its own; the PDF as the document's)
         let session = Session::new(j, files, status, &mut |_| {})?;
-        let short = |r: &str| r.chars().take(7).collect::<String>();
-        let label = format!(
-            "{} → {}",
-            short(rev),
-            to.map_or_else(|| "the files as they are".to_owned(), short)
-        );
         let mut c = Compare {
-            rev: rev.to_owned(),
-            to: to.map(str::to_owned),
-            label,
-            look,
-            old,
-            live,
+            rev: String::new(),
+            to: None,
+            label: String::new(),
+            look: Look::default(),
+            old: Flat::default(),
+            live: Live::new(Baseline::from_flat(
+                Flat::default(),
+                &Look::default().options(),
+            )),
             session,
+            active: true,
+            next: None,
             tex: String::new(),
             pdf: None,
             hashes: Vec::new(),
@@ -232,18 +279,68 @@ impl Compare {
             wrote: Vec::new(),
             write,
         };
-        let new = match to {
-            Some(t) => flat(src.files(t)?.as_ref(), main, "new")?,
-            None => flat(now, main, "new")?,
-        };
-        c.diff(&new);
+        c.take(pair);
         Ok(c)
     }
 
-    /// Diffed again against `new` (only where it changed) and built.
+    /// Diff version `rev` against `to` from now on, in this session, on:
+    /// its next build an edit of the marked-up text last built. Nothing
+    /// changed on an error.
+    ///
+    /// # Errors
+    ///
+    /// A version not there, or not a LaTeX document.
+    pub fn against(
+        &mut self,
+        src: &dyn Versions,
+        rev: &str,
+        to: Option<&str>,
+        now: &dyn Files,
+        main: &str,
+    ) -> Result<(), String> {
+        let pair = Pair::of(src, rev, to, now, main)?;
+        self.take(pair);
+        self.active = true;
+        Ok(())
+    }
+
+    fn take(&mut self, p: Pair) {
+        let short = |r: &str| r.chars().take(7).collect::<String>();
+        self.label = format!(
+            "{} → {}",
+            short(&p.rev),
+            p.to.as_deref()
+                .map_or_else(|| "the files as they are".to_owned(), short)
+        );
+        self.rev = p.rev;
+        self.to = p.to;
+        self.live = Live::new(Baseline::from_flat(p.old.clone(), &self.look.options()));
+        self.old = p.old;
+        self.diff(&p.new);
+        // (the last build's PDF, pages and places are of another text: none
+        // until this one's build, which may fail before a page)
+        if self.next.as_deref() != Some(self.tex.as_str()) {
+            self.pdf = None;
+            self.hashes.clear();
+            self.places.clear();
+            self.origins = None;
+        }
+    }
+
+    /// The session's status: its phases, its progress and pages.
+    pub fn status(&self) -> &Arc<Status> {
+        self.session.status()
+    }
+
+    /// The marked-up text the next build builds (the last one built if
+    /// none is due).
+    pub fn text(&self) -> &str {
+        self.next.as_deref().unwrap_or(&self.tex)
+    }
+
+    /// Diffed again against `new` (only where it changed), to build.
     pub fn diff(&mut self, new: &Flat) {
-        let tex = self.live.update(new).tex.clone();
-        self.build(tex);
+        self.next = Some(self.live.update(new).tex.clone());
     }
 
     /// The files as they are diffed again (a live diff only).
@@ -254,6 +351,21 @@ impl Compare {
         if let Ok(new) = flat(now, main, "new") {
             self.diff(&new);
         }
+    }
+
+    /// Files `names` (other than the main one, which the diff flattens)
+    /// changed: each the editor's buffer in `buffers`, else as on disk,
+    /// read again by the next build, as the document's session is told.
+    pub fn files_changed(&mut self, buffers: &HashMap<String, String>, names: &[String]) {
+        for n in names {
+            let text = buffers.get(n).map(|b| crate::tex::chars(b.as_bytes()));
+            self.session.set_buffer(n, text.as_deref());
+        }
+    }
+
+    /// Every file the builds read looked at again on disk (`r`).
+    pub fn reread(&mut self) {
+        self.session.reread_all();
     }
 
     /// A new look: the baseline read again with it, the whole diffed.
@@ -269,14 +381,26 @@ impl Compare {
         }
     }
 
-    /// The marked-up text built (as an edit of the last one), its outputs
-    /// written.
-    fn build(&mut self, tex: String) {
-        if tex == self.tex && self.report.is_some() {
-            return;
+    /// Whether a build is due: a new marked-up text, a file it read
+    /// changed, or none built yet.
+    pub fn due(&self) -> bool {
+        self.report.is_none()
+            || self.next.as_ref().is_some_and(|t| *t != self.tex)
+            || !self.session.up_to_date()
+    }
+
+    /// The marked-up text built, if due (as an edit of the last one), its
+    /// outputs written: the build's report, none if none was due.
+    pub fn build(&mut self) -> Option<&Report> {
+        if let Some(tex) = self.next.take()
+            && (tex != self.tex || self.report.is_none())
+        {
+            self.session.set_text(crate::tex::chars(tex.as_bytes()));
+            self.tex = tex;
         }
-        self.session.set_text(crate::tex::chars(tex.as_bytes()));
-        self.tex = tex;
+        if self.report.is_some() && self.session.up_to_date() {
+            return None;
+        }
         let r = self.session.build();
         self.session.flush_records();
         let ok = r.out.errors.is_empty();
@@ -293,6 +417,7 @@ impl Compare {
         let raw = self.session.origins();
         self.places = raw.as_ref().map_or_else(Vec::new, |o| self.places_of(o));
         self.origins = raw.map(|o| self.mapped(&o));
+        self.report.as_ref()
     }
 
     /// Where each change is shown on the diff's pages: the glyphs of the
