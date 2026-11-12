@@ -1507,9 +1507,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // searched for)
     let new_fields: FxHashSet<Field> = rec.defs.iter().map(|d| d.f).collect();
     let new_contribs: FxHashSet<Field> = rec.contribs.iter().map(|c| c.0).collect();
-    // (the definitions it may take back, noted with the node until its
-    // walks are done: `Node::withdrawing`)
-    let withdrawing = Withdrawing::note(node, old_fields.iter().filter(|f| !new_fields.contains(f)).copied());
+    // (the fields its walks after the lock go from its label for, noted
+    // with the node until they are done: `Node::walking`)
+    let walking = Walking::new(node);
     let mut tries = 0;
     todo_room();
     // (what the lock finds the filing would grow: its lists' room made here)
@@ -1542,7 +1542,6 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 drop(now);
                 drop(inner);
                 (old_fields, old_contribs) = fields_of(&last);
-                withdrawing.add(node, old_fields.iter().filter(|f| !new_fields.contains(f)).copied());
                 gone_runs.0.reserve(old_fields.len());
                 gone_runs.1.reserve(old_contribs.len() + rec.contribs.len());
                 continue;
@@ -2049,6 +2048,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 to_walk.sort_unstable();
                 to_walk.dedup();
             }
+            // (walked after the lock from where the node then stands: a
+            // relocation lifting it first walks them from here, `lift`)
+            walking.add(to_walk.iter().copied());
         }
         for &f in &to_walk {
             walks.push((
@@ -2448,8 +2450,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let defined: Vec<(Field, u16)> = rec.defs.iter().map(|d| (d.f, def_level(eng, d.f, node.id))).collect();
         walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
     }
-    // (its walks done: what it took back no longer waits on them)
-    drop(withdrawing);
+    // (its walks done)
+    drop(walking);
     for &f in &changed_contribs {
         reask_ranges(eng, ww, f, seg_pos, node.id, &holes, &mut st);
     }
@@ -2936,9 +2938,13 @@ pub(crate) fn commit_stood(
 /// the walk wakes it if the value has moved since. A node gone was walked
 /// by its removal, which flushed this list first.
 pub(crate) fn flush_unwalked(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
+    // (noted as they are taken: a relocation lifting the node before the
+    // walks go walks them from its old label, `Walking`)
+    let walking = Walking::new(node);
     let fs = {
         let mut u = node.unwalked.lock();
         node.transient.store(false, Ordering::Release);
+        walking.add(u.iter().copied());
         std::mem::take(&mut *u)
     };
     if fs.is_empty() {
@@ -5494,44 +5500,43 @@ pub(crate) enum Target {
     Before(NodeId, NodeId),
 }
 
-/// A commit's note of the definitions it may take back at its node's
-/// label (`Node::withdrawing`), made before its lock and taken off when
-/// its walks are done or it ends early. Its walk of one taken back starts
-/// where the node stands when the walk goes; a relocation lifting the node
-/// before then walks the note's fields from the label it leaves, where
-/// they went (`lift`): else the readers between the two labels kept what
-/// the node no longer defined (layout_d at -j4: a page's finisher landed
-/// before a paragraph, its run there took its \@currlist back and it was
-/// lifted again before that walk went, which then started past the
-/// paragraph; the paragraph's append stood on the value taken back, its
-/// floats listed twice, "Float(s) lost").
-struct Withdrawing<'a> {
+/// A walk's note of the fields it goes from its node's label for
+/// (`Node::walking`): made under the lock that files them (a commit's), or
+/// as they are taken (`flush_unwalked`), and taken off when its walks are
+/// done or it ends early. Such a walk starts where the node stands when it
+/// goes; a relocation lifting the node before then walks the note's fields
+/// from the label it leaves, where they changed (`lift`): else the readers
+/// between the two labels kept what the node no longer defined there
+/// (layout_d at -j4: a page's finisher landed before a paragraph, its run
+/// there took its \@currlist back and it was lifted again before that
+/// walk went, which then started past the paragraph; the paragraph's
+/// append stood on the value taken back, its floats listed twice,
+/// "Float(s) lost").
+struct Walking<'a> {
     node: &'a Node,
     token: u64,
 }
 
-impl<'a> Withdrawing<'a> {
-    fn note(node: &'a Node, fs: impl Iterator<Item = Field>) -> Withdrawing<'a> {
+impl<'a> Walking<'a> {
+    fn new(node: &'a Node) -> Walking<'a> {
         static TOKENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let w = Withdrawing {
+        Walking {
             node,
             token: TOKENS.fetch_add(1, Ordering::Relaxed),
-        };
-        w.add(node, fs);
-        w
+        }
     }
 
-    fn add(&self, node: &Node, fs: impl Iterator<Item = Field>) {
+    fn add(&self, fs: impl Iterator<Item = Field>) {
         let mut fs = fs.peekable();
         if fs.peek().is_some() {
-            node.withdrawing.lock().extend(fs.map(|f| (f, self.token)));
+            self.node.walking.lock().extend(fs.map(|f| (f, self.token)));
         }
     }
 }
 
-impl Drop for Withdrawing<'_> {
+impl Drop for Walking<'_> {
     fn drop(&mut self) {
-        let mut v = self.node.withdrawing.lock();
+        let mut v = self.node.walking.lock();
         if !v.is_empty() {
             v.retain(|x| x.1 != self.token);
         }
@@ -5951,9 +5956,9 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
         m.transient.store(false, Ordering::Release);
         std::mem::take(&mut *u)
     };
-    // (and what a commit under way took back here, its walk not gone yet:
-    // `Withdrawing`)
-    unwalked.extend(m.withdrawing.lock().drain(..).map(|x| x.0));
+    // (and what a walk under way goes from here for, not gone yet:
+    // `Walking`)
+    unwalked.extend(m.walking.lock().drain(..).map(|x| x.0));
     unwalked.sort_unstable();
     unwalked.dedup();
     m.pos.store(0, Ordering::Release);
