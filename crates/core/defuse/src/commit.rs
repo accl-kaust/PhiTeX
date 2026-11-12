@@ -1507,6 +1507,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // searched for)
     let new_fields: FxHashSet<Field> = rec.defs.iter().map(|d| d.f).collect();
     let new_contribs: FxHashSet<Field> = rec.contribs.iter().map(|c| c.0).collect();
+    // (the definitions it may take back, noted with the node until its
+    // walks are done: `Node::withdrawing`)
+    let withdrawing = Withdrawing::note(node, old_fields.iter().filter(|f| !new_fields.contains(f)).copied());
     let mut tries = 0;
     todo_room();
     // (what the lock finds the filing would grow: its lists' room made here)
@@ -1539,6 +1542,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 drop(now);
                 drop(inner);
                 (old_fields, old_contribs) = fields_of(&last);
+                withdrawing.add(node, old_fields.iter().filter(|f| !new_fields.contains(f)).copied());
                 gone_runs.0.reserve(old_fields.len());
                 gone_runs.1.reserve(old_contribs.len() + rec.contribs.len());
                 continue;
@@ -2444,6 +2448,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let defined: Vec<(Field, u16)> = rec.defs.iter().map(|d| (d.f, def_level(eng, d.f, node.id))).collect();
         walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
     }
+    // (its walks done: what it took back no longer waits on them)
+    drop(withdrawing);
     for &f in &changed_contribs {
         reask_ranges(eng, ww, f, seg_pos, node.id, &holes, &mut st);
     }
@@ -5488,6 +5494,50 @@ pub(crate) enum Target {
     Before(NodeId, NodeId),
 }
 
+/// A commit's note of the definitions it may take back at its node's
+/// label (`Node::withdrawing`), made before its lock and taken off when
+/// its walks are done or it ends early. Its walk of one taken back starts
+/// where the node stands when the walk goes; a relocation lifting the node
+/// before then walks the note's fields from the label it leaves, where
+/// they went (`lift`): else the readers between the two labels kept what
+/// the node no longer defined (layout_d at -j4: a page's finisher landed
+/// before a paragraph, its run there took its \@currlist back and it was
+/// lifted again before that walk went, which then started past the
+/// paragraph; the paragraph's append stood on the value taken back, its
+/// floats listed twice, "Float(s) lost").
+struct Withdrawing<'a> {
+    node: &'a Node,
+    token: u64,
+}
+
+impl<'a> Withdrawing<'a> {
+    fn note(node: &'a Node, fs: impl Iterator<Item = Field>) -> Withdrawing<'a> {
+        static TOKENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let w = Withdrawing {
+            node,
+            token: TOKENS.fetch_add(1, Ordering::Relaxed),
+        };
+        w.add(node, fs);
+        w
+    }
+
+    fn add(&self, node: &Node, fs: impl Iterator<Item = Field>) {
+        let mut fs = fs.peekable();
+        if fs.peek().is_some() {
+            node.withdrawing.lock().extend(fs.map(|f| (f, self.token)));
+        }
+    }
+}
+
+impl Drop for Withdrawing<'_> {
+    fn drop(&mut self) {
+        let mut v = self.node.withdrawing.lock();
+        if !v.is_empty() {
+            v.retain(|x| x.1 != self.token);
+        }
+    }
+}
+
 /// What a relocated node left at its old label (`lift`): the label and
 /// segment, the fields it defined and contributed to there, its brackets,
 /// others' reads anchored at it (filed again where it lands), the `next`
@@ -5896,11 +5946,16 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
     // run there withdrew its \@currlist unwalked, then moved after the
     // paragraph again; the paragraph's append stood on the withdrawn
     // value, its floats listed twice, "Float(s) lost")
-    let unwalked = {
+    let mut unwalked = {
         let mut u = m.unwalked.lock();
         m.transient.store(false, Ordering::Release);
         std::mem::take(&mut *u)
     };
+    // (and what a commit under way took back here, its walk not gone yet:
+    // `Withdrawing`)
+    unwalked.extend(m.withdrawing.lock().drain(..).map(|x| x.0));
+    unwalked.sort_unstable();
+    unwalked.dedup();
     m.pos.store(0, Ordering::Release);
     for &f in defs.iter().chain(&contribs) {
         eng.bump(f);

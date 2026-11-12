@@ -174,6 +174,12 @@ pub(crate) struct Node {
     /// next commit, of whatever kind, or its removal walks them
     /// (`commit::flush_unwalked`), against what each reader read.
     pub(crate) unwalked: Mx<Vec<Field>>,
+    /// The fields a commit under way may take back at the node's label,
+    /// each with that commit's token (`commit::commit`): noted before its
+    /// lock, dropped once its walks are done. A relocation lifting the node
+    /// meanwhile walks them from the label it leaves (`commit::lift`):
+    /// the commit's own walk starts where the node stands when it goes.
+    pub(crate) withdrawing: Mx<Vec<(Field, u64)>>,
     /// `unwalked` is not empty: what the node has filed is its stale
     /// run's, and its next commit is coming (`Ctx::wait_for_settling`).
     pub(crate) transient: AtomicBool,
@@ -337,6 +343,7 @@ impl Node {
             window_pass: AtomicBool::new(false),
             frontier_pass: AtomicBool::new(false),
             unwalked: Mx::new(Vec::new()),
+            withdrawing: Mx::new(Vec::new()),
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
