@@ -2936,6 +2936,13 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             continue;
         }
         node.committing.store(false, Ordering::Release);
+        // (an edited node committed, or taken: what it defines is known now.
+        // Not at its commit's start: a reader let go then ran before the
+        // commit's definitions were filed and again after, block_heads at
+        // -j8 201 runs for 200 readers)
+        if to != State::Dirty {
+            clear_edited(eng, node);
+        }
         // (not open any more: the readers filed at it after its commit
         // took its stops, re-asked)
         if to != State::Dirty {
