@@ -1117,6 +1117,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for d in &mut p.defs {
         if let Some(c) = d.rel {
             d.value = rel_value_at(eng, d.f, node.id, c);
+            if ftrace(eng, d.f) {
+                let i = reaching_at(eng, d.f, node.id, false);
+                eprintln!(
+                    "ftrace: rel-file {} by {} pos {} input-by {:?} input {} value {} t {}",
+                    eng.values().as_str(d.f.0).unwrap_or_default(),
+                    node.id.raw(),
+                    node.pos_hint().0,
+                    i.as_ref().and_then(|r| r.by).map(NodeId::raw),
+                    i.and_then(|r| r.value)
+                        .map_or("none".to_owned(), |x| eng.values().render(x)),
+                    eng.values().render(d.value),
+                    eng.now_ns()
+                );
+            }
         }
     }
     let defs = dedup_defs(std::mem::take(&mut p.defs));
@@ -2101,11 +2115,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         for d in rec.defs.iter().filter(|_| crate::obs::enabled()) {
             if ftrace(eng, d.f) {
                 eprintln!(
-                    "ftrace: def {} by {} ({}) serial {serial} value {} changed {} t {}",
+                    "ftrace: def {} by {} ({}) serial {serial} pos {} rel {:?} value {} changed {} t {}",
                     eng.values().as_str(d.f.0).unwrap_or_default(),
                     node.id.raw(),
                     eng.op(node.op()).name(),
-                    d.value.raw(),
+                    node.pos_hint().0,
+                    d.rel.is_some(),
+                    eng.values().render(d.value),
                     changed_defs.contains(&d.f),
                     eng.now_ns()
                 );
@@ -3094,6 +3110,19 @@ fn walk_here(
             // `settle_rel`)
             _ => read::rel_plain(eng, c, Some(i.value)),
         };
+        if ftrace(eng, f) {
+            eprintln!(
+                "ftrace: walk-here {} by {} rel {} pos {} input-by {} old {} new {} t {}",
+                eng.values().as_str(f.0).unwrap_or_default(),
+                by.raw(),
+                d.by.raw(),
+                p.0,
+                i.by.raw(),
+                eng.values().render(d.value),
+                eng.values().render(nv),
+                eng.now_ns()
+            );
+        }
         if nv == d.value {
             return Here::Done;
         }
@@ -3147,6 +3176,17 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
         let p = n.pos_hint();
         match inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
             Some(e) if e.by == by && e.rel == Some(c) => {
+                if ftrace(eng, f) {
+                    eprintln!(
+                        "ftrace: settle {} by {} pos {} old {} new {} t {}",
+                        eng.values().as_str(f.0).unwrap_or_default(),
+                        by.raw(),
+                        p.0,
+                        eng.values().render(e.value),
+                        eng.values().render(nv),
+                        eng.now_ns()
+                    );
+                }
                 if e.value != nv {
                     e.value = nv;
                     changed = true;
@@ -5464,6 +5504,9 @@ struct Left {
     after: Option<NodeId>,
     moves: u64,
     defs: Vec<Field>,
+    /// The fields its last commit changed there and left unwalked
+    /// (`Node::unwalked`): walked from the old label, where they changed.
+    unwalked: Vec<Field>,
     contribs: Vec<Field>,
     brackets: Option<Brackets>,
     readers: Vec<(Field, Reader)>,
@@ -5732,6 +5775,9 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left,
     for &f in &left.defs {
         reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), 0, st);
     }
+    for &f in left.unwalked.iter().filter(|f| !left.defs.contains(f)) {
+        reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), 0, st);
+    }
     for &f in &left.contribs {
         reask_ranges_at(eng, w, f, left.pos, m.id, &left.stops, st);
     }
@@ -5841,6 +5887,20 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
             }
         }
     }
+    // (what its last commit, a stale run's, changed here and left
+    // unwalked (`Node::unwalked`): taken under the lock that commit filed
+    // them under, and walked from this label, where they changed. Left
+    // with the node, they were walked from where it lands, and the
+    // readers between its two labels kept what it no longer gives them:
+    // layout_d at -j4, a page's finisher moved before a paragraph, its
+    // run there withdrew its \@currlist unwalked, then moved after the
+    // paragraph again; the paragraph's append stood on the withdrawn
+    // value, its floats listed twice, "Float(s) lost")
+    let unwalked = {
+        let mut u = m.unwalked.lock();
+        m.transient.store(false, Ordering::Release);
+        std::mem::take(&mut *u)
+    };
     m.pos.store(0, Ordering::Release);
     for &f in defs.iter().chain(&contribs) {
         eng.bump(f);
@@ -5860,6 +5920,7 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
         after,
         moves,
         defs,
+        unwalked,
         contribs,
         brackets,
         readers,
