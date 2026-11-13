@@ -590,7 +590,7 @@ full setup: the page follows the cursor, a double-click on the page
 reaches the source, and they show the caches and status. They live in
 [PhiTeX-frontends](https://github.com/accl-kaust/PhiTeX-frontends):
 
-- **VS Code**: the extension *PhiTeX ⚡ Instant* (`accl-kaust.phitex`,
+- **VS Code**: the extension *PhiTeX ⚡ Instant LaTeX Preview* (`accl-kaust.phitex`,
   `apps/vscode/`; not yet on the Marketplace: a `.vsix` built from that
   repository).
 - **Neovim 0.11+**: `apps/editors/nvim/phitex.lua` (lazy.nvim:
