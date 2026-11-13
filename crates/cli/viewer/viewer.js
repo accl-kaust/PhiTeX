@@ -248,6 +248,108 @@ function search(pages2, q, max = 1e3) {
   return out;
 }
 
+// viewer/src/wasp.ts
+function bands(lines2) {
+  const count = /* @__PURE__ */ new Map();
+  for (const l of lines2) {
+    const s = Math.round(l.size * 10) / 10;
+    count.set(s, (count.get(s) ?? 0) + l.text.replace(/\s/g, "").length);
+  }
+  let body = 0, most = 0;
+  for (const [s, n2] of count) if (n2 > most) most = n2, body = s;
+  if (!body) return [];
+  const em = body;
+  const runs = lines2.filter((l) => Math.abs(l.size - body) <= body * 0.12 && l.text.trim());
+  if (!runs.length) return [];
+  const long = runs.filter((l) => l.w > em * 15);
+  const spans2 = (long.length ? long : runs).map((l) => [l.x, l.x + l.w]).sort((a, b) => a[0] - b[0]);
+  const cols = [];
+  for (const s of spans2) {
+    const last = cols[cols.length - 1];
+    if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
+    else cols.push([...s]);
+  }
+  const colOf = (l) => {
+    const m = l.x + l.w / 2;
+    let best = 0, d = Infinity;
+    cols.forEach(([a, b], i) => {
+      const e = m < a ? a - m : m > b ? m - b : 0;
+      if (e < d) d = e, best = i;
+    });
+    return best;
+  };
+  const out = [];
+  let n = 0;
+  cols.forEach((col, ci) => {
+    const mine = runs.filter((l) => colOf(l) === ci).sort((a, b) => a.y - b.y || a.x - b.x);
+    const rows = [];
+    for (const l of mine) {
+      const last = rows[rows.length - 1];
+      const edges = [];
+      for (let i = 0; i < l.text.length; i++) if (l.text[i].trim()) edges.push([l.xs?.[i] ?? l.x, l.rs?.[i] ?? l.x + l.w]);
+      if (!l.xs) edges.splice(0, edges.length, [l.x, l.x + l.w]);
+      if (last && Math.abs(l.y - last.y) < em * 0.3) {
+        last.l = Math.min(last.l, l.x);
+        last.r = Math.max(last.r, l.x + l.w);
+        last.edges.push(...edges);
+      } else rows.push({ l: l.x, r: l.x + l.w, y: l.y, size: l.size, edges });
+    }
+    for (const row of rows) {
+      const inset = row.l > col[0] + em * 3;
+      const edges = row.edges.sort((a, b) => a[0] - b[0]);
+      let gap = 0, r = edges.length ? edges[0][1] : row.l;
+      for (const [a, b] of edges) gap = Math.max(gap, a - r), r = Math.max(r, b);
+      if (inset && (row.r < col[1] - em * 3 || gap > em * 3)) continue;
+      const pad = em * 0.15;
+      const dir = n % 2;
+      out.push({ x: row.l - pad, y: row.y - em * 0.82, w: row.r - row.l + 2 * pad, h: em * 1.14, dir, c: Math.floor(n / 2) % 2 });
+      n++;
+    }
+  });
+  return out;
+}
+var SVG = "http://www.w3.org/2000/svg";
+var made = 0;
+function waspOn(page) {
+  if (page.querySelector(":scope > .phx-wasp")) return;
+  const text = page.querySelector(":scope > .phx-text");
+  if (!text) return;
+  const lines2 = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l) => !!l);
+  const svg2 = document.createElementNS(SVG, "svg");
+  svg2.setAttribute("class", "phx-wasp");
+  svg2.setAttribute("viewBox", text.getAttribute("viewBox") ?? "");
+  svg2.setAttribute("preserveAspectRatio", "none");
+  svg2.setAttribute("aria-hidden", "true");
+  const id = `phx-wasp${made++}`;
+  const defs = document.createElementNS(SVG, "defs");
+  for (const c of [0, 1])
+    for (const dir of [0, 1]) {
+      const g = document.createElementNS(SVG, "linearGradient");
+      g.id = `${id}-${c}${dir}`;
+      for (const [off, cls] of [["0", dir ? `w${c}` : "wi"], ["1", dir ? "wi" : `w${c}`]]) {
+        const s = document.createElementNS(SVG, "stop");
+        s.setAttribute("offset", off);
+        s.setAttribute("class", cls);
+        g.append(s);
+      }
+      defs.append(g);
+    }
+  svg2.append(defs);
+  for (const b of bands(lines2)) {
+    const r = document.createElementNS(SVG, "rect");
+    r.setAttribute("x", b.x.toFixed(2));
+    r.setAttribute("y", b.y.toFixed(2));
+    r.setAttribute("width", b.w.toFixed(2));
+    r.setAttribute("height", b.h.toFixed(2));
+    r.setAttribute("fill", `url(#${id}-${b.c}${b.dir})`);
+    svg2.append(r);
+  }
+  page.insertBefore(svg2, text);
+}
+function waspOff(page) {
+  page.querySelector(":scope > .phx-wasp")?.remove();
+}
+
 // viewer/src/viewer.ts
 var spans = /* @__PURE__ */ new WeakMap();
 function inkSpan(c) {
@@ -1665,6 +1767,15 @@ var Viewer = class _Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
+    if (this.wasp) waspOn(c);
+  }
+  // ---- The reading aid (wasp.ts): each line of the body's text coloured by a gradient, alternating ----
+  wasp = false;
+  /** The reading aid on or off (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
+  waspShown(on) {
+    if (on === this.wasp) return;
+    this.wasp = on;
+    for (const s of this.slots) if (s.img) (on ? waspOn : waspOff)(s.img.canvas);
   }
   /**
    * A page drawn as a bitmap shown at its own pixels: its box exactly its
@@ -2091,6 +2202,16 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
+/* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
+   white), darken on Dark PDF's (its light ink takes a light colour, the grey stays); a stop "wi" leaves the ink as it is */
+.phx-wasp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: lighten; }
+.phx-wasp .wi { stop-color: #000; }
+.phx-wasp .w0 { stop-color: #1747d6; }
+.phx-wasp .w1 { stop-color: #d0202a; }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: #6e98ff; }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: #ff7b72; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
 .zooming .phx-text { display: none; }
@@ -4482,9 +4603,9 @@ function blur(a, lw, lh, sigma) {
   return src;
 }
 function levels(a, lw, lh, norm) {
-  const made = [];
+  const made2 = [];
   return (l) => {
-    if (made[l]) return made[l];
+    if (made2[l]) return made2[l];
     const s = SIGMAS[l], b = s ? blur(a, lw, lh, s) : a.slice();
     if (norm) {
       const hist = new Uint32Array(256);
@@ -4498,7 +4619,7 @@ function levels(a, lw, lh, norm) {
       const k = (s ? 0.8 : 1.15) / Math.max(top / 255, 1e-3);
       for (let i = 0; i < b.length; i++) b[i] = Math.min(1, b[i] * k);
     }
-    return made[l] = b;
+    return made2[l] = b;
   };
 }
 function field(lw, lh, ink2, draw) {
@@ -4760,7 +4881,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, built: [] };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -6758,6 +6879,18 @@ var Panel = class {
         }
       }
     );
+    look2.push({
+      id: "wasp",
+      label: "Colour lines",
+      help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line",
+      kind: "toggle",
+      value: this.prefs.wasp,
+      set: (on) => {
+        this.prefs.wasp = on === true;
+        this.linksShown();
+        this.save();
+      }
+    });
     if (ev.onBoxes) look2.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     const problems = KINDS.map(([k, name]) => ({
       id: `kind-${k}`,
@@ -6788,11 +6921,12 @@ var Panel = class {
   startAt(k, top) {
     this.viewer.startAt(k, top);
   }
-  /** The links' switches (PanelPrefs) given to the viewer. */
+  /** The links' switches and the reading aid (PanelPrefs) given to the viewer. */
   linksShown() {
     const v = this.viewer, p = this.prefs;
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
+    v.waspShown(p.wasp === true);
   }
   /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
   linkRows() {
@@ -9063,14 +9197,14 @@ var Strips = class {
   /** The strips of `keys` in `buf` from byte `at` (each its size, then its pixels), made bitmaps and kept. */
   async take(keys, buf, at) {
     const dv = new DataView(buf);
-    const made = [];
+    const made2 = [];
     for (const key of keys) {
       if (at + 8 > buf.byteLength) break;
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
         const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
-        made.push(
+        made2.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
             const old = this.kept.get(key);
             if (old) this.bytes -= old.width * old.height * 4, old.close();
@@ -9081,7 +9215,7 @@ var Strips = class {
       }
       at += w * h * 4;
     }
-    await Promise.all(made);
+    await Promise.all(made2);
     for (const [k, b] of this.kept) {
       if (this.bytes <= this.max) break;
       this.bytes -= b.width * b.height * 4;
@@ -9094,14 +9228,14 @@ function pagewise(px) {
   const clone = globalThis.cloneInto;
   return clone ? clone(px, window) : px;
 }
-var SVG = "http://www.w3.org/2000/svg";
+var SVG2 = "http://www.w3.org/2000/svg";
 function textLayer(lines2, w, h) {
-  const svg2 = document.createElementNS(SVG, "svg");
+  const svg2 = document.createElementNS(SVG2, "svg");
   svg2.setAttribute("class", "phx-text");
   svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg2.setAttribute("preserveAspectRatio", "none");
   for (const l of lines2) {
-    const t = document.createElementNS(SVG, "text");
+    const t = document.createElementNS(SVG2, "text");
     t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));

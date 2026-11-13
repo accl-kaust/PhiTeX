@@ -286,6 +286,16 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
+/* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
+   white), darken on Dark PDF's (its light ink takes a light colour, the grey stays); a stop "wi" leaves the ink as it is */
+.phx-wasp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: lighten; }
+.phx-wasp .wi { stop-color: #000; }
+.phx-wasp .w0 { stop-color: #1747d6; }
+.phx-wasp .w1 { stop-color: #d0202a; }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: #6e98ff; }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: #ff7b72; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
 .zooming .phx-text { display: none; }

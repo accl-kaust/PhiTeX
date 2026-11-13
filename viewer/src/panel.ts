@@ -294,11 +294,13 @@ export interface PanelPrefs {
   backs: boolean;
   flashes: boolean;
   newTabs: boolean;
+  /** The reading aid (wasp.ts): each line of text coloured by a gradient, alternating, as BeeLine does. */
+  wasp: boolean;
   /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
   built: string[];
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, built: [] };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -2609,6 +2611,18 @@ export class Panel {
         },
       },
     );
+    look.push({
+      id: "wasp",
+      label: "Colour lines",
+      help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line",
+      kind: "toggle",
+      value: this.prefs.wasp,
+      set: (on) => {
+        this.prefs.wasp = on === true;
+        this.linksShown();
+        this.save();
+      },
+    });
     if (ev.onBoxes) look.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     // (the problems' filters, the same as the buttons at the top of the problems list)
     const problems: SettingRow[] = KINDS.map(([k, name]) => ({
@@ -2642,11 +2656,12 @@ export class Panel {
     this.viewer.startAt(k, top);
   }
 
-  /** The links' switches (PanelPrefs) given to the viewer. */
+  /** The links' switches and the reading aid (PanelPrefs) given to the viewer. */
   private linksShown(): void {
     const v = this.viewer, p = this.prefs;
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
+    v.waspShown(p.wasp === true);
   }
 
   /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
