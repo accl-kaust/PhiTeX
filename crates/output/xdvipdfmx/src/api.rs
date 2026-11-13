@@ -873,6 +873,17 @@ impl Session {
         }
     }
 
+    /// What `from` read that this session would read alike, kept here
+    /// for its snapshots: the glyph list's map ([`crate::agl::Read`]). A
+    /// session its pages' files are snapshots of takes it from the first
+    /// file's, so that each later one opens its document without reading
+    /// the lists again.
+    pub fn adopt_memos(&mut self, from: &Session) {
+        if self.dpx.agl.read.0.is_none() {
+            self.dpx.agl.read = from.dpx.agl.read.clone();
+        }
+    }
+
     /// A copy of the session as it is (between pages), to go on from
     /// later: the incremental link. A page that changed is done again
     /// from the snapshot taken before it, then the pages after it and the
