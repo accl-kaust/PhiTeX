@@ -680,6 +680,44 @@ fn glyph_origins_plain() {
     assert!(f.is_empty(), "origins after the edits:\n{}", f.join("\n"));
 }
 
+/// Right-to-left text (TeX--XeT's `\beginR`...`\endR`), which the
+/// page shows in the reverse of its reading order: each glyph's origin is
+/// its own occurrence in the source, a word repeated in the segment and
+/// a paragraph repeated whole too. Read in the page's order, the
+/// segment's words matched the source's the wrong way round (its first
+/// `gamma` took the second's bytes) and a repeated paragraph's lines
+/// both took the first's: the editor's cursor on one marked both or
+/// neither.
+#[test]
+fn right_to_left_glyph_origins_are_their_own_occurrence() {
+    let src = "\\pdfoutput=1 \\TeXXeTstate=1\nalpha \\beginR gamma delta gamma\\endR\\ omega.\n\n\\beginR one two three\\endR\n\n\\beginR one two three\\endR\n\\bye\n";
+    let b = origins_build(src, 1, true);
+    let f = common::origin_failures(&b, src, "orig.tex");
+    assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
+    let at = |w: &str, k: usize| {
+        (
+            src.match_indices(w).nth(k).expect("the word").0,
+            w.to_owned(),
+        )
+    };
+    assert_eq!(
+        common::page_words(&b, 0, src.as_bytes(), "orig.tex"),
+        [
+            at("alpha", 0),
+            at("gamma", 1),
+            at("delta", 0),
+            at("gamma", 0),
+            at("omega.", 0),
+            at("three", 0),
+            at("two", 0),
+            at("one", 0),
+            at("three", 1),
+            at("two", 1),
+            at("one", 1),
+        ]
+    );
+}
+
 /// `\pdffilemoddate` of a file the job opened with `\openout` before
 /// it (TeX made it then, §1374): a date, the build's clock as the job's
 /// own log's is, not nothing. (Nothing: a document taking an `\openout`
