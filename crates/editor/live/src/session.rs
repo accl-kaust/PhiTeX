@@ -685,6 +685,15 @@ impl Session {
         }
     }
 
+    /// The last build's runs by operation (its engine's
+    /// `Stats::runs_by_op`): what an edit ran again.
+    pub fn runs_by_op(&self) -> Vec<(&'static str, u64)> {
+        self.build
+            .as_ref()
+            .map(|b| b.stats.runs_by_op.clone())
+            .unwrap_or_default()
+    }
+
     /// The host: the files the build reads, the services it calls.
     pub fn host(&self) -> &Arc<dyn Host> {
         &self.host

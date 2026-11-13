@@ -2877,6 +2877,78 @@ mod tests {
         );
     }
 
+    /// An edit of one paragraph runs again the writer of the page it is on
+    /// only, its page streamed again: a page's writer reads its own lines,
+    /// those a routine gave back from pieces outside its window too
+    /// (`\vsplit`, the rest put back), each by its piece's unit. The
+    /// writers of XeTeX's pages read the whole of the pieces' items, and
+    /// every page with a line given back ran again on every edit (Grail's
+    /// word edit: 10 of 18 page writers, 30 ms). pdfTeX and XeTeX, at one
+    /// thread and eight.
+    #[test]
+    fn an_edit_runs_the_writer_of_its_page_only() {
+        let body = |w: usize| {
+            let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\parindent=0pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=2pt \\output={\\setbox0\\vsplit255 to 50pt \\shipout\\box0 \\unvbox255 }".to_owned();
+            for i in 0..40 {
+                let width = if i == 20 { w } else { 10 + i };
+                t.push_str(&format!(
+                    "\\vrule width {width}pt height 5pt depth 1pt\\par "
+                ));
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let pdf = |w: usize| {
+            format!(
+                "\\pdfoutput=1 \\pdfpagewidth=120pt \\pdfpageheight=120pt {}",
+                body(w)
+            )
+        };
+        let dist = || {
+            let out = std::process::Command::new("kpsewhich")
+                .args(["-var-value", "TEXMFDIST"])
+                .output()
+                .expect("kpsewhich (TeX Live) on the test machine");
+            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+        };
+        for threads in [1, 8] {
+            for (engine, op) in [("pdftex", "pdfpage"), ("xetex", "xdvpage")] {
+                let host: Arc<dyn Host> = if engine == "xetex" {
+                    Arc::new(XeHost {
+                        dist: dist(),
+                        index: None,
+                        read_face: Arc::default(),
+                    })
+                } else {
+                    Arc::new(Files(HashMap::new()))
+                };
+                let text = |w| if engine == "xetex" { body(w) } else { pdf(w) };
+                let (mut d, events, _) = streaming(engine, &text(30), host, threads);
+                d.step();
+                let pages = exact_told(&lock(&events)).len();
+                assert!(pages > 4, "{engine} -j{threads}: {pages} pages");
+                lock(&events).clear();
+                d.push(Ask::SetFile {
+                    file: "doc.tex".into(),
+                    text: text(31),
+                });
+                d.step();
+                let told = exact_told(&lock(&events)).len();
+                let runs = d
+                    .session()
+                    .runs_by_op()
+                    .iter()
+                    .find(|x| x.0 == op)
+                    .map_or(0, |x| x.1);
+                assert!(told >= 1, "{engine} -j{threads}: the edited page streamed");
+                assert!(
+                    runs <= 1,
+                    "{engine} -j{threads}: {runs} page writers ran for an edit of one page ({told} told, {pages} pages)"
+                );
+            }
+        }
+    }
+
     /// The PDF is the same whether the builds stream their pages or not:
     /// a clean build and its edits, streamed (every page an edit changed
     /// told), against the same builds of a session nothing listens to.
