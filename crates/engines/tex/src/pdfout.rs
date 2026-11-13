@@ -3112,6 +3112,7 @@ pub(crate) fn page_alone(
         suppress_ptex_info: 0,
         ptex_use_underscore: 0,
         pk_resolution: params.pk_resolution,
+        pngs: None,
     };
     let mut alone = Alone {
         base: &pc.base_in,
@@ -3727,6 +3728,13 @@ pub(crate) struct StreamObjs {
     /// What the pages' files keep across files: their fonts' programs,
     /// their images' streams ([`phitex_pdf::StreamMemo`]).
     memo: Arc<phitex_pdf::StreamMemo>,
+}
+
+impl StreamObjs {
+    /// What the pages' files keep across files ([`EndFields::pngs`]).
+    pub(crate) fn memo(&self) -> Arc<phitex_pdf::StreamMemo> {
+        self.memo.clone()
+    }
 }
 
 /// A command a page drawn alone takes ([`Found::cmds`]).
@@ -5267,6 +5275,10 @@ pub(crate) struct EndFields {
     /// `\pdfpkresolution`: what a font without a map entry's failure
     /// names ([`phitex_pdf::PdfError::Fail`]).
     pub pk_resolution: i32,
+    /// Where the pages' files keep their PNGs' streams: the build's link
+    /// takes them from there, decoded and compressed once a build
+    /// ([`StreamObjs::memo`]).
+    pub pngs: Option<Arc<phitex_pdf::StreamMemo>>,
 }
 
 /// The records between two of the link's kept states ([`LinkMemo`]), at
@@ -5859,6 +5871,9 @@ fn link(
     }
     let t0 = std::time::Instant::now();
     let mut st = fresh(v, f.date.clone(), &f.jobname, f.g2u);
+    if let Some(m) = &f.pngs {
+        st.png_memo_with(m.clone());
+    }
     if let Some(a) = alone {
         base_tables(v, a.base, a.fonts, &mut st);
         st.stream_with(a.memo.clone());
@@ -5935,6 +5950,9 @@ fn link(
         let same = m.ids.iter().zip(&ids).take_while(|(a, b)| a == b).count();
         if let Some(sn) = m.snaps.iter().rev().find(|sn| sn.at <= same && sn.at > 0) {
             st = sn.st.clone();
+            if let Some(m) = &f.pngs {
+                st.png_memo_with(m.clone());
+            }
             nums = sn.nums.clone();
             forms = sn.forms.clone();
             reloc = sn.reloc.clone();

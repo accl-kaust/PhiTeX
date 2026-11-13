@@ -1169,7 +1169,7 @@ impl PdfState {
             };
             Ok((img.color_type, img.bit_depth, streams))
         };
-        let memo = self.stream_memo.clone();
+        let memo = self.png_memo.clone();
         let (made, raw) = match &memo {
             Some(m) => (Some(self.stream_png(m, &image.data, decode)?), None),
             None => (None, Some(decode()?)),

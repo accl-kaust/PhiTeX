@@ -132,10 +132,17 @@ pub(crate) struct PngMade {
 }
 
 impl PdfState {
+    /// This writer's PNGs' streams taken from `memo`, made there where
+    /// they are not (the build's link: the pages' files made them).
+    pub fn png_memo_with(&mut self, memo: Arc<StreamMemo>) {
+        self.png_memo = Some(memo);
+    }
+
     /// This writer writes a page's file of its own (a page streamed): its
     /// Type 1 fonts' programs and its images' streams taken from `memo`,
     /// made there where they are not ([`StreamMemo`]).
     pub fn stream_with(&mut self, memo: Arc<StreamMemo>) {
+        self.png_memo = Some(memo.clone());
         self.stream_memo = Some(memo);
     }
 
