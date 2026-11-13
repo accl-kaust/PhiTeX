@@ -591,8 +591,7 @@ reaches the source, and they show the caches and status. They live in
 [PhiTeX-frontends](https://github.com/accl-kaust/PhiTeX-frontends):
 
 - **VS Code**: the extension *PhiTeX ⚡ Instant LaTeX Preview* (`accl-kaust.phitex`,
-  `apps/vscode/`; not yet on the Marketplace: a `.vsix` built from that
-  repository).
+  `apps/vscode/`; on the VS Code Marketplace and Open VSX).
 - **Neovim 0.11+**: `apps/editors/nvim/phitex.lua` (lazy.nvim:
   `{ "accl-kaust/PhiTeX-frontends", config = function(p) dofile(p.dir .. "/apps/editors/nvim/phitex.lua") end }`).
 - **Emacs 29+**: `apps/editors/emacs/phitex.el` (`phitex-mode`, by
