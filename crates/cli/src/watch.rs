@@ -427,6 +427,7 @@ fn line_key(l: &str) -> Key {
 
 /// The keys answered where they are read, a build running or not: they
 /// need nothing of the build.
+#[derive(Clone)]
 struct Here {
     ui: Ui,
     /// The viewer's address (none: no viewer, or `--open` starts a program
@@ -1267,6 +1268,19 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             asking: kept.asking.clone(),
             out: kept.out.clone(),
         };
+        // (SIGINT, SIGTERM, SIGHUP: as `q`, [`keys::take_signals`])
+        {
+            let (tx, here) = (Mutex::new(tx.clone()), Mutex::new(here.clone()));
+            keys::on_quit_signal(Box::new(move || {
+                let here = here.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                if !here.answer(Key::Quit) {
+                    let _ = tx
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .send((Instant::now(), Event::Key(Key::Quit)));
+                }
+            }));
+        }
         match lsp.as_ref().filter(|_| on_stdio) {
             // (the editor's `exit`, or its end: as `q`)
             Some(l) => l.serve(Box::new(move || {
@@ -1299,7 +1313,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (nothing written while watching: asked whether to write the PDF
         // now, where a person is at the terminal; an editor's or a pipe's
         // way out writes nothing)
-        if let (Some(rx), Some(r)) = (rx.filter(|_| raw), unwritten.borrow_mut().take()) {
+        // (a signal's way out asks nothing: no one may be there to answer)
+        if let (Some(rx), Some(r)) = (
+            rx.filter(|_| raw && keys::signalled().is_none()),
+            unwritten.borrow_mut().take(),
+        ) {
             ui.finish();
             // (`--no-confirm`: yes, unasked)
             let yes = o.no_confirm || {

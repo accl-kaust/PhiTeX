@@ -95,7 +95,7 @@ pub use native::NativeFonts;
 pub fn boxscope_on() -> bool {
     boxscope::on()
 }
-pub use origins::{OriginsSnapshot, PageOrigins};
+pub use origins::{OriginsCapture, OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};

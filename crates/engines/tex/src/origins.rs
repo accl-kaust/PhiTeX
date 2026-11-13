@@ -1639,6 +1639,9 @@ pub(crate) struct Input<'a> {
     pub doc_name: String,
     pub doc_text: &'a str,
     pub doc_raw: Option<&'a str>,
+    /// The pages' glyphs, by place in `shown`, where they were taken
+    /// with the rest ([`OriginsCapture`]); none: the kept ones.
+    pub glyphs: Option<&'a [Option<Arc<PageGlyphs>>]>,
 }
 
 /// A text node as placed: its file (index into the files) and start.
@@ -1996,7 +1999,11 @@ fn answer_until(
     let Some(&id) = cx.inp.shown.get(k) else {
         return Ok(None);
     };
-    let Some(g) = kept(cx.inp.inst, id) else {
+    let g = match cx.inp.glyphs {
+        Some(gs) => gs.get(k).cloned().flatten(),
+        None => kept(cx.inp.inst, id),
+    };
+    let Some(g) = g else {
         return Ok(None);
     };
     let Some(m) = st.matched(cx, id, &g, stop) else {
@@ -2229,46 +2236,42 @@ impl crate::Build {
     /// says so (`None`; the pages answered so far kept, the next call
     /// goes on from them).
     pub fn origins_snapshot_until(&self, stop: &dyn Fn(bool) -> bool) -> Option<OriginsSnapshot> {
-        let t0 = std::time::Instant::now();
-        let st = self.origins_state();
+        snapshot_until(
+            self.origins_state(),
+            self.origins_input(),
+            &|| self.origins_pdf(),
+            stop,
+        )
+    }
+
+    /// What [`Self::origins_snapshot`] of the Build as it is now is made
+    /// from, taken apart from it ([`OriginsCapture`]): its snapshot made
+    /// later, on any thread, is this one whatever the Build has become
+    /// meanwhile (a watch's way out writes the `.synctex.gz` of the PDF
+    /// file it wrote while the next edit's build runs).
+    #[must_use]
+    pub fn origins_capture(&self) -> OriginsCapture {
         let inp = self.origins_input();
-        let t1 = t0.elapsed();
-        let cx = st.ctx_until(inp, stop)?;
-        let t2 = t0.elapsed();
-        let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
-        let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
-        let mut pages = Vec::with_capacity(cx.inp.shown.len());
-        for k in 0..cx.inp.shown.len() {
-            if stop(true) {
-                return None;
-            }
-            pages.push(answer_until(st, &cx, k, &get, stop).ok()?);
+        let glyphs = inp.shown.iter().map(|&id| kept(inp.inst, id)).collect();
+        OriginsCapture {
+            st: self.origins_shared(),
+            inst: inp.inst,
+            shown: inp.shown,
+            spans: inp.spans,
+            doc_name: inp.doc_name,
+            doc_text: Arc::from(inp.doc_text),
+            doc_raw: inp.doc_raw.map(Arc::from),
+            glyphs,
+            pdf: self.origins_pdf_later(),
         }
-        let t3 = t0.elapsed();
-        let files = st.files.locked().clone();
-        let texts = (0..files.len())
-            .map(|i| {
-                cx.texts
-                    .get(i)
-                    .and_then(Option::as_ref)
-                    .map(|t| file_bytes(t))
-            })
-            .collect();
-        if crate::exec::env_flag!("PHITEX_ORIGINS_TIME") {
-            eprintln!(
-                "origins: input {t1:?} (spans {}), sources {:?} (nodes {}), pages {:?}, texts {:?}",
-                cx.inp.spans.len(),
-                t2.saturating_sub(t1),
-                cx.index.nodes.len(),
-                t3.saturating_sub(t2),
-                t0.elapsed().saturating_sub(t3)
-            );
+    }
+
+    /// [`Self::origins_pdf`], made when asked from what it is now.
+    fn origins_pdf_later(&self) -> Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync> {
+        if let Some(p) = self.origins_state().pdf.locked().clone() {
+            return Arc::new(move || p.clone());
         }
-        Some(OriginsSnapshot {
-            pages,
-            files,
-            texts,
-        })
+        self.output_bytes_later()
     }
 
     /// The pages (0 the first) whose sealed lines came from the nodes
@@ -2498,6 +2501,95 @@ impl crate::Build {
         }
         out
     }
+}
+
+/// What [`crate::Build::origins_snapshot`] is made from, taken apart from
+/// the Build ([`crate::Build::origins_capture`]): the origins' memos
+/// (shared, each kept by what it was made from), the pages, the nodes'
+/// texts and places, the pages' glyphs, and the PDF their codes are
+/// counted in as it was.
+pub struct OriginsCapture {
+    st: Arc<State>,
+    inst: u64,
+    shown: Vec<u64>,
+    #[allow(clippy::type_complexity)]
+    spans: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)>,
+    doc_name: String,
+    doc_text: Arc<str>,
+    doc_raw: Option<Arc<str>>,
+    glyphs: Vec<Option<Arc<PageGlyphs>>>,
+    pdf: Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync>,
+}
+
+impl OriginsCapture {
+    /// The Build's [`crate::Build::origins_snapshot`] when it was taken.
+    #[must_use]
+    pub fn snapshot(&self) -> OriginsSnapshot {
+        let inp = Input {
+            inst: self.inst,
+            shown: self.shown.clone(),
+            spans: self.spans.clone(),
+            doc_name: self.doc_name.clone(),
+            doc_text: &self.doc_text,
+            doc_raw: self.doc_raw.as_deref(),
+            glyphs: Some(&self.glyphs),
+        };
+        snapshot_until(&self.st, inp, &|| (self.pdf)(), &|_| false).unwrap_or_else(|| {
+            OriginsSnapshot {
+                pages: Vec::new(),
+                files: Vec::new(),
+                texts: Vec::new(),
+            }
+        })
+    }
+}
+
+/// [`crate::Build::origins_snapshot_until`] of input `inp` with memos
+/// `st`, the PDF the codes are counted in from `pdf_of`.
+fn snapshot_until(
+    st: &State,
+    inp: Input<'_>,
+    pdf_of: &dyn Fn() -> Arc<Vec<u8>>,
+    stop: &dyn Fn(bool) -> bool,
+) -> Option<OriginsSnapshot> {
+    let t0 = std::time::Instant::now();
+    let t1 = t0.elapsed();
+    let cx = st.ctx_until(inp, stop)?;
+    let t2 = t0.elapsed();
+    let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
+    let get = || pdf.get_or_init(pdf_of).clone();
+    let mut pages = Vec::with_capacity(cx.inp.shown.len());
+    for k in 0..cx.inp.shown.len() {
+        if stop(true) {
+            return None;
+        }
+        pages.push(answer_until(st, &cx, k, &get, stop).ok()?);
+    }
+    let t3 = t0.elapsed();
+    let files = st.files.locked().clone();
+    let texts = (0..files.len())
+        .map(|i| {
+            cx.texts
+                .get(i)
+                .and_then(Option::as_ref)
+                .map(|t| file_bytes(t))
+        })
+        .collect();
+    if crate::exec::env_flag!("PHITEX_ORIGINS_TIME") {
+        eprintln!(
+            "origins: input {t1:?} (spans {}), sources {:?} (nodes {}), pages {:?}, texts {:?}",
+            cx.inp.spans.len(),
+            t2.saturating_sub(t1),
+            cx.index.nodes.len(),
+            t3.saturating_sub(t2),
+            t0.elapsed().saturating_sub(t3)
+        );
+    }
+    Some(OriginsSnapshot {
+        pages,
+        files,
+        texts,
+    })
 }
 
 #[cfg(test)]

@@ -432,6 +432,23 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
     }
 }
 
+/// [`file_bytes_shared`], made when asked from the file `x` stands for
+/// now (a layout's exact file is made once, and kept by the layout).
+pub(crate) fn file_bytes_later(
+    v: &phitex_defuse::Values,
+    x: ValueId,
+) -> std::sync::Arc<dyn Fn() -> std::sync::Arc<Vec<u8>> + Send + Sync> {
+    match file_of(v, x) {
+        Found::File(File::Bytes(b)) => std::sync::Arc::new(move || b.clone()),
+        Found::File(File::Layout(l)) => std::sync::Arc::new(move || l.exact().unwrap_or_default()),
+        Found::Gone => std::sync::Arc::new(|| std::sync::Arc::new(Vec::new())),
+        Found::Str => {
+            let b = file_bytes_shared(v, x);
+            std::sync::Arc::new(move || b.clone())
+        }
+    }
+}
+
 /// The PDF file's layout an output value stands for (none: a DVI file,
 /// or no file).
 pub(crate) fn file_layout(v: &phitex_defuse::Values, x: ValueId) -> Option<phitex_pdf::Layout> {

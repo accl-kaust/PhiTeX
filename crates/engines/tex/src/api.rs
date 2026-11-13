@@ -6450,8 +6450,9 @@ pub struct Build {
     staged: bool,
     /// Whether the build has evaluated (its cold build done).
     evaluated: bool,
-    /// Glyph origins' memos ([`Build::page_origins`]).
-    origins: crate::origins::State,
+    /// Glyph origins' memos ([`Build::page_origins`]), shared with the
+    /// captures of them ([`Build::origins_capture`]).
+    origins: Arc<crate::origins::State>,
 }
 
 impl Drop for Build {
@@ -6715,7 +6716,7 @@ impl Build {
             loads_ran: false,
             staged: false,
             evaluated: false,
-            origins: crate::origins::State::default(),
+            origins: Arc::default(),
         };
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -7655,12 +7656,18 @@ impl Build {
             } else {
                 None
             },
+            glyphs: None,
         }
     }
 
     /// Glyph origins' memos.
     pub(crate) fn origins_state(&self) -> &crate::origins::State {
         &self.origins
+    }
+
+    /// [`Self::origins_state`], shared ([`Build::origins_capture`]).
+    pub(crate) fn origins_shared(&self) -> Arc<crate::origins::State> {
+        self.origins.clone()
     }
 
     /// [`Build::node_spans`] with each file's name, and the index of the
@@ -8316,6 +8323,16 @@ impl Build {
         self.end_file()
             .map(|x| crate::assemble::file_bytes_shared(v, x))
             .unwrap_or_default()
+    }
+
+    /// [`Self::output_bytes`] of the file as it is now, made when asked
+    /// (from any thread, whatever the Build has become meanwhile).
+    pub(crate) fn output_bytes_later(&self) -> Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync> {
+        let v = self.g.eng.values();
+        match self.end_file() {
+            Some(x) => crate::assemble::file_bytes_later(v, x),
+            None => Arc::new(|| Arc::new(Vec::new())),
+        }
     }
 
     /// Whether TeX's history is `error_message_issued` or worse: an
