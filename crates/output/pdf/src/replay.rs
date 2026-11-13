@@ -11,13 +11,14 @@
 //! node), the recorded content bytes copied, the page and resources
 //! dictionaries written. A replay is taken only where it gives the bytes
 //! the walk would give: the variables the walk reads equal, the fonts
-//! shared as the walk shared them, and nothing but text and rules on
-//! the page (no objects, forms, images, annotations, links,
-//! destinations or beads, no error); otherwise the caller ships the
-//! page (the same file either way).
+//! shared as the walk shared them, the forms and images it shows here
+//! as the link has them (their operators made here, [`XHole`]), no bead
+//! or page group, no error; otherwise the caller ships the page (the
+//! same file either way).
 
 use std::collections::BTreeSet;
 
+use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::BoxNode;
 
@@ -141,7 +142,10 @@ impl PdfState {
 
     /// What of the writer's variables `pdf_ship_out` reads before it sets
     /// them (the text state is set at the page's start and by
-    /// `pdf_begin_text`), formatted.
+    /// `pdf_begin_text`), formatted. Not `\\pdfimagehicolor` as fixed:
+    /// only writing a PNG reads it (and one written below PDF 1.5 sets it
+    /// off), which the link does on its own state where it places a page,
+    /// [`PdfState::replay_page`].
     fn pre_key(&self) -> String {
         self.pre_key_with(false)
     }
@@ -171,7 +175,6 @@ impl PdfState {
                     self.fixed_minor,
                     self.fixed_ocl,
                     self.fixed_draftmode,
-                    self.fixed_image_hicolor,
                     self.fixed_inclusion_copy_font,
                 ],
                 (self.os.enable, self.faked_space, self.running_link),
@@ -242,6 +245,24 @@ impl PdfState {
     }
 }
 
+/// A form or image a page written apart shows that its writer has not
+/// (`\\pdfrefxform`, `\\pdfrefximage` of an object TeX made before the
+/// page): the walk ends the text and lists it as `out_form` and
+/// `out_image` do, and leaves its operators (`q`, its matrix, its name,
+/// `Q`) out of the content at `at`; [`PdfState::replay_page`] makes them
+/// with the form or image the link has ([`PdfState::xobject_ops`]), at
+/// `h` from the origin and `v` below it (a vlist's top, `vertical`, else
+/// the baseline).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct XHole {
+    pub at: usize,
+    pub n: usize,
+    pub form: bool,
+    pub vertical: bool,
+    pub h: Scaled,
+    pub v: Scaled,
+}
+
 /// What [`PdfState::ship_recorded`] keeps of a page.
 #[derive(Clone, Debug, Default)]
 pub struct PageRecord {
@@ -294,6 +315,9 @@ pub struct PageRecord {
     dest_data: Vec<(usize, crate::marks::Dest)>,
     obj_list: Vec<usize>,
     ximage_list: Vec<usize>,
+    xform_list: Vec<usize>,
+    /// The forms and images shown whose operators the link makes.
+    xholes: Vec<XHole>,
 }
 
 impl PageRecord {
@@ -361,13 +385,17 @@ pub(crate) struct Recording {
     pub deferred: bool,
     /// The font numbers written in the content ([`PageRecord`]'s).
     pub holes: Vec<(usize, usize, FontId)>,
+    /// The forms and images shown that the writer has not.
+    pub xholes: Vec<XHole>,
     pub font_list: Vec<FontId>,
-    /// Whether the page made anything but text, rules, annotations,
-    /// links and destinations.
+    /// Whether the page made a bead, a page group, or showed a form
+    /// its writer has (and wrote: the writer's state after is not the
+    /// link's, whose form was written before).
     pub other: bool,
-    /// The objects and images the page refers to (TeX's numbers).
+    /// The objects, images and forms the page refers to (TeX's numbers).
     pub obj_list: Vec<usize>,
     pub ximage_list: Vec<usize>,
+    pub xform_list: Vec<usize>,
     /// The marks and destinations as the walk left them.
     pub marks: Vec<(usize, crate::marks::Mark)>,
     pub dest_data: Vec<(usize, crate::marks::Dest)>,
@@ -486,7 +514,9 @@ impl PdfState {
             && !link_at_start
             && self.link_stack.is_empty();
         if pr.simple {
-            if !rec.deferred {
+            // (a content with forms' or images' operators to make: the
+            // link's to compress)
+            if !rec.deferred && rec.xholes.is_empty() {
                 pr.blob = self.out[a..b].to_vec();
             }
             pr.post = Some(Box::new(self.scratch()));
@@ -505,6 +535,8 @@ impl PdfState {
             // (the marks were written and taken out: the walk's copies)
             pr.obj_list = rec.obj_list;
             pr.ximage_list = rec.ximage_list;
+            pr.xform_list = rec.xform_list;
+            pr.xholes = rec.xholes;
             pr.marks = rec.marks;
             pr.dest_data = rec.dest_data;
         }
@@ -566,10 +598,14 @@ impl PdfState {
     /// for the caller to compress (in parallel with the other pages').
     /// `tex` gives a number the record shares with the state it was
     /// recorded on (one TeX numbered before the page) the number here.
+    /// A form the page shows that is not written here is written with
+    /// `forms` (its whatsits; a file of the one page: the writer's
+    /// variables after it are no later page's), else the page is not
+    /// placed (the form's walk leaves variables the record has not).
     ///
     /// # Errors
     /// Why the page cannot be placed (the caller ships it).
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     pub fn replay_page(
         &mut self,
         rec: &PageRecord,
@@ -578,6 +614,7 @@ impl PdfState {
         tex: &dyn Fn(usize) -> usize,
         known: Option<&str>,
         parts: &mut Vec<Part>,
+        forms: Option<&mut crate::WhatsitSource<'_>>,
     ) -> Result<Option<String>, String> {
         let Some(post) = rec.post.as_deref().filter(|_| rec.simple) else {
             return Err("not only text and rules".to_owned());
@@ -679,6 +716,32 @@ impl PdfState {
                 _ => {}
             }
         }
+        // the forms and images the page shows: here, as the link has
+        // them (an image with a group sets the page's: not recorded), a
+        // form written here before or by this page's placing
+        let mut xsubs: Vec<(usize, usize, Vec<u8>)> = Vec::with_capacity(rec.xholes.len());
+        for x in &rec.xholes {
+            let n = tex(x.n);
+            if !x.form && self.aux.ximages.get(&n).is_some_and(|i| i.group_ref != 0) {
+                return Err(format!("image {n} has a group"));
+            }
+            let Some(ops) = self.xobject_ops(n, x.form, x.vertical, x.h, x.v) else {
+                return Err(format!(
+                    "{} {n} not here",
+                    if x.form { "form" } else { "image" }
+                ));
+            };
+            xsubs.push((x.at, 0, ops));
+        }
+        if forms.is_none()
+            && let Some(k) = rec
+                .xform_list
+                .iter()
+                .map(|&k| tex(k))
+                .find(|&k| !self.is_written(k))
+        {
+            return Err(format!("form {k} not written yet"));
+        }
         // §752 as `ship` does it
         let last_resources = self.new_objnum_();
         self.page_group_val = 0;
@@ -767,7 +830,7 @@ impl PdfState {
         // there; here `ff` of the font it is, named as the caller numbers
         // it); where one differs, the content is the caller's to
         // compress, after the bytes so far
-        let subs: Vec<(usize, usize, Vec<u8>)> = rec
+        let mut subs: Vec<(usize, usize, Vec<u8>)> = rec
             .holes
             .iter()
             .filter_map(|&(a, len, k)| {
@@ -782,6 +845,11 @@ impl PdfState {
             })
             .collect();
         let report = (!subs.is_empty()).then(|| format!("{} font numbers rewritten", subs.len()));
+        // (and the forms' and images' operators, in their places)
+        if !xsubs.is_empty() {
+            subs.append(&mut xsubs);
+            subs.sort_by_key(|s| s.0);
+        }
         if subs.is_empty() && !rec.blob.is_empty() {
             self.print(&rec.blob);
         } else {
@@ -794,7 +862,11 @@ impl PdfState {
             });
         }
         self.total_pages += 1;
+        // (`\\pdfimagehicolor` as fixed here: the images are written here,
+        // [`PdfState::pre_key`])
+        let hicolor = self.fixed_image_hicolor;
         self.set_scratch(post);
+        self.fixed_image_hicolor = hicolor;
         for l in &mut self.link_stack {
             l.objnum = at(l.objnum);
         }
@@ -806,6 +878,7 @@ impl PdfState {
         // "Write out resource lists": what no page before wrote
         self.obj_list = rec.obj_list.iter().map(|&k| at(k)).collect();
         self.ximage_list = rec.ximage_list.iter().map(|&k| at(k)).collect();
+        self.xform_list = rec.xform_list.iter().map(|&k| at(k)).collect();
         for k in self.obj_list.clone() {
             if !self.is_written(k) {
                 self.pdf_write_obj(k);
@@ -820,14 +893,23 @@ impl PdfState {
                 self.fail(e);
             }
         }
+        if let Some(wh) = forms {
+            for k in self.xform_list.clone() {
+                if !self.is_written(k) {
+                    self.ship_form(k, fonts, wh);
+                }
+            }
+        }
         self.font_list.clone_from(&rec.font_list);
         self.write_page_marks();
         self.font_list = self.font_list.iter().map(|&f| fmap(f)).collect();
         self.write_resources(last_resources, true, fonts);
         self.restore_resource_lists(saved);
         let links = std::mem::take(&mut self.link_stack);
+        let hicolor = self.fixed_image_hicolor;
         self.set_scratch(post);
         self.link_stack = links;
+        self.fixed_image_hicolor = hicolor;
         if let Some((u, form)) = &under {
             self.stacks.rebase_page(u, &rec.depths);
             self.cur_form = *form;

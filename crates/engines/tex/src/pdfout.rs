@@ -6171,7 +6171,16 @@ fn link(
                 Err("an object the line does not number".to_owned())
             } else {
                 let at = |n: usize| tex.get(&n).copied().unwrap_or(n);
-                st.replay_page(rec, &src, &fmap, &at, None, &mut ps)
+                // (a page alone writes the forms it shows, as its walk
+                // would: the file has no page after it)
+                let mut wh = |h: u32, _leaders: bool| {
+                    page_whatsit(v, &forms, &pc.whats, h)
+                        .filter(|w| alone.is_none_or(|a| a.keeps(w)))
+                        .map(|w| relocated(w, &reloc))
+                };
+                let wh: Option<&mut phitex_pdf::WhatsitSource<'_>> =
+                    alone.is_some().then_some(&mut wh);
+                st.replay_page(rec, &src, &fmap, &at, None, &mut ps, wh)
             };
             t_step[2] += ts.elapsed();
             if alone.is_some() && crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
@@ -6206,7 +6215,8 @@ fn link(
                 }
                 placed += 1;
             }
-            if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
+            // (a page's file of its own: PHITEX_STREAM_TRACE's, above)
+            if alone.is_none() && crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
                 eprintln!(
                     "  link page {} (shipped by node {}): objects {n0} -> {} ({})",
                     pc.pj,
