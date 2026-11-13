@@ -75,6 +75,9 @@ struct Kept {
     asking: Arc<AtomicBool>,
     /// Whether standard input is read (by the first session).
     reading: bool,
+    /// The session's output files, for a quit that does not wait
+    /// ([`Here::out`]).
+    out: Arc<Mutex<Option<session::WayOut>>>,
 }
 
 /// What the last build read ([`phitex_live::session::Session::watched`]):
@@ -441,6 +444,9 @@ struct Here {
     target: Target,
     /// The watch asks a question on the way out: every key is its answer.
     asking: Arc<AtomicBool>,
+    /// The session's output files: a quit while the loop works leaves
+    /// them as any way out does (its PDF file the exact one).
+    out: Arc<Mutex<Option<session::WayOut>>>,
 }
 
 fn help(ui: &Ui) {
@@ -492,14 +498,26 @@ impl Here {
                     ui.warning(&format!("could not start a browser: open {url}"));
                 }
             }
-            // (q or Ctrl-C while the loop works: out now, the work dropped)
+            // (q or Ctrl-C while the loop works: out now, the work dropped,
+            // but the files written left as every way out leaves them: a
+            // write in flight finished, none begun after, the PDF file
+            // the exact one of what it holds, not its update sections)
             Key::Quit if busy => {
                 ui.finish();
                 keys::restore();
                 ui.line(&ui.st.dim("stopped while working"));
                 modern::cache_summary(&self.target, ui);
                 crate::attach::forget();
-                std::process::exit(crate::lsp::exit_status());
+                let status = crate::lsp::exit_status();
+                let out = self
+                    .out
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                match out {
+                    Some(o) => o.end(status, |e| ui.error(e)),
+                    None => std::process::exit(status),
+                }
             }
             Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
                 // (said once a build: a held key says nothing more)
@@ -789,6 +807,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         told: Arc::default(),
         asking: Arc::default(),
         reading: false,
+        out: Arc::default(),
     };
     let (mut t, mut o) = (t.clone(), o.clone());
     loop {
@@ -947,6 +966,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     if writing && !o.exact_file {
         s.set_updates(Some(Arc::default()));
     }
+    *kept.out.lock().unwrap_or_else(PoisonError::into_inner) = Some(s.way_out());
     // (writing no file, the viewer's PDF kept as update sections in
     // memory, `ViewFile`: an edit's pages linked live, not folded again
     // from the first one changed to the end; the exact file made when idle)
@@ -1245,6 +1265,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             told: told.clone(),
             target: t.clone(),
             asking: kept.asking.clone(),
+            out: kept.out.clone(),
         };
         match lsp.as_ref().filter(|_| on_stdio) {
             // (the editor's `exit`, or its end: as `q`)
