@@ -4917,7 +4917,6 @@ function firstPage(cv, dark) {
 
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
-var LATE_OPENING = 1500;
 var MAKING = "Making the format, once per PhiTeX update";
 var KIND_HELP = {
   error: "LaTeX errors and files not found",
@@ -4953,7 +4952,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", built: [] };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body" };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -6128,18 +6127,9 @@ var Panel = class {
     const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
-    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
-    const warm = !now && was !== void 0 && (!was.includes(" ") || was.split(" ")[1] === this.look);
-    this.playOn(sheet, warm ? "off" : this.look, first, dark);
-    clearTimeout(this.lateTimer);
-    if (warm) this.lateTimer = setTimeout(() => {
-      this.lateTimer = void 0;
-      if (this.anim && !this.ending && this.firstPending()) this.playOn(sheet, this.look, first, this.sheetDark());
-    }, LATE_OPENING);
+    this.playOn(sheet, this.look, first, dark);
     this.hints(true);
   }
-  /** A reopened document's opening, played once its first page has been awaited this long (ms). */
-  lateTimer;
   /** The opening for `look` played on `sheet`, in place of one playing there. */
   playOn(sheet, look2, first, dark) {
     this.anim?.stop();
@@ -6158,13 +6148,6 @@ var Panel = class {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
     return (h >>> 0).toString(36);
-  }
-  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
-  builtHere() {
-    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
-    if (was[0] === e) return;
-    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
-    this.save();
   }
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
   sheetDark() {
@@ -6229,8 +6212,6 @@ var Panel = class {
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
-    clearTimeout(this.lateTimer);
-    this.lateTimer = void 0;
     this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();
@@ -6242,7 +6223,6 @@ var Panel = class {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
-      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -7720,7 +7700,6 @@ var Panel = class {
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
-    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();

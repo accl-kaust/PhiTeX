@@ -34,8 +34,6 @@ import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } f
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
 
-/** How long a reopened document's first page is awaited on a still sheet before the looks chosen play (ms): the format made after an update, a long build. */
-const LATE_OPENING = 1500;
 /** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
 const MAKING = "Making the format, once per PhiTeX update";
 
@@ -324,11 +322,9 @@ export interface PanelPrefs {
   /** How much of a line fades, 0 to 200: 100 the whole line (the default); less, the colour only toward its end; more, held flat over more of it. */
   waspLength: number;
   waspText: "body" | "all";
-  /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
-  built: string[];
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", built: [] };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body" };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -1699,27 +1695,12 @@ export class Panel {
     const sheet = el.querySelector<HTMLElement>(".sheet")!;
     // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
     const first = !this.seenIds.has("opening");
-    // (a document built here before, opened again (a reload, the editor reopened): its steps
-    // on a still sheet, no opening played: the animation is for a document's first build.
-    // A Rebuild asked for plays it)
-    // (unless the looks chosen changed since this document was last opened: the new choice
-    // plays once, the next open's. Picked and the document opened again, it played nothing)
-    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
-    const warm = !now && was !== undefined && (!was.includes(" ") || was.split(" ")[1] === this.look);
-    this.playOn(sheet, warm ? "off" : this.look, first, dark);
-    // (a document opened again whose first page is not back by LATE_OPENING: a wait (the
-    // format made after an update, packages fetched, a long build) gets the looks chosen
-    // after all; a quick reopen stays a still sheet)
-    clearTimeout(this.lateTimer);
-    if (warm) this.lateTimer = setTimeout(() => {
-      this.lateTimer = undefined;
-      if (this.anim && !this.ending && this.firstPending()) this.playOn(sheet, this.look, first, this.sheetDark());
-    }, LATE_OPENING);
+    // (no page to show, a build running: the looks chosen play, whether this document was
+    // built here before or not; a document whose pages are ready shows them, no sheet: the
+    // sheet goes up only at a build's own step, and a page within 400 ms takes it down at once)
+    this.playOn(sheet, this.look, first, dark);
     this.hints(true);
   }
-
-  /** A reopened document's opening, played once its first page has been awaited this long (ms). */
-  private lateTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** The opening for `look` played on `sheet`, in place of one playing there. */
   private playOn(sheet: HTMLElement, look: OpeningLook, first: boolean, dark: boolean): void {
@@ -1742,15 +1723,6 @@ export class Panel {
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
     return (h >>> 0).toString(36);
-  }
-
-  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
-  private builtHere(): void {
-    // (each "key looks": the looks chosen when it was opened, so that a new choice plays once)
-    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
-    if (was[0] === e) return;
-    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
-    this.save();
   }
 
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
@@ -1831,8 +1803,6 @@ export class Panel {
 
   /** The sheet gone (played out, or a card in its place). */
   private stopSheet(): void {
-    clearTimeout(this.lateTimer);
-    this.lateTimer = undefined;
     this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();
@@ -1844,7 +1814,6 @@ export class Panel {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
-      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -3525,8 +3494,6 @@ export class Panel {
     // (a view with no layout yet: this page's slots, up to it)
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => (i === k && hash) || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
-    // (a page drawn: this document is built here, with or without a sheet over it)
-    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();
