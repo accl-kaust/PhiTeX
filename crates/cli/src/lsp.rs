@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
-use phitex_live::lsp::{LspHost, Server, Settings, Trouble, path_of};
+use phitex_live::lsp::{LspHost, RequestError, Server, Settings, Trouble, path_of};
 use phitex_live::progress::Progress;
 use serde_json::{Value, json};
 
@@ -321,6 +321,20 @@ impl Client {
 impl LspHost for Client {
     fn ask(&self, a: Ask) {
         let w = &self.watch;
+        // (the user's own edits, for the review: accepted as typed, §9.4)
+        let hub = crate::review::hub();
+        match &a {
+            Ask::Edit {
+                file,
+                start,
+                end,
+                text,
+            } => hub.user_edit(file, Some((*start, *end)), text, false),
+            // (the first a file's: its opening, no edit)
+            Ask::SetFile { file, text } => hub.user_edit(file, None, text, false),
+            Ask::Closed { file } => hub.user_closed(file),
+            _ => {}
+        }
         let a = match a {
             // (another client edited the file last: this one's ranges are
             // in its own text, so its whole text)
@@ -404,6 +418,18 @@ impl LspHost for Client {
 
     fn engine(&self) -> &'static str {
         "native"
+    }
+
+    /// `phitex session`'s requests (§9.1), answered by the review's hub;
+    /// a failure carries the status the CLI exits with.
+    fn request(&self, method: &str, params: &Value) -> Option<Result<Value, RequestError>> {
+        crate::review::hub().request(method, params).map(|r| {
+            r.map_err(|f| RequestError {
+                code: -32800,
+                message: f.message,
+                data: Some(json!({"status": f.status})),
+            })
+        })
     }
 }
 
@@ -738,6 +764,22 @@ impl Lsp {
             }
         }
         listen(&self.watch);
+        // (the review's view of the editors: their buffers, and a buffer
+        // changed for the user, a rejected hunk written back)
+        let (a, b) = (self.watch.clone(), self.watch.clone());
+        crate::review::hub().on_editors(crate::review::Editors {
+            buffer: Box::new(move |f| {
+                a.servers()
+                    .iter()
+                    .find(|(_, s)| s.owns(f))
+                    .and_then(|(_, s)| s.text(f))
+            }),
+            replace: Box::new(move |f, t| {
+                b.servers().iter().fold(false, |any, (_, s)| {
+                    s.owns(f) && s.replace_text(f, t) || any
+                })
+            }),
+        });
     }
 
     /// Call `wake` when the editor asks the watch for something.
@@ -769,6 +811,12 @@ impl Lsp {
     /// The last build's PDF, for `phitex.savePdf`.
     pub fn set_pdf(&self, pdf: Option<Pdf>) {
         *lock(&self.watch.pdf) = pdf;
+    }
+
+    /// Ask the watch for `a` as an editor would (the review's: a
+    /// rebuild, the transcript).
+    pub fn push(&self, a: Ask) {
+        self.watch.push(a);
     }
 
     /// What the editor asked for since last taken.

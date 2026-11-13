@@ -561,6 +561,11 @@ impl Host for ShelfHost {
         }
     }
 
+    /// A watch's exact `wait`: the project's files the engine was given.
+    fn fed(&self, path: &Path, bytes: &[u8]) {
+        crate::review::fed(path, bytes);
+    }
+
     /// A pack's file: its release's, the same for the session; the
     /// project's: as on disk ([`crate::session::disk_stamp`]).
     fn stamp(&self, path: &Path) -> Option<Vec<u8>> {

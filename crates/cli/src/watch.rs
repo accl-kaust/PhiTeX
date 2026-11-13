@@ -921,6 +921,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             job.path.to_string_lossy().trim_start_matches("./"),
         );
     }
+    // (the review's hub: notes, changes, `phitex session`; before the
+    // first build, which it records)
+    let hub = crate::review::hub().clone();
+    hub.start(
+        &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        job.path.to_string_lossy().trim_start_matches("./"),
+        writing,
+        t.review_accept_disk,
+    );
     // (the banner: what is built into what, by which engine)
     if !ui.quiet {
         let threads = session::threads(job.threads);
@@ -1225,6 +1234,32 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 .unwrap_or_else(PoisonError::into_inner)
                 .send((Instant::now(), Event::Asked));
         }));
+    }
+    // (the review's asks of the watch, as the editor's; its `stop` as q;
+    // its state to every viewer, its ops the viewer's)
+    {
+        let server = lsp.clone();
+        let quit = Mutex::new(tx.clone());
+        hub.on_ask(
+            Box::new(move |a| {
+                if let Some(l) = &server {
+                    l.push(a);
+                }
+            }),
+            Box::new(move || {
+                let _ = quit
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .send((Instant::now(), Event::Key(Key::Quit)));
+            }),
+        );
+        if let Some(v) = view.as_ref().map(View::viewer) {
+            hub.set_viewer(view.as_ref().map(View::url).unwrap_or_default());
+            let shown = v.clone();
+            hub.on_emit(Box::new(move |e| shown.event(e)));
+            let h = hub.clone();
+            v.on_review(Box::new(move |op, req| h.viewer(op, req)));
+        }
     }
     // (what the viewer and the editor asked, taken together)
     let take_asks = || {
@@ -1706,6 +1741,45 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 l.built(&b);
             }
+            // (the review's record of it: what it read, its problems; a
+            // `wait` answered by it, the notes moved)
+            let w = s.watched();
+            let found: HashSet<String> = w
+                .paths
+                .iter()
+                .map(|p| p.to_string_lossy().trim_start_matches("./").to_owned())
+                .collect();
+            let missing = w
+                .names
+                .iter()
+                .filter(|n| {
+                    let n = n.trim_start_matches("./");
+                    !found.contains(n) && !found.contains(&format!("{n}.tex"))
+                })
+                .flat_map(|n| {
+                    let n = n.trim_start_matches("./").to_owned();
+                    let tex = (Path::new(&n).extension().is_none()).then(|| format!("{n}.tex"));
+                    std::iter::once(n).chain(tex)
+                })
+                .collect();
+            hub.built(crate::review::BuildFacts {
+                n: builds,
+                ok: !failed,
+                pages: r.pages(),
+                ms: r.wall.as_secs_f64() * 1e3,
+                errors: r.out.errors.clone(),
+                main: (main_rel.clone(), s.source(&main_rel)),
+                paths: w
+                    .paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                missing,
+                diags_pending: pending,
+                // (pending: its errors at once, the last warnings with them)
+                diags: b.diagnostics.clone(),
+                pdf: written.as_ref().map(|p| p.display().to_string()),
+            });
             status.set("");
             phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
         }
@@ -2193,6 +2267,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             if let Some(l) = &lsp {
                 l.diagnostics(&d);
             }
+            hub.diagnostics(last.borrow().builds, &d);
             *last_diags.borrow_mut() = key.map(|k| (k, d));
         }
         let builds = {
@@ -2595,6 +2670,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     });
                     let out = last.borrow().good.clone();
                     if exact && b == last.borrow().builds && out.is_some() {
+                        hub.written(b);
                         ui.event(&json!({
                             "event": "written",
                             "exact": true,
@@ -2629,6 +2705,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     let mut asks = std::mem::take(&mut held_asks);
                     asks.extend(take_asks());
                     for a in asks {
+                        if a == Ask::Transcript {
+                            hub.transcript(last.borrow().builds, s.transcript());
+                        }
                         match edits.apply(&mut s, view.as_deref(), a) {
                             Applied::Painted(us) => {
                                 let mut l = last.borrow_mut();
@@ -2819,24 +2898,33 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // (a session kept from the last diff: this one an
                         // edit of it; else a new one, its first build a
                         // clean build that streams its pages)
-                        let started =
-                            crate::compare::Git::open(&root).and_then(|g| {
-                                match comparing.as_mut() {
-                                    Some(c) => c.against(&g, &rev, to.as_deref(), &now, &main_rel),
-                                    None => crate::compare::Compare::start(
-                                        &g,
-                                        &rev,
-                                        to.as_deref(),
-                                        &now,
-                                        &main_rel,
-                                        &s.job,
-                                        s.files(),
-                                        diff_status.clone(),
-                                        writing,
-                                    )
-                                    .map(|c| comparing = Some(c)),
-                                }
-                            });
+                        // (`baseline`: the review's, `.phitex/baseline/`
+                        // where there is no git, §9.4)
+                        let src: Result<Box<dyn crate::compare::Versions>, String> =
+                            if rev == "baseline" {
+                                Ok(Box::new(crate::review::BaselineFiles(root.clone())))
+                            } else {
+                                crate::compare::Git::open(&root)
+                                    .map(|g| Box::new(g) as Box<dyn crate::compare::Versions>)
+                            };
+                        let started = src.and_then(|g| {
+                            let g = &*g;
+                            match comparing.as_mut() {
+                                Some(c) => c.against(g, &rev, to.as_deref(), &now, &main_rel),
+                                None => crate::compare::Compare::start(
+                                    g,
+                                    &rev,
+                                    to.as_deref(),
+                                    &now,
+                                    &main_rel,
+                                    &s.job,
+                                    s.files(),
+                                    diff_status.clone(),
+                                    writing,
+                                )
+                                .map(|c| comparing = Some(c)),
+                            }
+                        });
                         match (started, comparing.as_mut()) {
                             (Ok(()), Some(c)) => {
                                 // (its changes told and its pages shown at

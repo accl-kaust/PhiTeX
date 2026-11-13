@@ -193,6 +193,11 @@ impl Host for Machine {
         std::fs::read(path).ok()
     }
 
+    /// A watch's exact `wait`: the project's files the engine was given.
+    fn fed(&self, path: &Path, bytes: &[u8]) {
+        crate::review::fed(path, bytes);
+    }
+
     /// Its size, modification and change times and inode
     /// ([`disk_stamp`]).
     fn stamp(&self, path: &Path) -> Option<Vec<u8>> {

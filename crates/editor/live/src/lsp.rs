@@ -119,6 +119,24 @@ pub trait LspHost: Send + Sync {
 
     /// `phitex/status`'s engine: `native` or `wasm`.
     fn engine(&self) -> &'static str;
+
+    /// A request of the host's own (`phitex/session/*`, `phitex/notes/*`,
+    /// `phitex/changes/*`: docs/spec-editor-protocol.md §9), `params` its
+    /// parameters: its result, or its error (code, message, data); none:
+    /// no such method here. Called on the client's own thread, which it
+    /// may hold (a `wait`).
+    fn request(&self, _method: &str, _params: &Value) -> Option<Result<Value, RequestError>> {
+        None
+    }
+}
+
+/// A host request's error ([`LspHost::request`]): JSON-RPC's code, its
+/// message and data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequestError {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Value>,
 }
 
 /// The byte of `text` at LSP position `p` (`{line, character}`, UTF-16
@@ -1277,10 +1295,42 @@ impl Server {
             }
             _ => {
                 if let Some(id) = id {
-                    self.fail(id, -32601, &format!("no method {method:?} here"));
+                    match self.host.request(method, p) {
+                        Some(Ok(v)) => self.reply(id, v),
+                        Some(Err(e)) => {
+                            let mut err = json!({"code": e.code, "message": e.message});
+                            if let Some(d) = e.data {
+                                err["data"] = d;
+                            }
+                            self.send(&json!({"jsonrpc": "2.0", "id": id, "error": err}));
+                        }
+                        None => self.fail(id, -32601, &format!("no method {method:?} here")),
+                    }
                 }
             }
         }
+        true
+    }
+
+    /// The client's buffer of `file` (from the root) replaced by `text`
+    /// (`workspace/applyEdit`, the whole buffer: a change made for the
+    /// user, a rejected hunk written back): whether the client has the
+    /// file open (else nothing is sent).
+    pub fn replace_text(&self, file: &str, text: &str) -> bool {
+        let lines = {
+            let st = lock(&self.st);
+            let Some(d) = st.docs.get(file) else {
+                return false;
+            };
+            // (the end: past the last line, as the buffer has it)
+            d.split('\n').count()
+        };
+        self.request(
+            "workspace/applyEdit",
+            json!({"label": "PhiTeX", "edit": {"changes": {self.uri(file): [
+                {"range": {"start": {"line": 0, "character": 0}, "end": {"line": lines, "character": 0}}, "newText": text}
+            ]}}}),
+        );
         true
     }
 
