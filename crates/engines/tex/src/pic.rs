@@ -431,26 +431,40 @@ impl Run<'_, '_> {
         // moved: its state lacks the work of the one before, and its child
         // given that state runs again once that one's output is in, the
         // pictures after it again for each: lie-hasse's page of 24
-        // diagrams, one more right a pass. So it goes on as if empty too,
-        // its child kept on the view it has, or none placed where none has
-        // run; this run goes again at the first one's output, and gives
-        // each its view then, each picture run once)
+        // diagrams, one more right a pass. A child that has run keeps the
+        // view it has and the picture goes on as if empty; one that has
+        // not is read here, inline, as TeX reads it, its child placed for
+        // the runs after. Gone on as if empty and placed only once the one
+        // before had its output, each picture ran once but the run went
+        // again for each: lie-hasse's piece, 37 s of its own text, 24
+        // times, -j1 860 -> 1356 s, mc 86456)
         if self.pic_pending && !view_held {
-            self.muts += 1;
-            self.pic_skip(&body.skip);
-            let kept = self.cx.placed_before_ran(self.ops.pic, &args);
-            if kept && let Some(old) = self.cx.last_def(field) {
+            if self.cx.placed_before_ran(self.ops.pic, &args)
+                && let Some(old) = self.cx.last_def(field)
+            {
+                self.muts += 1;
+                self.pic_skip(&body.skip);
                 self.cx.define_with(field, old, Locality::Global);
                 self.cx.child_once(self.ops.pic, args);
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: after one to come, as if empty, its child kept",
+                        body.name
+                    );
+                }
+                return Ok(true);
             }
+            self.cx.define_with(field, locals, Locality::Global);
+            self.cx.child_once(self.ops.pic, args);
+            self.muts += 1;
+            self.pic_inline_count();
             if trace() {
                 eprintln!(
-                    "pic: node {node} {} {hash:x}: after one to come, as if empty ({})",
-                    body.name,
-                    if kept { "its child kept" } else { "not placed" }
+                    "pic: node {node} {} {hash:x}: after one to come, no output yet, inline",
+                    body.name
                 );
             }
-            return Ok(true);
+            return Ok(false);
         }
         self.cx.define_with(field, locals, Locality::Global);
         let i = self.cx.child_once(self.ops.pic, args);
