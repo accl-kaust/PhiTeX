@@ -29,7 +29,7 @@ import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
-import { WASP_PRESETS, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
+import { WASP_PRESETS, inkAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -315,12 +315,14 @@ export interface PanelPrefs {
   waspColours: WaspColours;
   waspCustom: [string, string];
   waspStrength: number;
+  /** How much of a line fades (0 to 100): 100 the whole line; less, the colour only toward its end. */
+  waspLength: number;
   waspText: "body" | "all";
   /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
   built: string[];
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspText: "body", built: [] };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", built: [] };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -2700,6 +2702,7 @@ export class Panel {
       colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
       custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
       strength: Number.isFinite(p.waspStrength) ? Math.min(100, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(100, Math.max(0, p.waspLength)) / 100 : 1,
       text: p.waspText === "all" ? "all" : "body",
     };
   }
@@ -2721,7 +2724,7 @@ export class Panel {
     st.setProperty("--ph-wasp1", c.light[1]);
     st.setProperty("--ph-wasp0-dark", c.dark[0]);
     st.setProperty("--ph-wasp1-dark", c.dark[1]);
-    this.viewer.waspShown(l.on, l.text === "all");
+    this.viewer.waspShown(l.on, l.text === "all", l.length);
     const box = this.waspSample;
     if (box?.isConnected) {
       const dark = this.sheetDark();
@@ -2731,7 +2734,8 @@ export class Panel {
       const all = l.text === "all";
       box.querySelectorAll("i").forEach((band, k) => {
         const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
-        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink}` : `${ink}, ${col}`})` : "none";
+        const at = `${(inkAt(n % 2 ? 1 : 0, l.length) * 100).toFixed(1)}%`;
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink} ${at}` : `${ink} ${at}, ${col}`})` : "none";
       });
     }
     this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v as WaspColours));
@@ -2779,6 +2783,7 @@ export class Panel {
       },
       { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
       { id: "wasp-strength", label: "Strength", help: "How far a line's fade goes: subtle, a hint of the colour; full, all of it", kind: "range", value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "How much of a line fades: short, the colour only near its ends; long, the whole line", kind: "range", value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
       { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
       { id: "wasp-sample", label: "Sample", kind: "custom", make: sample },
     ];

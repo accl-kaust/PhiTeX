@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bands, mix, waspColours, type WaspLook } from "../src/wasp.ts";
+import { bands, inkAt, mix, waspColours, type WaspLook } from "../src/wasp.ts";
 import type { TextLine } from "../src/text.ts";
 
 const line = (text: string, y: number, x0 = 72, size = 10): TextLine => {
@@ -56,11 +56,19 @@ test("All text: a heading is a line too; a centred equation still is not", () =>
 });
 
 test("the colours: a preset's at full, mixed toward what leaves the ink at less; Custom's dark ones lightened", () => {
-  const look: WaspLook = { on: true, colours: "classic", custom: ["#0000ff", "#ff0000"], strength: 1, text: "body" };
+  const look: WaspLook = { on: true, colours: "classic", custom: ["#0000ff", "#ff0000"], strength: 1, length: 1, text: "body" };
   assert.deepEqual(waspColours(look).light, ["#1747d6", "#d0202a"]);
   assert.deepEqual(waspColours({ ...look, strength: 0 }), { light: ["#000000", "#000000"], dark: ["#ffffff", "#ffffff"] });
   assert.equal(waspColours({ ...look, strength: 0.5 }).light[0], mix("#000000", "#1747d6", 0.5));
   const c = waspColours({ ...look, colours: "custom" });
   assert.deepEqual(c.light, ["#0000ff", "#ff0000"]);
   assert.deepEqual(c.dark, ["#7373ff", "#ff7373"]);
+});
+
+test("the fade's length: the ink held from a line's other end, mirrored line to line", () => {
+  assert.equal(inkAt(0, 1), 0);
+  assert.equal(inkAt(1, 1), 1);
+  assert.equal(inkAt(0, 0.3), 0.7);
+  assert.equal(inkAt(1, 0.3), 0.3);
+  assert.equal(inkAt(0, 2), 0);
 });

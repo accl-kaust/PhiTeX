@@ -333,9 +333,16 @@ function bands(lines2, all = false) {
 }
 var SVG = "http://www.w3.org/2000/svg";
 var made = 0;
-function waspOn(page, all = false) {
+function inkAt(dir, length) {
+  const l = Math.min(1, Math.max(0, length));
+  return dir ? l : 1 - l;
+}
+function waspLength(root, length) {
+  for (const s of root.querySelectorAll(".phx-wasp stop.wi")) s.setAttribute("offset", inkAt(s.dataset.dir === "1" ? 1 : 0, length).toFixed(3));
+}
+function waspOn(page, all = false, length = 1) {
   const had = page.querySelector(":scope > .phx-wasp");
-  if (had?.dataset.all === String(all)) return;
+  if (had?.dataset.all === String(all)) return waspLength(page, length);
   had?.remove();
   const text = page.querySelector(":scope > .phx-text");
   if (!text) return;
@@ -352,10 +359,12 @@ function waspOn(page, all = false) {
     for (const dir of [0, 1]) {
       const g = document.createElementNS(SVG, "linearGradient");
       g.id = `${id}-${c}${dir}`;
-      for (const [off, cls] of [["0", dir ? `w${c}` : "wi"], ["1", dir ? "wi" : `w${c}`]]) {
+      const ink2 = inkAt(dir, length).toFixed(3);
+      for (const [off, cls] of [dir ? ["0", `w${c}`] : [ink2, "wi"], dir ? [ink2, "wi"] : ["1", `w${c}`]]) {
         const s = document.createElementNS(SVG, "stop");
         s.setAttribute("offset", off);
         s.setAttribute("class", cls);
+        if (cls === "wi") s.dataset.dir = String(dir);
         g.append(s);
       }
       defs.append(g);
@@ -1793,16 +1802,21 @@ var Viewer = class _Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
-    if (this.wasp) waspOn(c, this.waspAll);
+    if (this.wasp) waspOn(c, this.waspAll, this.waspLen);
   }
   // ---- The reading aid (wasp.ts): each line of the text coloured by a gradient, alternating ----
   wasp = false;
   waspAll = false;
+  waspLen = 1;
   /** The reading aid on or off, `all` every line or only the body's (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
-  waspShown(on, all = false) {
-    if (on === this.wasp && all === this.waspAll) return;
-    [this.wasp, this.waspAll] = [on, all];
-    for (const s of this.slots) if (s.img) on ? waspOn(s.img.canvas, all) : waspOff(s.img.canvas);
+  waspShown(on, all = false, length = 1) {
+    if (on === this.wasp && all === this.waspAll) {
+      if (length !== this.waspLen && on) waspLength(this.root, length);
+      this.waspLen = length;
+      return;
+    }
+    [this.wasp, this.waspAll, this.waspLen] = [on, all, length];
+    for (const s of this.slots) if (s.img) on ? waspOn(s.img.canvas, all, length) : waspOff(s.img.canvas);
   }
   /**
    * A page drawn as a bitmap shown at its own pixels: its box exactly its
@@ -4931,7 +4945,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspText: "body", built: [] };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", built: [] };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -6993,6 +7007,7 @@ var Panel = class {
       colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
       custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
       strength: Number.isFinite(p.waspStrength) ? Math.min(100, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(100, Math.max(0, p.waspLength)) / 100 : 1,
       text: p.waspText === "all" ? "all" : "body"
     };
   }
@@ -7012,7 +7027,7 @@ var Panel = class {
     st.setProperty("--ph-wasp1", c.light[1]);
     st.setProperty("--ph-wasp0-dark", c.dark[0]);
     st.setProperty("--ph-wasp1-dark", c.dark[1]);
-    this.viewer.waspShown(l.on, l.text === "all");
+    this.viewer.waspShown(l.on, l.text === "all", l.length);
     const box = this.waspSample;
     if (box?.isConnected) {
       const dark = this.sheetDark();
@@ -7021,7 +7036,8 @@ var Panel = class {
       const all = l.text === "all";
       box.querySelectorAll("i").forEach((band, k) => {
         const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
-        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink2}` : `${ink2}, ${col}`})` : "none";
+        const at = `${(inkAt(n % 2 ? 1 : 0, l.length) * 100).toFixed(1)}%`;
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink2} ${at}` : `${ink2} ${at}, ${col}`})` : "none";
       });
     }
     this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v));
@@ -7065,6 +7081,7 @@ var Panel = class {
       },
       { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
       { id: "wasp-strength", label: "Strength", help: "How far a line's fade goes: subtle, a hint of the colour; full, all of it", kind: "range", value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "How much of a line fades: short, the colour only near its ends; long, the whole line", kind: "range", value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
       { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
       { id: "wasp-sample", label: "Sample", kind: "custom", make: sample }
     ];

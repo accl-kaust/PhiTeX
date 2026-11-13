@@ -39,6 +39,8 @@ export interface WaspLook {
   colours: WaspColours;
   custom: [string, string];
   strength: number;
+  /** How much of a line fades (0 to 1): 1 the whole line, less the ink held from its other end that much longer. */
+  length: number;
   text: "body" | "all";
 }
 
@@ -158,10 +160,25 @@ export function bands(lines: TextLine[], all = false): Band[] {
 const SVG = "http://www.w3.org/2000/svg";
 let made = 0;
 
-/** The aid over a page (strips.ts's `.phx-page`: its bitmaps and text layer), once (`all`: every line, not only the body's); none where the page has no text layer. */
-export function waspOn(page: HTMLElement, all = false): void {
+/**
+ * Where a gradient's ink stop is for a fade over `length` of the line:
+ * ink to the colour holds the ink until 1 - length of the way, the colour
+ * to ink reaches it at `length`.
+ */
+export function inkAt(dir: 0 | 1, length: number): number {
+  const l = Math.min(1, Math.max(0, length));
+  return dir ? l : 1 - l;
+}
+
+/** The fade's length on a page's bands (or every page's under `root`): only their gradients' ink stops moved, nothing drawn again. */
+export function waspLength(root: ParentNode, length: number): void {
+  for (const s of root.querySelectorAll<SVGStopElement>(".phx-wasp stop.wi")) s.setAttribute("offset", inkAt(s.dataset.dir === "1" ? 1 : 0, length).toFixed(3));
+}
+
+/** The aid over a page (strips.ts's `.phx-page`: its bitmaps and text layer), once (`all`: every line, not only the body's; `length`: how much of a line fades); none where the page has no text layer. */
+export function waspOn(page: HTMLElement, all = false, length = 1): void {
   const had = page.querySelector<SVGElement>(":scope > .phx-wasp");
-  if (had?.dataset.all === String(all)) return;
+  if (had?.dataset.all === String(all)) return waspLength(page, length);
   had?.remove();
   const text = page.querySelector<SVGElement>(":scope > .phx-text");
   if (!text) return;
@@ -179,10 +196,13 @@ export function waspOn(page: HTMLElement, all = false): void {
     for (const dir of [0, 1]) {
       const g = document.createElementNS(SVG, "linearGradient");
       g.id = `${id}-${c}${dir}`;
-      for (const [off, cls] of [["0", dir ? `w${c}` : "wi"], ["1", dir ? "wi" : `w${c}`]]) {
+      // (the ink's stop where the fade's length puts it, waspLength)
+      const ink = inkAt(dir as 0 | 1, length).toFixed(3);
+      for (const [off, cls] of [dir ? ["0", `w${c}`] : [ink, "wi"], dir ? [ink, "wi"] : ["1", `w${c}`]]) {
         const s = document.createElementNS(SVG, "stop");
         s.setAttribute("offset", off);
         s.setAttribute("class", cls);
+        if (cls === "wi") s.dataset.dir = String(dir);
         g.append(s);
       }
       defs.append(g);
