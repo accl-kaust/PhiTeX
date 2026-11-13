@@ -28,8 +28,8 @@
   <a href="https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl"><img alt="Chrome Web Store" src="https://img.shields.io/chrome-web-store/v/joimneigjammmhdbgaonlepnlllceajl?label=Chrome%20Web%20Store&logo=googlechrome&logoColor=white"></a>
   <a href="https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/"><img alt="Firefox Add-ons" src="https://img.shields.io/amo/v/phitex-for-overleaf-unofficial?label=Firefox%20Add-ons&logo=firefoxbrowser&logoColor=white"></a>
   <a href="https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd"><img alt="Microsoft Edge Add-ons" src="https://img.shields.io/badge/Edge%20Add--ons-get-0078D7?logo=microsoftedge&logoColor=white"></a>
-  <a href="https://github.com/accl-kaust/PhiTeX-frontends"><img alt="VS Code Marketplace: coming soon" src="https://img.shields.io/badge/VS%20Code%20Marketplace-coming%20soon-lightgrey?logo=visualstudiocode&logoColor=white"></a>
-  <!-- TODO(link): the VS Code badge, live once published: https://img.shields.io/visual-studio-marketplace/v/<publisher>.<extension>, linking to its Marketplace page · Phi Frontends -->
+  <a href="https://marketplace.visualstudio.com/items?itemName=accl-kaust.phitex"><img alt="VS Code Marketplace" src="https://vsmarketplacebadges.dev/version/accl-kaust.phitex.svg?label=VS%20Code%20Marketplace&color=007ACC"></a>
+  <a href="https://open-vsx.org/extension/accl-kaust/phitex"><img alt="Open VSX" src="https://img.shields.io/open-vsx/v/accl-kaust/phitex?label=Open%20VSX&logo=eclipseide&logoColor=white"></a>
 </p>
 
 ## Why PhiTeX
@@ -126,7 +126,7 @@ phitex upgrade                            # the latest release, after a [Y/n] (-
 | Where | How | Get it |
 |---|---|---|
 | **Overleaf** | A browser extension adds a **PDF \| ⚡ Instant** switch to Overleaf's toolbar. The page follows your typing. It compiles inside your browser: your document is never sent anywhere. | [Chrome](https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl) · [Firefox](https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/) · [Edge](https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd) |
-| **VS Code** | A live page beside your editor, errors in the Problems panel, click-to-source both ways. | Marketplace <!-- TODO(link): Marketplace and Open VSX; today from source or a .vsix · Phi Frontends --> |
+| **VS Code** | A live page beside your editor, errors in the Problems panel, click-to-source both ways. | [Marketplace](https://marketplace.visualstudio.com/items?itemName=accl-kaust.phitex) · [Open VSX](https://open-vsx.org/extension/accl-kaust/phitex) |
 | **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [apps/editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/nvim/phitex.lua) |
 | **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [apps/editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/emacs/phitex.el) |
 | **Any LSP editor** | `phitex watch --lsp` is a language server: your buffers are built as you type, problems published, your cursor shown on the page. | built in |
