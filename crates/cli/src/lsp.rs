@@ -47,9 +47,10 @@ use crate::view::{Ask, Built};
 /// input's end), as the LSP says; else 0.
 static EXIT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
-/// The status the watch exits with when it ends as `q` ends it.
+/// The status the watch exits with when it ends as `q` ends it (a
+/// signal's way out: 128 + the signal, as a shell reports it).
 pub fn exit_status() -> i32 {
-    EXIT.load(Ordering::Relaxed)
+    crate::keys::signalled().map_or_else(|| EXIT.load(Ordering::Relaxed), |s| 128 + s)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

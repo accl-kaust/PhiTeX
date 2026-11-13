@@ -211,6 +211,31 @@ impl Writer {
     ) -> Option<Option<Vec<u8>>> {
         let t0 = std::time::Instant::now();
         let snap = b.origins_snapshot_until(stop)?;
+        self.write_snapshot(&snap, dir, stop, t0)
+    }
+
+    /// `JOB.synctex.gz` of the Build as it was when `cap` was taken
+    /// ([`phitex_tex::Build::origins_capture`]), its files named from
+    /// directory `dir`; `None` where the build kept no origins.
+    pub fn write_capture(
+        &mut self,
+        cap: &phitex_tex::OriginsCapture,
+        dir: &Path,
+    ) -> Option<Vec<u8>> {
+        let t0 = std::time::Instant::now();
+        let snap = cap.snapshot();
+        self.write_snapshot(&snap, dir, &|_| false, t0).flatten()
+    }
+
+    /// [`Writer::write_until`] from the origins' snapshot `snap`.
+    #[allow(clippy::option_option)]
+    fn write_snapshot(
+        &mut self,
+        snap: &phitex_tex::OriginsSnapshot,
+        dir: &Path,
+        stop: &dyn Fn(bool) -> bool,
+        t0: std::time::Instant,
+    ) -> Option<Option<Vec<u8>>> {
         let (pages, files) = (&snap.pages, &snap.files);
         if pages.iter().all(Option::is_none) {
             return Some(None);

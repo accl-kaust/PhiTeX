@@ -1551,6 +1551,11 @@ pub fn main(args: &[String]) -> ! {
         );
         std::process::exit(crate::EXIT_USAGE);
     };
+    // (a watch's SIGINT, SIGTERM and SIGHUP taken by a thread of their
+    // own before any other thread starts: they end it as `q` does)
+    if command == Command::Watch {
+        crate::keys::take_signals();
+    }
     if command == Command::News {
         crate::news::print(o.json);
         std::process::exit(0);

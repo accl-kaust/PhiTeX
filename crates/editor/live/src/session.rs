@@ -2134,6 +2134,7 @@ impl Session {
     /// the host's sink.
     pub fn write(&self, r: &Report, main_too: bool) -> Result<Written, String> {
         let sink = &self.sink;
+        let _held = sink.hold();
         sink.begin()?;
         phitex_tex::timeline::lap("write: the output directory");
         let mut files = Vec::new();
@@ -2209,10 +2210,23 @@ impl Session {
         // the main file's directory)
         // (a watch's at idle, [`Session::write_synctex`]: the pages'
         // origins matched off the typing path)
-        if self.job.synctex && self.build.is_some() {
+        if self.job.synctex
+            && let Some(b) = &self.build
+        {
             if self.watching {
                 self.synctex_due
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // (what it is made from taken now, for a way out that
+                // writes it while the next edit's build runs: the file of
+                // the PDF file written, not of what the Build became)
+                let cap = b.origins_capture();
+                let root = self.synctex_root();
+                sink.synctex_due(
+                    &format!("{}.synctex.gz", self.job.jobname),
+                    Some(Arc::new(move || {
+                        crate::synctex::Writer::default().write_capture(&cap, &root)
+                    })),
+                );
             } else if let Some(Some(gz)) = self.synctex_bytes(&|_| false) {
                 put(&format!("{}.synctex.gz", self.job.jobname), &gz)?;
                 phitex_tex::timeline::lap("write: the SyncTeX file");
@@ -2229,15 +2243,21 @@ impl Session {
         let Some(b) = self.build.as_ref() else {
             return Some(None);
         };
-        let root = match self.job.path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let root = self.host.canonical(&root);
+        let root = self.synctex_root();
         self.synctex
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .write_until(b, &root, stop)
+    }
+
+    /// The directory `JOB.synctex.gz` names the files from: the main
+    /// file's.
+    fn synctex_root(&self) -> PathBuf {
+        let root = match self.job.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        self.host.canonical(&root)
     }
 
     /// Whether a watch's `JOB.synctex.gz` waits for idle.
@@ -2293,9 +2313,9 @@ impl Session {
     /// The sink's.
     pub fn put_synctex(&self, gz: &[u8]) -> Result<(PathBuf, u64), String> {
         let h = tex::fingerprint(gz);
-        let p = self
-            .sink
-            .put(&format!("{}.synctex.gz", self.job.jobname), gz, h)?;
+        let name = format!("{}.synctex.gz", self.job.jobname);
+        let p = self.sink.put(&name, gz, h)?;
+        self.sink.synctex_due(&name, None);
         phitex_tex::timeline::lap("idle: the SyncTeX file");
         Ok((p, h))
     }

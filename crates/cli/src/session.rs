@@ -131,6 +131,8 @@ impl Session {
             written: Mutex::new(BTreeMap::new()),
             last_main: Mutex::new(None),
             updates: Mutex::new(None),
+            writing: Mutex::new(()),
+            synctex: Mutex::new(None),
         });
         (store, out)
     }
@@ -384,9 +386,23 @@ struct Out {
     last_main: Mutex<Option<(PathBuf, Arc<Vec<u8>>)>>,
     /// The PDF file written as update sections, if it is.
     updates: Mutex<Option<Arc<Mutex<UpdateFile>>>>,
+    /// Held while a build's outputs are written ([`Sink::hold`]).
+    writing: Mutex<()>,
+    /// The SyncTeX file of the outputs written last, left for idle and
+    /// not written yet: its name and how it is made.
+    synctex: Mutex<Option<(String, phitex_live::host::SynctexMaker)>>,
 }
 
 impl Sink for Out {
+    fn hold(&self) -> Box<dyn phitex_live::host::Held + '_> {
+        Box::new(self.writing.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn synctex_due(&self, name: &str, make: Option<phitex_live::host::SynctexMaker>) {
+        *self.synctex.lock().unwrap_or_else(PoisonError::into_inner) =
+            make.map(|m| (name.to_owned(), m));
+    }
+
     fn begin(&self) -> Result<(), String> {
         let dir = &self.dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))
@@ -733,15 +749,21 @@ fn exact_tmp(p: &Path) -> PathBuf {
 pub struct WayOut(Arc<Out>);
 
 impl WayOut {
-    /// The process ended with exit status `status` (an error writing
-    /// the exact PDF file said by `error` first), the files the session
-    /// wrote whole and its PDF file the exact one of what it holds, as
-    /// every other way out leaves it: a write in flight (an update section appended, the
-    /// main output written in place) ends first and none begins after
-    /// (the locks they take are held until the process ends), the update
-    /// sections are compacted under the lock, and the temporary files of
-    /// compactions still running are removed.
-    pub fn end(&self, status: i32, error: impl FnOnce(&str)) -> ! {
+    /// The process ended with exit status `status` (an error writing a
+    /// file said by `error` first), the files the session wrote whole and
+    /// as every other way out leaves them: a write of a build's outputs
+    /// in flight ends first and none begins after (the locks its writes
+    /// take are held until the process ends); the PDF file the exact one
+    /// of what it holds (its update sections compacted, the temporary
+    /// files of compactions still running removed); its SyncTeX file, if
+    /// left for idle, that of the outputs written (made from what they
+    /// were made from, whatever the build has become since).
+    pub fn end(&self, status: i32, mut error: impl FnMut(&str)) -> ! {
+        let _writing = self
+            .0
+            .writing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let _main = self
             .0
             .last_main
@@ -753,15 +775,37 @@ impl WayOut {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let Some(u) = u else {
-            std::process::exit(status)
-        };
-        let mut g = u.lock().unwrap_or_else(PoisonError::into_inner);
-        for t in std::mem::take(&mut g.tmps) {
-            let _ = std::fs::remove_file(t);
+        let mut g = u
+            .as_ref()
+            .map(|u| u.lock().unwrap_or_else(PoisonError::into_inner));
+        if let Some(g) = g.as_deref_mut() {
+            for t in std::mem::take(&mut g.tmps) {
+                let _ = std::fs::remove_file(t);
+            }
+            if let Err(e) = compact_held(g) {
+                error(&e);
+            }
         }
-        if let Err(e) = compact_held(&mut g) {
-            error(&e);
+        let _written = self
+            .0
+            .written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let due = self
+            .0
+            .synctex
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((name, make)) = due
+            && let Some(gz) = make()
+        {
+            let p = self.0.dir.join(&name);
+            let tmp = p.with_file_name(format!(".{name}.phitex-out"));
+            if let Err(e) = std::fs::write(&tmp, &gz).and_then(|()| std::fs::rename(&tmp, &p)) {
+                let _ = std::fs::remove_file(&tmp);
+                error(&format!("can't write {}: {e}", p.display()));
+            }
         }
         std::process::exit(status)
     }
