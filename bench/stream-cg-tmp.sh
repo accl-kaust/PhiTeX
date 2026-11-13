@@ -9,13 +9,14 @@ bin=$PWD/target/release/phitex
 # (DOC: a TeX Live manual by its directory/main under /usr/share/doc/texlive, the CI image;
 # else amsldoc)
 rm -rf $w/e && mkdir -p $w/e
-if [ -n "${DOC:-}" ]; then cp -a /usr/share/doc/texlive/$(dirname $DOC)/. $w/e/ && rm -f $w/e/*.pdf; main=$(basename $DOC); else cp bench/amsldoc/amsldoc.tex $w/e/; main=amsldoc.tex; fi
+if [ "${DOC:-}" = grail ]; then cp -a $w/bin/grail-src/. $w/e/ && rm -f $w/e/grail.pdf; main=grail.tex
+elif [ -n "${DOC:-}" ]; then cp -a /usr/share/doc/texlive/$(dirname $DOC)/. $w/e/ && rm -f $w/e/*.pdf; main=$(basename $DOC); else cp bench/amsldoc/amsldoc.tex $w/e/; main=amsldoc.tex; fi
 (cd $w/e && PHITEX_CACHE_DIR=$w/cache $bin build -j1 $main > /dev/null 2>&1)
 rm -f $w/e/${main%.tex}.pdf
 python3 -I bench/cut1-paraedit.py $w/e/$main ${EDITS:-2} > $w/edits.json
 cat > $w/cg.sh <<EOF
 #!/bin/bash
-exec valgrind --tool=callgrind --callgrind-out-file=$r/cg.%p.out --toggle-collect='*page_alone*' $bin "\$@"
+exec valgrind --tool=callgrind --callgrind-out-file=$r/cg.%p.out ${CG_EDITS:+--instr-atstart=no} $( [ "${TOGGLE:-}" = all ] || echo "--toggle-collect=${TOGGLE:-*page_alone*}" ) $bin "\$@"
 EOF
 chmod +x $w/cg.sh
 PHITEX_CACHE_DIR=$w/cache PHITEX_TIME_LIMIT_SECS=0 timeout 10000 python3 -I bench/stream-edits-tmp.py $w/cg.sh $w/e $main 1 $w/edits.json $r/e.json --view --write > $r/e.txt 2>&1

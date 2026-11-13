@@ -584,7 +584,23 @@ impl PdfState {
         };
         self.init_output();
         if rec.pre_p.as_ref() != Some(&self.p) {
-            return Err("the parameters differ".to_owned());
+            // (where they differ, said only where traces are built: the
+            // link refuses pages so on every edit)
+            if !cfg!(feature = "observe") {
+                return Err("the parameters differ".to_owned());
+            }
+            let (here, there) = (format!("{:?}", self.p), format!("{:?}", rec.pre_p));
+            let at = here
+                .bytes()
+                .zip(there.bytes())
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            let from = at.saturating_sub(40);
+            return Err(format!(
+                "the parameters differ: here {:?}, recorded {:?}",
+                here.get(from..(at + 40).min(here.len())).unwrap_or(""),
+                there.get(from..(at + 40).min(there.len())).unwrap_or("")
+            ));
         }
         let pre = match known {
             Some(k) => k.to_owned(),

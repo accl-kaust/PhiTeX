@@ -2834,6 +2834,7 @@ impl phitex_defuse::Operation for PdfPage {
     ) -> bool {
         !crate::pages::from_pieces(v, f)
     }
+    #[allow(clippy::too_many_lines)]
     fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
@@ -2877,7 +2878,7 @@ impl phitex_defuse::Operation for PdfPage {
             if let Some(id) = glyphs {
                 crate::origins::keep_pieces(v.instance(), id, &pc.pieces);
             }
-            let made = record_of(v, key, &pc, &h, &mut line, glyphs);
+            record_of(v, key, &pc, &h, &mut line, glyphs);
             // (streamed: the page told, as `Build::pages` would name it,
             // with its PDF alone, unless it was told so last)
             if self.stream.load(std::sync::atomic::Ordering::Relaxed) {
@@ -2900,9 +2901,19 @@ impl phitex_defuse::Operation for PdfPage {
                     // file begun from the colours they leave it; not its
                     // record's stacks, a walk that stops at an object the
                     // page's own writer lacks)
-                    if let Some(ops) = with_page_box(v, &pc, &h, &mut line, |bx| {
-                        color_ops(v, &pc.whats, &bx.list)
-                    }) {
+                    // (a page with none: its box not made for them)
+                    let colors = pc
+                        .whats
+                        .each(v)
+                        .any(|w| matches!(w, Whatsit::ColorStack(..)));
+                    let ops = if colors {
+                        with_page_box(v, &pc, &h, &mut line, |bx| {
+                            color_ops(v, &pc.whats, &bx.list)
+                        })
+                    } else {
+                        Some(Vec::new())
+                    };
+                    if let Some(ops) = ops {
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!("stream: page {k} colour commands {}", ops.len());
                         }
@@ -2910,19 +2921,22 @@ impl phitex_defuse::Operation for PdfPage {
                     }
                     let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
                     let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
-                    p.stream_page(k, hash, |start| {
+                    p.stream_page(k, hash, |start, last| {
                         let t0 = std::time::Instant::now();
-                        let content = made.get().map(|m| m.0.content()).unwrap_or_default();
                         let none = crate::exec::ColorStart::new();
-                        let (pdf, exact) = page_alone(
+                        let (pdf, exact, file) = match page_alone(
                             v,
                             kx,
                             &pc,
                             &units,
                             &self.objs,
-                            content,
                             start.unwrap_or(&none),
-                        )?;
+                            hash,
+                            last,
+                        )? {
+                            PageFile::Same => return Some(crate::exec::Made::Same),
+                            PageFile::File(pdf, exact, file) => (pdf, exact, file),
+                        };
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!(
                                 "stream: page {k} exact {exact}, {} bytes, {} commands kept, evaluation {}, {:.2} ms",
@@ -2931,21 +2945,36 @@ impl phitex_defuse::Operation for PdfPage {
                                 p.evaluation(),
                                 t0.elapsed().as_secs_f64() * 1e3
                             );
+                            eprintln!(
+                                "stream: memo (fonts made, found; images made, found) {:?}",
+                                phitex_pdf::StreamMemo::counts()
+                            );
+                            // (`PHITEX_STREAM_DUMP=<dir>`: each page's file kept there)
+                            if let Some(d) = std::env::var_os("PHITEX_STREAM_DUMP") {
+                                let f = std::path::Path::new(&d)
+                                    .join(format!("e{}-p{k}.pdf", p.evaluation()));
+                                let _ = std::fs::write(f, &pdf);
+                            }
                         }
                         // (made before the pages before it are known: made
                         // again from the colours they carry in, once known,
                         // on these values, `Progress::page_colors`)
                         let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
                             let (pc, units, objs) = (pc.clone(), units.clone(), self.objs.clone());
-                            let (content, epoch) = (content.to_vec(), v.epoch());
+                            let epoch = v.epoch();
                             Box::new(move |v: &Values, start: &crate::exec::ColorStart| {
                                 if v.epoch() != epoch {
                                     return None;
                                 }
-                                page_alone(v, kx, &pc, &units, &objs, &content, start)
+                                match page_alone(
+                                    v, kx, &pc, &units, &objs, start, hash, None,
+                                )? {
+                                    PageFile::File(pdf, exact, _) => Some((pdf, exact)),
+                                    PageFile::Same => None,
+                                }
                             }) as crate::exec::Remake
                         });
-                        Some((pdf, exact, remake))
+                        Some(crate::exec::Made::File(pdf, exact, remake, file))
                     });
                 }
             }
@@ -2953,6 +2982,13 @@ impl phitex_defuse::Operation for PdfPage {
 
         Ok(ValueId::UNIT)
     }
+}
+
+/// A page's file of its own ([`page_alone`]): the one told last, its key
+/// the same; or the file, whether exact, and its key.
+pub(crate) enum PageFile {
+    Same,
+    File(Vec<u8>, bool, u64),
 }
 
 /// Page `kx` (its key, as the line holds it: [`XPAGES`]) as a PDF file
@@ -2969,20 +3005,69 @@ impl phitex_defuse::Operation for PdfPage {
 /// graphics states, patterns and shadings written at the document's
 /// end): drawn all the same, the names of what it lacks left without an
 /// object (a viewer draws without them: `phitex_render`). None where the
-/// writer could not write it alone.
+/// writer could not write it alone. `ident`: the page's identity; the
+/// file whose key ([`PageFile`]) is `last` not made again.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) fn page_alone(
     v: &Values,
     kx: ValueId,
     pc: &PagePiece,
     units: &FxHashMap<i64, ValueId>,
     objs: &Mutex<StreamObjs>,
-    content: &[u8],
     colors: &crate::exec::ColorStart,
-) -> Option<(Vec<u8>, bool)> {
+    ident: u64,
+    last: Option<u64>,
+) -> Option<PageFile> {
     let mut params = PdfParams::default();
     page_params(v, &mut params, &pc.params);
-    let (need, mut named, rels) = page_names(v, pc, &params, content);
-    let found = objs.locked().closure(&need, &rels);
+    // (what of its content can name its resources: its literals' and
+    // specials' texts, its colours' and those it begins from; TeX's own
+    // text, rules, images and forms name only what the writer names for
+    // them)
+    let whats: Vec<Whatsit> = pc.whats.each(v).collect();
+    let drawn = drawn_words(v, pc, &whats, colors);
+    let (need, mut named, rels, dicts) = page_names(&whats, &params, &drawn);
+    let found = objs
+        .locked()
+        .closure(&need, &dicts, &content_names(&drawn), &rels);
+    if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+        let o = objs.locked();
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for (k, ..) in &found.cmds {
+            let kd = o.by_key.get(k).map_or(ClaimKind::Other, |c| c.kind);
+            *kinds.entry(format!("{kd:?}")).or_default() += 1;
+        }
+        eprintln!(
+            "stream: page {} closure: need {} (whatsits {}), named {}, rels {}; commands {} {kinds:?}",
+            pc.pj,
+            need.len(),
+            whats
+                .iter()
+                .filter(|w| matches!(
+                    w,
+                    Whatsit::RefObj(_) | Whatsit::RefXForm(_) | Whatsit::RefXImage(_)
+                ))
+                .count(),
+            named.len(),
+            rels.len(),
+            found.cmds.len()
+        );
+    }
+    // (the file's key: the page, the colours it begins from, the
+    // commands it takes and what they are made of; the file told last of
+    // the same key not made again, a later pass's page as the last's)
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = phitex_defuse::FxHasher::default();
+        (ident, colors, found.complete, &found.missing).hash(&mut h);
+        for c in &found.cmds {
+            (c.0, c.2, c.4).hash(&mut h);
+        }
+        h.finish()
+    };
+    if last == Some(key) {
+        return Some(PageFile::Same);
+    }
     named.extend(&need);
     named.extend(&found.named);
     let floor = named
@@ -2998,7 +3083,7 @@ pub(crate) fn page_alone(
     let cmds: CmdMemo = Mutex::default();
     {
         let mut m = cmds.locked();
-        for (key, serial, rt, cmd) in &found.cmds {
+        for (key, serial, rt, cmd, _) in &found.cmds {
             let mut e = vec![
                 v.str("cmd"),
                 v.int(*key),
@@ -3013,8 +3098,11 @@ pub(crate) fn page_alone(
     }
     line.push(kx);
     let f = EndFields {
-        date: phitex_pdf::pdf_date(0),
-        jobname: String::new(),
+        // (the date and name the page's record was written with, its
+        // writer's parameters: the record replayed, not its box shipped
+        // again, `PdfState::replay_page`)
+        date: pc.base_in.date.clone(),
+        jobname: pc.base_in.jobname.clone(),
         g2u: None,
         fonts: Vec::new(),
         seed: Vec::new(),
@@ -3037,6 +3125,7 @@ pub(crate) fn page_alone(
             .collect(),
         bare: false,
         landed: std::cell::Cell::new(true),
+        memo: objs.locked().memo.clone(),
     };
     // (a page its writer cannot write so, an object it draws with or
     // names the file has not as the writer wants it: written again with
@@ -3056,7 +3145,11 @@ pub(crate) fn page_alone(
                     found.cmds.iter().map(|c| c.2).collect::<Vec<_>>()
                 );
             }
-            return Some((pdf, !bare && found.complete && alone.landed.get()));
+            return Some(PageFile::File(
+                pdf,
+                !bare && found.complete && alone.landed.get(),
+                key,
+            ));
         }
         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
             eprintln!(
@@ -3071,23 +3164,64 @@ pub(crate) fn page_alone(
     None
 }
 
+/// The words of page `pc`'s content that can name objects of its
+/// resources ([`resource_refs`]): its literals' and specials' texts, its
+/// colour stack commands', those of the colours it begins from (`colors`)
+/// and of the colour stacks made before it, which its start writes.
+fn drawn_words(
+    v: &Values,
+    pc: &PagePiece,
+    whats: &[Whatsit],
+    colors: &crate::exec::ColorStart,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut put = |t: &[u8]| {
+        out.extend_from_slice(t);
+        out.push(b' ');
+    };
+    for w in whats {
+        match w {
+            Whatsit::Special(t)
+            | Whatsit::Literal(_, t)
+            | Whatsit::ColorStack(
+                _,
+                phitex_pdf::ColorStackCmd::Push(t) | phitex_pdf::ColorStackCmd::Set(t),
+            ) => put(t),
+            _ => {}
+        }
+    }
+    for (_, below, cur) in colors {
+        for t in below.iter().chain(std::iter::once(cur)).flatten() {
+            put(t);
+        }
+    }
+    for s in pc.base_in.stacks.map(|x| list_of(v, x)).unwrap_or_default() {
+        if let Some(&t) = list_of(v, s).get(2) {
+            put(&bytes_of(&str_of(v, t)));
+        }
+    }
+    out
+}
+
 /// The object numbers page `pc` (its parameters `params`, its content
 /// `content`) names: those it draws with (its images, forms and objects;
 /// of those its resources name, the kinds its content draws with), those
 /// it only names (its literals', links' and annotations' texts, its
-/// attributes), and its links' and annotations' read-time ones
-/// ([`crate::pdfprim::REL`]).
+/// attributes), its links' and annotations' read-time ones
+/// ([`crate::pdfprim::REL`]), and of those it draws with, the resource
+/// dictionaries of their own whose entries its content names
+/// ([`resource_refs`]).
 fn page_names(
-    v: &Values,
-    pc: &PagePiece,
+    whats: &[Whatsit],
     params: &PdfParams,
     content: &[u8],
-) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+) -> (Vec<i64>, Vec<i64>, Vec<i64>, Vec<i64>) {
     let mut need: Vec<i64> = Vec::new();
     let mut named: Vec<i64> = Vec::new();
     let mut rels: Vec<i64> = Vec::new();
-    for w in pc.whats.each(v) {
-        match &w {
+    let mut dicts: Vec<i64> = Vec::new();
+    for w in whats {
+        match w {
             Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
                 need.push(i64::try_from(*n).unwrap_or(i64::MAX));
             }
@@ -3116,8 +3250,10 @@ fn page_names(
     // (of the objects its resources name, those of the kinds its content
     // draws with: pgf names its graphics states, patterns and shadings on
     // every page, a page drawing with none of them does not need them)
+    // (and of those, a dictionary of its own: its entries the content
+    // names, [`StreamObjs::closure`])
     if let Some(t) = &params.page_resources {
-        resource_refs(t, content, &mut need, &mut named);
+        resource_refs(t, content, true, &mut need, &mut named, &mut dicts);
     }
     for t in [&params.page_attr, &params.pages_attr]
         .into_iter()
@@ -3125,7 +3261,7 @@ fn page_names(
     {
         refs_in(t, &mut named);
     }
-    (need, named, rels)
+    (need, named, rels, dicts)
 }
 
 /// The colour stack commands of a page of `list` (its whatsits `whats`)
@@ -3177,6 +3313,9 @@ struct Alone<'a> {
     missing: FxHashSet<usize>,
     /// Every command's object got TeX's number.
     landed: std::cell::Cell<bool>,
+    /// The fonts' programs and images' streams of the pages' files
+    /// ([`StreamObjs::memo`]).
+    memo: Arc<phitex_pdf::StreamMemo>,
 }
 
 impl Alone<'_> {
@@ -3203,20 +3342,33 @@ fn pad_objects(st: &mut PdfState, n: usize) {
     }
 }
 
-/// The objects resource dictionary text `t` (`\pdfpageresources`, the
-/// inside of the page's `/Resources`) names, by the kind of resource
-/// they are under (`/ExtGState`, `/Pattern`, ...): those of a kind content
-/// stream `c` draws with added to `need` (an operator that takes one:
-/// `gs`, `sh`, `scn`, `cs`, `Do`, `BDC`, `Tf`; a string's text that looks
-/// like one counts too), the others to `named`.
-fn resource_refs(t: &[u8], c: &[u8], need: &mut Vec<i64>, named: &mut Vec<i64>) {
+/// The objects resource dictionary text `t` (`\pdfpageresources`, a
+/// form's resources: the inside of its `/Resources`) names, by the kind of
+/// resource they are under (`/ExtGState`, `/Pattern`, ...): those of a
+/// kind content stream `c` draws with added to `need` (an operator that
+/// takes one: `gs`, `sh`, `scn`, `cs`, `Do`, `BDC`, `Tf`; a string's text
+/// that looks like one counts too), the others to `named`. Of a kind
+/// drawn with, an entry the content names not (`/ExtGState << /a 5 0 R >>`
+/// where it shows no `/a`) is only named; a kind's dictionary that is an
+/// object of its own (`/ExtGState 5 0 R`) is needed, and in `dicts` too:
+/// of its entries, those the content names ([`ContentNames`]). `known`:
+/// `c` is the whole content (else, empty, every kind and entry is drawn
+/// with, to be safe).
+fn resource_refs(
+    t: &[u8],
+    c: &[u8],
+    known: bool,
+    need: &mut Vec<i64>,
+    named: &mut Vec<i64>,
+    dicts: &mut Vec<i64>,
+) {
     let ops: FxHashSet<&[u8]> = c
         .split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
         .filter(|w| !w.is_empty())
         .collect();
     // (a page whose content was not kept, one not written as plain text
     // and rules: every kind drawn with, to be safe)
-    let all = c.is_empty();
+    let all = !known;
     let uses = |kind: &[u8]| -> bool {
         let has = |o: &[u8]| all || ops.contains(o);
         match kind {
@@ -3253,20 +3405,30 @@ fn resource_refs(t: &[u8], c: &[u8], need: &mut Vec<i64>, named: &mut Vec<i64>) 
             i = j;
         }
     }
-    let (mut depth, mut kind): (i32, &[u8]) = (0, b"");
+    // (the kind, at the top; the entry of the kind's dictionary, below)
+    let (mut depth, mut kind, mut entry): (i32, &[u8], &[u8]) = (0, b"", b"");
     for (k, w) in words.iter().enumerate() {
         match *w {
             b"<<" | b"[" => depth += 1,
             b">>" | b"]" => depth -= 1,
-            _ if depth == 0 && w.first() == Some(&b'/') => kind = &w[1..],
+            _ if depth == 0 && w.first() == Some(&b'/') => {
+                (kind, entry) = (&w[1..], b"");
+            }
+            _ if depth == 1 && w.first() == Some(&b'/') && words[k - 1] != b"[" => {
+                entry = &w[1..];
+            }
             b"R" if k >= 2
                 && words[k - 1].iter().all(u8::is_ascii_digit)
                 && let Some(n) = std::str::from_utf8(words[k - 2])
                     .ok()
                     .and_then(|s| s.parse::<i64>().ok()) =>
             {
-                if uses(kind) {
+                let named_here = all || depth == 0 || ops.contains(entry);
+                if uses(kind) && named_here {
                     need.push(n);
+                    if depth == 0 && known && is_kind(kind) {
+                        dicts.push(n);
+                    }
                 } else {
                     named.push(n);
                 }
@@ -3274,6 +3436,115 @@ fn resource_refs(t: &[u8], c: &[u8], need: &mut Vec<i64>, named: &mut Vec<i64>) 
             _ => {}
         }
     }
+}
+
+/// Whether `kind` is a kind of resource whose dictionary's entries a
+/// content stream names (`/ExtGState`, `/Pattern`, ...).
+fn is_kind(kind: &[u8]) -> bool {
+    matches!(
+        kind,
+        b"ExtGState"
+            | b"Shading"
+            | b"Pattern"
+            | b"ColorSpace"
+            | b"XObject"
+            | b"Properties"
+            | b"Font"
+    )
+}
+
+/// The names a content stream shows (`/a gs`: `a`), its words but for
+/// the brackets and slashes: an entry of a resource dictionary not among
+/// them is not drawn with ([`resource_refs`], [`StreamObjs::closure`]).
+type ContentNames = Arc<FxHashSet<Vec<u8>>>;
+
+/// [`ContentNames`] of content `c`.
+fn content_names(c: &[u8]) -> ContentNames {
+    Arc::new(
+        c.split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
+            .filter(|w| !w.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect(),
+    )
+}
+
+/// A dictionary's entries, each with the objects its value names
+/// ([`dict_entries`]).
+type DictEntries = Vec<(Vec<u8>, Vec<i64>)>;
+
+/// The entries of dictionary text `t` (`<< /a 5 0 R /b << /G 6 0 R >> >>`)
+/// and the objects each names: none where `t` is not one dictionary.
+fn dict_entries(t: &[u8]) -> Option<DictEntries> {
+    let t = t.trim_ascii();
+    let inner = t.strip_prefix(b"<<")?.strip_suffix(b">>")?;
+    let mut out: DictEntries = Vec::new();
+    let (mut depth, mut i, mut start) = (0i32, 0usize, None::<(Vec<u8>, usize)>);
+    let close = |out: &mut DictEntries, s: Option<(Vec<u8>, usize)>, end: usize| {
+        if let Some((key, from)) = s {
+            let mut refs = Vec::new();
+            refs_in(&inner[from..end], &mut refs);
+            out.push((key, refs));
+        }
+    };
+    while i < inner.len() {
+        let b = inner[i];
+        if inner[i..].starts_with(b"<<") {
+            depth += 1;
+            i += 2;
+        } else if inner[i..].starts_with(b">>") {
+            depth -= 1;
+            i += 2;
+        } else if b == b'[' {
+            depth += 1;
+            i += 1;
+        } else if b == b']' {
+            depth -= 1;
+            i += 1;
+        } else if b == b'(' {
+            // (a string: its parentheses balanced, its escapes kept)
+            let mut d = 0i32;
+            while i < inner.len() {
+                match inner[i] {
+                    b'\\' => i += 1,
+                    b'(' => d += 1,
+                    b')' => {
+                        d -= 1;
+                        if d == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            i += 1;
+        } else if b == b'/' && depth == 0 {
+            // (a key where a value ended: the next entry)
+            let j = inner[i + 1..]
+                .iter()
+                .position(|&c| c.is_ascii_whitespace() || b"[]<>/()".contains(&c))
+                .map_or(inner.len(), |k| i + 1 + k);
+            let is_key = match &start {
+                None => true,
+                Some((_, from)) => !inner[*from..i].trim_ascii().is_empty(),
+            };
+            if is_key {
+                close(&mut out, start.take(), i);
+                start = Some((inner[i + 1..j].to_vec(), j));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    close(&mut out, start.take(), inner.len());
+    Some(out)
 }
 
 /// The objects PDF text `t` names by reference (`12 0 R`), added to `out`.
@@ -3314,6 +3585,31 @@ pub(crate) struct Claim {
     needs: Vec<i64>,
     /// Those it only names (in a form's literals, its attributes).
     names: Vec<i64>,
+    /// What it makes: an image, a form, an object (its text), else (a
+    /// link's number, an annotation's, a reserved number).
+    kind: ClaimKind,
+    /// A form's resource dictionaries of their own among `needs`: of their
+    /// entries, those its content names (`uses`) are drawn with
+    /// ([`resource_refs`]).
+    dicts: Vec<i64>,
+    /// The names a form's content shows ([`ContentNames`]): none, not
+    /// known.
+    uses: Option<ContentNames>,
+    /// An object whose text is a dictionary: its entries and the objects
+    /// each names ([`dict_entries`]), what a resource dictionary of its
+    /// own gives a content that names one entry of it.
+    entries: Option<Arc<DictEntries>>,
+    /// The objects an object's attributes name.
+    attr: Vec<i64>,
+}
+
+/// What a read-time command makes ([`Claim::kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimKind {
+    Image,
+    Form,
+    Object,
+    Other,
 }
 
 impl Claim {
@@ -3335,20 +3631,32 @@ impl Claim {
             fill: None,
             needs: Vec::new(),
             names: Vec::new(),
+            kind: ClaimKind::Other,
+            dicts: Vec::new(),
+            uses: None,
+            entries: None,
+            attr: Vec::new(),
         };
         match xs.first().map(|&k| str_of(v, k)).as_deref() {
             Some("ximage") => {
+                c.kind = ClaimKind::Image;
                 c.body = true;
                 refs_in(&text(4), &mut c.names);
             }
             Some("xform") => {
+                c.kind = ClaimKind::Form;
                 c.body = true;
                 refs_in(&text(1), &mut c.names);
-                refs_in(&text(2), &mut c.needs);
+                // (its content's own words: those of its box's literals,
+                // specials and colours, where the box is read; the rest of
+                // its content (its text, rules, images and forms) names no
+                // object of its resources' text)
                 let mut side = Side::default();
+                let mut words: Option<Vec<u8>> = None;
                 if let Some(&b) = xs.get(3)
                     && crate::nodes::decode(v, b, &mut side).is_some()
                 {
+                    let words = words.get_or_insert_with(Vec::new);
                     for w in side.whats {
                         let ys = list_of(v, w);
                         match ys.first().map(|&k| str_of(v, k)).as_deref() {
@@ -3359,14 +3667,29 @@ impl Claim {
                                 for &y in &ys {
                                     if let Some(t) = v.with_str(y, crate::pdfprim::bytes) {
                                         refs_in(&t, &mut c.names);
+                                        words.extend_from_slice(&t);
+                                        words.push(b' ');
                                     }
                                 }
                             }
                         }
                     }
                 }
+                // (of its resources, those its content draws with, as a
+                // page's: [`resource_refs`])
+                let lits = words.as_deref().unwrap_or_default();
+                resource_refs(
+                    &text(2),
+                    lits,
+                    words.is_some(),
+                    &mut c.needs,
+                    &mut c.names,
+                    &mut c.dicts,
+                );
+                c.uses = words.as_deref().map(content_names);
             }
             Some("obj") => {
+                c.kind = ClaimKind::Object;
                 let n = int(1);
                 if n > 0 {
                     c.fill = Some(n);
@@ -3375,9 +3698,12 @@ impl Claim {
                 }
                 // (a `file` object's text is its file's bytes: not read)
                 if int(4) == 0 {
-                    refs_in(&text(5), &mut c.needs);
+                    let t = text(5);
+                    refs_in(&t, &mut c.needs);
+                    c.entries = dict_entries(&t).map(Arc::new);
                 }
-                refs_in(&text(3), &mut c.needs);
+                refs_in(&text(3), &mut c.attr);
+                c.needs.extend(&c.attr);
             }
             _ => {}
         }
@@ -3398,12 +3724,19 @@ pub(crate) struct StreamObjs {
     by_key: FxHashMap<i64, Claim>,
     by_num: FxHashMap<i64, Vec<i64>>,
     fills: FxHashMap<i64, Vec<i64>>,
+    /// What the pages' files keep across files: their fonts' programs,
+    /// their images' streams ([`phitex_pdf::StreamMemo`]).
+    memo: Arc<phitex_pdf::StreamMemo>,
 }
+
+/// A command a page drawn alone takes ([`Found::cmds`]).
+type FoundCmd = (i64, u64, Option<i64>, Arc<Cmd>, u64);
 
 /// What a page drawn alone takes ([`StreamObjs::closure`]).
 struct Found {
-    /// The commands, in their objects' order: key, serial, number, step.
-    cmds: Vec<(i64, u64, Option<i64>, Arc<Cmd>)>,
+    /// The commands, in their objects' order: key, serial, number, step,
+    /// and what it is made of ([`Claim::made_of`]).
+    cmds: Vec<FoundCmd>,
     /// Every object it draws with was found complete.
     complete: bool,
     /// The numbers the commands taken name.
@@ -3474,8 +3807,14 @@ impl StreamObjs {
     }
 
     /// The commands of the objects `need` names, followed through what
-    /// theirs need in turn, and those of the link numbers `rels`.
-    fn closure(&self, need: &[i64], rels: &[i64]) -> Found {
+    /// theirs need in turn, and those of the link numbers `rels`. Of
+    /// those, a resource dictionary of its own (`dicts`, a page's; a
+    /// form's, [`Claim::dicts`]) is followed only through its entries the
+    /// content drawing with it names (`names`; a form's [`Claim::uses`]):
+    /// pgf's graphics states' dictionary names every soft mask of the
+    /// document, a page drawing with one takes that one's form.
+    #[allow(clippy::too_many_lines)]
+    fn closure(&self, need: &[i64], dicts: &[i64], names: &ContentNames, rels: &[i64]) -> Found {
         let mut out = Found {
             cmds: Vec::new(),
             complete: true,
@@ -3484,28 +3823,62 @@ impl StreamObjs {
         };
         let mut taken: FxHashSet<i64> = FxHashSet::default();
         let mut order: Vec<((i64, u8), i64)> = Vec::new();
-        let mut todo: Vec<i64> = need.to_vec();
-        let mut seen: FxHashSet<i64> = FxHashSet::default();
-        while let Some(n) = todo.pop() {
-            if !seen.insert(n) {
-                continue;
+        // (an object to follow, through the entries its drawer names,
+        // or whole)
+        let mut todo: Vec<(i64, Option<ContentNames>)> = need
+            .iter()
+            .map(|&n| (n, dicts.contains(&n).then(|| names.clone())))
+            .collect();
+        // (each object followed: whole, or through the entries named so
+        // far; found complete or not, once)
+        let mut followed: FxHashMap<i64, Option<FxHashSet<Vec<u8>>>> = FxHashMap::default();
+        while let Some((n, by)) = todo.pop() {
+            let first = !followed.contains_key(&n);
+            // (the entries to follow now: none new, nothing to do)
+            let new_keys: Option<Vec<Vec<u8>>> = match (followed.get(&n), &by) {
+                (Some(None), _) => continue,
+                (_, None) => None,
+                (Some(Some(done)), Some(by)) => {
+                    let k: Vec<Vec<u8>> =
+                        by.iter().filter(|k| !done.contains(*k)).cloned().collect();
+                    if k.is_empty() {
+                        continue;
+                    }
+                    Some(k)
+                }
+                (None, Some(by)) => Some(by.iter().cloned().collect()),
+            };
+            match &new_keys {
+                None => {
+                    followed.insert(n, None);
+                }
+                Some(k) => {
+                    if let Some(done) = followed
+                        .entry(n)
+                        .or_insert_with(|| Some(FxHashSet::default()))
+                    {
+                        done.extend(k.iter().cloned());
+                    }
+                }
             }
             let Some((k, c)) = self.one(self.by_num.get(&n)) else {
-                if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
-                    eprintln!(
-                        "stream: object {n}: {} commands claim it",
-                        self.by_num.get(&n).map_or(0, Vec::len)
-                    );
+                if first {
+                    if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                        eprintln!(
+                            "stream: object {n}: {} commands claim it",
+                            self.by_num.get(&n).map_or(0, Vec::len)
+                        );
+                    }
+                    out.complete = false;
+                    out.missing.push(n);
                 }
-                out.complete = false;
-                out.missing.push(n);
                 continue;
             };
             let mut take = vec![(k, c, 0u8)];
             if !c.body {
                 if let Some((fk, f)) = self.one(self.fills.get(&n)) {
                     take.push((fk, f, 1));
-                } else {
+                } else if first {
                     out.complete = false;
                     out.missing.push(n);
                 }
@@ -3513,9 +3886,25 @@ impl StreamObjs {
             for (k, c, at) in take {
                 if taken.insert(k) {
                     order.push(((n, at), k));
-                    todo.extend(&c.needs);
+                    // (every object its text names numbered past, drawn
+                    // with or not: its own objects not given their numbers)
                     out.named.extend(&c.needs);
                     out.named.extend(&c.names);
+                }
+                // (a dictionary followed through the entries named)
+                if let (Some(keys), Some(es)) = (&new_keys, &c.entries) {
+                    for (key, refs) in es.iter() {
+                        if keys.contains(key) {
+                            todo.extend(refs.iter().map(|&r| (r, None)));
+                        }
+                    }
+                    todo.extend(c.attr.iter().map(|&r| (r, None)));
+                } else {
+                    let uses = c.uses.clone();
+                    todo.extend(c.needs.iter().map(|&r| {
+                        let by = uses.as_ref().filter(|_| c.dicts.contains(&r)).cloned();
+                        (r, by)
+                    }));
                 }
             }
         }
@@ -3536,6 +3925,7 @@ impl StreamObjs {
                     c.serial,
                     c.rt.filter(|_| c.fill.is_none()),
                     c.cmd.clone(),
+                    c.made_of,
                 ));
             }
         }
@@ -5471,6 +5861,7 @@ fn link(
     let mut st = fresh(v, f.date.clone(), &f.jobname, f.g2u);
     if let Some(a) = alone {
         base_tables(v, a.base, a.fonts, &mut st);
+        st.stream_with(a.memo.clone());
         st.start_page_colors(a.colors);
         st.hold_writes();
     }
@@ -5681,7 +6072,9 @@ fn link(
         }
         t_try += tt.elapsed();
         let tt = std::time::Instant::now();
-        if i > start && (i - start).is_multiple_of(snap_every) {
+        // (a link that keeps no memo, a page's file of its own, takes no
+        // snapshot: none goes on from it)
+        if memo && i > start && (i - start).is_multiple_of(snap_every) {
             // (the writer's digests' sums brought up to date first: a
             // later link comparing a writer with this snapshot, or going
             // on from it, hashes only what changed after it, not every
@@ -5757,8 +6150,22 @@ fn link(
             let ts = std::time::Instant::now();
             let res = if moved {
                 Err("an object numbered otherwise at read time".to_owned())
-            } else if alone.is_some_and(|a| a.bare || !a.missing.is_empty() || !a.colors.is_empty())
-            {
+            } else if alone.is_some_and(|a| {
+                a.bare
+                    || (!a.missing.is_empty()
+                        && pc.whats.each(v).any(|w| match w {
+                            Whatsit::RefXImage(n) | Whatsit::RefXForm(n) => a.missing.contains(&n),
+                            _ => false,
+                        }))
+            }) {
+                // (an image or form the page shows that the file lacks:
+                // shipped without it, below; an object it only names, a
+                // graphics state filled at the document's end, leaves its
+                // bytes as the record has them)
+                // (a page alone whose colours begin from those the pages
+                // before it left: replayed where the record began from
+                // them, or from none and pops none of them, as the
+                // build's link places it, `PdfState::replay_page`)
                 Err("an image or form the file lacks".to_owned())
             } else if tex.len() != aliases.len() {
                 Err("an object the line does not number".to_owned())
@@ -5767,6 +6174,16 @@ fn link(
                 st.replay_page(rec, &src, &fmap, &at, None, &mut ps)
             };
             t_step[2] += ts.elapsed();
+            if alone.is_some() && crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                eprintln!(
+                    "stream: page {} {}",
+                    pc.pj,
+                    match &res {
+                        Ok(_) => "replayed".to_owned(),
+                        Err(e) => format!("shipped again: {e}"),
+                    }
+                );
+            }
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
@@ -5977,9 +6394,13 @@ fn link(
         bytes.push(c.clone());
     }
     let t_bytes = t_after.elapsed();
-    st.refresh_digests();
+    // (the end's snapshot, its digests' sums brought up to date: kept for
+    // the next link, a link that keeps none takes neither)
+    if memo {
+        st.refresh_digests();
+    }
     let t_digests = t_after.elapsed();
-    let end = LinkSnap {
+    let end = memo.then(|| LinkSnap {
         at: xpages.len(),
         digests: None,
         st: st.clone(),
@@ -5990,9 +6411,9 @@ fn link(
         errors: errors.len(),
         placed,
         shipped,
-    };
+    });
     let t_end = t_after.elapsed();
-    if memo {
+    if let Some(end) = end {
         *link_memo().locked() = Some(LinkMemo {
             head,
             ids,
@@ -6052,17 +6473,21 @@ fn link(
     // edit that changes no font, page count or table writes them once);
     // then the chunks placed by their lengths' prefix sums and the
     // cross-reference section
-    let key = st.digest();
+    // (a page's file of its own, [`page_alone`], neither keeps one nor
+    // finds one kept: its state is its own, and its digest, every object
+    // formatted, would cost the page more than its tail)
+    let key = alone.is_none().then(|| st.digest());
     let t1 = std::time::Instant::now();
-    let kept = tails().locked().get(&key).cloned();
+    let kept = key.and_then(|k| tails().locked().get(&k).cloned());
     let tail = match kept {
         Some(t) => Ok(Some(t)),
         None => st.tail().map(|t| {
             let t = t.map(Arc::new);
-            // (a page's file of its own, [`page_alone`], keeps none: one
-            // a page would be kept for every page streamed)
-            if memo && let Some(t) = &t {
-                tails().locked().insert(key, t.clone());
+            if memo
+                && let Some(t) = &t
+                && let Some(k) = key
+            {
+                tails().locked().insert(k, t.clone());
             }
             t
         }),
@@ -6133,8 +6558,8 @@ mod tests {
     fn resources_needed_by_the_kinds_drawn_with() {
         let res = b"/ExtGState 5 0 R /Pattern 6 0 R /ColorSpace << /pgfprgb [/Pattern /DeviceRGB] /X 9 0 R >> /Shading << /S1 7 0 R >> /Foo 8 0 R";
         let run = |c: &[u8]| {
-            let (mut need, mut named) = (Vec::new(), Vec::new());
-            resource_refs(res, c, &mut need, &mut named);
+            let (mut need, mut named, mut dicts) = (Vec::new(), Vec::new(), Vec::new());
+            resource_refs(res, c, !c.is_empty(), &mut need, &mut named, &mut dicts);
             need.sort_unstable();
             named.sort_unstable();
             (need, named)
@@ -6144,8 +6569,14 @@ mod tests {
             (vec![5, 8], vec![6, 7, 9])
         );
         assert_eq!(run(b"0 0 m 1 1 l S"), (vec![8], vec![5, 6, 7, 9]));
+        // (of a kind drawn with, the entries the content names: no `/S1`,
+        // no `/X`)
         assert_eq!(
             run(b"/Pattern cs /P1 scn 0 0 1 1 re f"),
+            (vec![6, 8], vec![5, 7, 9])
+        );
+        assert_eq!(
+            run(b"/X cs /S1 scn 0 0 1 1 re f"),
             (vec![6, 7, 8, 9], vec![5])
         );
         assert_eq!(run(b"/S1 sh /G gs"), (vec![5, 7, 8], vec![6, 9]));

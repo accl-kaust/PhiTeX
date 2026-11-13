@@ -51,6 +51,9 @@ def main():
     ev, w = next_build()
     res = {"cold_s": round(w, 3), "cold_wall_ms": (ev or {}).get("wall_ms"), "edits": []}
     print(f"cold: {w:.3f} s", flush=True)
+    # (CG_EDITS=1: callgrind started without instrumenting, turned on here: the edits alone)
+    if os.environ.get("CG_EDITS"):
+        subprocess.run(["callgrind_control", "-i", "on"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     steps = []
     for e in edits:
         f, a, b = e[0], e[1], e[2]

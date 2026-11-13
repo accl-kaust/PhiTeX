@@ -652,12 +652,53 @@ impl PdfState {
         self.objs[l].link = 0;
     }
 
+    /// The objects up to `last` a page's file of its own has, in runs of
+    /// consecutive numbers (first, count), object 0 the first: its free
+    /// numbers, thousands where the page names objects the build numbered
+    /// late, left out of its cross-reference section.
+    fn alone_runs(&self, last: usize) -> Vec<(usize, usize)> {
+        let mut runs = vec![(0, 1)];
+        let mut k = 1;
+        while k <= last {
+            if self.is_written(k) {
+                let first = k;
+                while k <= last && self.is_written(k) {
+                    k += 1;
+                }
+                runs.push((first, k - first));
+            } else {
+                k += 1;
+            }
+        }
+        runs
+    }
+
     /// "Output the `obj_tab`".
     fn output_obj_tab(&mut self) {
         self.link_free_objects();
         self.save_offset = self.offset();
         let obj_ptr = self.obj_ptr;
         self.print_ln(b"xref");
+        // (a page's file of its own: its objects alone, in runs, as its
+        // cross-reference stream lists them, [`PdfState::alone_runs`])
+        if self.stream_memo.is_some() {
+            let runs = self.alone_runs(obj_ptr);
+            for (first, n) in runs {
+                self.print_int(int(first));
+                self.pdf_out(b' ');
+                self.print_int_ln(int(n));
+                for k in first..first + n {
+                    if k == 0 {
+                        self.print_fw_int(0, 10);
+                        self.print_ln(b" 65535 f ");
+                    } else {
+                        self.print_fw_int(self.objs[k].offset, 10);
+                        self.print_ln(b" 00000 n ");
+                    }
+                }
+            }
+            return;
+        }
         self.print(b"0 ");
         self.print_int_ln(int(obj_ptr) + 1);
         self.print_fw_int(int(self.objs[0].link), 10);
@@ -689,10 +730,31 @@ impl PdfState {
         };
         self.link_free_objects();
         let obj_ptr = self.obj_ptr;
+        // (a page's file of its own, `crate::stream`: the objects it has
+        // alone, its free ones left out, in runs: numbered past every
+        // object the build numbered before its page, it has thousands of
+        // numbers and a few objects)
+        let runs = self
+            .stream_memo
+            .is_some()
+            .then(|| self.alone_runs(self.sys_obj_ptr()));
         self.print_ln(b"/Type /XRef");
-        self.print(b"/Index [0 ");
-        self.print_int(int(obj_ptr) + 1);
-        self.print_ln(b"]");
+        if let Some(runs) = &runs {
+            self.print(b"/Index [");
+            for (i, &(first, n)) in runs.iter().enumerate() {
+                if i > 0 {
+                    self.pdf_out(b' ');
+                }
+                self.print_int(int(first));
+                self.pdf_out(b' ');
+                self.print_int(int(n));
+            }
+            self.print_ln(b"]");
+        } else {
+            self.print(b"/Index [0 ");
+            self.print_int(int(obj_ptr) + 1);
+            self.print_ln(b"]");
+        }
         self.int_entry_ln(b"Size", int(obj_ptr) + 1);
         self.print(b"/W [1 ");
         self.print_int(int(w));
@@ -712,9 +774,18 @@ impl PdfState {
             b[8 - w..].to_vec()
         };
         let t_head = t0.elapsed();
-        for k in 0..=self.sys_obj_ptr() {
+        let rows: Vec<usize> = match &runs {
+            Some(runs) => runs.iter().flat_map(|&(a, n)| a..a + n).collect(),
+            None => (0..=self.sys_obj_ptr()).collect(),
+        };
+        for k in rows {
             let o = self.objs[k];
-            if !self.is_written(k) {
+            if k == 0 && runs.is_some() {
+                // (no free object listed: the list's head ends it)
+                self.pdf_out(0);
+                self.print(&bytes(0));
+                self.pdf_out(255);
+            } else if !self.is_written(k) {
                 self.pdf_out(0);
                 self.print(&bytes(int(o.link)));
                 self.pdf_out(255);
@@ -730,7 +801,14 @@ impl PdfState {
         }
         let t_rows = t0.elapsed();
         let n = self.zip.as_ref().map_or(0, Vec::len);
-        self.end_stream_with(crate::compress_resumed);
+        // (resumed from the last link's where its beginning is that
+        // one's; a page's file of its own compresses its own, the link's
+        // state left to the next link)
+        if self.stream_memo.is_some() {
+            self.end_stream_with(crate::compress_xref_alone);
+        } else {
+            self.end_stream_with(crate::compress_resumed);
+        }
         if crate::phase::on() {
             eprintln!(
                 "pdf xref stream: head {t_head:?}, rows {:?}, compressed {:?} ({n} bytes, level {})",

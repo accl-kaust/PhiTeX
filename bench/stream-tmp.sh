@@ -6,6 +6,7 @@
 # Documents: a small article (4 pages), amsldoc (44), and DOCS (TeX Live manuals by their
 # directory/main under /usr/share/doc/texlive: the CI image, ACCL_IMAGE=phitex-ci-2026-09-25).
 set -u
+echo "governor $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown), $(nproc) cpus, load $(cut -d' ' -f1-3 /proc/loadavg)"
 export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
 build() { ( cd "$2" && cargo build -q --release -p phitex-cli > "$r/build-$1.txt" 2>&1 ) || { echo "BUILD FAILED $1"; tail "$r/build-$1.txt"; return 1; }; mkdir -p $w/bins/$1 && cp "$2/target/release/phitex" $w/bins/$1/; }
 rm -rf $w/control && mkdir -p $w/control && git archive "$CONTROL" | tar -x -C $w/control; [ -d upstream ] && ln -s $PWD/upstream $w/control/upstream
@@ -28,8 +29,10 @@ for i, p in enumerate(paras):
 out.append("\\end{document}")
 open(sys.argv[1], "w").write("\n".join(out) + "\n")
 EOF
-list="small/small.tex amsldoc/amsldoc.tex"
+list=${BASE-small/small.tex amsldoc/amsldoc.tex}
 for d in ${DOCS:-}; do
+  # (grail: the Grail paper, XeLaTeX, ACCL_STORE_IN=code/flinner/grail-src)
+  if [ $d = grail ]; then mkdir -p $w/docs/grail && cp -a $w/bin/grail-src/. $w/docs/grail/ && rm -f $w/docs/grail/grail.pdf; list="$list grail/grail.tex"; continue; fi
   n=$(basename $(dirname $d)); mkdir -p $w/docs/$n && cp -a /usr/share/doc/texlive/$(dirname $d)/. $w/docs/$n/ && rm -f $w/docs/$n/*.pdf
   list="$list $n/$(basename $d)"
 done

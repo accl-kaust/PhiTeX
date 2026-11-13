@@ -2751,6 +2751,132 @@ mod tests {
         }
     }
 
+    /// A page drawing with one entry of a resource dictionary of its own
+    /// (pgf's graphics states, every soft mask of the document in one
+    /// object) takes the objects that entry names, not the others': each
+    /// page's file holds the one form its content shows of the two the
+    /// dictionary names, exact, drawn as the build's file draws it. At one
+    /// thread and two.
+    #[test]
+    fn a_page_takes_the_entries_it_draws_with() {
+        let mut t = PDF_HEAD.to_owned();
+        t.push_str("\\setbox0\\hbox{\\vrule width 20pt height 10pt}\\immediate\\pdfxform 0 \\edef\\fa{\\the\\pdflastxform} \\setbox0\\hbox{\\vrule width 7pt height 25pt}\\immediate\\pdfxform 0 \\edef\\fb{\\the\\pdflastxform} \\immediate\\pdfobj{<< /Fa \\fa\\space 0 R /Fb \\fb\\space 0 R >>}\\edef\\x{\\the\\pdflastobj} \\edef\\r{/XObject \\x\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in ["/Fa", "/Fb"] {
+            t.push_str(&format!(
+                "\\hbox{{\\pdfliteral{{q 1 0 0 1 0 0 cm {p} Do Q}}\\vrule width 1pt height 30pt}}\\penalty-10000 "
+            ));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
+            let told = exact_told(&ev);
+            assert_eq!(
+                told.len(),
+                2,
+                "threads {threads}: every page streamed: {ev:?}"
+            );
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "threads {threads}: page {k} exact");
+                let forms = String::from_utf8_lossy(pdf)
+                    .matches("/Subtype /Form")
+                    .count();
+                assert_eq!(
+                    forms, 1,
+                    "threads {threads}: page {k}'s file holds its one form"
+                );
+                assert_eq!(
+                    pixels(pdf, 0, 2.0),
+                    pixels(&out, *k, 2.0),
+                    "threads {threads}: page {k} drawn as the build's"
+                );
+            }
+        }
+    }
+
+    /// The glyphs a streamed page's file embeds of a Type 1 font
+    /// (its descriptor's `/CharSet`).
+    fn charset(pdf: &[u8]) -> std::collections::BTreeSet<String> {
+        let s = String::from_utf8_lossy(pdf);
+        let at = s.find("/CharSet (").expect("a subset's /CharSet") + 10;
+        let end = at + s[at..].find(')').unwrap();
+        s[at..end]
+            .split('/')
+            .filter(|g| !g.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The files of the pages streamed embed each Type 1 font with every
+    /// glyph the pages streamed before them used of it, the font's
+    /// program made once for those (not each page's own subset made and
+    /// compressed again): a page's file holds the glyphs of the pages
+    /// before it, and an edit's page those of every page streamed; each
+    /// drawn exactly as the build's file draws the page. At one thread.
+    #[test]
+    fn streamed_pages_embed_the_glyphs_seen_so_far() {
+        let doc = |last: &str| {
+            format!(
+                "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 \\pdfcompresslevel=9 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={{\\shipout\\box255}} \\pdfmapline{{cmr10 CMR10 <cmr10.pfb}}\\font\\r=cmr10 \\r \\hbox{{abc}}\\penalty-10000 \\hbox{{xyz}}\\penalty-10000 \\hbox{{{last}}}\\penalty-10000 \\end\n"
+            )
+        };
+        let host: Arc<dyn Host> = Arc::new(Files(HashMap::from([
+            (
+                "cmr10.tfm".to_owned(),
+                include_bytes!("../../../fonts/tfm/tests/fixtures/cmr10.tfm").to_vec(),
+            ),
+            (
+                "cmr10.pfb".to_owned(),
+                include_bytes!("../../../output/pdf/tests/fixtures/cmr10.pfb").to_vec(),
+            ),
+        ])));
+        let (mut d, _, files) = streaming("pdftex", &doc("abq"), host, 1);
+        let glyphs = |s: &str| -> std::collections::BTreeSet<String> {
+            s.chars().map(|c| c.to_string()).collect()
+        };
+        let check = |d: &Document, files: &Streamed, what: &str| {
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            let files = lock(files).clone();
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "{what}: page {k} streamed exact");
+                assert_eq!(
+                    pixels(pdf, 0, 4.0),
+                    pixels(&out, *k, 4.0),
+                    "{what}: page {k} drawn"
+                );
+            }
+            files
+        };
+        d.step();
+        let files_now = check(&d, &files, "clean");
+        assert_eq!(files_now.len(), 3, "every page");
+        let seen = [glyphs("abc"), glyphs("abcxyz"), glyphs("abcxyzq")];
+        for (k, want) in seen.iter().enumerate() {
+            let has = charset(&files_now[&k].0);
+            assert!(
+                want.is_subset(&has),
+                "page {k}'s file embeds the glyphs of the pages before it: {has:?}"
+            );
+        }
+        lock(&files).clear();
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: doc("abw"),
+        });
+        d.step();
+        let files_now = check(&d, &files, "edit");
+        assert_eq!(
+            files_now.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "the page it changed"
+        );
+        let has = charset(&files_now[&2].0);
+        assert!(
+            glyphs("abcxyzqw").is_subset(&has),
+            "an edit's page embeds every glyph streamed: {has:?}"
+        );
+    }
+
     /// The PDF is the same whether the builds stream their pages or not:
     /// a clean build and its edits, streamed (every page an edit changed
     /// told), against the same builds of a session nothing listens to.
@@ -2806,6 +2932,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The bytes of the first `CIDFontType0C` font program in `pdf` (its
+    /// dictionary to its stream's end, as written).
+    fn cff_program(pdf: &[u8]) -> Vec<u8> {
+        let at = pdf
+            .windows(13)
+            .position(|w| w == b"CIDFontType0C")
+            .expect("an embedded CFF font");
+        let end = at
+            + pdf[at..]
+                .windows(9)
+                .position(|w| w == b"endstream")
+                .expect("its stream");
+        pdf[at..end].to_vec()
+    }
+
+    /// A XeTeX build's pages' files embed each OpenType font with every
+    /// glyph the pages streamed before them used, the same program from
+    /// page to page while no page brings another (a page showing glyphs
+    /// the pages before it showed embeds the program the page before it
+    /// did, not a subset of its own); each drawn as the build's file draws
+    /// the page; an edit streams the page it changes. At one thread.
+    #[test]
+    fn xetex_pages_embed_the_glyphs_seen_so_far() {
+        let out = std::process::Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .expect("kpsewhich (TeX Live) on the test machine");
+        let dist = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let rel = "fonts/opentype/public/lm/lmroman10-regular.otf";
+        let data: Arc<[u8]> = Arc::from(std::fs::read(dist.join(rel)).expect("Latin Modern Roman"));
+        let abs = dist.join(rel).to_string_lossy().into_owned();
+        let mut e = phitex_otf::index::FaceEntry::read(&abs, data, 0);
+        e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+        let index = phitex_tex::FontIndex { entries: vec![e] }.relative_to(&dist.to_string_lossy());
+        let doc = |last: &str| {
+            format!(
+                "\\catcode`\\{{=1 \\catcode`\\}}=2 \\vsize=100pt \\hsize=100pt \\output={{\\shipout\\box255}} \\font\\x=\"Latin Modern Roman\" at 10pt \\x \\hbox{{abc}}\\penalty-10000 \\hbox{{xyz}}\\penalty-10000 \\hbox{{{last}}}\\penalty-10000 \\end\n"
+            )
+        };
+        let host: Arc<dyn Host> = Arc::new(XeHost {
+            dist: dist.clone(),
+            index: Some(index.to_bytes()),
+            read_face: Arc::default(),
+        });
+        let (mut d, _, files) = streaming("xetex", &doc("abz"), host, 1);
+        let check = |d: &Document, files: &Streamed, what: &str| {
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            let files = lock(files).clone();
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "{what}: page {k} streamed exact");
+                assert_eq!(
+                    pixels(pdf, 0, 4.0),
+                    pixels(&out, *k, 4.0),
+                    "{what}: page {k} drawn"
+                );
+            }
+            files
+        };
+        d.step();
+        let f = check(&d, &files, "clean");
+        assert_eq!(f.len(), 3, "every page");
+        assert_eq!(
+            cff_program(&f[&1].0),
+            cff_program(&f[&2].0),
+            "the third page embeds the program the second did: every glyph seen"
+        );
+        lock(&files).clear();
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: doc("abq"),
+        });
+        d.step();
+        let f = check(&d, &files, "edit");
+        assert_eq!(
+            f.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "an edit streams the page it changed"
+        );
     }
 
     /// A XeTeX build streams its pages too: each page's file xdvipdfmx's

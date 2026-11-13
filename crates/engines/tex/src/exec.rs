@@ -317,13 +317,27 @@ struct Colors {
     told: std::collections::BTreeMap<u64, Told>,
 }
 
-/// A page told ([`Colors::told`]): its identity, whether exact, and the
-/// colours its file began from.
+/// A page told ([`Colors::told`]): its identity, whether exact, the
+/// colours its file began from (whether known: [`Progress::page_colors`])
+/// and its file's key ([`Made::File`]).
 #[derive(Debug, PartialEq)]
 struct Told {
     hash: u64,
     exact: bool,
     start: ColorStart,
+    known: bool,
+    file: u64,
+}
+
+/// What a page's file made gives [`Progress::stream_page`]: the file as
+/// it was told last (its key the same: nothing to tell), or a file, the
+/// objects it draws with all in it, its making again from the colours
+/// carried in once they are known (where they are not yet), and its key:
+/// what the file is made of (the page, the colours it begins from, the
+/// commands of the objects it takes), the same key the same file.
+pub(crate) enum Made {
+    Same,
+    File(Vec<u8>, bool, Option<Remake>, u64),
 }
 
 impl Colors {
@@ -520,13 +534,13 @@ impl Progress {
         &self,
         k: u64,
         hash: u64,
-        make: impl FnOnce(Option<&ColorStart>) -> Option<(Vec<u8>, bool, Option<Remake>)>,
+        make: impl FnOnce(Option<&ColorStart>, Option<u64>) -> Option<Made>,
     ) {
         let Some(h) = self.on_stream.get() else {
             return;
         };
         let order = self.order();
-        let start = {
+        let (start, last) = {
             let mut c = self
                 .colors
                 .lock()
@@ -540,14 +554,26 @@ impl Progress {
             {
                 return;
             }
-            start
+            // (the key of the file told last of the page, made from the
+            // colours it begins from now, known: a file of the same key
+            // is that file, not told again)
+            let last = start.as_ref().and_then(|st| {
+                c.told
+                    .get(&k)
+                    .filter(|t| t.known && t.hash == hash && t.start == *st)
+                    .map(|t| t.file)
+            });
+            (start, last)
         };
-        let Some((pdf, objects, remake)) = make(start.as_ref()) else {
-            self.colors
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .told
-                .remove(&k);
+        let got = make(start.as_ref(), last);
+        let Some(Made::File(pdf, objects, remake, file)) = got else {
+            if got.is_none() {
+                self.colors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .told
+                    .remove(&k);
+            }
             return;
         };
         let e = self.evaluation();
@@ -577,7 +603,9 @@ impl Progress {
                 Told {
                     hash,
                     exact,
+                    known: start.is_some(),
                     start: start.unwrap_or_default(),
+                    file,
                 },
             );
         }
@@ -634,10 +662,13 @@ impl Progress {
             return;
         };
         for (page, start, w) in known {
+            // (no key: made again, a file other than any made from it)
             let told = |exact: bool| Told {
                 hash: w.hash,
                 exact,
                 start: start.clone(),
+                known: false,
+                file: 0,
             };
             if start.is_empty() {
                 if w.objects {

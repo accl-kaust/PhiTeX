@@ -1683,8 +1683,19 @@ pub(crate) struct XdvPage {
 
 /// The session a XeTeX page's file of its own begins from
 /// ([`XdvPage`]), by what it is made of: the values' table, `\mag`, the
-/// preamble's comment, the PDF's name and date.
-type AloneStart = Mutex<Option<((u64, i32, String, String, i64), Arc<Mutex<Session>>)>>;
+/// preamble's comment, the PDF's name and date; and the characters the
+/// pages' files so far used of each font (`Session::widen_used`).
+type AloneStart = Mutex<
+    Option<(
+        (u64, i32, String, String, i64),
+        Arc<Mutex<Session>>,
+        Arc<Mutex<UsedSeen>>,
+    )>,
+>;
+
+/// The characters the pages' files used of each font
+/// (`phitex_xdvipdfmx::api::Session::widen_used`).
+type UsedSeen = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
 
 fn alone_start() -> &'static AloneStart {
     static S: std::sync::OnceLock<AloneStart> = std::sync::OnceLock::new();
@@ -1871,6 +1882,7 @@ impl phitex_defuse::Operation for XdvPage {
     ) -> bool {
         false
     }
+    #[allow(clippy::too_many_lines)]
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let v = cx.values();
@@ -1941,10 +1953,22 @@ impl phitex_defuse::Operation for XdvPage {
                 .collect(),
         );
         let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
-        progress.stream_page(k, hash, |start| {
+        progress.stream_page(k, hash, |start, last| {
+            let t0 = std::time::Instant::now();
             // (the document's named objects the pages before it made, made
             // again first; the colours they leave it pushed)
             let before = progress.doc_specials_before(k);
+            // (the file's key: the page, those and the colours; the file
+            // told last of the same key not made again)
+            let file = {
+                use std::hash::{Hash, Hasher};
+                let mut h = phitex_defuse::FxHasher::default();
+                (hash, &before, start).hash(&mut h);
+                h.finish()
+            };
+            if last == Some(file) {
+                return Some(crate::exec::Made::Same);
+            }
             let mut all: Vec<Op> = before
                 .iter()
                 .flatten()
@@ -1956,8 +1980,22 @@ impl phitex_defuse::Operation for XdvPage {
             // (exact where both are known; a colour carried in and not
             // known: drawn from none, told exact later only if none is)
             let exact = xdv_alone_exact(&ops) && before.is_some();
-            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") && !exact {
-                trace_not_exact(k, start, &ops);
+            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                if !exact {
+                    trace_not_exact(k, start, &ops);
+                }
+                eprintln!(
+                    "stream: page {k} exact {exact}, {} bytes, 0 commands kept, evaluation {}, {:.2} ms",
+                    pdf.len(),
+                    progress.evaluation(),
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+                // (`PHITEX_STREAM_DUMP=<dir>`: each page's file kept there)
+                if let Some(d) = std::env::var_os("PHITEX_STREAM_DUMP") {
+                    let f = std::path::Path::new(&d)
+                        .join(format!("e{}-p{k}.pdf", progress.evaluation()));
+                    let _ = std::fs::write(f, &pdf);
+                }
             }
             // (made before the pages before it are known: made again from
             // what they leave it, once known, `Progress::page_colors`)
@@ -1973,7 +2011,7 @@ impl phitex_defuse::Operation for XdvPage {
                     Some((pdf, xdv_alone_exact(&ops)))
                 }) as crate::exec::Remake
             });
-            Some((pdf, exact, remake))
+            Some(crate::exec::Made::File(pdf, exact, remake, file))
         });
         Ok(ValueId::UNIT)
     }
@@ -2000,10 +2038,10 @@ fn trace_not_exact(k: u64, start: Option<&crate::exec::ColorStart>, ops: &[Op]) 
 fn xdv_alone(p: &XdvPdf, inst: u64, mag: i32, comment: &str, ops: &[Op]) -> Option<Vec<u8>> {
     let key = (inst, mag, comment.to_owned(), p.name.clone(), p.date);
     let files = (p.files)();
-    let start = {
+    let (start, seen) = {
         let mut g = alone_start().locked();
         match g.as_ref() {
-            Some((k, s)) if *k == key => s.clone(),
+            Some((k, s, u)) if *k == key => (s.clone(), u.clone()),
             _ => {
                 let mut s = Session::direct(
                     options(p),
@@ -2015,14 +2053,18 @@ fn xdv_alone(p: &XdvPdf, inst: u64, mag: i32, comment: &str, ops: &[Op]) -> Opti
                 .ok()?;
                 s.set_batch_deflate(batch());
                 let s = Arc::new(Mutex::new(s));
-                *g = Some((key, s.clone()));
-                s
+                let u = Arc::new(Mutex::new(UsedSeen::new()));
+                *g = Some((key, s.clone(), u.clone()));
+                (s, u)
             }
         }
     };
     let mut s = start.locked().snapshot();
     s.set_files(files);
     let chunk: Arc<[u8]> = Arc::from(s.page_ops(ops).ok()?.pdf);
+    // (each font with every glyph the pages' files so far used: its
+    // subset the same from page to page, compressed once)
+    s.widen_used(&mut seen.locked());
     let (tail, _) = s.finish_recorded().ok()?;
     let l = layout(&[chunk], &tail, &s)?;
     l.exact().ok().map(|b| b.as_ref().clone())
