@@ -1539,6 +1539,14 @@ impl<'a> Ctx<'a> {
         x
     }
 
+    /// Stops my run, nothing filed, my last run's products standing, and
+    /// runs me again at once: a run that finds it went a way its next run
+    /// must not (the client noted why, and the run again takes the other).
+    pub fn run_again(&mut self) -> Stop {
+        self.wait_on = None;
+        stop()
+    }
+
     /// My run goes on on `guess` for the output of the node my `i`-th
     /// placement of this run stands for, whatever output it has now (one
     /// of inputs this run moves: a picture child whose placer hands it

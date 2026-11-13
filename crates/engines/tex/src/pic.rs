@@ -107,6 +107,25 @@ fn refuse(hash: u64) {
         .insert(hash);
 }
 
+/// The pictures (by the hash of their text) whose runs meet more pictures
+/// after them: such a run reads them inline, as TeX does, and places their
+/// children for the runs after ([`Run::pic_begin`]).
+static MANY: std::sync::Mutex<Option<phitex_defuse::FxHashSet<u64>>> = std::sync::Mutex::new(None);
+
+fn many(hash: u64) -> bool {
+    MANY.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|s| s.contains(&hash))
+}
+
+fn mark_many(hash: u64) {
+    MANY.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(Default::default)
+        .insert(hash);
+}
+
 /// What the child's run keeps ([`Run::pic_run`]).
 pub(crate) struct PicChild {
     /// The parent's locals, a field read key by key
@@ -428,17 +447,18 @@ impl Run<'_, '_> {
             v.int(i64::from_ne_bytes(hash.to_ne_bytes())),
         ];
         // (a picture after one gone on as if empty in this run, its view
-        // moved: its state lacks the work of the one before, and its child
-        // given that state runs again once that one's output is in, the
-        // pictures after it again for each: lie-hasse's page of 24
-        // diagrams, one more right a pass. A child that has run keeps the
-        // view it has and the picture goes on as if empty; one that has
-        // not is read here, inline, as TeX reads it, its child placed for
-        // the runs after. Gone on as if empty and placed only once the one
-        // before had its output, each picture ran once but the run went
-        // again for each: lie-hasse's piece, 37 s of its own text, 24
-        // times, -j1 860 -> 1356 s, mc 86456)
-        if self.pic_pending && !view_held {
+        // moved: its state lacks the work of the one before. One whose
+        // child has run keeps the view it has and goes on as if empty; one
+        // whose child has not makes the run go again at once, the picture
+        // gone on as if empty marked to be read inline from now on, as TeX
+        // reads it, with its child placed for the runs after: so a run of
+        // many pictures reads them all inline the first time, as before
+        // §8 of the spec. Gone on as if empty and placed one a run, each
+        // picture ran once but the run went again once a picture,
+        // lie-hasse's piece of 24 diagrams, -j1 860 -> 1356 s (mc 86456);
+        // read inline and placed there, their children ran on views
+        // without the one before and again, past 2400 s (mc 86471))
+        if self.pic_pending.is_some() && !view_held {
             if self.cx.placed_before_ran(self.ops.pic, &args)
                 && let Some(old) = self.cx.last_def(field)
             {
@@ -454,17 +474,16 @@ impl Run<'_, '_> {
                 }
                 return Ok(true);
             }
-            self.cx.define_with(field, locals, Locality::Global);
-            self.cx.child_once(self.ops.pic, args);
-            self.muts += 1;
-            self.pic_inline_count();
+            if let Some(first) = self.pic_pending {
+                mark_many(first);
+            }
             if trace() {
                 eprintln!(
-                    "pic: node {node} {} {hash:x}: after one to come, no output yet, inline",
+                    "pic: node {node} {} {hash:x}: after one to come, no output yet: the run again, its pictures inline",
                     body.name
                 );
             }
-            return Ok(false);
+            return Err(Halt::Stop(self.cx.run_again()));
         }
         self.cx.define_with(field, locals, Locality::Global);
         let i = self.cx.child_once(self.ops.pic, args);
@@ -497,6 +516,19 @@ impl Run<'_, '_> {
         if !self.cx.ran_this_evaluation() && self.pic_guess(i, body) {
             return true;
         }
+        // (a run of many pictures: read here, inline, its child placed for
+        // the runs after, as above)
+        if self.pic_many || many(hash) {
+            self.pic_many = true;
+            self.pic_inline_count();
+            if trace() {
+                eprintln!(
+                    "pic: node {node} {} {hash:x}: placed, no output yet, many after it: inline",
+                    body.name
+                );
+            }
+            return false;
+        }
         // (none: the run goes on as if the picture were empty, and the
         // child's first commit asks it again (its output is not the
         // guess read here), that run taking it. So the picture runs
@@ -506,7 +538,7 @@ impl Run<'_, '_> {
         // on a clean build, 6.1 s of its 19.3 s at -j1, and every
         // figure's run held the text behind it for its picture)
         self.cx.placed_output_or(i, ValueId::UNIT);
-        self.pic_pending = true;
+        self.pic_pending = Some(hash);
         self.pic_skip(&body.skip);
         if trace() {
             eprintln!(
@@ -550,6 +582,18 @@ impl Run<'_, '_> {
         // twice, here and in its child, Grail's deleted figure 8.0 -> 13.3 s)
         if self.cx.ran_this_evaluation() {
             let holds = view_held || self.cx.placed_reads_hold(i, field, locals);
+            if !holds && (self.pic_many || many(hash)) {
+                // (a run of many pictures: inline, as above)
+                self.pic_many = true;
+                self.pic_inline_count();
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: its view moved, many after it: inline",
+                        body.name
+                    );
+                }
+                return false;
+            }
             if !holds {
                 // (its view moved where the child read it: the run goes on
                 // as if the picture were empty, the child asked again by the
@@ -567,7 +611,7 @@ impl Run<'_, '_> {
                 // 3000 s cold, accl 26269)
                 self.cx.placed_output_guessed(i, ValueId::UNIT);
                 self.cx.placed_output_wait(i);
-                self.pic_pending = true;
+                self.pic_pending = Some(hash);
                 self.pic_skip(&body.skip);
                 if trace() {
                     eprintln!(

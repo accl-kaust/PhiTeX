@@ -1380,14 +1380,12 @@ fn latex_a_picture_asked_again_runs_again() {
 /// in a `\resizebox` argument of a figure in an `\input` file (a token
 /// list, Grail's drawn figures), one in a file `\input` inside a
 /// `\resizebox` (its generated ones), two in one figure, one in a
-/// paragraph. At -j1 five runs of `pic` and one picture read inline: the
-/// second of the two in one figure, met while the first's output is to
-/// come (a run of many pictures goes once more for the first only, not
-/// once a picture: lie-hasse); at -j4 the PDF of -j1 (the figure's runs
-/// there go on as if empty more than once, each reading the second
-/// inline while the first is to come). Then an edit in the text
-/// before them runs none, and one in a picture's body runs that one
-/// again; each PDF a clean build's.
+/// paragraph. At -j1 five runs of `pic`, and the two in one figure read
+/// inline once: met while the first's output is to come, the run goes
+/// again and reads both inline, placing their children (a run of many
+/// pictures goes once more, not once a picture: lie-hasse); at -j4 the
+/// PDF of -j1. Then an edit in the text before them runs none, and one in
+/// a picture's body runs that one again; each PDF a clean build's.
 #[test]
 fn latex_each_picture_runs_once_on_a_clean_build() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-once");
@@ -1409,7 +1407,7 @@ fn latex_each_picture_runs_once_on_a_clean_build() {
     if children {
         assert_eq!(
             (common::runs_of(&one, "pic"), one.stats.pics_inline),
-            (5, 1),
+            (5, 2),
             "-j1: pictures run in children, read inline: {:?}",
             one.stats.runs_by_op
         );

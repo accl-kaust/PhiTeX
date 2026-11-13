@@ -786,7 +786,10 @@ pub(crate) struct Run<'c, 'a> {
     /// A picture of this run went on as if empty, its child's output to
     /// come (`crate::pic`): the pictures after it in the run are given a
     /// state without that one's work, so none is placed anew.
-    pub pic_pending: bool,
+    pub pic_pending: Option<u64>,
+    /// A picture of this run was read inline as one of many in a run
+    /// (`crate::pic`): the pictures after it with no output are too.
+    pub pic_many: bool,
     pub pic_child: Option<crate::pic::PicChild>,
     /// The child's output, in place of the run's ([`Run::finish`]).
     pub pic_out: Option<ValueId>,
@@ -1393,7 +1396,8 @@ impl<'c, 'a> Run<'c, 'a> {
             pic_on: false,
             pic_stop: false,
             pic_seen: Vec::new(),
-            pic_pending: false,
+            pic_pending: None,
+            pic_many: false,
             pic_child: None,
             pic_out: None,
             pic_void: false,
