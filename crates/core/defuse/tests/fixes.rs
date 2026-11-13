@@ -196,14 +196,15 @@ fn a_node_taken_while_its_run_claims_gives_back_what_it_took() {
         let f = v.field("x");
         let u = e.new_unit();
         // (work around them, so the workers start, and the two in two
-        // workers' first shares: they run side by side)
-        for _ in 0..8 {
+        // workers' first shares, the first's last and the second's first:
+        // they run side by side)
+        for _ in 0..3 {
             e.push(u, spin, vec![v.int(500)]);
         }
         e.push(u, claim, vec![v.int(1), v.int(1)]);
         let a = e.push(u, claim, vec![v.int(3), v.int(2)]);
         let sibs: Vec<_> = (0..3).map(|_| e.push(u, get, vec![f.0])).collect();
-        for _ in 0..59 {
+        for _ in 0..64 {
             e.push(u, spin, vec![v.int(500)]);
         }
         e.evaluate(8).unwrap();

@@ -1630,20 +1630,26 @@ impl Engine {
             // woken only if they wait there, as for any node a commit queues.
             // Dealt out, an edit's two nodes began on two threads wherever
             // they read one another. A first evaluation's pieces are dealt
-            // out in blocks in TeX's order, each block run in order by one
-            // worker: on one queue each idle worker took the next piece while
-            // the one before it ran, so every piece ran first on a state
-            // without its predecessor's definitions, and a piece that read
-            // on into its siblings did so on a prefix whose nodes had all
-            // run once on such states (a paragraph met `\open` new and
+            // out in TeX's order, a few at a time, each worker running its
+            // few in order: on one queue each idle worker took the next
+            // piece while the one before it ran, so every piece ran first on
+            // a state without its predecessor's definitions, and a piece that
+            // read on into its siblings did so on a prefix whose nodes had
+            // all run once on such states (a paragraph met `\open` new and
             // `\close` old and read on through 21 siblings, 63 of them run
-            // again; the pieces after a fatal error ran on 7 workers)
+            // again; the pieces after a fatal error ran on 7 workers))
             if n > 1 && epoch > 1 && seed.len() < crate::sched::BLOCK_MIN {
                 workers[0].ready_all(self, &seed);
             } else if !seed.is_empty() {
-                let per = seed.len().div_ceil(n);
-                for (i, chunk) in seed.chunks(per).enumerate() {
-                    workers[i].seed(self, chunk);
+                // (`Worker::deal`: dealt as one block a worker, an eighth of
+                // the text each at -j8, the front of the text moved at one
+                // worker's pace, the one that also ran the page layer's
+                // chain behind it: para4000's pages fired 45 of 692 while
+                // the text ran, then alone, half of the -j8 build, accl
+                // 28297; docs/note-par-2026-11-13.md)
+                workers[0].deal(self, &seed);
+                for w in &workers {
+                    w.take_dealt();
                 }
             }
             // (the trait object's lifetime shortened for the reborrow, which
