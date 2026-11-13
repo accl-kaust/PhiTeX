@@ -8177,13 +8177,21 @@ impl Build {
     /// in the order first opened: what TeX leaves in them.
     #[must_use]
     pub fn files(&self) -> Vec<(String, String)> {
+        self.files_shared().to_vec()
+    }
+
+    /// [`Build::files`], shared: the evaluation's list, not a copy of
+    /// every file's text (a reader of their names only, the session's
+    /// records of a build, copied them all at each keystroke).
+    #[must_use]
+    pub fn files_shared(&self) -> Arc<Vec<(String, String)>> {
         let v = self.g.eng.values();
         let streams = self.g.eng.acc_value(self.unit, v.field("streams"));
         let mut m = self.memo.locked();
         if let Some((from, fs)) = &m.files
             && *from == streams
         {
-            return fs.to_vec();
+            return fs.clone();
         }
         let fs = Arc::new(
             written_texts(v, streams)
@@ -8192,7 +8200,7 @@ impl Build {
                 .collect::<Vec<_>>(),
         );
         m.files = Some((streams, fs.clone()));
-        fs.to_vec()
+        fs
     }
 
     /// The files `\write18`'s commands made through the hook, as the last
@@ -8254,8 +8262,8 @@ impl Build {
     pub fn export_made(&self) -> Vec<u8> {
         let v = self.g.eng.values();
         let mut made: Vec<(String, ValueId)> = Vec::new();
-        for (input, _) in self.files() {
-            for o in crate::tools::made_names(&input) {
+        for (input, _) in self.files_shared().iter() {
+            for o in crate::tools::made_names(input) {
                 if made.iter().any(|(n, _)| *n == o) {
                     continue;
                 }

@@ -648,6 +648,92 @@ fn watch_word_edit_ms() -> f64 {
     ms
 }
 
+/// `phitex watch --synctex` with a browser's socket: a save made while
+/// the viewer's asks are in flight (every page's origins, asked at once,
+/// as a browser asks for the pages it shows after a build), one made the
+/// moment the last build's event is out (the `SyncTeX` file and the
+/// problems then due, the watch's idle work) and one made when idle each
+/// begin their build at once: the wait before each, by what the watch did
+/// meanwhile (the build event's `waited`, the viewer's "before the
+/// build"), within 50 ms in a release build. Every page's origins made
+/// first held a save 5.2 s behind them in Grail.
+#[test]
+fn watch_save_starts_at_once() {
+    let _one = one();
+    let text = big();
+    let dir = scratch("watch-save-at-once");
+    std::fs::write(dir.join("big.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--synctex",
+            "--ini",
+            "--etex",
+            "-j",
+            "1",
+            "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut stdin = child.stdin.take().expect("its input");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let pages = cold["pages"].as_u64().expect("its pages");
+    let mut viewer = Viewer::connect(&url);
+    let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
+    let word = text[at..].find(" the ").expect("a word") + at;
+    let edit = |w: &str| format!("{} {w} {}", &text[..word], &text[word + 5..]);
+    std::thread::sleep(Duration::from_millis(500));
+    let bound = if cfg!(debug_assertions) { 500.0 } else { 50.0 };
+    let mut id = 100;
+    for (b, w, asks, pause) in [
+        (2, "thy", true, 0),
+        (3, "our", true, 0),
+        (4, "his", false, 0),
+        (5, "her", false, 600),
+    ] {
+        std::thread::sleep(Duration::from_millis(pause));
+        if asks {
+            // (every page's origins, twice over, not waited for)
+            for k in (0..pages).chain(0..pages) {
+                id += 1;
+                viewer
+                    .ws
+                    .send(tungstenite::Message::text(
+                        serde_json::json!({"id": id, "op": "origins", "page": k}).to_string(),
+                    ))
+                    .expect("an ask");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::write(dir.join("big.tex"), edit(w)).expect("a save");
+        let ev = until(&mut lines, "build", &b.into(), &mut seen);
+        let waited = ev["waited"].as_array().expect("the wait's parts");
+        let ms: f64 = waited.iter().filter_map(|p| p[1].as_f64()).sum();
+        eprintln!("watch: build {b}'s save waited {ms:.3} ms: {waited:?}");
+        assert!(
+            ms <= bound,
+            "build {b}'s save waited {ms:.3} ms before its build: {ev}"
+        );
+    }
+    let _ = stdin.write_all(b"q\n");
+    drop(stdin);
+    lines.for_each(drop);
+    let _ = child.wait();
+}
+
 /// `phitex watch`, headless, with nothing changed: `r` (twice) and a
 /// file saved with its bytes evaluate nothing, run no node, write no
 /// PDF and change no page, and `r` reads no file again. The document

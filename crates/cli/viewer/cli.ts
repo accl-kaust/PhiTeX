@@ -103,16 +103,39 @@ class Socket implements CoreTransport {
  * `outline` and every other request asked of the watch.
  */
 /** The watch's `settled` event: the build's time and parts (a failed build: since_ms, ms and history only). */
-type Settled = { since_ms?: number | null; ms?: number; history?: number; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number };
+type Settled = {
+  since_ms?: number | null; ms?: number; history?: number; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number;
+  /** The change's wait before its build, by what the watch did meanwhile (the last build, the viewer's asks, …; "reaching the watch": nothing). */
+  waited?: [string, number][];
+};
 
 const dur = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
 
-/** The timing popover's line and parts for a build (panel.latency: one part a line, its name and value two spaces apart). */
-function timing(s: Settled): [string, string] {
+/** A sum's parts as the popover's bars read them ("= waiting 5.2 + build 0.6"): names of letters and spaces, then ms. */
+const sum = (parts: [string, number][]) => parts.filter(([, ms]) => ms >= 0.05).map(([k, ms]) => `${k.replace(/[^a-z ]/gi, "")} ${ms.toFixed(1)}`).join(" + ");
+
+/**
+ * The timing popover's line and parts for a build (panel.latency: one part a
+ * line, its name and value two spaces apart): from the save to the page, its
+ * parts adding up to it (the wait before the build, by what the watch did
+ * meanwhile; the build; the files and the viewer told; the drawing, `drawn`,
+ * once the page is on the screen).
+ */
+function timing(s: Settled, drawn?: number): [string, string] {
   const ms = s.ms ?? 0;
+  const waited = s.waited ?? [];
+  const wait = waited.reduce((a, [, x]) => a + x, 0);
+  const since = typeof s.since_ms === "number" ? s.since_ms : null;
+  // (after the build: its files written, the viewer and the editor told)
+  const after = since === null ? 0 : Math.max(0, since - wait - ms);
+  const total = since === null ? null : since + (drawn ?? 0);
   const parts: [string, string | null][] = [
+    [
+      drawn === undefined ? "save to built" : "keystroke→page",
+      total === null ? null : `${total.toFixed(1)} ms = ${sum([["queued", wait], ["build", ms], ["files and viewer", after], ...(drawn === undefined ? [] : [["paint", drawn] as [string, number]])])}`,
+    ],
+    ["before the build", wait >= 1 ? `${wait.toFixed(1)} ms = ${sum(waited)}` : null],
     [s.cold ? "first build" : "build", `${dur(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
-    ["save to build", typeof s.since_ms === "number" ? dur(s.since_ms) : null],
     ["LaTeX runs", s.passes === undefined ? null : String(s.passes)],
     ["steps", s.ran === undefined ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
     ["packages fetched", s.fetched ? String(s.fetched) : null],
@@ -174,6 +197,8 @@ class Pages implements CoreTransport {
   private sock: Socket;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   private change: { since: number; at: number } | null = null;
+  /** The last build's `settled` event, for its parts once its page is drawn. */
+  private settled: Settled | null = null;
   /** Every page's text, for finding (asked again after each build). */
   private texts: Promise<TextLine[][]> | null = null;
 
@@ -187,6 +212,7 @@ class Pages implements CoreTransport {
       // (a cold build has no save before it: its first page is timed from the build's start, "First build · 14.9 s")
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
+      this.settled = s;
       if (typeof s.ms === "number") panel.latency(...timing(s));
       // (the bars' times: the session's, from the same event)
     });
@@ -213,6 +239,9 @@ class Pages implements CoreTransport {
     this.change = null;
     requestAnimationFrame(() => {
       const ms = c.since + performance.now() - c.at;
+      // (the parts again, the drawing among them: they add up to the head's time)
+      const s = this.settled;
+      if (s && typeof s.ms === "number") panel.latency(...timing(s, ms - c.since));
       panel.painted(ms);
       void this.sock.request({ op: "painted", ms });
     });

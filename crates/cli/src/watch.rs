@@ -42,6 +42,10 @@ enum Event {
     Key(Key),
     /// The viewer asked for something.
     Asked,
+    /// The viewer's reads (a page's origins, a source place's pages, a
+    /// citation, the transcript) put off for a change's build, asked
+    /// again after it: no change of its own (not when a change came).
+    Reads,
     /// This many browsers show the viewer now.
     Clients(usize),
     /// File `0`'s buffer changed (applied already, while a build ran).
@@ -324,6 +328,70 @@ fn watcher(
     })?;
     w.watch(root, RecursiveMode::Recursive)?;
     Ok(w)
+}
+
+/// What the watch's loop did, newest last, each with when it began and
+/// ended (a build, the viewer's asks, the problems made when idle, the
+/// SyncTeX file): a change's wait before its build said by what the loop
+/// was doing meanwhile ([`Busy::waited`]), so the viewer's timing adds up
+/// (a save 5.2 s before its build, said nowhere).
+#[derive(Default)]
+struct Busy(VecDeque<(&'static str, Instant, Instant)>);
+
+impl Busy {
+    /// The loop did `what` from `from` until now.
+    fn did(&mut self, what: &'static str, from: Instant) {
+        self.0.push_back((what, from, Instant::now()));
+        if self.0.len() > 256 {
+            self.0.pop_front();
+        }
+    }
+
+    /// The time from `since` to now by what the loop did in it, in the
+    /// order it first did each, and the rest: the loop waiting for the
+    /// change to reach it (the system's file event, the gathering of a
+    /// save's events).
+    fn waited(&self, since: Instant) -> Vec<(&'static str, Duration)> {
+        let now = Instant::now();
+        let mut out: Vec<(&'static str, Duration)> = Vec::new();
+        let mut busy = Duration::ZERO;
+        for &(what, a, b) in &self.0 {
+            let (a, b) = (a.max(since), b.min(now));
+            if b <= a {
+                continue;
+            }
+            busy += b - a;
+            match out.iter_mut().find(|(w, _)| *w == what) {
+                Some(x) => x.1 += b - a,
+                None => out.push((what, b - a)),
+            }
+        }
+        out.push(("reaching the watch", (now - since).saturating_sub(busy)));
+        out
+    }
+}
+
+/// Whether `a` only reads the last build (the viewer's page origins, a
+/// source place's pages, a citation, the transcript): put off while a
+/// change waits to be built.
+fn is_read(a: &Ask) -> bool {
+    matches!(
+        a,
+        Ask::Origins(_) | Ask::PageOf { .. } | Ask::Cites { .. } | Ask::Transcript
+    )
+}
+
+/// Whether a change of the files (a save, an editor's) has come and waits:
+/// the events come since taken into `held`, in order.
+fn change_waits(
+    rx: &mpsc::Receiver<(Instant, Event)>,
+    held: &mut VecDeque<(Instant, Event)>,
+) -> bool {
+    while let Ok(e) = rx.try_recv() {
+        held.push_back(e);
+    }
+    held.iter()
+        .any(|e| matches!(e.1, Event::Files(_) | Event::Edited(_)))
 }
 
 /// The next event, the receiver borrowed uniquely: a closure that calls
@@ -1482,12 +1550,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the evaluation the last build's result was of: a build that ran
     // none says so)
     let last_settled: Cell<Option<(u64, u64)>> = Cell::new(None);
+    let busy: RefCell<Busy> = RefCell::default();
     let mut rebuild = |s: &mut Session,
                        why: &str,
                        since: Option<Instant>,
                        meanwhile: &mut (dyn FnMut() -> bool + Send)| {
         builds += 1;
         let asked_reread = reread.take();
+        let began = Instant::now();
+        // (the change's wait before this build, by what the loop did)
+        let before = since.map(|t| busy.borrow().waited(t));
         if let Some(t) = since
             && !phitex_tex::timeline::active()
         {
@@ -1581,6 +1653,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 let mut l = last.borrow_mut();
                 l.build = Some((format!("build {builds} failed in the engine"), false));
                 show(ui, &l);
+                busy.borrow_mut().did("the last build", began);
                 return;
             }
         };
@@ -1704,7 +1777,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     *last_diags.borrow_mut() = r.settled.map(|k| (k, d.clone()));
                     Some(d)
                 },
-                parts: Built::parts_of(s, &r),
+                parts: {
+                    let mut p = Built::parts_of(s, &r);
+                    if let Some(w) = &before {
+                        p.insert(
+                            "waited".into(),
+                            w.iter()
+                                .map(|(k, d)| json!([k, d.as_secs_f64() * 1e3]))
+                                .collect(),
+                        );
+                    }
+                    p
+                },
             };
             phitex_tex::timeline::lap("watch: the viewer's build (its diagnostics, parts)");
             if let Some(v) = &view {
@@ -2083,6 +2167,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             // (whether the build evaluated anything: none when nothing it
             // reads changed, `r` or a file saved with its bytes)
             "evaluated": evaluated,
+            // (the change's wait before the build began, by what the
+            // watch did meanwhile, `Busy::waited`)
+            "waited": before.as_ref().map(|w| w.iter().map(|(k, d)| json!([k, d.as_secs_f64() * 1e3])).collect::<Vec<_>>()),
             // (`r`: the files checked, those changed and read again)
             "reread": asked_reread.map(|(checked, changed, d)| json!({
                 "checked": checked,
@@ -2213,6 +2300,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         let w = Wanted::of(s.watched(), &root, config.clone());
         watching.borrow_mut().add(&w);
         *wanted.lock().unwrap_or_else(PoisonError::into_inner) = w;
+        busy.borrow_mut().did("the last build", began);
         phitex_tex::timeline::end(&format!("build {builds}"));
     };
     // (what came while a build ran and it could not take: done after it)
@@ -2338,6 +2426,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     let t0 = Instant::now();
                     let made = s.synctex_made_until(&stop);
                     at_wait.store(false, Ordering::Relaxed);
+                    busy.borrow_mut().did("the SyncTeX file", t0);
                     if let Some(e) = came.into_inner() {
                         // (`PHITEX_TEX_TIME`: how long the event waited on it)
                         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
@@ -2369,7 +2458,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if diags_due.get().is_some() && !s.synctex_due() && held.is_empty() {
             match rx.try_recv() {
                 Ok(e) => held.push_back(e),
-                Err(mpsc::TryRecvError::Empty) => late_diagnostics(&s),
+                Err(mpsc::TryRecvError::Empty) => {
+                    let t = Instant::now();
+                    late_diagnostics(&s);
+                    busy.borrow_mut().did("the problems made", t);
+                }
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -2701,14 +2794,48 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     why.push(format!("{file} (editor)"));
                     again = true;
                 }
-                Event::Asked => {
+                Event::Asked | Event::Reads => {
                     let mut asks = std::mem::take(&mut held_asks);
                     asks.extend(take_asks());
                     for a in asks {
+                        // (a viewer's read never holds a change's build
+                        // back: put off while one is to be built, from
+                        // this gathering or come since, and asked again
+                        // after it. Each is made on this loop, a page's
+                        // origins up to 0.3 s of Grail's: a browser that
+                        // asked for every page it shows held a save 5 s)
+                        if is_read(&a) && (again || change_waits(&rx, &mut held)) {
+                            held_asks.push(a);
+                            continue;
+                        }
+                        // (a page's origins given up for a change come
+                        // while they are made, asked again after its build)
+                        if let (Ask::Origins(k), Some(v)) = (&a, view.as_deref()) {
+                            let t = Instant::now();
+                            let came: RefCell<VecDeque<(Instant, Event)>> = RefCell::default();
+                            let stop = |_: bool| {
+                                let mut c = came.borrow_mut();
+                                while let Ok(e) = rx.try_recv() {
+                                    c.push_back(e);
+                                }
+                                c.iter()
+                                    .any(|e| matches!(e.1, Event::Files(_) | Event::Edited(_)))
+                            };
+                            match s.page_origins_until(*k, &stop) {
+                                Some((files, page)) => v.put_origins(*k, files, page),
+                                None => held_asks.push(a),
+                            }
+                            held.extend(came.into_inner());
+                            busy.borrow_mut().did("the viewer's asks", t);
+                            continue;
+                        }
                         if a == Ask::Transcript {
                             hub.transcript(last.borrow().builds, s.transcript());
                         }
-                        match edits.apply(&mut s, view.as_deref(), a) {
+                        let t = Instant::now();
+                        let applied = edits.apply(&mut s, view.as_deref(), a);
+                        busy.borrow_mut().did("the viewer's asks", t);
+                        match applied {
                             Applied::Painted(us) => {
                                 let mut l = last.borrow_mut();
                                 let d = Duration::from_micros(us);
@@ -2876,6 +3003,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 false
             };
             rebuild(&mut s, &why.join(", "), Some(came), &mut meanwhile);
+        }
+        // (the viewer's reads put off for the change: asked now)
+        if !held_asks.is_empty()
+            && !held
+                .iter()
+                .any(|e| matches!(e.1, Event::Asked | Event::Reads))
+        {
+            held.push_back((Instant::now(), Event::Reads));
         }
         // (the diff: asked for, or diffed again after the edit)
         if let Some(v) = &view {

@@ -514,6 +514,9 @@ pub struct Session {
     /// are at most that new. Empty: read twice under two keys (changed
     /// while a build read it), unknown.
     stamps: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+    /// [`Session::inputs`] by name, and by the names a change of each
+    /// comes as.
+    inputs_by: InputIndex,
     /// The evaluation the last report was made of
     /// ([`Build::settled_key`]): the records made of it stored then.
     reported: Option<(u64, u64)>,
@@ -664,6 +667,7 @@ impl Session {
             changed: Vec::new(),
             inputs: Vec::new(),
             reported: None,
+            inputs_by: InputIndex::default(),
             stamps: Arc::default(),
             records_dirty: false,
             absorb: Absorb::default(),
@@ -1160,15 +1164,25 @@ impl Session {
                     b.set_stuck_after(Some((t0.elapsed() * 5).max(Duration::from_secs(60))));
                 }
                 self.inputs.clear();
+                self.inputs_by = InputIndex::default();
             }
+            // (each name looked up by the index, not compared with every
+            // input: every build's reads against every input was
+            // quadratic, Grail's 335 inputs)
             for (n, found) in b.reads() {
-                if let Some(e) = self.inputs.iter_mut().find(|(m, ..)| *m == n) {
+                if let Some(&i) = self.inputs_by.name.get(&n) {
+                    let e = &mut self.inputs[i];
                     if found && e.2.is_none() {
                         e.2 = self.host.locate_key(&n);
+                        if let Some(p) = &e.2 {
+                            self.inputs_by.key(plain_name(&p.to_string_lossy()), i);
+                        }
                     }
                     e.1 = found;
                 } else {
                     let p = found.then(|| self.host.locate_key(&n)).flatten();
+                    let i = self.inputs.len();
+                    self.inputs_by.add(&n, p.as_deref(), i);
                     self.inputs.push((n, found, p));
                 }
             }
@@ -1639,6 +1653,25 @@ impl Session {
         Some((b.origin_files(), page))
     }
 
+    /// [`Session::page_origins`] (none: no origins kept, as an empty
+    /// answer), given up (`None`) once `stop` says so
+    /// ([`phitex_tex::Build::page_origins_until`]).
+    pub fn page_origins_until(
+        &self,
+        k: usize,
+        stop: &dyn Fn(bool) -> bool,
+    ) -> Option<(Vec<String>, Option<Arc<phitex_tex::PageOrigins>>)> {
+        let Some(b) = self
+            .build
+            .as_ref()
+            .filter(|_| self.job.origins || self.job.synctex)
+        else {
+            return Some((Vec::new(), None));
+        };
+        let page = b.page_origins_until(k, stop)?;
+        Some((b.origin_files(), page))
+    }
+
     /// The main text with the editor's buffer for it, if there is one.
     /// The last build's diagnostics at their places (TeX's errors and
     /// warnings, the engine's), made now: an edit's report leaves them
@@ -1876,7 +1909,7 @@ impl Session {
         let Some(c) = &self.store else {
             return;
         };
-        let names: Vec<String> = b.files().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = b.files_shared().iter().map(|(n, _)| n.clone()).collect();
         let out = wnames_bytes(&names);
         let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
         if last.2.as_deref() == Some(out.as_bytes()) {
@@ -2018,26 +2051,7 @@ impl Session {
         if changed.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        let found: Vec<Option<String>> = self
-            .inputs
-            .iter()
-            .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
-            .collect();
         let mut hit = vec![false; self.inputs.len()];
-        // (each input by the names a change of it comes as: its name, with
-        // `.tex`, the file found; looked up, not compared with every input
-        // for every change, `r` changing every input: 10 ms for Grail's)
-        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, (n, ..)) in self.inputs.iter().enumerate() {
-            let n = plain_name(n);
-            let mut keys = vec![format!("{n}.tex"), n];
-            keys.extend(found[i].clone());
-            keys.sort();
-            keys.dedup();
-            for k in keys {
-                by_name.entry(k).or_default().push(i);
-            }
-        }
         // (a changed file TeX did not read: staged too, for a tool that
         // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
         // engine stages only what one of its runs read, else nothing)
@@ -2050,7 +2064,7 @@ impl Session {
         let base_is = |p: &str, base: Option<&std::ffi::OsStr>| Path::new(p).file_name() == base;
         for c in changed {
             let mut any = false;
-            for &i in by_name.get(c).into_iter().flatten() {
+            for &i in self.inputs_by.change.get(c).into_iter().flatten() {
                 hit[i] = true;
                 any = true;
             }
@@ -2058,10 +2072,10 @@ impl Session {
                 continue;
             }
             let base = Path::new(c).file_name();
-            for (i, f) in found.iter().enumerate() {
+            for (i, (.., f)) in self.inputs.iter().enumerate() {
                 if let Some(f) = f
-                    && Path::new(f).file_name() == base
-                    && self.host.same_file(f, c)
+                    && f.file_name() == base
+                    && self.host.same_file(&plain_name(&f.to_string_lossy()), c)
                 {
                     hit[i] = true;
                     any = true;
@@ -2525,6 +2539,36 @@ fn out_name_ok(name: &str) -> bool {
 }
 
 /// A file's name without a leading `./`.
+/// The session's inputs by name ([`Session::inputs`]' places), and by
+/// each name a change of one comes as: its name, with `.tex`, the file
+/// found ([`Session::reads_of`]).
+#[derive(Default)]
+struct InputIndex {
+    name: HashMap<String, usize>,
+    change: HashMap<String, Vec<usize>>,
+}
+
+impl InputIndex {
+    /// Input `i`, named `n`, found at `p`.
+    fn add(&mut self, n: &str, p: Option<&Path>, i: usize) {
+        self.name.insert(n.to_owned(), i);
+        let plain = plain_name(n);
+        self.key(format!("{plain}.tex"), i);
+        self.key(plain, i);
+        if let Some(p) = p {
+            self.key(plain_name(&p.to_string_lossy()), i);
+        }
+    }
+
+    /// A change of `k` is one of input `i`.
+    fn key(&mut self, k: String, i: usize) {
+        let v = self.change.entry(k).or_default();
+        if !v.contains(&i) {
+            v.push(i);
+        }
+    }
+}
+
 fn plain_name(n: &str) -> String {
     n.strip_prefix("./").unwrap_or(n).to_owned()
 }

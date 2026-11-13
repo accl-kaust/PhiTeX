@@ -4661,12 +4661,12 @@ function blur(a, lw, lh, sigma) {
     const across = pass % 2 === 0, n = across ? lw : lh, m = across ? lh : lw, step = across ? 1 : lw, line = across ? lw : 1;
     for (let j = 0; j < m; j++) {
       const o = j * line, last = o + (n - 1) * step;
-      let sum = src[o] * (r + 1);
-      for (let i = 1; i <= r; i++) sum += src[o + Math.min(i, n - 1) * step];
+      let sum2 = src[o] * (r + 1);
+      for (let i = 1; i <= r; i++) sum2 += src[o + Math.min(i, n - 1) * step];
       for (let i = 0, at = o; i < n; i++, at += step) {
-        dst[at] = sum / d;
+        dst[at] = sum2 / d;
         const add = i + r + 1 < n ? o + (i + r + 1) * step : last, drop = i - r > 0 ? o + (i - r) * step : o;
-        sum += src[add] - src[drop];
+        sum2 += src[add] - src[drop];
       }
     }
     [src, dst] = [dst, src];
@@ -7709,12 +7709,12 @@ var downloaded = (n, bytes) => n ? `${n} package${n === 1 ? "" : "s"} downloaded
 function foldedDetail(text, label) {
   const d = document.createElement("details");
   d.className = "folded";
-  const sum = document.createElement("summary");
-  sum.textContent = label;
+  const sum2 = document.createElement("summary");
+  sum2.textContent = label;
   const pre = document.createElement("pre");
   pre.className = "detail";
   pre.textContent = text;
-  d.append(sum, pre);
+  d.append(sum2, pre);
   return d;
 }
 function known(source2) {
@@ -8118,10 +8118,10 @@ var PreviewSession = class {
       this.sync(f, t);
       this.status();
     });
-    host2.onChanges((f0, es, len, sum) => {
+    host2.onChanges((f0, es, len, sum2) => {
       const f = this.known(f0);
       this.queue(f, es);
-      if (len !== void 0) this.agree(f, len, es, sum);
+      if (len !== void 0) this.agree(f, len, es, sum2);
     });
     core.onLost?.(() => {
       this.opened = false;
@@ -8141,10 +8141,10 @@ var PreviewSession = class {
    * so it is said and the whole text asked for again, sync() diffing it in.
    * Once until it comes.
    */
-  agree(file, len, edits, sum) {
+  agree(file, len, edits, sum2) {
     const text = this.text(file) ?? "";
-    if (text.length === len && (sum === void 0 || textSum(text) === sum) || this.resending.has(file)) return;
-    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum !== void 0, edits: edits.slice(-5) });
+    if (text.length === len && (sum2 === void 0 || textSum(text) === sum2) || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum2 !== void 0, edits: edits.slice(-5) });
     if (!this.host.resend) return;
     this.resending.add(file);
     this.host.resend(file);
@@ -9878,11 +9878,21 @@ var Socket = class {
   }
 };
 var dur2 = (ms) => ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
-function timing(s) {
+var sum = (parts) => parts.filter(([, ms]) => ms >= 0.05).map(([k, ms]) => `${k.replace(/[^a-z ]/gi, "")} ${ms.toFixed(1)}`).join(" + ");
+function timing(s, drawn) {
   const ms = s.ms ?? 0;
+  const waited = s.waited ?? [];
+  const wait = waited.reduce((a, [, x]) => a + x, 0);
+  const since = typeof s.since_ms === "number" ? s.since_ms : null;
+  const after = since === null ? 0 : Math.max(0, since - wait - ms);
+  const total = since === null ? null : since + (drawn ?? 0);
   const parts = [
+    [
+      drawn === void 0 ? "save to built" : "keystroke\u2192page",
+      total === null ? null : `${total.toFixed(1)} ms = ${sum([["queued", wait], ["build", ms], ["files and viewer", after], ...drawn === void 0 ? [] : [["paint", drawn]]])}`
+    ],
+    ["before the build", wait >= 1 ? `${wait.toFixed(1)} ms = ${sum(waited)}` : null],
     [s.cold ? "first build" : "build", `${dur2(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
-    ["save to build", typeof s.since_ms === "number" ? dur2(s.since_ms) : null],
     ["LaTeX runs", s.passes === void 0 ? null : String(s.passes)],
     ["steps", s.ran === void 0 ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
     ["packages fetched", s.fetched ? String(s.fetched) : null],
@@ -9920,6 +9930,8 @@ var Pages = class {
   sock;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   change = null;
+  /** The last build's `settled` event, for its parts once its page is drawn. */
+  settled = null;
   /** Every page's text, for finding (asked again after each build). */
   texts = null;
   constructor(sock2) {
@@ -9931,6 +9943,7 @@ var Pages = class {
       const s = e;
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
+      this.settled = s;
       if (typeof s.ms === "number") panel.latency(...timing(s));
     });
   }
@@ -9954,6 +9967,8 @@ var Pages = class {
     this.change = null;
     requestAnimationFrame(() => {
       const ms = c.since + performance.now() - c.at;
+      const s = this.settled;
+      if (s && typeof s.ms === "number") panel.latency(...timing(s, ms - c.since));
       panel.painted(ms);
       void this.sock.request({ op: "painted", ms });
     });

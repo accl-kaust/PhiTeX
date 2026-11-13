@@ -2199,6 +2199,20 @@ impl crate::Build {
         answer(st, &cx, k, &|| self.origins_pdf())
     }
 
+    /// [`Self::page_origins`], given up (`None`) once `stop` says so,
+    /// between a few hundred nodes of the sources' look or while the page
+    /// is matched: a watch's save waits for none of it (a page's origins
+    /// asked by a browser after an edit took 135 ms of the loop).
+    pub fn page_origins_until(
+        &self,
+        k: usize,
+        stop: &dyn Fn(bool) -> bool,
+    ) -> Option<Option<Arc<PageOrigins>>> {
+        let st = self.origins_state();
+        let cx = st.ctx_until(self.origins_input(), stop)?;
+        answer_until(st, &cx, k, &|| self.origins_pdf(), stop).ok()
+    }
+
     /// Every page's origins ([`Self::page_origins`]), made with one
     /// look at the sources.
     #[must_use]
