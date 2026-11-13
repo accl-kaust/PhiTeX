@@ -1953,7 +1953,11 @@ impl phitex_defuse::Operation for XdvPage {
                 .collect(),
         );
         let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
-        progress.stream_page(k, hash, |start, last| {
+        // (made beside the evaluation, which goes on at once: of what it
+        // owns, `Progress::stream_page_beside`)
+        let (p, inst, prog) = (p.clone(), v.instance(), progress.clone());
+        progress.stream_page_beside(k, hash, Box::new(move |start, last| {
+            let progress = prog;
             let t0 = std::time::Instant::now();
             // (the document's named objects the pages before it made, made
             // again first; the colours they leave it pushed)
@@ -1976,7 +1980,7 @@ impl phitex_defuse::Operation for XdvPage {
                 .collect();
             all.extend(start.map(color_prelude).unwrap_or_default());
             all.extend(ops.iter().cloned());
-            let pdf = xdv_alone(p, v.instance(), mag, &comment, &all)?;
+            let pdf = xdv_alone(&p, inst, mag, &comment, &all)?;
             // (exact where both are known; a colour carried in and not
             // known: drawn from none, told exact later only if none is)
             let exact = xdv_alone_exact(&ops) && before.is_some();
@@ -2001,7 +2005,7 @@ impl phitex_defuse::Operation for XdvPage {
             // what they leave it, once known, `Progress::page_colors`)
             let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
                 let (p, prog, ops) = (p.clone(), progress.clone(), ops.clone());
-                let (inst, comment) = (v.instance(), comment.clone());
+                let comment = comment.clone();
                 Box::new(move |_: &Values, start: &crate::exec::ColorStart| {
                     let before = prog.doc_specials_before(k)?;
                     let mut all: Vec<Op> = before.iter().map(|s| Op::Special(s.clone())).collect();
@@ -2012,7 +2016,7 @@ impl phitex_defuse::Operation for XdvPage {
                 }) as crate::exec::Remake
             });
             Some(crate::exec::Made::File(pdf, exact, remake, file))
-        });
+        }));
         Ok(ValueId::UNIT)
     }
 }
