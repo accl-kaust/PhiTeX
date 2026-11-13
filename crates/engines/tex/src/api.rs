@@ -7305,8 +7305,13 @@ impl Build {
         // a package load whose record lists the file: its key no longer
         // matches, so its hint goes back to the unrecorded one
         // (`crate::pkgrec`)
+        // (keyed only where a node's record lists the file: every node's
+        // text hashed for each file staged was 1.9 ms of each keystroke
+        // in Grail's chapters, no record listing them)
         if let Some(l) = self.g.loads.clone() {
             l.forget(name);
+        }
+        if let Some(l) = self.g.loads.clone().filter(|l| l.node_reads_file(name)) {
             let text = as_file(&self.text);
             let incr = self.doc.then_some(&self.incr);
             let redo: Vec<(NodeId, Vec<ValueId>)> = self
