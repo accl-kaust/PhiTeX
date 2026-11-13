@@ -1373,6 +1373,84 @@ fn latex_a_picture_asked_again_runs_again() {
     let _ = std::fs::write(dir.join("picck.tex"), src);
 }
 
+/// Each picture of a clean build runs once, in its child: a figure's
+/// run goes on as if its picture were empty, and takes the child's output
+/// when it has run, never reading the picture inline as well (Grail ran
+/// each of its pictures twice, 6.1 s of 19.3 s at -j1). The pictures: one
+/// in a `\resizebox` argument of a figure in an `\input` file (a token
+/// list, Grail's drawn figures), one in a file `\input` inside a
+/// `\resizebox` (its generated ones), two in one figure, one in a
+/// paragraph. At -j1 five runs of `pic` and no picture read inline; at
+/// -j4 the PDF of -j1 and none read inline. Then an edit in the text
+/// before them runs none, and one in a picture's body runs that one
+/// again; each PDF a clean build's.
+#[test]
+fn latex_each_picture_runs_once_on_a_clean_build() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-once");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{graphicx}\n\\usepackage{tikz}\n\\begin{document}\nFirst words, before the figures.\n\n\\input{picdrawn}\n\nWords between the figures.\n\n\\begin{figure}\n\\centering\n\\resizebox{0.5\\columnwidth}{!}{\\input{picgen}}\n\\caption{A generated picture.}\n\\end{figure}\n\n\\begin{figure}\n\\centering\n\\begin{tikzpicture}\\draw (0,0) rectangle (1,1); \\node at (0.5,0.5) {\\small one};\\end{tikzpicture}\n\\hfill\n\\begin{tikzpicture}\\draw (0,0) circle (0.5); \\node at (0,0) {\\footnotesize two};\\end{tikzpicture}\n\\caption{Two pictures.}\n\\end{figure}\n\nA paragraph \\begin{tikzpicture}\\draw (0,0) -- (1,0.2);\\end{tikzpicture} with a picture in it.\n\nLast words.\n\\end{document}\n";
+    let drawn = "\\begin{figure}[t]\n\\centering\n\\resizebox{\\columnwidth}{!}{%\n\\begin{tikzpicture}[x=0.5cm,y=0.5cm]\n\\foreach \\i in {1,...,12}{\\draw (\\i,0) circle (0.3); \\node at (\\i,1) {\\scriptsize \\i};}\n\\end{tikzpicture}%\n}\n\\caption{A drawn picture.}\n\\end{figure}\n";
+    let generated = "% generated\n\\begin{tikzpicture}\n\\foreach \\i in {1,...,8}{\\fill (\\i*0.4,0) rectangle +(0.3,\\i*0.2);}\n\\node at (2,-0.5) {\\sffamily bars};\n\\end{tikzpicture}%\n";
+    std::fs::write(dir.join("piconce.tex"), src).expect("write");
+    std::fs::write(dir.join("picdrawn.tex"), drawn).expect("write");
+    std::fs::write(dir.join("picgen.tex"), generated).expect("write");
+    let at = |threads: usize| Options {
+        threads: Some(threads),
+        ..pdf_opts("piconce", &dir)
+    };
+    let one = common::build(at(1), Some(&prelude(true)), src);
+    // (with lists left open, `phitex_tex::boxscope_on`, a picture is no
+    // child: its statements are nodes; the PDFs are the check)
+    let children = !phitex_tex::boxscope_on();
+    if children {
+        assert_eq!(
+            (common::runs_of(&one, "pic"), one.stats.pics_inline),
+            (5, 0),
+            "-j1: pictures run in children, read inline: {:?}",
+            one.stats.runs_by_op
+        );
+    }
+    let four = common::build(at(4), Some(&prelude(true)), src);
+    if children {
+        assert_eq!(four.stats.pics_inline, 0, "-j4: pictures read inline");
+    }
+    if let Some(d) = common::first_difference(&four.output().0, &one.output().0) {
+        panic!("-j4 differs from -j1: {d}");
+    }
+    let mut b = one;
+    let before = b.pages();
+    let word = src.replace("First words", "Some first words");
+    b.edit(&word);
+    if children {
+        assert_eq!(
+            common::runs_of(&b, "pic"),
+            0,
+            "a word edit before the pictures ran one"
+        );
+    }
+    std::fs::write(dir.join("piconce.tex"), &word).expect("write");
+    let cold = common::build(at(1), Some(&prelude(true)), &word);
+    assert_eq!(b.pages().len(), before.len());
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("the word edit differs from a clean build: {d}");
+    }
+    let drawn2 = drawn.replace("circle (0.3)", "circle (0.25)");
+    std::fs::write(dir.join("picdrawn.tex"), &drawn2).expect("write");
+    b.edit_file("picdrawn.tex", Some(drawn2.as_bytes()));
+    if children {
+        assert!(
+            common::runs_of(&b, "pic") >= 1,
+            "the drawing edited, its picture did not run again"
+        );
+    }
+    let cold = common::build(at(1), Some(&prelude(true)), &word);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("the drawing's edit differs from a clean build: {d}");
+    }
+    let _ = std::fs::write(dir.join("piconce.tex"), src);
+    let _ = std::fs::write(dir.join("picdrawn.tex"), drawn);
+}
+
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
 /// read staged again from disk, the main text sent again; an editor
 /// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut

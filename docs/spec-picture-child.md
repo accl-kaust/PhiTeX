@@ -332,3 +332,165 @@ picture saw, and the parent to make exactly what TeX's run made:
    picture (the `pic:` field's `\u{1}list` key, read only then) in front
    of its own, and its output's list is then the parent's whole list,
    which the parent puts in place of its own (`Run::pic_take_list`).
+
+## 8. One run per picture on a clean build (agent pic, 2026-11-13)
+
+### 8.1 What was wrong
+
+§2.5 as built read a picture inline whenever its child had no output yet,
+and placed the child as well, for the runs after. On a clean build every
+figure's run meets its picture before the child has run, so every picture
+ran twice: inline (the output used) and in its child (kept for the edits).
+Grail at -j1 spent 6.1 s of 19.3 s on that duplicate (note-par-2026-11-13
+§2). And each figure's run, released by the page layer's frontier where it
+read `\@freelist`, read its picture inline (1.1-1.5 s) before the frontier
+could pass it: Grail's eight figures stood on the critical path one after
+another.
+
+### 8.2 The rule: a child exists or will exist, so the figure's run never reads the picture
+
+At a picture's `\begin` the run (`Run::pic_begin`) computes the child's
+arguments and the bindings it hands over (`pic:` field) as before, then:
+
+| the child | first run of an evaluation (an edit's) | any later run, every run of a clean build |
+|---|---|---|
+| has no output | its last run's output as the guess (`Run::pic_guess`, unchanged), else as if empty | as if empty |
+| refused (`[refused]`) | inline, never placed again (unchanged) | the same |
+| has an output | taken (unchanged) | taken where its view holds, else as if empty |
+
+**As if empty.** The run skips the body (`Run::pic_skip`) and goes on;
+the read of the child's output is recorded as the guess `()`
+(`Ctx::placed_output_or`, or `Ctx::placed_output_guessed` where the child
+has an output of another view). A placement's output that differs from
+what its placer saw re-asks the placer (`commit::reask_parent`), and a
+commit whose own read of a placement no longer holds is refuted at once
+(`read::holds`), so a run that went on as if empty never stands: it runs
+again once the child has an output for the view it gave, and takes it.
+The picture runs once, in its child, on whichever worker is free.
+
+**The view holds** where my last run handed the child the same bindings
+(`Ctx::last_def` of the `pic:` field equals this run's), or where every
+read the child's last run made of that field gives what it gave with
+this run's bindings (`Ctx::placed_reads_hold`: the same comparison the
+commit's walk makes, so a view that holds by it re-asks the child for
+nothing). A float's run is re-asked each time `\@freelist` moves, and
+its bindings move with `\@currbox`, which no picture reads: such runs
+take the output (milliseconds), where §2.5 read the picture inline again.
+A child whose view holds but that is asked again or still running gives
+its output as the guess it is, recorded as seen: its next commit with
+another output re-asks the run. (Waiting for it, as a run waits for a
+definer, was built first and deadlocked at -j8: the child's reads before
+its placer were held at the page layer's frontier, which stood at the
+placer; Grail never ended, accl 28411.)
+
+**Pictures after one gone on as if empty.** Their state lacks that
+picture's work (fonts it loads first, pgf's counters, its items), so a
+child given it would run again once that output is in, and the pictures
+after it again for each: lie-hasse's page of 24 diagrams, one more right
+a pass (f940e759c). So in a run that went on as if empty at one picture,
+each later picture whose view moved goes on as if empty too, without
+handing its child new bindings: a child that has run keeps its view
+(the field defined with its last value), and one that has not is not
+placed. The run is asked again by the first one's output, and places the
+next then. Each picture runs once; the run's own text, cheap, runs once
+a picture.
+
+What is still read inline: a refused picture (§7.4), and a picture whose
+child is held for a panic (no commit of it comes). `Stats::pics_inline`
+counts them.
+
+### 8.3 Exactness
+
+Nothing here changes what a run makes from what it read: a run that goes
+on as if empty records the guess it went on, and every record that does
+not hold is run again (§7.1-7.3 unchanged). The bars: PDFs byte-identical
+to dev's at -j1/-j4/-j8/-j16 (Grail, amsldoc, para4000, the course cover,
+pgf-pie's and pgf-umlsd's manuals, two chapters of the TikZ manual).
+
+### 8.4 Children placed early
+
+A child is placed by its figure's run, so it starts when that run first
+reaches the picture. With §8.2 that run is cheap, and the page layer's
+frontier no longer waits there for a picture: the children start as the
+text's front passes their figures, in parallel with the text after them.
+What the source-level placement of §8.5 would add over that is measured
+first (8.6).
+
+### 8.5 Placing children from the source (designed, not built)
+
+The hint pass could place a child for every picture whose body it can
+see: `\begin{tikzpicture}`...`\end{tikzpicture}` in a slice, or in a
+file an `\input{}` of a slice names. Such a child cannot be the figure's
+own: its arguments are the body as the figure's run finds it (a token
+list where the picture is a `\resizebox` argument, Grail's drawn
+figures; lines of a file where it is `\input` there), the list's mode and
+parameters at the picture, and the bindings the figure's run made before
+it (`\centering`, the float's `\normalsize`, `\@currbox`), none of which
+the source gives. The early node would run on a guess of all three (the
+body tokenised with the catcodes before the figure, restricted
+horizontal mode, no bindings) and record what it read of each; the
+figure's run, at the picture, adopts it where its own arguments match
+and every recorded read of the guessed bindings and parameters holds,
+else places its own child as in §8.2. Exact by construction (adoption
+only where the reads hold), but it needs the early node's identity by
+place rather than by arguments, a lookup of it from the figure's run
+(a field it defines, read as a definer's), and a tokenisation of the
+argument that matches the run's. Built only if §8.6 shows the children
+starting late.
+
+### 8.6 Measured
+
+Picture runs on a clean build of Grail (11 pictures; acclnode11, Shelf's
+files, `PHITEX_PIC_TRACE`): before, -j1 22 (11 read inline, 11 children),
+-j8 33 (20 inline, 9 children, 4 children stopped); after, -j1 11 (all
+children, none inline), -j8 9-10 children run to the end, none inline,
+15-22 runs of children stopped part way (the long-run check of their
+reads, `Ctx::recheck`, and `Ctx::yield_to_prefix`). Test:
+`latex_each_picture_runs_once_on_a_clean_build`.
+
+Clean builds (mc 86417, mcnode42 alone, EPYC 9754, schedutil, boost on;
+release, warm format, median of 3; dev 81a72ba6d before):
+
+| doc | -j1 | -j4 | -j8 | -j16 |
+|---|---|---|---|---|
+| Grail before | 19.09 | 16.28 | 17.00 | 17.42 |
+| Grail after | 12.95 | 12.58 | 13.78 | 14.60 |
+| amsldoc before | 2.39 | 2.96 | 3.13 | 3.68 |
+| amsldoc after | 2.39 | 2.92 | 3.27 | 3.55 |
+| para4000 before | 2.54 | 1.29 | 1.27 | 1.37 |
+| para4000 after | 2.53 | 1.28 | 1.29 | 1.34 |
+| course cover before | 6.59 | 6.73 | 6.72 | 6.87 |
+| course cover after | 6.56 | 6.70 | 6.75 | 6.81 |
+| pgf-pie manual before | 3.89 | 3.35 | 3.34 | 3.78 |
+| pgf-pie manual after | 3.60 | 3.16 | 2.97 | 3.53 |
+| pgf-umlsd manual before | 3.86 | 3.66 | 3.83 | 4.08 |
+| pgf-umlsd manual after | 3.87 | 3.69 | 3.83 | 4.26 |
+
+Every PDF the same at every -j, before and after: Grail 004bb415ed,
+amsldoc 98c96e004c, para4000 4146793290, the cover 13349bee03, pgf-pie
+601000b03e, pgf-umlsd a24a2ba54d. Edits through `watch`, before / after
+(ms, 3 each): Grail one word -j1 38.9-40.6 / 39.1-39.8, -j8 40.8-58.9 /
+41.0-56.5; Grail's first drawn figure deleted -j1 6955-6979 / 6727-6755,
+-j8 7161-7520 / 6750-7042; amsldoc one word -j1 8.0-8.4 / 8.2-8.3, a
+paragraph inserted 108.0-108.5 / 107.7-108.9; the edited PDFs the same.
+
+So the duplicate is gone (Grail -j1 -6.1 s), and -j8 gained 3.2 s, but
+Grail at -j8 is still about its -j1. What holds it there is no longer
+the pictures (mc 86379, a profile build, -j8): the class (1.7 s, one
+node); minted's listing after the drawn figures (0.73 s, a `\write18`)
+runs only on the settled prefix (`Ctx::wait_settled`), so after every
+picture before it and its figure's run again: at 7.6 s; then three runs
+of about 2 s each (resume nodes that take 6 ms on their other runs and
+take no such time at -j1) one after another at the page layer's frontier
+(10.5-17.7 s), with `grail.aux` read back and BibTeX run four times
+where -j1 runs it once. Without minted (acclnode11, Shelf has no
+`latexminted`, release, 3 each) Grail is -j1 12.15 / 8.15 s and -j8
+about 11.0 / 9.0 s before / after: -j8 does not beat -j1 there either.
+The children themselves at -j8: 45 runs for 12 pictures (12.2 s of
+work, 6.3 kept), stopped where a read moved under them, on
+`cs:MT@font@list` (a font the text before first uses), `box:53`
+(amsmath's `\Mathstrutbox@`, whose depth every formula sets in place,
+a picture's math too), `pgf@arrow@id@count`. A picture child kept from
+yielding its worker (`Ctx::yield_to_prefix`) measured no change (mc
+86408, 5 each: -j8 13.1 / 13.1 s), so §8.5 was not built: the children
+start in time; the text after them does not finish sooner for it.
