@@ -262,20 +262,6 @@ impl PdfState {
         Ok(([e.length1, e.length2, e.length3], bytes))
     }
 
-    /// Whether a page's file wrote Type 1 font `file` (map entry `fm`)
-    /// before ([`PdfState::stream_t1`]).
-    pub(crate) fn stream_knows(
-        memo: &StreamMemo,
-        file: &Arc<[u8]>,
-        fm: &crate::map::MapEntry,
-    ) -> bool {
-        memo.fonts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&(file.as_ptr() as usize, file.len()))
-            .is_some_and(|e| e.iter().any(|(f, _)| f == fm))
-    }
-
     /// The glyph names of encoding file `bytes` ([`crate::enc::load_enc`]),
     /// read once for the pages' files.
     pub(crate) fn stream_enc(

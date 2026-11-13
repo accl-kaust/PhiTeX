@@ -630,41 +630,6 @@ impl PdfState {
                     .get_or_insert_with(BTreeSet::new)
                     .extend(marked.iter().copied());
             }
-            // (a page's file of its own, its Type 1 program made for the
-            // glyphs the pages so far used, `crate::stream`: the first
-            // page's to use the font, those of every code below 128 the
-            // font has too, the letters, digits and signs a page goes on
-            // to use, so that the program is made once, not again as each
-            // page brings another letter; what it shows is the page's)
-            if let Some(memo) = &self.stream_memo
-                && fm.is_type1()
-                && fm.is_subsetted()
-                && !self
-                    .font(f)
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| Self::stream_knows(memo, file, &fm))
-            {
-                let has = |c: usize| {
-                    u8::try_from(c).is_ok_and(|c| self.font(f).metrics.char(c).is_some())
-                };
-                let seed = (0..128).filter(|&c| has(c));
-                match &fe_key {
-                    Some(k) => {
-                        let g = &t.fe_tree[k].names;
-                        for c in seed {
-                            if let Some(n) = &g[c] {
-                                fd.desc.gl_tree.insert(n.clone());
-                            }
-                        }
-                    }
-                    None => fd
-                        .desc
-                        .tx_tree
-                        .get_or_insert_with(BTreeSet::new)
-                        .extend(seed),
-                }
-            }
             if !fm.is_type1() {
                 let mut fd = std::mem::replace(&mut t.fds[fd_index], self.new_fd(&fm, f));
                 let r = self.write_fontdescriptor(&mut fd);
