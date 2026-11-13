@@ -329,14 +329,11 @@ struct Streamed {
     /// The pages whose files draw them otherwise than the build's file will
     /// ([`phitex_tex::StreamedPage::exact`]: what they lack left out).
     inexact: std::collections::BTreeSet<usize>,
-    /// The bytes of the files kept ([`STREAM_KEEP`]).
-    bytes: usize,
 }
 
 impl Streamed {
     /// Page `k` streamed ([`Viewer::stream_page`]'s arguments): kept, and
-    /// the `page` event to tell (none: nothing new to tell, or past
-    /// [`STREAM_KEEP`]).
+    /// the `page` event to tell (none: nothing new to tell).
     fn put(
         &mut self,
         k: usize,
@@ -353,16 +350,10 @@ impl Streamed {
         } else if pdf.is_empty() {
             return None;
         } else {
-            let old = self.pdfs.get(&k).map_or(0, |p| p.len());
-            let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
-            if !first && self.bytes - old + pdf.len() > STREAM_KEEP {
-                return None;
-            }
             if self.hashes.len() <= k {
                 self.hashes.resize(k + 1, None);
             }
             self.hashes[k] = Some(h);
-            self.bytes = self.bytes - old + pdf.len();
             self.pdfs.insert(k, Arc::from(pdf));
             if exact {
                 self.inexact.remove(&k);
@@ -392,11 +383,6 @@ impl Streamed {
         (hashes, self.inexact.iter().copied().collect())
     }
 }
-
-/// The most bytes of streamed pages' files kept until the build is in (a
-/// wasm core's memory is the document's too): a page past it is not
-/// streamed, but for the first [`crate::progress::STREAM_FIRST`].
-pub const STREAM_KEEP: usize = 64 << 20;
 
 /// What a streamed page's identity has in it (xor): no page the build
 /// settles with is named so, and each streamed page is drawn again from

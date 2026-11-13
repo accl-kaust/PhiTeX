@@ -827,6 +827,52 @@ pub fn split_xdv(x: &[u8]) -> (usize, Vec<(usize, usize)>) {
 }
 
 impl Session {
+    /// Each font the pages so far used given the characters (and a CID
+    /// font's vertical ones) `seen` keeps of the same font too (its name,
+    /// file, index, kind and encoding), and `seen` given its own: a page's
+    /// file of its own (a page streamed) embeds each font with every glyph
+    /// the pages written before it used, the same subset for each page
+    /// (its compression found made), not each page's own made and
+    /// compressed again. A font shows the glyphs its page uses either way.
+    pub fn widen_used(&mut self, seen: &mut alloc::collections::BTreeMap<Vec<u8>, Vec<u8>>) {
+        for f in &self.dpx.font.fonts {
+            if f.reference.is_none() {
+                continue;
+            }
+            for (which, uc) in [(0u8, &f.usedchars), (1, &f.cid.usedchars_v)] {
+                let Some(uc) = uc else {
+                    continue;
+                };
+                let key = alloc::format!(
+                    "{:?}",
+                    (
+                        which,
+                        &f.ident,
+                        &f.filename,
+                        f.index,
+                        f.subtype,
+                        f.encoding_id
+                    )
+                )
+                .into_bytes();
+                let mut cur = uc.to_vec();
+                let e = seen.entry(key).or_default();
+                if e.len() < cur.len() {
+                    e.resize(cur.len(), 0);
+                }
+                let mut more = false;
+                for (a, b) in cur.iter_mut().zip(e.iter_mut()) {
+                    more |= *b & !*a != 0;
+                    *a |= *b;
+                    *b = *a;
+                }
+                if more {
+                    uc.store(&cur);
+                }
+            }
+        }
+    }
+
     /// A copy of the session as it is (between pages), to go on from
     /// later: the incremental link. A page that changed is done again
     /// from the snapshot taken before it, then the pages after it and the

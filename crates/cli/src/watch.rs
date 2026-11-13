@@ -1158,11 +1158,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }));
         }
     }
-    // (the pages a cold build streams, where a viewer shows them: each
-    // drawn from its own file until the build is in; a page streamed again
-    // with another hash shown redone in the live tree. Only where the
-    // viewer listens: a listener makes the clean build stream its pages,
-    // work the tree alone does not pay for)
+    // (the pages every build streams, where a viewer shows them: the
+    // clean build's all, an edit's those it changed, each drawn from its
+    // own file until the build is in; in the live tree a clean build's
+    // page streamed again with another hash shown redone, an edit's each
+    // as it comes. Only where the viewer listens: a listener makes the
+    // builds stream their pages, work the tree alone does not pay for)
     if let Some(v) = view.as_ref().map(View::viewer) {
         let ui = ui.clone();
         status.meter().on_streamed(Box::new(move |p, pages| {

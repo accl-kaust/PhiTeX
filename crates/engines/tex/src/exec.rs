@@ -210,8 +210,9 @@ pub struct Progress {
     /// The pages streamed' colors ([`Colors`]).
     colors: std::sync::Mutex<Colors>,
     /// Each page streamed's specials on the document (XeTeX's named
-    /// objects made or added to: `crate::xdvpdf::XdvPage`), by page from 1.
-    doc_specials: std::sync::Mutex<std::collections::BTreeMap<u64, Vec<Vec<u8>>>>,
+    /// objects made or added to: `crate::xdvpdf::XdvPage`), by the page's
+    /// identity ([`PageId`]).
+    doc_specials: std::sync::Mutex<FxHashMap<PageId, Vec<Vec<u8>>>>,
     /// Told at every job's start ([`Progress::on_tick`]).
     on_tick: OnceLock<TickHook>,
 }
@@ -282,22 +283,96 @@ fn color_after(start: &ColorStart, ops: &[ColorOp]) -> ColorStart {
         .collect()
 }
 
+/// A page by what made it, whatever its place: the finisher that
+/// shipped it (its node) and its place among that finisher's pages. An
+/// edit that moves pages leaves a page's identity as it was, its number
+/// not ([`Progress::page_of`]).
+pub(crate) type PageId = (u64, u32);
+
 /// The colour stacks where each page streamed begins ([`Progress::page_colors`]):
 /// a page is drawn exactly alone only where every page before it is
 /// known, its file starting from the colours they leave it (a colour
 /// pushed on one page and popped on a later one colours the pages
-/// between). Kept across a build's passes (a page not made again in a
-/// later pass leaves what it left), made afresh when a build begins to
-/// stream ([`Progress::set_streaming`]).
+/// between). Kept across a build's passes and its edits' evaluations (a
+/// page not made again leaves what it left), each page's commands by its
+/// identity, so that a page an edit moves carries its own to its new
+/// place; made afresh when a build begins to stream
+/// ([`Progress::set_streaming`]).
 #[derive(Debug, Default)]
 struct Colors {
-    /// The commands of page `k` (from 1).
-    ops: std::collections::BTreeMap<u64, Vec<ColorOp>>,
-    /// Where pages 1, 2, ... begin, as far as every page before is known.
+    /// The commands of each page, by its identity.
+    ops: FxHashMap<PageId, Vec<ColorOp>>,
+    /// The pages, in order, whose commands made [`Colors::starts`]:
+    /// `starts[j + 1]` is where the page after `seq[j]` begins.
+    seq: Vec<PageId>,
+    /// Where pages 1, 2, ... begin, as far as every page before is known
+    /// (the first: none carried in).
     starts: Vec<ColorStart>,
     /// The pages streamed before every page before them was known, drawn
-    /// from no colour carried in ([`Waiting`]).
+    /// from no colour carried in ([`Waiting`]), by page (from 1): this
+    /// evaluation's ([`Progress::begin`]).
     waiting: std::collections::BTreeMap<u64, Waiting>,
+    /// What was told of each page (from 1) last, its file streamed
+    /// ([`Told`]): a page made again as it was told is not told again.
+    told: std::collections::BTreeMap<u64, Told>,
+}
+
+/// A page told ([`Colors::told`]): its identity, whether exact, the
+/// colours its file began from (whether known: [`Progress::page_colors`])
+/// and its file's key ([`Made::File`]).
+#[derive(Debug, PartialEq)]
+struct Told {
+    hash: u64,
+    exact: bool,
+    start: ColorStart,
+    known: bool,
+    file: u64,
+}
+
+/// What a page's file made gives [`Progress::stream_page`]: the file as
+/// it was told last (its key the same: nothing to tell), or a file, the
+/// objects it draws with all in it, its making again from the colours
+/// carried in once they are known (where they are not yet), and its key:
+/// what the file is made of (the page, the colours it begins from, the
+/// commands of the objects it takes), the same key the same file.
+pub(crate) enum Made {
+    Same,
+    File(Vec<u8>, bool, Option<Remake>, u64),
+}
+
+impl Colors {
+    /// [`Colors::starts`] made good for the pages in `order` (their
+    /// identities, first first): kept as far as the pages they were made
+    /// from are the same pages in the same places, made on from there
+    /// while each page's commands are known.
+    fn settle(&mut self, order: &[PageId]) {
+        if self.starts.is_empty() {
+            self.starts.push(ColorStart::new());
+        }
+        let same = self
+            .seq
+            .iter()
+            .zip(order)
+            .take_while(|(a, b)| a == b)
+            .count();
+        self.seq.truncate(same);
+        self.starts.truncate(same + 1);
+        while let Some(id) = order.get(self.seq.len())
+            && let Some(o) = self.ops.get(id)
+        {
+            let next = color_after(self.starts.last().unwrap_or(&ColorStart::new()), o);
+            self.starts.push(next);
+            self.seq.push(*id);
+        }
+    }
+
+    /// Where page `k` (from 1) begins, where every page before it is
+    /// known.
+    fn start(&self, k: u64) -> Option<&ColorStart> {
+        usize::try_from(k.checked_sub(1)?)
+            .ok()
+            .and_then(|i| self.starts.get(i))
+    }
 }
 
 /// A page's file made again from where its colours begin, on the values
@@ -328,11 +403,9 @@ impl std::fmt::Debug for Waiting {
     }
 }
 
-/// What is told of the pages streamed ([`Progress::on_stream`]): whether
-/// page `k` (from 1) is wanted, asked before its PDF is made, and the
-/// page made.
+/// What is told of the pages streamed ([`Progress::on_stream`]): each
+/// page made, every one, but one made again as it was told last.
 pub struct StreamHook {
-    pub want: Box<dyn Fn(u64) -> bool + Send + Sync>,
     pub page: Box<dyn Fn(StreamedPage) + Send + Sync>,
 }
 
@@ -392,25 +465,28 @@ impl Progress {
             streaming: std::sync::atomic::AtomicBool::new(false),
             on_stream: OnceLock::new(),
             colors: std::sync::Mutex::default(),
-            doc_specials: std::sync::Mutex::default(),
+            doc_specials: std::sync::Mutex::new(FxHashMap::default()),
             on_tick: OnceLock::new(),
         }
     }
 
     /// `hook` told of each page made while the build runs, once
     /// [`Progress::set_streaming`] is on (once per progress: whether it
-    /// was set). Its `want` is asked on the writer's thread before the
-    /// page's PDF is made; its `page` given the page there.
+    /// was set): its `page` given the page on the writer's thread.
     pub fn on_stream(&self, hook: StreamHook) -> bool {
         self.on_stream.set(hook).is_ok()
     }
 
     /// The evaluations begun from now on stream their pages (`on`) or do
     /// not: a page's PDF side runs as soon as its page is shipped, not
-    /// once the loop-backs settle, and each page wanted is told
-    /// ([`Progress::on_stream`]). The output is the same either way.
+    /// once the loop-backs settle, and each page made is told
+    /// ([`Progress::on_stream`]), a clean build's and every edit's. The
+    /// output is the same either way. What the pages streamed left (their
+    /// colours, what was told) is kept while it stays on, so an edit's
+    /// pages begin from the pages it left alone; made afresh when it is
+    /// turned on.
     pub fn set_streaming(&self, on: bool) {
-        if on {
+        if on && !self.streaming.swap(true, Ordering::Relaxed) {
             *self
                 .colors
                 .lock()
@@ -423,43 +499,85 @@ impl Progress {
         self.streaming.store(on, Ordering::Relaxed);
     }
 
+    /// The pages' identities in their order ([`PageId`]), as
+    /// [`Progress::page_of`] places them.
+    fn order(&self) -> Vec<PageId> {
+        let s = self
+            .ships
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut f: Vec<(i64, bool, u64, u32)> =
+            s.iter().map(|(&n, &(p, sp, k))| (p, sp, n, k)).collect();
+        drop(s);
+        f.sort_unstable();
+        f.into_iter()
+            .flat_map(|(_, _, n, k)| (0..k).map(move |i| (n, i)))
+            .collect()
+    }
+
     /// Whether the evaluations stream their pages.
     #[must_use]
     pub fn streaming(&self) -> bool {
         self.streaming.load(Ordering::Relaxed)
     }
 
-    /// Page `k` (from 1) made in this evaluation, told if it is wanted:
-    /// `make` gives, from where its colours begin (none: not known yet,
-    /// drawn from none carried in), its identity, its PDF and whether
-    /// that draws every object as the build's file will (none: not
-    /// streamed). It is told exact where that is so and its colours'
-    /// start is known ([`Progress::page_colors`]); where it is not known
-    /// yet, told again exact once it is known to carry none.
+    /// Page `k` (from 1) made in this evaluation, `hash` its identity,
+    /// told: `make` gives, from where its colours begin (none: not known
+    /// yet, drawn from none carried in), its PDF and whether that draws
+    /// every object as the build's file will (none: not streamed). It is
+    /// told exact where that is so and its colours' start is known
+    /// ([`Progress::page_colors`]); where it is not known yet, told again
+    /// exact once it is known to carry none. A page made as it was told
+    /// last (the same identity, from the same colours, exact) is not made
+    /// or told again: an edit tells the pages it changed.
     pub(crate) fn stream_page(
         &self,
         k: u64,
-        make: impl FnOnce(Option<&ColorStart>) -> Option<(u64, Vec<u8>, bool, Option<Remake>)>,
+        hash: u64,
+        make: impl FnOnce(Option<&ColorStart>, Option<u64>) -> Option<Made>,
     ) {
         let Some(h) = self.on_stream.get() else {
             return;
         };
-        if !(h.want)(k) {
-            return;
-        }
-        let start = {
-            let c = self
+        let order = self.order();
+        let (start, last) = {
+            let mut c = self
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            usize::try_from(k - 1)
-                .ok()
-                .and_then(|i| c.starts.get(i).cloned())
+            c.settle(&order);
+            let start = c.start(k).cloned();
+            if let Some(st) = &start
+                && c.told
+                    .get(&k)
+                    .is_some_and(|t| t.hash == hash && t.exact && t.start == *st)
+            {
+                return;
+            }
+            // (the key of the file told last of the page, made from the
+            // colours it begins from now, known: a file of the same key
+            // is that file, not told again)
+            let last = start.as_ref().and_then(|st| {
+                c.told
+                    .get(&k)
+                    .filter(|t| t.known && t.hash == hash && t.start == *st)
+                    .map(|t| t.file)
+            });
+            (start, last)
         };
-        let Some((hash, pdf, objects, remake)) = make(start.as_ref()) else {
+        let got = make(start.as_ref(), last);
+        let Some(Made::File(pdf, objects, remake, file)) = got else {
+            if got.is_none() {
+                self.colors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .told
+                    .remove(&k);
+            }
             return;
         };
         let e = self.evaluation();
+        let exact = objects && start.is_some();
         {
             let mut c = self
                 .colors
@@ -480,50 +598,63 @@ impl Progress {
                     c.waiting.remove(&k);
                 }
             }
+            c.told.insert(
+                k,
+                Told {
+                    hash,
+                    exact,
+                    known: start.is_some(),
+                    start: start.unwrap_or_default(),
+                    file,
+                },
+            );
         }
         (h.page)(StreamedPage {
             evaluation: e,
             page: k,
             hash,
             pdf,
-            exact: objects && start.is_some(),
+            exact,
         });
     }
 
-    /// Page `k` (from 1) of this build meets the colour stack commands
-    /// `ops`: where the pages after it begin known as far as every page
-    /// before them is. Each page streamed before that, from no colour
-    /// carried in ([`Progress::stream_page`]), is told again: where none
-    /// is carried in, exact as it is; else made again on `v` from the
-    /// colours carried in, under another identity (the viewer draws it
-    /// again), and told.
-    pub(crate) fn page_colors(&self, k: u64, ops: Vec<ColorOp>, v: &phitex_defuse::Values) {
+    /// Page `k` (from 1) of this build, `id` its identity ([`PageId`]),
+    /// meets the colour stack commands `ops`: where the pages after it
+    /// begin known as far as every page before them is. Each page
+    /// streamed before that, from no colour carried in
+    /// ([`Progress::stream_page`]), is told again: where none is carried
+    /// in, exact as it is; else made again on `v` from the colours carried
+    /// in, under another identity (the viewer draws it again), and told.
+    pub(crate) fn page_colors(&self, id: PageId, ops: Vec<ColorOp>, v: &phitex_defuse::Values) {
         let e = self.evaluation();
+        let order = self.order();
         let known: Vec<(u64, ColorStart, Waiting)> = {
             let mut c = self
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let c = &mut *c;
-            if c.starts.is_empty() {
-                c.starts.push(ColorStart::new());
-            }
-            if c.ops.get(&k) != Some(&ops) {
-                c.ops.insert(k, ops);
+            if c.ops.get(&id) != Some(&ops) {
                 // (the pages after it begin anew from it)
-                c.starts.truncate(usize::try_from(k).unwrap_or(usize::MAX));
+                if let Some(j) = c.seq.iter().position(|x| *x == id) {
+                    c.seq.truncate(j);
+                    c.starts.truncate(j + 1);
+                }
+                c.ops.insert(id, ops);
             }
-            while let Some(o) = c.ops.get(&(c.starts.len() as u64)) {
-                let next = color_after(c.starts.last().unwrap_or(&ColorStart::new()), o);
-                c.starts.push(next);
+            // (the pages gone: their commands dropped)
+            if c.ops.len() > order.len() {
+                let live: phitex_defuse::FxHashSet<PageId> = order.iter().copied().collect();
+                c.ops.retain(|x, _| live.contains(x));
             }
+            c.settle(&order);
             let n = c.starts.len() as u64;
             let rest = c.waiting.split_off(&(n + 1));
             let done = std::mem::replace(&mut c.waiting, rest);
             done.into_iter()
                 .filter_map(|(p, w)| {
-                    let st = usize::try_from(p - 1).ok().and_then(|i| c.starts.get(i))?;
-                    Some((p, st.clone(), w))
+                    let st = c.start(p)?.clone();
+                    Some((p, st, w))
                 })
                 .collect()
         };
@@ -531,8 +662,21 @@ impl Progress {
             return;
         };
         for (page, start, w) in known {
+            // (no key: made again, a file other than any made from it)
+            let told = |exact: bool| Told {
+                hash: w.hash,
+                exact,
+                start: start.clone(),
+                known: false,
+                file: 0,
+            };
             if start.is_empty() {
                 if w.objects {
+                    self.colors
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .told
+                        .insert(page, told(true));
                     (h.page)(StreamedPage {
                         evaluation: e,
                         page,
@@ -542,6 +686,11 @@ impl Progress {
                     });
                 }
             } else if let Some((pdf, exact)) = (w.remake)(v, &start) {
+                self.colors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .told
+                    .insert(page, told(exact));
                 (h.page)(StreamedPage {
                     evaluation: e,
                     page,
@@ -553,26 +702,31 @@ impl Progress {
         }
     }
 
-    /// Page `k` (from 1) of this build makes or adds to the document's
-    /// named objects with `specials` (XeTeX's `pdf:obj @x`, `pdf:put @x`,
-    /// `pdf:stream @x`).
-    pub(crate) fn page_doc_specials(&self, k: u64, specials: Vec<Vec<u8>>) {
+    /// Page `id` ([`PageId`]) of this build makes or adds to the
+    /// document's named objects with `specials` (XeTeX's `pdf:obj @x`,
+    /// `pdf:put @x`, `pdf:stream @x`).
+    pub(crate) fn page_doc_specials(&self, id: PageId, specials: Vec<Vec<u8>>) {
         self.doc_specials
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(k, specials);
+            .insert(id, specials);
     }
 
     /// The document's specials of pages 1 to `k - 1` in order, where each
     /// of those pages is known ([`Progress::page_doc_specials`]).
     pub(crate) fn doc_specials_before(&self, k: u64) -> Option<Vec<Vec<u8>>> {
+        let order = self.order();
         let m = self
             .doc_specials
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = usize::try_from(k.saturating_sub(1)).unwrap_or(usize::MAX);
+        if order.len() < before {
+            return None;
+        }
         let mut out = Vec::new();
-        for j in 1..k {
-            out.extend(m.get(&j)?.iter().cloned());
+        for id in &order[..before] {
+            out.extend(m.get(id)?.iter().cloned());
         }
         Some(out)
     }
@@ -677,8 +831,14 @@ impl Progress {
             .collect()
     }
 
-    /// An evaluation begins: no jobs known or done.
+    /// An evaluation begins: no jobs known or done, no page streamed in
+    /// it waiting for its colours (the last's: its build is in).
     pub(crate) fn begin(&self) {
+        self.colors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .waiting
+            .clear();
         self.done.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
         self.page.store(0, Ordering::Relaxed);

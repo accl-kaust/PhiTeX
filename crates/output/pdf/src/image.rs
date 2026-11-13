@@ -1093,11 +1093,70 @@ impl PdfState {
             self.png_device(image.colorspace_ref, color_type == png::COLOR_GRAY);
             return self.copy_png(image, &info, bit_depth);
         }
-        let img = png::read_image(&image.data, &info, t)
-            .map_err(|_| fail(name, "libpng: internal error"))?;
-        let rows = &img.rows;
+        // (the streams of the object, in their order: the rows, or the
+        // colours and the soft mask apart, then the palette; a page's
+        // file of its own takes them decoded and compressed once,
+        // `crate::stream`)
+        let hicolor = self.fixed_image_hicolor;
+        let alpha_split = major > 1 || minor >= 4;
+        let decode = || -> Result<(u8, u8, Vec<Vec<u8>>), PdfError> {
+            let img = png::read_image(&image.data, &info, t)
+                .map_err(|_| fail(name, "libpng: internal error"))?;
+            let streams = match img.color_type {
+                png::COLOR_PALETTE => {
+                    let bytes: Vec<u8> = info.palette.iter().flatten().copied().collect();
+                    vec![img.rows, bytes]
+                }
+                png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA if alpha_split => {
+                    let gray = img.color_type == png::COLOR_GRAY_ALPHA;
+                    let wide = img.bit_depth == 16 && hicolor != 0;
+                    let (n, alpha_from) = match (gray, wide) {
+                        (true, true) => (4, 2),
+                        (true, false) => (2, 1),
+                        (false, true) => (8, 6),
+                        (false, false) => (4, 3),
+                    };
+                    let mut color = Vec::with_capacity(img.rows.len());
+                    let mut smask = Vec::new();
+                    for row in img.rows.chunks(img.rowbytes.max(1)) {
+                        for piece in row.chunks(16384) {
+                            for (j, &b) in piece.iter().enumerate() {
+                                if j % n < alpha_from {
+                                    color.push(b);
+                                } else {
+                                    smask.push(b);
+                                }
+                            }
+                        }
+                    }
+                    let mask: Vec<u8> = if img.bit_depth == 16 {
+                        smask.iter().step_by(2).copied().collect()
+                    } else {
+                        smask
+                    };
+                    vec![color, mask]
+                }
+                _ => vec![img.rows],
+            };
+            Ok((img.color_type, img.bit_depth, streams))
+        };
+        let memo = self.stream_memo.clone();
+        let (made, raw) = match &memo {
+            Some(m) => (Some(self.stream_png(m, &image.data, decode)?), None),
+            None => (None, Some(decode()?)),
+        };
+        let (color_type, depth) = match (&made, &raw) {
+            (Some(m), _) => (m.color_type, m.bit_depth),
+            (_, Some((c, d, _))) => (*c, *d),
+            _ => (0, 0),
+        };
+        let put = |st: &mut Self, k: usize| match (&made, &raw) {
+            (Some(m), _) => st.put_made_stream(m.streams.get(k).map_or(&[][..], |b| &b[..])),
+            (_, Some((_, _, s))) => st.png_stream(s.get(k).map_or(&[][..], |b| &b[..])),
+            _ => {}
+        };
         let mut needs_group = false;
-        match img.color_type {
+        match color_type {
             png::COLOR_PALETTE => {
                 let palette_objnum = self.new_objnum_();
                 if image.colorspace_ref != 0 {
@@ -1111,42 +1170,20 @@ impl PdfState {
                         .as_bytes(),
                     );
                 }
-                self.png_stream(rows);
+                put(self, 0);
                 self.begin_dict(palette_objnum, 0);
-                let bytes: Vec<u8> = info.palette.iter().flatten().copied().collect();
-                self.png_stream(&bytes);
+                put(self, 1);
             }
             png::COLOR_GRAY | png::COLOR_RGB => {
-                self.png_device(image.colorspace_ref, img.color_type == png::COLOR_GRAY);
-                self.png_stream(rows);
+                self.png_device(image.colorspace_ref, color_type == png::COLOR_GRAY);
+                put(self, 0);
             }
-            png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA if major > 1 || minor >= 4 => {
-                let gray = img.color_type == png::COLOR_GRAY_ALPHA;
+            png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA if alpha_split => {
+                let gray = color_type == png::COLOR_GRAY_ALPHA;
                 self.png_device(image.colorspace_ref, gray);
                 let smask_objnum = self.new_objnum_();
                 self.print(format!("/SMask {smask_objnum} 0 R\n").as_bytes());
-                let wide = img.bit_depth == 16 && self.fixed_image_hicolor != 0;
-                let (n, alpha_from) = match (gray, wide) {
-                    (true, true) => (4, 2),
-                    (true, false) => (2, 1),
-                    (false, true) => (8, 6),
-                    (false, false) => (4, 3),
-                };
-                let mut color = Vec::with_capacity(rows.len());
-                let mut smask = Vec::new();
-                for row in rows.chunks(img.rowbytes.max(1)) {
-                    for piece in row.chunks(16384) {
-                        for (j, &b) in piece.iter().enumerate() {
-                            if j % n < alpha_from {
-                                color.push(b);
-                            } else {
-                                smask.push(b);
-                            }
-                        }
-                    }
-                }
-                self.png_stream(&color);
-                let depth = img.bit_depth;
+                put(self, 0);
                 self.begin_dict(smask_objnum, 0);
                 self.print(b"/Type /XObject\n/Subtype /Image\n");
                 self.print(
@@ -1159,20 +1196,12 @@ impl PdfState {
                     .as_bytes(),
                 );
                 self.print(b"/ColorSpace /DeviceGray\n");
-                let mask: Vec<u8> = if depth == 16 {
-                    smask.iter().step_by(2).copied().collect()
-                } else {
-                    smask
-                };
-                self.png_stream(&mask);
+                put(self, 1);
                 needs_group = true;
             }
             png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA => {
-                self.png_device(
-                    image.colorspace_ref,
-                    img.color_type == png::COLOR_GRAY_ALPHA,
-                );
-                self.png_stream(rows);
+                self.png_device(image.colorspace_ref, color_type == png::COLOR_GRAY_ALPHA);
+                put(self, 0);
             }
             t => return Err(fail(name, &format!("unsupported type of color_type <{t}>"))),
         }

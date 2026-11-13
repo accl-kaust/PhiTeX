@@ -2212,6 +2212,27 @@ mod tests {
         host: Arc<dyn Host>,
         threads: usize,
     ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
+        let (mut d, events, files) = streaming(engine, text, host, threads);
+        d.step();
+        let ev = lock(&events).clone();
+        let files = lock(&files).clone();
+        (d, ev, files)
+    }
+
+    /// The pages a build streamed, by page (from 0): the last file of each
+    /// and whether it was exact.
+    type Streamed = Arc<Mutex<HashMap<usize, (Vec<u8>, bool)>>>;
+
+    /// A document of `text` by `engine` at `threads` threads, nothing
+    /// built yet, whose builds stream their pages: the events as they are
+    /// told (each page told drawn at once, as a viewer asks), and the pages
+    /// streamed.
+    fn streaming(
+        engine: &str,
+        text: &str,
+        host: Arc<dyn Host>,
+        threads: usize,
+    ) -> (Document, Arc<Mutex<Vec<Value>>>, Streamed) {
         let session = Session::new(
             Job {
                 engine: crate::tex::engine(engine).unwrap(),
@@ -2224,7 +2245,7 @@ mod tests {
             Arc::new(Memory::default()),
             Arc::new(Status::default()),
         );
-        let files: Arc<Mutex<HashMap<usize, (Vec<u8>, bool)>>> = Arc::default();
+        let files: Streamed = Arc::default();
         let fs = files.clone();
         session.status().meter().on_streamed(Box::new(move |p, _| {
             let k = usize::try_from(p.page - 1).unwrap();
@@ -2240,7 +2261,7 @@ mod tests {
         let events: Arc<Mutex<Vec<Value>>> = Arc::default();
         let viewer: Arc<std::sync::OnceLock<Arc<Viewer>>> = Arc::default();
         let (ev, vw) = (events.clone(), viewer.clone());
-        let mut d = Document::new_with_emit(session, "doc.tex", move |e| {
+        let d = Document::new_with_emit(session, "doc.tex", move |e| {
             if e["event"] == "page"
                 && let (Some(v), Some(k)) = (vw.get(), e["k"].as_u64())
             {
@@ -2253,10 +2274,7 @@ mod tests {
             lock(&ev).push(e);
         });
         let _ = viewer.set(d.viewer().clone());
-        d.step();
-        let ev = lock(&events).clone();
-        let files = lock(&files).clone();
-        (d, ev, files)
+        (d, events, files)
     }
 
     /// The page events' `exact`, by page (the last told).
@@ -2500,6 +2518,500 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Page `k` (from 0) of `pdf`: its content stream, decoded.
+    fn content(pdf: &[u8], k: usize) -> Vec<u8> {
+        let data: Arc<[u8]> = Arc::from(pdf);
+        let doc = phitex_codecs::pdfread::Doc::open(&data).expect("a PDF");
+        let page = doc.page(k + 1).expect("the page");
+        phitex_codecs::pdftext::page_content(&doc, &page)
+    }
+
+    /// The pages' identities the viewer has once the build is in.
+    fn settled_pages(d: &Document) -> Vec<Value> {
+        d.request(&json!({"id": 9, "op": "pages"}))["json"]["pages"]
+            .as_array()
+            .cloned()
+            .unwrap()
+    }
+
+    /// The pages (from 0) told in `ev` before the build was in, and
+    /// whether none was told after.
+    fn told_before_settled(ev: &[Value]) -> (std::collections::BTreeSet<u64>, bool) {
+        let settled = ev
+            .iter()
+            .position(|e| e["event"] == "settled")
+            .expect("settled");
+        let ks = ev[..settled]
+            .iter()
+            .filter(|e| e["event"] == "page")
+            .filter_map(|e| e["k"].as_u64())
+            .collect();
+        (ks, ev[settled..].iter().all(|e| e["event"] != "page"))
+    }
+
+    /// A document of rules, page `i` a rule `widths[i]` wide, with a
+    /// colour pushed on page 2 and popped on page 5 (those between begin
+    /// coloured), a literal drawing with an object its resources name on
+    /// page 7, and an image on page 9; with `loop_steps` steps of a loop
+    /// before the pages (a build that takes a while before them).
+    fn streamed_doc(widths: &[usize], loop_steps: u32) -> String {
+        let mut t = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 \\pdfcompresslevel=9 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={{\\shipout\\box255}} \\def\\space{{ }} \\count1=0 \\def\\l{{\\advance\\count1 by1 \\ifnum\\count1<{loop_steps} \\expandafter\\l\\fi}}\\l "
+        );
+        t.push_str("\\pdfximage width 20pt {a.png}\\edef\\i{\\the\\pdflastximage} \\immediate\\pdfobj{<< /G1 << /ca 0.5 /CA 0.5 >> >>}\\edef\\g{\\the\\pdflastobj} \\edef\\r{/ExtGState \\g\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for (i, w) in widths.iter().enumerate() {
+            let c = match i {
+                2 => "\\pdfcolorstack0 push{1 0 0 rg}",
+                5 => "\\pdfcolorstack0 pop",
+                7 => "\\pdfliteral{/G1 gs 0 0 1 rg}",
+                9 => "\\pdfrefximage\\i",
+                _ => "",
+            };
+            t.push_str(&format!(
+                "\\hbox{{{c}\\vrule width {w}pt height 30pt}}\\penalty-10000 "
+            ));
+        }
+        t.push_str("\\end\n");
+        t
+    }
+
+    /// The host of [`streamed_doc`]: its image.
+    fn streamed_host() -> Arc<dyn Host> {
+        let a = png(8, 8, |x, y| {
+            [
+                u8::try_from(x * 30).unwrap(),
+                0,
+                u8::try_from(y * 30).unwrap(),
+                u8::try_from(40 + x * 25).unwrap(),
+            ]
+        });
+        Arc::new(Files(HashMap::from([("a.png".to_owned(), a)])))
+    }
+
+    /// An edit streams the pages it changes, each before its build is in,
+    /// and only those: a rule made wider (its page), a page put in (it
+    /// and every page after it, each now another's), a page taken out
+    /// (every page after it), the colour carried across pages changed
+    /// (the pages it colours); an edit that changes no page streams none.
+    /// The pages it changed are those whose identities differ once the
+    /// build is in. At one thread and two.
+    #[test]
+    fn an_edit_streams_exactly_the_pages_it_changed() {
+        let base: Vec<usize> = (0..20).map(|i| 10 + i).collect();
+        let mut wider = base.clone();
+        wider[13] = 44;
+        let mut more = wider.clone();
+        more.insert(15, 50);
+        let mut fewer = more.clone();
+        fewer.remove(17);
+        let green = streamed_doc(&fewer, 2000).replace("push{1 0 0 rg}", "push{0 1 0 rg}");
+        let edits = [
+            streamed_doc(&wider, 2000),
+            streamed_doc(&more, 2000),
+            streamed_doc(&fewer, 2000),
+            green.clone(),
+            green.replacen("\\penalty-10000 ", "\\penalty-10000 % a note\n", 1),
+        ];
+        for threads in [1, 2] {
+            let (mut d, events, _) = streaming(
+                "pdftex",
+                &streamed_doc(&base, 2000),
+                streamed_host(),
+                threads,
+            );
+            d.step();
+            for (n, text) in edits.iter().enumerate() {
+                let before = settled_pages(&d);
+                lock(&events).clear();
+                d.push(Ask::SetFile {
+                    file: "doc.tex".into(),
+                    text: text.clone(),
+                });
+                d.step();
+                let ev = lock(&events).clone();
+                let after = settled_pages(&d);
+                let changed: std::collections::BTreeSet<u64> = (0..after.len())
+                    .filter(|&k| before.get(k) != Some(&after[k]))
+                    .map(|k| u64::try_from(k).unwrap())
+                    .collect();
+                let (told, none_after) = told_before_settled(&ev);
+                assert!(
+                    none_after,
+                    "j{threads} edit {n}: a page told after settled: {ev:?}"
+                );
+                assert_eq!(
+                    told, changed,
+                    "j{threads} edit {n}: the pages streamed are the pages it changed"
+                );
+                if n < 4 {
+                    assert!(!changed.is_empty(), "j{threads} edit {n} changed a page");
+                } else {
+                    assert!(changed.is_empty(), "j{threads} edit {n} changed none");
+                }
+            }
+        }
+    }
+
+    /// A clean build of many pages, each quickly made, streams every one
+    /// of them, each told before the build is in, the first page's file
+    /// as much as the last's (no share of the build's time, no count of
+    /// pages streamed whatever they cost). At one thread and two.
+    #[test]
+    fn a_clean_build_streams_every_page() {
+        let n = 120;
+        let widths: Vec<usize> = (0..n).map(|i| 10 + i % 80).collect();
+        for threads in [1, 2] {
+            let (mut d, events, files) = streaming(
+                "pdftex",
+                &streamed_doc(&widths, 0),
+                streamed_host(),
+                threads,
+            );
+            d.step();
+            let ev = lock(&events).clone();
+            let (told, none_after) = told_before_settled(&ev);
+            assert!(none_after, "j{threads}: a page told after settled");
+            assert_eq!(
+                told,
+                (0..u64::try_from(n).unwrap()).collect(),
+                "j{threads}: every page streamed"
+            );
+            assert_eq!(lock(&files).len(), n, "j{threads}: each page's file");
+            assert_eq!(settled_pages(&d).len(), n);
+        }
+    }
+
+    /// Each page streamed and told exact is the page the build's file
+    /// has: its content stream the same bytes, drawn the same pixels; a
+    /// clean build's pages and every edit's (a colour carried in, an
+    /// image, a graphics state its resources name, pages moved). Every
+    /// page of the clean build is streamed exact, and every page an edit
+    /// changed. At one thread and two.
+    #[test]
+    fn every_exact_page_streamed_is_the_builds_page() {
+        let base: Vec<usize> = (0..16).map(|i| 10 + i).collect();
+        let mut wider = base.clone();
+        wider[3] = 60;
+        let mut more = wider.clone();
+        more.insert(1, 33);
+        let edits = [
+            streamed_doc(&wider, 0),
+            streamed_doc(&more, 0),
+            streamed_doc(&more, 0).replace("push{1 0 0 rg}", "push{0 0.5 0 rg}"),
+        ];
+        for threads in [1, 2] {
+            let (mut d, events, files) =
+                streaming("pdftex", &streamed_doc(&base, 0), streamed_host(), threads);
+            let check = |d: &Document, files: &Streamed, what: &str| {
+                let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+                let files = lock(files).clone();
+                for (k, (pdf, exact)) in &files {
+                    assert!(exact, "j{threads} {what}: page {k} streamed exact");
+                    assert_eq!(
+                        String::from_utf8_lossy(&content(pdf, 0)),
+                        String::from_utf8_lossy(&content(&out, *k)),
+                        "j{threads} {what}: page {k}'s content"
+                    );
+                    assert_eq!(
+                        pixels(pdf, 0, 2.0),
+                        pixels(&out, *k, 2.0),
+                        "j{threads} {what}: page {k} drawn"
+                    );
+                }
+                files.len()
+            };
+            d.step();
+            assert_eq!(
+                check(&d, &files, "clean"),
+                base.len(),
+                "j{threads}: every page"
+            );
+            for (n, text) in edits.iter().enumerate() {
+                let before = settled_pages(&d);
+                lock(&files).clear();
+                lock(&events).clear();
+                d.push(Ask::SetFile {
+                    file: "doc.tex".into(),
+                    text: text.clone(),
+                });
+                d.step();
+                let after = settled_pages(&d);
+                let changed = (0..after.len())
+                    .filter(|&k| before.get(k) != Some(&after[k]))
+                    .count();
+                assert!(changed > 0, "j{threads} edit {n}");
+                assert_eq!(
+                    check(&d, &files, &format!("edit {n}")),
+                    changed,
+                    "j{threads} edit {n}: every page it changed"
+                );
+            }
+        }
+    }
+
+    /// A page drawing with one entry of a resource dictionary of its own
+    /// (pgf's graphics states, every soft mask of the document in one
+    /// object) takes the objects that entry names, not the others': each
+    /// page's file holds the one form its content shows of the two the
+    /// dictionary names, exact, drawn as the build's file draws it. At one
+    /// thread and two.
+    #[test]
+    fn a_page_takes_the_entries_it_draws_with() {
+        let mut t = PDF_HEAD.to_owned();
+        t.push_str("\\setbox0\\hbox{\\vrule width 20pt height 10pt}\\immediate\\pdfxform 0 \\edef\\fa{\\the\\pdflastxform} \\setbox0\\hbox{\\vrule width 7pt height 25pt}\\immediate\\pdfxform 0 \\edef\\fb{\\the\\pdflastxform} \\immediate\\pdfobj{<< /Fa \\fa\\space 0 R /Fb \\fb\\space 0 R >>}\\edef\\x{\\the\\pdflastobj} \\edef\\r{/XObject \\x\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in ["/Fa", "/Fb"] {
+            t.push_str(&format!(
+                "\\hbox{{\\pdfliteral{{q 1 0 0 1 0 0 cm {p} Do Q}}\\vrule width 1pt height 30pt}}\\penalty-10000 "
+            ));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
+            let told = exact_told(&ev);
+            assert_eq!(
+                told.len(),
+                2,
+                "threads {threads}: every page streamed: {ev:?}"
+            );
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "threads {threads}: page {k} exact");
+                let forms = String::from_utf8_lossy(pdf)
+                    .matches("/Subtype /Form")
+                    .count();
+                assert_eq!(
+                    forms, 1,
+                    "threads {threads}: page {k}'s file holds its one form"
+                );
+                assert_eq!(
+                    pixels(pdf, 0, 2.0),
+                    pixels(&out, *k, 2.0),
+                    "threads {threads}: page {k} drawn as the build's"
+                );
+            }
+        }
+    }
+
+    /// The glyphs a streamed page's file embeds of a Type 1 font
+    /// (its descriptor's `/CharSet`).
+    fn charset(pdf: &[u8]) -> std::collections::BTreeSet<String> {
+        let s = String::from_utf8_lossy(pdf);
+        let at = s.find("/CharSet (").expect("a subset's /CharSet") + 10;
+        let end = at + s[at..].find(')').unwrap();
+        s[at..end]
+            .split('/')
+            .filter(|g| !g.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The files of the pages streamed embed each Type 1 font with every
+    /// glyph the pages streamed before them used of it, the font's
+    /// program made once for those (not each page's own subset made and
+    /// compressed again): a page's file holds the glyphs of the pages
+    /// before it, and an edit's page those of every page streamed; each
+    /// drawn exactly as the build's file draws the page. At one thread.
+    #[test]
+    fn streamed_pages_embed_the_glyphs_seen_so_far() {
+        let doc = |last: &str| {
+            format!(
+                "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 \\pdfcompresslevel=9 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={{\\shipout\\box255}} \\pdfmapline{{cmr10 CMR10 <cmr10.pfb}}\\font\\r=cmr10 \\r \\hbox{{abc}}\\penalty-10000 \\hbox{{xyz}}\\penalty-10000 \\hbox{{{last}}}\\penalty-10000 \\end\n"
+            )
+        };
+        let host: Arc<dyn Host> = Arc::new(Files(HashMap::from([
+            (
+                "cmr10.tfm".to_owned(),
+                include_bytes!("../../../fonts/tfm/tests/fixtures/cmr10.tfm").to_vec(),
+            ),
+            (
+                "cmr10.pfb".to_owned(),
+                include_bytes!("../../../output/pdf/tests/fixtures/cmr10.pfb").to_vec(),
+            ),
+        ])));
+        let (mut d, _, files) = streaming("pdftex", &doc("abq"), host, 1);
+        let glyphs = |s: &str| -> std::collections::BTreeSet<String> {
+            s.chars().map(|c| c.to_string()).collect()
+        };
+        let check = |d: &Document, files: &Streamed, what: &str| {
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            let files = lock(files).clone();
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "{what}: page {k} streamed exact");
+                assert_eq!(
+                    pixels(pdf, 0, 4.0),
+                    pixels(&out, *k, 4.0),
+                    "{what}: page {k} drawn"
+                );
+            }
+            files
+        };
+        d.step();
+        let files_now = check(&d, &files, "clean");
+        assert_eq!(files_now.len(), 3, "every page");
+        let seen = [glyphs("abc"), glyphs("abcxyz"), glyphs("abcxyzq")];
+        for (k, want) in seen.iter().enumerate() {
+            let has = charset(&files_now[&k].0);
+            assert!(
+                want.is_subset(&has),
+                "page {k}'s file embeds the glyphs of the pages before it: {has:?}"
+            );
+        }
+        lock(&files).clear();
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: doc("abw"),
+        });
+        d.step();
+        let files_now = check(&d, &files, "edit");
+        assert_eq!(
+            files_now.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "the page it changed"
+        );
+        let has = charset(&files_now[&2].0);
+        assert!(
+            glyphs("abcxyzqw").is_subset(&has),
+            "an edit's page embeds every glyph streamed: {has:?}"
+        );
+    }
+
+    /// The PDF is the same whether the builds stream their pages or not:
+    /// a clean build and its edits, streamed (every page an edit changed
+    /// told), against the same builds of a session nothing listens to.
+    /// At one thread and eight.
+    #[test]
+    fn streaming_leaves_the_pdf_as_it_is() {
+        let base: Vec<usize> = (0..14).map(|i| 10 + i).collect();
+        let mut wider = base.clone();
+        wider[6] = 70;
+        let mut more = wider.clone();
+        more.insert(2, 31);
+        let texts = [
+            streamed_doc(&base, 500),
+            streamed_doc(&wider, 500),
+            streamed_doc(&more, 500),
+            streamed_doc(&more, 500).replace("push{1 0 0 rg}", "push{0 0 1 rg}"),
+        ];
+        for threads in [1, 8] {
+            let (mut d, events, _) = streaming("pdftex", &texts[0], streamed_host(), threads);
+            let mut quiet = Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    threads: Some(threads),
+                    ..job()
+                },
+                Arc::from(texts[0].as_str()),
+                streamed_host(),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            assert!(!quiet.status().meter().streams());
+            for (n, text) in texts.iter().enumerate() {
+                lock(&events).clear();
+                if n > 0 {
+                    d.push(Ask::SetFile {
+                        file: "doc.tex".into(),
+                        text: text.clone(),
+                    });
+                    quiet.set_text(text.clone());
+                }
+                d.step();
+                let r = quiet.build();
+                let ev = lock(&events).clone();
+                assert!(
+                    ev.iter().any(|e| e["event"] == "page"),
+                    "j{threads} build {n}: pages streamed"
+                );
+                assert_eq!(
+                    d.output().map(|o| o.1.to_vec()),
+                    Some(r.out.pdf.to_vec()),
+                    "j{threads} build {n}: the streaming build's file"
+                );
+            }
+        }
+    }
+
+    /// The bytes of the first `CIDFontType0C` font program in `pdf` (its
+    /// dictionary to its stream's end, as written).
+    fn cff_program(pdf: &[u8]) -> Vec<u8> {
+        let at = pdf
+            .windows(13)
+            .position(|w| w == b"CIDFontType0C")
+            .expect("an embedded CFF font");
+        let end = at
+            + pdf[at..]
+                .windows(9)
+                .position(|w| w == b"endstream")
+                .expect("its stream");
+        pdf[at..end].to_vec()
+    }
+
+    /// A XeTeX build's pages' files embed each OpenType font with every
+    /// glyph the pages streamed before them used, the same program from
+    /// page to page while no page brings another (a page showing glyphs
+    /// the pages before it showed embeds the program the page before it
+    /// did, not a subset of its own); each drawn as the build's file draws
+    /// the page; an edit streams the page it changes. At one thread.
+    #[test]
+    fn xetex_pages_embed_the_glyphs_seen_so_far() {
+        let out = std::process::Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .expect("kpsewhich (TeX Live) on the test machine");
+        let dist = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let rel = "fonts/opentype/public/lm/lmroman10-regular.otf";
+        let data: Arc<[u8]> = Arc::from(std::fs::read(dist.join(rel)).expect("Latin Modern Roman"));
+        let abs = dist.join(rel).to_string_lossy().into_owned();
+        let mut e = phitex_otf::index::FaceEntry::read(&abs, data, 0);
+        e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+        let index = phitex_tex::FontIndex { entries: vec![e] }.relative_to(&dist.to_string_lossy());
+        let doc = |last: &str| {
+            format!(
+                "\\catcode`\\{{=1 \\catcode`\\}}=2 \\vsize=100pt \\hsize=100pt \\output={{\\shipout\\box255}} \\font\\x=\"Latin Modern Roman\" at 10pt \\x \\hbox{{abc}}\\penalty-10000 \\hbox{{xyz}}\\penalty-10000 \\hbox{{{last}}}\\penalty-10000 \\end\n"
+            )
+        };
+        let host: Arc<dyn Host> = Arc::new(XeHost {
+            dist: dist.clone(),
+            index: Some(index.to_bytes()),
+            read_face: Arc::default(),
+        });
+        let (mut d, _, files) = streaming("xetex", &doc("abz"), host, 1);
+        let check = |d: &Document, files: &Streamed, what: &str| {
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            let files = lock(files).clone();
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "{what}: page {k} streamed exact");
+                assert_eq!(
+                    pixels(pdf, 0, 4.0),
+                    pixels(&out, *k, 4.0),
+                    "{what}: page {k} drawn"
+                );
+            }
+            files
+        };
+        d.step();
+        let f = check(&d, &files, "clean");
+        assert_eq!(f.len(), 3, "every page");
+        assert_eq!(
+            cff_program(&f[&1].0),
+            cff_program(&f[&2].0),
+            "the third page embeds the program the second did: every glyph seen"
+        );
+        lock(&files).clear();
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: doc("abq"),
+        });
+        d.step();
+        let f = check(&d, &files, "edit");
+        assert_eq!(
+            f.keys().copied().collect::<Vec<_>>(),
+            vec![2],
+            "an edit streams the page it changed"
+        );
     }
 
     /// A XeTeX build streams its pages too: each page's file xdvipdfmx's
