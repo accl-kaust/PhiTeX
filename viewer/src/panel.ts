@@ -310,7 +310,7 @@ export interface PanelPrefs {
   newTabs: boolean;
   /**
    * The reading aid (wasp.ts, Settings' Colour lines): each line of text
-   * coloured by a gradient, alternating, as BeeLine does; its colours (a
+   * coloured by a gradient, alternating; its colours (a
    * preset, or Custom's two), how strong (0 to 200), which
    * text (the body's lines, or every line but display maths).
    */
@@ -2766,7 +2766,7 @@ export class Panel {
       return box;
     };
     return [
-      { id: "wasp", label: "Colour lines", help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
+      { id: "wasp", label: "Colour lines", help: "A reading aid: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
       {
         id: "wasp-colours",
         label: "Colours",

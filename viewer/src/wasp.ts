@@ -1,5 +1,5 @@
-// The reading aid (Settings, its own tab: "Colour lines"), BeeLine's and
-// WaspLine Reader's (github.com/corollari/waspline-reader): the body
+// Colour lines, a reading aid (Settings, its own tab), after the scheme of
+// WaspLine Reader (github.com/corollari/waspline-reader): the body
 // text's ink coloured by a gradient along each line, its direction
 // alternating line to line, so the end of one line and the start of the
 // next share a colour and the eye finds the next line. Lines in pairs, a
@@ -28,7 +28,7 @@ export type WaspColours = "classic" | "blues" | "gray" | "warm" | "custom";
 /**
  * The presets: their names, each one's two colours on a white page and on
  * Dark PDF's (lighter: blended with darken over light ink), at strength
- * 100; and at 200, `vivid` (WaspLine's pure blue and red for Classic) and
+ * 100; and at 200, `vivid` (pure blue and red for Classic) and
  * `vividDark` (bright, saturated tints, still above Dark PDF's grey page).
  */
 export const WASP_PRESETS: { id: Exclude<WaspColours, "custom">; name: string; light: [string, string]; dark: [string, string]; vivid: [string, string]; vividDark: [string, string] }[] = [

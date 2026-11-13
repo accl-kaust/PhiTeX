@@ -7072,7 +7072,7 @@ var Panel = class {
       return box;
     };
     return [
-      { id: "wasp", label: "Colour lines", help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
+      { id: "wasp", label: "Colour lines", help: "A reading aid: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
       {
         id: "wasp-colours",
         label: "Colours",
