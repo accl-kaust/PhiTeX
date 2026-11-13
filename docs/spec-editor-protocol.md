@@ -136,8 +136,10 @@ build came meanwhile (its own idle point says it).
 
 ### 2.1c Pages streamed: `page`
 
-A clean build sends each page as it ships, before the build settles
-(an edit's build never streams; its pages come in at once):
+Every build sends its pages as they ship, before the build settles: a
+clean build every page, an edit the pages it changes, each as it is
+made (a page made again as it was sent last is not sent again; the
+pages an edit leaves alone are never sent):
 
 ```json
 {"event": "page", "k": 4, "hash": "5354…", "pages": 12, "exact": true}

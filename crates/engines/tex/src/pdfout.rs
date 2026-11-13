@@ -2879,7 +2879,7 @@ impl phitex_defuse::Operation for PdfPage {
             }
             let made = record_of(v, key, &pc, &h, &mut line, glyphs);
             // (streamed: the page told, as `Build::pages` would name it,
-            // with its PDF alone, where it is wanted)
+            // with its PDF alone, unless it was told so last)
             if self.stream.load(std::sync::atomic::Ordering::Relaxed) {
                 let progress = self
                     .watch
@@ -2887,10 +2887,12 @@ impl phitex_defuse::Operation for PdfPage {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .as_ref()
                     .map(|w| w.progress.clone());
+                let id = (
+                    pc.node.cast_unsigned(),
+                    u32::try_from(i).unwrap_or(u32::MAX),
+                );
                 if let Some(p) = progress.filter(|p| p.streams())
-                    && let Some(k) = u32::try_from(i)
-                        .ok()
-                        .and_then(|i| p.page_of(pc.node.cast_unsigned(), i))
+                    && let Some(k) = p.page_of(id.0, id.1)
                 {
                     // (its colour stack commands in the order its walk meets
                     // them, which the pages after it begin from: a page is
@@ -2904,11 +2906,12 @@ impl phitex_defuse::Operation for PdfPage {
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!("stream: page {k} colour commands {}", ops.len());
                         }
-                        p.page_colors(k, ops, v);
+                        p.page_colors(id, ops, v);
                     }
-                    p.stream_page(k, |start| {
-                        let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
-                        let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
+                    let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
+                    let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
+                    p.stream_page(k, hash, |start| {
+                        let t0 = std::time::Instant::now();
                         let content = made.get().map(|m| m.0.content()).unwrap_or_default();
                         let none = crate::exec::ColorStart::new();
                         let (pdf, exact) = page_alone(
@@ -2922,9 +2925,11 @@ impl phitex_defuse::Operation for PdfPage {
                         )?;
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!(
-                                "stream: page {k} exact {exact}, {} bytes, {} commands kept",
+                                "stream: page {k} exact {exact}, {} bytes, {} commands kept, evaluation {}, {:.2} ms",
                                 pdf.len(),
-                                self.objs.locked().len()
+                                self.objs.locked().len(),
+                                p.evaluation(),
+                                t0.elapsed().as_secs_f64() * 1e3
                             );
                         }
                         // (made before the pages before it are known: made
@@ -2940,7 +2945,7 @@ impl phitex_defuse::Operation for PdfPage {
                                 page_alone(v, kx, &pc, &units, &objs, &content, start)
                             }) as crate::exec::Remake
                         });
-                        Some((hash, pdf, exact, remake))
+                        Some((pdf, exact, remake))
                     });
                 }
             }

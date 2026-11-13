@@ -1929,9 +1929,10 @@ impl phitex_defuse::Operation for XdvPage {
         let Some(ops) = walk(&mut dw, &w, &defs, None) else {
             return Ok(ValueId::UNIT);
         };
-        progress.page_colors(k, xdv_color_ops(&ops), v);
+        let id = (node.cast_unsigned(), u32::try_from(i).unwrap_or(u32::MAX));
+        progress.page_colors(id, xdv_color_ops(&ops), v);
         progress.page_doc_specials(
-            k,
+            id,
             ops.iter()
                 .filter_map(|o| match o {
                     Op::Special(s) if doc_special(s) => Some(s.clone()),
@@ -1939,8 +1940,8 @@ impl phitex_defuse::Operation for XdvPage {
                 })
                 .collect(),
         );
-        progress.stream_page(k, |start| {
-            let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
+        let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
+        progress.stream_page(k, hash, |start| {
             // (the document's named objects the pages before it made, made
             // again first; the colours they leave it pushed)
             let before = progress.doc_specials_before(k);
@@ -1972,7 +1973,7 @@ impl phitex_defuse::Operation for XdvPage {
                     Some((pdf, xdv_alone_exact(&ops)))
                 }) as crate::exec::Remake
             });
-            Some((hash, pdf, exact, remake))
+            Some((pdf, exact, remake))
         });
         Ok(ValueId::UNIT)
     }

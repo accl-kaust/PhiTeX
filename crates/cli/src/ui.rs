@@ -280,8 +280,10 @@ pub struct Spin {
 ///   then, and only then. Marking each page `✓` while the build runs
 ///   needs the engine to say which pages nothing pending can reach any
 ///   more ("settled up to page N" on its progress), which is 1.0.1 (#18).
-/// - An edit (the last build made pages) lists no page while it runs,
-///   and at its end only the pages it changed (`↻ page 4`).
+/// - An edit (the last build made pages) lists the pages it makes again
+///   as each is streamed (`↻ page 4 · redone`, the engine streams an
+///   edit's pages, those it changed), and at its end only the pages it
+///   changed (`↻ page 4`).
 #[derive(Default)]
 pub struct PageLog {
     /// The engine's evaluation, and its highest page, last seen, and when.
@@ -292,6 +294,9 @@ pub struct PageLog {
     before: usize,
     /// A clean build's pages, from 1.
     rows: Vec<PageRow>,
+    /// The pages streamed in this build (from 1): an edit's, those it
+    /// made again.
+    made: std::collections::BTreeSet<usize>,
     /// The build is over: its pages, and those that differ from the last
     /// build's.
     end: Option<(usize, Vec<usize>)>,
@@ -388,6 +393,8 @@ impl PageLog {
         if page == 0 || self.end.is_some() {
             return;
         }
+        self.made
+            .insert(usize::try_from(page).unwrap_or(usize::MAX));
         let r = self.row(page);
         if r.hash.is_some_and(|h| h != hash) {
             r.redone = true;
@@ -436,7 +443,16 @@ impl PageLog {
             return vec![(st.green("✓"), text)];
         }
         if self.before > 0 {
-            return Vec::new();
+            // (an edit: the pages it made again so far, as they stream)
+            let made: Vec<usize> = self.made.iter().copied().collect();
+            return if made.is_empty() {
+                Vec::new()
+            } else {
+                vec![(
+                    st.cyan("↻"),
+                    format!("{} {}", pages_brief(&made), st.dim("· redone")),
+                )]
+            };
         }
         let n = self.rows.len();
         let cut = n.saturating_sub(SHOWN);
@@ -1222,6 +1238,24 @@ mod tests {
         assert_eq!(said(&l)[1], "↻ 6 pages redone");
         l.end(40, &[]);
         assert_eq!(said(&l), ["✓ pages 1–40 · 6 pages redone"]);
+    }
+
+    /// An edit lists each page it makes again as it is streamed, before
+    /// its build is over; at its end, the pages it changed.
+    #[test]
+    fn an_edits_pages_listed_as_they_stream() {
+        let ms = Duration::from_millis;
+        let mut l = PageLog::default();
+        l.observe(9, 0, 30, ms(0));
+        assert_eq!(said(&l), Vec::<String>::new());
+        l.streamed(4, 7);
+        assert_eq!(said(&l), ["↻ page 4 · redone"]);
+        l.observe(9, 5, 30, ms(40));
+        l.streamed(5, 8);
+        l.streamed(4, 7);
+        assert_eq!(said(&l), ["↻ pages 4–5 · redone"]);
+        l.end(30, &[4, 5]);
+        assert_eq!(said(&l), ["↻ pages 4–5"]);
     }
 
     /// The page the build is at never goes past the last build's last
