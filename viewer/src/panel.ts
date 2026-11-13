@@ -33,6 +33,9 @@ import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } f
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
+
+/** How long a reopened document's first page is awaited on a still sheet before the looks chosen play (ms): the format made after an update, a long build. */
+const LATE_OPENING = 1500;
 /** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
 const MAKING = "Making the format, once per PhiTeX update";
 
@@ -1703,16 +1706,33 @@ export class Panel {
     // plays once, the next open's. Picked and the document opened again, it played nothing)
     const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
     const warm = !now && was !== undefined && (!was.includes(" ") || was.split(" ")[1] === this.look);
-    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
-    this.anim = anim;
-    if (!warm) this.lastLook = id;
-    if (id !== "off") this.seen(["opening"]);
-    // (one that says the steps itself: the sheet's own not shown)
-    el.classList.toggle("owns", !!anim.step);
-    // (and the step the sheet says now, a rebuild's first: the watch says no other)
-    if (anim.step) anim.step(this.firstStep(), undefined, "");
-    this.animSince = performance.now();
+    this.playOn(sheet, warm ? "off" : this.look, first, dark);
+    // (a document opened again whose first page is not back by LATE_OPENING: a wait (the
+    // format made after an update, packages fetched, a long build) gets the looks chosen
+    // after all; a quick reopen stays a still sheet)
+    clearTimeout(this.lateTimer);
+    if (warm) this.lateTimer = setTimeout(() => {
+      this.lateTimer = undefined;
+      if (this.anim && !this.ending && this.firstPending()) this.playOn(sheet, this.look, first, this.sheetDark());
+    }, LATE_OPENING);
     this.hints(true);
+  }
+
+  /** A reopened document's opening, played once its first page has been awaited this long (ms). */
+  private lateTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** The opening for `look` played on `sheet`, in place of one playing there. */
+  private playOn(sheet: HTMLElement, look: OpeningLook, first: boolean, dark: boolean): void {
+    this.anim?.stop();
+    sheet.replaceChildren();
+    const { id, anim } = play(look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    this.anim = anim;
+    if (id !== "off") (this.lastLook = id), this.seen(["opening"]);
+    // (one that says the steps itself: the sheet's own not shown)
+    this.$("#opening").classList.toggle("owns", !!anim.step);
+    // (and the step the sheet says now, a rebuild's first: the watch says no other)
+    if (anim.step) anim.step(this.stepNow || this.firstStep(), undefined, "");
+    this.animSince = performance.now();
   }
 
   /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
@@ -1811,6 +1831,8 @@ export class Panel {
 
   /** The sheet gone (played out, or a card in its place). */
   private stopSheet(): void {
+    clearTimeout(this.lateTimer);
+    this.lateTimer = undefined;
     this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();

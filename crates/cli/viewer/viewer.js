@@ -4917,6 +4917,7 @@ function firstPage(cv, dark) {
 
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
+var LATE_OPENING = 1500;
 var MAKING = "Making the format, once per PhiTeX update";
 var KIND_HELP = {
   error: "LaTeX errors and files not found",
@@ -6129,14 +6130,26 @@ var Panel = class {
     const first = !this.seenIds.has("opening");
     const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
     const warm = !now && was !== void 0 && (!was.includes(" ") || was.split(" ")[1] === this.look);
-    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
-    this.anim = anim;
-    if (!warm) this.lastLook = id;
-    if (id !== "off") this.seen(["opening"]);
-    el.classList.toggle("owns", !!anim.step);
-    if (anim.step) anim.step(this.firstStep(), void 0, "");
-    this.animSince = performance.now();
+    this.playOn(sheet, warm ? "off" : this.look, first, dark);
+    clearTimeout(this.lateTimer);
+    if (warm) this.lateTimer = setTimeout(() => {
+      this.lateTimer = void 0;
+      if (this.anim && !this.ending && this.firstPending()) this.playOn(sheet, this.look, first, this.sheetDark());
+    }, LATE_OPENING);
     this.hints(true);
+  }
+  /** A reopened document's opening, played once its first page has been awaited this long (ms). */
+  lateTimer;
+  /** The opening for `look` played on `sheet`, in place of one playing there. */
+  playOn(sheet, look2, first, dark) {
+    this.anim?.stop();
+    sheet.replaceChildren();
+    const { id, anim } = play(look2, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
+    this.anim = anim;
+    if (id !== "off") this.lastLook = id, this.seen(["opening"]);
+    this.$("#opening").classList.toggle("owns", !!anim.step);
+    if (anim.step) anim.step(this.stepNow || this.firstStep(), void 0, "");
+    this.animSince = performance.now();
   }
   /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
   builtKey() {
@@ -6216,6 +6229,8 @@ var Panel = class {
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
+    clearTimeout(this.lateTimer);
+    this.lateTimer = void 0;
     this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();
