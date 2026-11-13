@@ -483,6 +483,18 @@ impl LoadHints {
         self.now.locked().remove(name);
     }
 
+    /// Whether any record asked for so far lists file `name` by its text
+    /// ([`Loads::reads_file`] of some node's): none, and no node's text
+    /// need be keyed to ask. A document node's records are all given up
+    /// front ([`crate::Options::noderec`]), and a load's is asked when
+    /// its node is made (its hint, [`Loads::hint_for`]).
+    pub(crate) fn node_reads_file(&self, name: &str) -> bool {
+        self.recs
+            .locked()
+            .values()
+            .any(|r| r.files.iter().any(|(n, h)| n == name && *h != UNITS))
+    }
+
     /// Whether the record of the node `text` lists file `name` by its
     /// text (one it read cut, [`UNITS`], matches any text of it).
     pub(crate) fn reads_file(&self, text: &str, name: &str) -> bool {

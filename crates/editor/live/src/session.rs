@@ -514,6 +514,9 @@ pub struct Session {
     /// are at most that new. Empty: read twice under two keys (changed
     /// while a build read it), unknown.
     stamps: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+    /// The evaluation the last report was made of
+    /// ([`Build::settled_key`]): the records made of it stored then.
+    reported: Option<(u64, u64)>,
     /// Whether the package loads' and the document nodes' records
     /// changed since last stored ([`Session::flush_records`], called when
     /// a build settles: a no-op unless a load changed them).
@@ -660,6 +663,7 @@ impl Session {
             buffers: Arc::default(),
             changed: Vec::new(),
             inputs: Vec::new(),
+            reported: None,
             stamps: Arc::default(),
             records_dirty: false,
             absorb: Absorb::default(),
@@ -726,34 +730,61 @@ impl Session {
     }
 
     /// Every file the builds read is to be read again from disk at the
-    /// next build (`r` in watch: a change made outside, unseen).
-    pub fn reread_all(&mut self) {
+    /// next build (`r` in watch: a change made outside, unseen): those
+    /// whose key moved, or not found then and found now. How many were
+    /// checked, and how many are to be read again.
+    pub fn reread_all(&mut self) -> (usize, usize) {
         // (a file found whose key is the one it had when the build read
         // it: unchanged, not read again; one not found is looked up again,
-        // one read from an editor's buffer or with no key is read again.
-        // Every file read and turned into a value of its whole text, the
-        // XeTeX job's fonts and pictures too, made `r` cost what all of
-        // them cost, not what changed)
+        // and read only if the host finds it now; one read from an
+        // editor's buffer or with no key is read again. Every file read
+        // and turned into a value of its whole text, the XeTeX job's fonts
+        // and pictures too, made `r` cost what all of them cost, not what
+        // changed; every name not found staged to be looked up again cost
+        // Grail's `r` 98 stagings of nothing, 3 ms)
+        for (n, ..) in self.inputs.iter().filter(|(_, found, _)| !found) {
+            self.host.look_again(n);
+        }
+        let trace = phitex_tex::OBSERVE && std::env::var_os("PHITEX_REREAD_TRACE").is_some();
         let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
         let stale: Vec<String> = self
             .inputs
             .iter()
-            .filter(|(_, found, p)| match (found, p) {
-                (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
-                    (Some(a), Some(b)) => a.is_empty() || *a != b,
-                    _ => true,
-                },
-                _ => true,
+            .filter(|(n, found, p)| {
+                let (stale, why) = match (found, p) {
+                    (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
+                        (Some(a), Some(_)) if a.is_empty() => (true, "read under two keys"),
+                        (Some(a), Some(b)) => (*a != b, "its key"),
+                        (None, _) => (true, "no key kept"),
+                        (_, None) => (true, "no key now"),
+                    },
+                    (true, None) => (true, "found nowhere now"),
+                    // (found now where the job wrote it, its key the
+                    // one it was written with: the build's own)
+                    (false, _) => match self.host.locate_key(n) {
+                        None => (false, "not found then, nor now"),
+                        Some(p) => match (stamps.get(&p), self.host.stamp(&p)) {
+                            (Some(a), Some(b)) if !a.is_empty() && *a == b => {
+                                (false, "written by the job")
+                            }
+                            _ => (true, "not found then, found now"),
+                        },
+                    },
+                };
+                if trace {
+                    eprintln!(
+                        "reread: {n}: {why}: {}",
+                        if stale { "read again" } else { "kept" }
+                    );
+                }
+                stale
             })
             .map(|(n, ..)| plain_name(n))
             .collect();
         drop(stamps);
-        // (a name not found: the host's lookup made again, not its last
-        // answer taken, a file the host has since given found)
-        for (n, ..) in self.inputs.iter().filter(|(_, found, _)| !found) {
-            self.host.look_again(n);
-        }
+        let counts = (self.inputs.len(), stale.len());
         self.changed.extend(stale);
+        counts
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -1147,7 +1178,12 @@ impl Session {
             phitex_tex::timeline::lap(&format!("session: {name}"));
             tp = Instant::now();
         };
-        if let Some(b) = &self.build {
+        // (an evaluation that had nothing to do, `r` or a save with
+        // nothing changed: what follows is made from the build's state,
+        // as it was at the last report, stored then)
+        let evaluated = self.build.as_ref().map(Build::settled_key);
+        let fresh = std::mem::replace(&mut self.reported, evaluated) != evaluated;
+        if let Some(b) = self.build.as_ref().filter(|_| fresh) {
             // (both made from the written files' accumulator: the same
             // as last stored, nothing to make or store)
             let from = b.wkeys_source();
@@ -2176,6 +2212,7 @@ impl Session {
             files.push((p.clone(), h));
             Ok(p)
         };
+        let mut ours: Vec<(&str, PathBuf)> = Vec::new();
         for (n, t) in &r.out.writes {
             // (TeX Live's `openout_any = p`: never outside the output
             // directory, never a dot file; a document can't overwrite
@@ -2184,7 +2221,35 @@ impl Session {
                 eprintln!("phitex: not writing to {n} (openout_any = p)");
                 continue;
             }
-            put(n, &tex::bytes(t))?;
+            let p = put(n, &tex::bytes(t))?;
+            ours.push((n.as_str(), p));
+        }
+        // (a file the job writes and reads back, `.aux`, `.out`: what it
+        // wrote is what the build holds of it, its read-back, so its key
+        // is the written file's from now on, one not found when the build
+        // began too. Kept as read, the watch's own write was a change
+        // made outside to the next `r`, which read it again and evaluated
+        // it: Grail's first `r` 4 ms of a round that ran no node)
+        {
+            let mut m = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+            for (n, written) in ours {
+                let Some(p) = self.host.locate_key(n) else {
+                    continue;
+                };
+                let kept = m.contains_key(&p)
+                    || self
+                        .inputs
+                        .iter()
+                        .any(|(i, found, _)| !found && plain_name(i) == plain_name(n));
+                if kept
+                    && self
+                        .host
+                        .same_file(&p.to_string_lossy(), &written.to_string_lossy())
+                    && let Some(now) = self.host.stamp(&p)
+                {
+                    m.insert(p, now);
+                }
+            }
         }
         for (n, b) in &r.out.shell_files {
             if !out_name_ok(n) {

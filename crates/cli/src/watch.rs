@@ -13,7 +13,7 @@
 //! instead (`lsp.rs`): its buffers are asked as the viewer's are, its
 //! problems published after each build, its cursor shown on the pages.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
@@ -615,6 +615,10 @@ struct Last {
     cold: Option<Duration>,
     /// The last change's time from its save to the viewer's screen.
     screen: Option<Duration>,
+    /// Whether that was the clean build's first page on the screen (the
+    /// viewer's "first page"), no change's: a build that changed nothing
+    /// keeps it, said as such, not as the time of a change.
+    screen_first: bool,
     /// Every change's time from its save to the screen, for the quit
     /// line.
     screens: Vec<Duration>,
@@ -1400,7 +1404,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some((b, _)) = &l.build {
             parts.push(b.clone());
             if let Some(d) = l.screen {
-                parts.push(format!("⚡ {} to the screen", ms(d)));
+                parts.push(if l.screen_first {
+                    format!("⚡ first page {}", ms(d))
+                } else {
+                    format!("⚡ {} to the screen", ms(d))
+                });
             }
         }
         if view.is_some() {
@@ -1432,11 +1440,19 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (`meanwhile`: called again and again while the build runs, on this
     // thread: the build runs on one of its own and sends `Event::Built`
     // as it ends, which `meanwhile` answers with true)
+    // (`r`: the files the builds read, how many were checked, how many
+    // had changed and were read again, and the time the check took; told
+    // with the build it asked for)
+    let reread: Cell<Option<(usize, usize, Duration)>> = Cell::new(None);
+    // (the evaluation the last build's result was of: a build that ran
+    // none says so)
+    let last_settled: Cell<Option<(u64, u64)>> = Cell::new(None);
     let mut rebuild = |s: &mut Session,
                        why: &str,
                        since: Option<Instant>,
                        meanwhile: &mut (dyn FnMut() -> bool + Send)| {
         builds += 1;
+        let asked_reread = reread.take();
         if let Some(t) = since
             && !phitex_tex::timeline::active()
         {
@@ -1626,7 +1642,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             phitex_tex::timeline::lap("watch: the viewer's PDF");
             status.set("viewer");
             last_hashes.clone_from(&r.out.page_hashes);
-            let b = Built {
+            let mut b = Built {
                 pdf: last_pdf.clone(),
                 hashes: last_hashes.clone(),
                 history: r.history(),
@@ -1635,8 +1651,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 origins: None,
                 changed: None,
                 diagnostics: if same_eval {
-                    // (the evaluation the last build's were made of: those)
-                    last_diags.borrow().as_ref().map(|x| x.1.clone())
+                    // (the evaluation the last build's were made of: the
+                    // viewer has them, none made, copied or compared
+                    // again; an editor is given them below)
+                    None
                 } else if pending {
                     // (made when the editing pauses: the last ones shown
                     // meanwhile, its errors with them at once)
@@ -1660,6 +1678,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }
             phitex_tex::timeline::lap("watch: the viewers told");
             if let Some(l) = &lsp {
+                // (the language server's none says "made later": it is
+                // given the last ones, and sends only what changed,
+                // `Server::publish`)
+                if same_eval {
+                    b.diagnostics = last_diags.borrow().as_ref().map(|x| x.1.clone());
+                }
                 // (what phitex.savePdf copies: the PDF file, else a DVI's
                 // PDF made for the viewer; set before the build is told
                 // ready, which an editor may answer with phitex.savePdf at
@@ -1703,6 +1727,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             None => crate::ui::said_why(why),
         };
         let nodes = r.runs.last().map_or(0, |x| x.commands_run);
+        let evaluated = r.settled.is_none() || last_settled.replace(r.settled) != r.settled;
         let changed = &r.out.pages_changed;
         // (a save that changed nothing the build reads (vim writes twice)
         // keeps the last change's time to the screen)
@@ -1837,6 +1862,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             } else {
                 rows.push(("nodes".to_owned(), format!("{nodes} run")));
             }
+            if let Some((checked, changed, d)) = asked_reread {
+                rows.push((
+                    "files".to_owned(),
+                    format!(
+                        "{checked} checked in {}, {}",
+                        ms(d),
+                        match changed {
+                            0 => "none changed".to_owned(),
+                            1 => "1 changed".to_owned(),
+                            n => format!("{n} changed"),
+                        }
+                    ),
+                ));
+            }
             for (name, d) in &phases {
                 rows.push((name.clone(), ms(*d)));
             }
@@ -1967,6 +2006,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             "pages": r.pages(),
             "pages_changed": changed,
             "nodes_run": nodes,
+            // (whether the build evaluated anything: none when nothing it
+            // reads changed, `r` or a file saved with its bytes)
+            "evaluated": evaluated,
+            // (`r`: the files checked, those changed and read again)
+            "reread": asked_reread.map(|(checked, changed, d)| json!({
+                "checked": checked,
+                "changed": changed,
+                "ms": d.as_secs_f64() * 1e3,
+            })),
             // (runs in all, a node run again counted again: past
             // nodes_run, the work an edit did again)
             "runs": r.runs.last().map(|x| x.runs),
@@ -2345,8 +2393,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     Key::Suspend => {}
                     Key::Rebuild => {
                         // (every input read again from disk: a change made
-                        // outside that no event told)
-                        s.reread_all();
+                        // outside that no event told; those whose key did
+                        // not move are not read)
+                        let t = Instant::now();
+                        let (checked, changed) = s.reread_all();
+                        reread.set(Some((checked, changed, t.elapsed())));
                         diff_reread = true;
                         again = true;
                         why.push("asked".to_owned());
@@ -2583,6 +2634,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 let mut l = last.borrow_mut();
                                 let d = Duration::from_micros(us);
                                 l.screen = Some(d);
+                                l.screen_first = l.builds <= 1;
                                 l.screens.push(d);
                                 ui.event(&json!({
                                     "event": "screen",
@@ -2594,7 +2646,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             Applied::Rebuild => {
                                 // (as `r`: every input read again from
                                 // disk, a change no event told)
-                                s.reread_all();
+                                let t = Instant::now();
+                                let (checked, changed) = s.reread_all();
+                                reread.set(Some((checked, changed, t.elapsed())));
                                 diff_reread = true;
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
