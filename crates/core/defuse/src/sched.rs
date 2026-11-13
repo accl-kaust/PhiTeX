@@ -39,6 +39,17 @@ use crate::values::{Field, FxHashMap};
 /// What every worker and the pool share.
 pub(crate) struct Shared {
     injector: Injector<NodeId>,
+    /// A clean build's text, in TeX's order, not yet taken: each worker
+    /// takes the next [`DEAL_RUN`] nodes into its block as its block
+    /// empties ([`Worker::take_dealt`]), so every worker works at the front
+    /// of the text and the settling layer folds behind it.
+    deal: Mx<std::collections::VecDeque<NodeId>>,
+    /// `deal`'s length, read without its lock.
+    deal_left: AtomicUsize,
+    /// How many dealt nodes a worker takes at a time: [`DEAL_RUN`], or
+    /// an n-th of what was dealt where that is fewer (a few nodes dealt
+    /// go one share to each worker, as the blocks went).
+    deal_k: AtomicUsize,
     /// The quiet points at which a published loop-back value moved and
     /// its readers ran again (`commit::publish_finals`): the loop-back's
     /// passes beyond the first, `Report::final_reruns`.
@@ -380,7 +391,7 @@ impl Worker {
             return;
         }
         let r = self.ready();
-        let stands = self.block.len() >= BLOCK_MIN;
+        let stands = self.block.len() >= BLOCK_MIN || sh.deal_left.load(Ordering::Relaxed) > 0;
         if !stands && r.len() == 0 {
             return;
         }
@@ -389,6 +400,51 @@ impl Worker {
             self.next_offer.store(now + offer_ns(), Ordering::Relaxed);
             sh.wake_one();
         }
+    }
+
+    /// Deals `nodes` (a clean build's text, in TeX's order) to every
+    /// worker: counted now, each worker taking the next [`DEAL_RUN`] of
+    /// them as its block empties ([`Worker::take_dealt`]); a node whose
+    /// work is at the settling layer's frontier on the ready heap, as
+    /// [`Worker::seed`] puts it.
+    pub(crate) fn deal(&self, eng: &Engine, nodes: &[NodeId]) {
+        self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
+        let mut q = self.shared.deal.lock();
+        for &n in nodes {
+            let node = eng.node(n);
+            if eng.op(node.op()).works_at_frontier() {
+                self.ready().push(eng, node);
+            } else {
+                q.push_back(n);
+            }
+        }
+        self.shared.deal_left.store(q.len(), Ordering::SeqCst);
+        self.shared
+            .deal_k
+            .store(q.len().div_ceil(self.shared.n).clamp(1, DEAL_RUN), Ordering::SeqCst);
+    }
+
+    /// The next [`DEAL_RUN`] dealt nodes into its block, as one run;
+    /// whether there were any.
+    pub(crate) fn take_dealt(&self) -> bool {
+        if self.shared.deal_left.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        let xs: Vec<NodeId> = {
+            let mut q = self.shared.deal.lock();
+            let k = self.shared.deal_k.load(Ordering::Relaxed).min(q.len());
+            let xs = q.drain(..k).collect();
+            self.shared.deal_left.store(q.len(), Ordering::SeqCst);
+            xs
+        };
+        if xs.is_empty() {
+            return false;
+        }
+        let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
+        for &n in xs.iter().rev() {
+            self.block.push((n, run));
+        }
+        true
     }
 
     /// Seeds the block with nodes to run in this order; a node whose work
@@ -650,6 +706,11 @@ const SPINS: u32 = 64;
 /// reader at the head of a stolen run is re-asked once its owner's chain
 /// reaches it (`commit::first_hole`), not once per definer before it.
 pub(crate) const BLOCK_MIN: usize = 96;
+/// How many dealt nodes a worker takes at a time ([`Worker::take_dealt`]):
+/// a node after its predecessor on one worker, as a block had it, most of
+/// the time, and the front of the text worked on by every worker (para4000
+/// -j8: 0.75-0.78 s for runs of 2 to 8, 0.89 s in blocks, mc 86202).
+const DEAL_RUN: usize = 4;
 const BLOCK_STEAL: usize = 32;
 /// An idle worker with no wake looks for work again after this (the
 /// caller's, which also asks for edits and starts the spare workers, after
@@ -668,6 +729,9 @@ impl Pool {
         let t0 = Instant::now();
         let shared = Arc::new(Shared {
             injector: Injector::new(),
+            deal: Mx::new(std::collections::VecDeque::new()),
+            deal_left: AtomicUsize::new(0),
+            deal_k: AtomicUsize::new(DEAL_RUN),
             passes: AtomicU64::new(0),
             runs_now: AtomicU64::new(0),
             ready: (0..n).map(|_| Ready::new(t0)).collect(),
@@ -827,7 +891,8 @@ impl Pool {
     /// The nodes still queued when a failure stopped the evaluation, to the
     /// engine's pending list: the next evaluation runs them.
     fn leave_queued(&self, eng: &Engine, workers: &[Worker]) {
-        let mut left = Vec::new();
+        let mut left: Vec<NodeId> = self.shared.deal.lock().drain(..).collect();
+        self.shared.deal_left.store(0, Ordering::SeqCst);
         for w in workers {
             while let Some(n) = w.ready().pop(eng) {
                 left.push(n);
@@ -956,6 +1021,9 @@ impl Pool {
         // page's break on its routine's state before that page and again
         // as each finisher came)
         let me = w.ready();
+        if w.block.is_empty() {
+            w.take_dealt();
+        }
         match (me.first_key(eng), w.block.pop()) {
             (Some(k), Some((b, run))) => {
                 if eng.node(b).pos_hint().0 < k {
