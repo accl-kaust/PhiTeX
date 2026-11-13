@@ -244,15 +244,6 @@ impl Watch {
         lock(&self.servers).clone()
     }
 
-    /// The viewer's hidden kinds, from the user's phitex.toml (the `prefs`
-    /// op's file), read as each build is published.
-    fn hidden() -> Vec<String> {
-        crate::config::prefs(None)
-            .ok()
-            .and_then(|v| serde_json::from_value(v["problems-hidden"].clone()).ok())
-            .unwrap_or_default()
-    }
-
     fn push(&self, a: Ask) {
         lock(&self.asks).push(a);
         if let Some(w) = lock(&self.wake).as_ref() {
@@ -327,10 +318,6 @@ impl Client {
 }
 
 impl LspHost for Client {
-    fn hidden(&self) -> Vec<String> {
-        Watch::hidden()
-    }
-
     fn ask(&self, a: Ask) {
         let w = &self.watch;
         let a = match a {

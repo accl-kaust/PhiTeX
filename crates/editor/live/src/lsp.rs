@@ -100,14 +100,6 @@ pub trait LspHost: Send + Sync {
         None
     }
 
-    /// The problems' kinds the user hid (`problems-hidden`, set in the
-    /// viewer's filters: `problems::kind_of`'s names), read at each
-    /// publish so a filter toggled reaches the editor with the next build;
-    /// none hidden by default.
-    fn hidden(&self) -> Vec<String> {
-        Vec::new()
-    }
-
     /// Whether the project's file `name` exists (a diagnostic's file
     /// named without its `.tex`).
     fn exists(&self, _name: &str) -> bool {
@@ -956,7 +948,6 @@ impl Server {
         let mut by: HashMap<String, Vec<Value>> = HashMap::new();
         by.insert(self.uri(&main), Vec::new());
         let mut p = Published::default();
-        let hidden = self.host.hidden();
         for d in d {
             match d["severity"].as_str() {
                 Some("error") => p.errors += 1,
@@ -969,14 +960,6 @@ impl Server {
                 p.engine.get_or_insert(message);
             } else if d["code"] == "format" {
                 p.format.get_or_insert(message);
-            }
-            // (a kind the user hid in the viewer is not published: counted
-            // in the status, not shown as the editor's problem)
-            if d["kind"]
-                .as_str()
-                .is_some_and(|k| hidden.iter().any(|h| h == k))
-            {
-                continue;
             }
             let file = d["file"].as_str().unwrap_or(&main);
             by.entry(self.uri(file))
@@ -2178,49 +2161,6 @@ mod tests {
                 .iter()
                 .any(|m| m["method"] == "window/showMessageRequest"),
             "said again"
-        );
-    }
-
-    /// A kind hidden in the viewer's filters (`problems-hidden`) is not
-    /// published to the editor; the others are, and the hidden one's
-    /// file is cleared as one with none.
-    #[test]
-    fn hidden_kinds_are_not_published() {
-        struct Hides;
-        impl LspHost for Hides {
-            fn ask(&self, _: Ask) {}
-            fn hidden(&self) -> Vec<String> {
-                vec!["underfull".into()]
-            }
-            fn engine(&self) -> &'static str {
-                "native"
-            }
-        }
-        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
-        let k = sent.clone();
-        let s = Server::new(Box::new(move |v| lock(&k).push(v.clone())), Arc::new(Hides));
-        init(&s, "file:///p", false);
-        s.set_main("main.tex");
-        lock(&sent).clear();
-        let mut b = built(1, 0);
-        b.diagnostics = Some(vec![
-            json!({"severity": "warning", "kind": "underfull", "message": "Underfull \\hbox (badness 10000)", "line": 2}),
-            json!({"severity": "warning", "kind": "reference", "message": "Reference `x' on page 1 undefined", "line": 5}),
-        ]);
-        s.built(&b);
-        let got = lock(&sent).clone();
-        let published: Vec<&Value> = got
-            .iter()
-            .filter(|m| m["method"] == "textDocument/publishDiagnostics")
-            .flat_map(|m| m["params"]["diagnostics"].as_array().unwrap())
-            .collect();
-        assert_eq!(published.len(), 1, "{got:?}");
-        assert!(
-            published[0]["message"]
-                .as_str()
-                .unwrap()
-                .starts_with("Reference"),
-            "{got:?}"
         );
     }
 }

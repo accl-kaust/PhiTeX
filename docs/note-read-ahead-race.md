@@ -1,8 +1,11 @@
 # Pieces that read ahead of their definer (2026-11-10)
 
 For cut1's speculation window (`PHITEX_SPEC_WINDOW`). This is why
-`chain::chains` and `chain::census_plain` stay known-red
-(`scripts/accl/gate-known-reds.txt`).
+`chain::chains` stays known-red (`scripts/accl/gate-known-reds.txt`,
+issue #10): its `pages` fixture runs 57 to 65 times for 46 nodes, 11 or
+12 of them resumptions, by run (1 red in 60 at 32 threads, accl 27895).
+`chain::census_plain`'s last red (issue #11) was its page chain counting
+the text node that woke the first page (reuse1, 2026-11-12).
 
 ## The race
 

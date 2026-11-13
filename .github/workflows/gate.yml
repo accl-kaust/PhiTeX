@@ -131,18 +131,26 @@ jobs:
           # (the research templates edited under the watch: scripts/ci/editsweep.py)
           - { name: edits-0, args: "edits 0 2" }
           - { name: edits-1, args: "edits 1 2" }
-          - { name: manuals-0, args: "manuals 0 12" }
-          - { name: manuals-1, args: "manuals 1 12" }
-          - { name: manuals-2, args: "manuals 2 12" }
-          - { name: manuals-3, args: "manuals 3 12" }
-          - { name: manuals-4, args: "manuals 4 12" }
-          - { name: manuals-5, args: "manuals 5 12" }
-          - { name: manuals-6, args: "manuals 6 12" }
-          - { name: manuals-7, args: "manuals 7 12" }
-          - { name: manuals-8, args: "manuals 8 12" }
-          - { name: manuals-9, args: "manuals 9 12" }
-          - { name: manuals-10, args: "manuals 10 12" }
-          - { name: manuals-11, args: "manuals 11 12" }
+          # (the shards dealt by the items' measured walls, a manual's -j1
+          # and -j4 builds apart: scripts/ci/shards.py, ci/shard-times.tsv;
+          # 16: the longest is lie-hasse's -j1 build alone, about 990 s, its
+          # -j4 build alone next, about 880 s, the others about 715 s)
+          - { name: manuals-0, args: "manuals 0 16" }
+          - { name: manuals-1, args: "manuals 1 16" }
+          - { name: manuals-2, args: "manuals 2 16" }
+          - { name: manuals-3, args: "manuals 3 16" }
+          - { name: manuals-4, args: "manuals 4 16" }
+          - { name: manuals-5, args: "manuals 5 16" }
+          - { name: manuals-6, args: "manuals 6 16" }
+          - { name: manuals-7, args: "manuals 7 16" }
+          - { name: manuals-8, args: "manuals 8 16" }
+          - { name: manuals-9, args: "manuals 9 16" }
+          - { name: manuals-10, args: "manuals 10 16" }
+          - { name: manuals-11, args: "manuals 11 16" }
+          - { name: manuals-12, args: "manuals 12 16" }
+          - { name: manuals-13, args: "manuals 13 16" }
+          - { name: manuals-14, args: "manuals 14 16" }
+          - { name: manuals-15, args: "manuals 15 16" }
     steps:
       - uses: actions/checkout@v4
         with:

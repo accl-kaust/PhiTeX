@@ -18,7 +18,7 @@ import { tetris } from "./tetris.ts";
 import { plane } from "./plane.ts";
 import { glyphs } from "./glyphs.ts";
 import { kaust } from "./kaust.ts";
-import { badapple } from "./badapple.ts";
+import { badapple, preload as preloadBadApple } from "./badapple.ts";
 
 export interface Look {
   id: string;
@@ -75,6 +75,11 @@ export function lookOf(v: unknown): OpeningLook {
   if (v === "random" || v === "all" || v === "off") return v;
   const ids = looksIn(v);
   return ids.length ? lookFrom(ids) : "random";
+}
+
+/** What the looks in `look` read ahead, so that each draws on its first frame: Bad Apple's frames. */
+export function ready(look: OpeningLook): void {
+  if (looksIn(look).includes("badapple")) preloadBadApple();
 }
 
 /** The opening to play for `look`: `first` (none played ever) gets PhiTeX's when it is chosen; another than the last one played, when there is another. */

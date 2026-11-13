@@ -1117,6 +1117,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     for d in &mut p.defs {
         if let Some(c) = d.rel {
             d.value = rel_value_at(eng, d.f, node.id, c);
+            if ftrace(eng, d.f) {
+                let i = reaching_at(eng, d.f, node.id, false);
+                eprintln!(
+                    "ftrace: rel-file {} by {} pos {} input-by {:?} input {} value {} t {}",
+                    eng.values().as_str(d.f.0).unwrap_or_default(),
+                    node.id.raw(),
+                    node.pos_hint().0,
+                    i.as_ref().and_then(|r| r.by).map(NodeId::raw),
+                    i.and_then(|r| r.value)
+                        .map_or("none".to_owned(), |x| eng.values().render(x)),
+                    eng.values().render(d.value),
+                    eng.now_ns()
+                );
+            }
         }
     }
     let defs = dedup_defs(std::mem::take(&mut p.defs));
@@ -1493,6 +1507,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // searched for)
     let new_fields: FxHashSet<Field> = rec.defs.iter().map(|d| d.f).collect();
     let new_contribs: FxHashSet<Field> = rec.contribs.iter().map(|c| c.0).collect();
+    // (the fields its walks after the lock go from its label for, noted
+    // with the node until they are done: `Node::walking`)
+    let walking = Walking::new(node);
     let mut tries = 0;
     todo_room();
     // (what the lock finds the filing would grow: its lists' room made here)
@@ -2031,6 +2048,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 to_walk.sort_unstable();
                 to_walk.dedup();
             }
+            // (walked after the lock from where the node then stands: a
+            // relocation lifting it first walks them from here, `lift`)
+            walking.add(to_walk.iter().copied());
         }
         for &f in &to_walk {
             walks.push((
@@ -2101,11 +2121,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         for d in rec.defs.iter().filter(|_| crate::obs::enabled()) {
             if ftrace(eng, d.f) {
                 eprintln!(
-                    "ftrace: def {} by {} ({}) serial {serial} value {} changed {} t {}",
+                    "ftrace: def {} by {} ({}) serial {serial} pos {} rel {:?} value {} changed {} t {}",
                     eng.values().as_str(d.f.0).unwrap_or_default(),
                     node.id.raw(),
                     eng.op(node.op()).name(),
-                    d.value.raw(),
+                    node.pos_hint().0,
+                    d.rel.is_some(),
+                    eng.values().render(d.value),
                     changed_defs.contains(&d.f),
                     eng.now_ns()
                 );
@@ -2428,6 +2450,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let defined: Vec<(Field, u16)> = rec.defs.iter().map(|d| (d.f, def_level(eng, d.f, node.id))).collect();
         walk_stopped(eng, ww, node, node.pos_hint(), seg_id, &defined, &mut st);
     }
+    // (its walks done)
+    drop(walking);
     for &f in &changed_contribs {
         reask_ranges(eng, ww, f, seg_pos, node.id, &holes, &mut st);
     }
@@ -2914,9 +2938,13 @@ pub(crate) fn commit_stood(
 /// the walk wakes it if the value has moved since. A node gone was walked
 /// by its removal, which flushed this list first.
 pub(crate) fn flush_unwalked(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
+    // (noted as they are taken: a relocation lifting the node before the
+    // walks go walks them from its old label, `Walking`)
+    let walking = Walking::new(node);
     let fs = {
         let mut u = node.unwalked.lock();
         node.transient.store(false, Ordering::Release);
+        walking.add(u.iter().copied());
         std::mem::take(&mut *u)
     };
     if fs.is_empty() {
@@ -3094,6 +3122,19 @@ fn walk_here(
             // `settle_rel`)
             _ => read::rel_plain(eng, c, Some(i.value)),
         };
+        if ftrace(eng, f) {
+            eprintln!(
+                "ftrace: walk-here {} by {} rel {} pos {} input-by {} old {} new {} t {}",
+                eng.values().as_str(f.0).unwrap_or_default(),
+                by.raw(),
+                d.by.raw(),
+                p.0,
+                i.by.raw(),
+                eng.values().render(d.value),
+                eng.values().render(nv),
+                eng.now_ns()
+            );
+        }
         if nv == d.value {
             return Here::Done;
         }
@@ -3147,6 +3188,17 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
         let p = n.pos_hint();
         match inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
             Some(e) if e.by == by && e.rel == Some(c) => {
+                if ftrace(eng, f) {
+                    eprintln!(
+                        "ftrace: settle {} by {} pos {} old {} new {} t {}",
+                        eng.values().as_str(f.0).unwrap_or_default(),
+                        by.raw(),
+                        p.0,
+                        eng.values().render(e.value),
+                        eng.values().render(nv),
+                        eng.now_ns()
+                    );
+                }
                 if e.value != nv {
                     e.value = nv;
                     changed = true;
@@ -3720,6 +3772,13 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
             st.woken += 1;
         }
     }
+}
+
+/// (`PHITEX_BRACKET_TRACE=1`, profile) Whether bracket filings and the
+/// walks after them are printed (`bracket-trace:` lines).
+fn bracket_trace() -> bool {
+    static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::obs::enabled() && *P.get_or_init(|| std::env::var_os("PHITEX_BRACKET_TRACE").is_some())
 }
 
 /// (`PHITEX_FIELD_TRACE=<prefix>`, observe) Whether `f`'s name begins with
@@ -4567,6 +4626,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         // (gone, it commits no more: none waits for it)
         crate::sched::clear_front(eng, node);
         crate::sched::clear_move(eng, node);
+        crate::sched::clear_edited(eng, node);
         if let Some(o) = node.last.lock().as_ref() {
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }
@@ -4632,6 +4692,11 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     inner.replaced = inner.replaced.saturating_add(1);
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
+    }
+    // (what it filed taken back, while a commit of it may still walk: the
+    // re-asks for this are others than that commit's, `sched::asked_before`)
+    if !changed_defs.is_empty() || !changed_contribs.is_empty() {
+        node.restated.fetch_add(1, Ordering::AcqRel);
     }
     ix.apply(eng, seg, &inner);
     drop(inner);
@@ -5448,6 +5513,49 @@ pub(crate) enum Target {
     Before(NodeId, NodeId),
 }
 
+/// A walk's note of the fields it goes from its node's label for
+/// (`Node::walking`): made under the lock that files them (a commit's), or
+/// as they are taken (`flush_unwalked`), and taken off when its walks are
+/// done or it ends early. Such a walk starts where the node stands when it
+/// goes; a relocation lifting the node before then walks the note's fields
+/// from the label it leaves, where they changed (`lift`): else the readers
+/// between the two labels kept what the node no longer defined there
+/// (layout_d at -j4: a page's finisher landed before a paragraph, its run
+/// there took its \@currlist back and it was lifted again before that
+/// walk went, which then started past the paragraph; the paragraph's
+/// append stood on the value taken back, its floats listed twice,
+/// "Float(s) lost").
+struct Walking<'a> {
+    node: &'a Node,
+    token: u64,
+}
+
+impl<'a> Walking<'a> {
+    fn new(node: &'a Node) -> Walking<'a> {
+        static TOKENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Walking {
+            node,
+            token: TOKENS.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    fn add(&self, fs: impl Iterator<Item = Field>) {
+        let mut fs = fs.peekable();
+        if fs.peek().is_some() {
+            self.node.walking.lock().extend(fs.map(|f| (f, self.token)));
+        }
+    }
+}
+
+impl Drop for Walking<'_> {
+    fn drop(&mut self) {
+        let mut v = self.node.walking.lock();
+        if !v.is_empty() {
+            v.retain(|x| x.1 != self.token);
+        }
+    }
+}
+
 /// What a relocated node left at its old label (`lift`): the label and
 /// segment, the fields it defined and contributed to there, its brackets,
 /// others' reads anchored at it (filed again where it lands), the `next`
@@ -5464,6 +5572,9 @@ struct Left {
     after: Option<NodeId>,
     moves: u64,
     defs: Vec<Field>,
+    /// The fields its last commit changed there and left unwalked
+    /// (`Node::unwalked`): walked from the old label, where they changed.
+    unwalked: Vec<Field>,
     contribs: Vec<Field>,
     brackets: Option<Brackets>,
     readers: Vec<(Field, Reader)>,
@@ -5732,6 +5843,9 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left,
     for &f in &left.defs {
         reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), 0, st);
     }
+    for &f in left.unwalked.iter().filter(|f| !left.defs.contains(f)) {
+        reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), 0, st);
+    }
     for &f in &left.contribs {
         reask_ranges_at(eng, w, f, left.pos, m.id, &left.stops, st);
     }
@@ -5841,6 +5955,25 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
             }
         }
     }
+    // (what its last commit, a stale run's, changed here and left
+    // unwalked (`Node::unwalked`): taken under the lock that commit filed
+    // them under, and walked from this label, where they changed. Left
+    // with the node, they were walked from where it lands, and the
+    // readers between its two labels kept what it no longer gives them:
+    // layout_d at -j4, a page's finisher moved before a paragraph, its
+    // run there withdrew its \@currlist unwalked, then moved after the
+    // paragraph again; the paragraph's append stood on the withdrawn
+    // value, its floats listed twice, "Float(s) lost")
+    let mut unwalked = {
+        let mut u = m.unwalked.lock();
+        m.transient.store(false, Ordering::Release);
+        std::mem::take(&mut *u)
+    };
+    // (and what a walk under way goes from here for, not gone yet:
+    // `Walking`)
+    unwalked.extend(m.walking.lock().drain(..).map(|x| x.0));
+    unwalked.sort_unstable();
+    unwalked.dedup();
     m.pos.store(0, Ordering::Release);
     for &f in defs.iter().chain(&contribs) {
         eng.bump(f);
@@ -5860,6 +5993,7 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
         after,
         moves,
         defs,
+        unwalked,
         contribs,
         brackets,
         readers,
@@ -6068,7 +6202,25 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
     }
     inner.sum_depth();
     let g = eng.scope_changed();
+    // (a change of what it filed: a re-ask for it is another than one for
+    // a change before, `sched::asked_before`)
+    node.restated.fetch_add(1, Ordering::AcqRel);
+    if bracket_trace() {
+        let o = old.unwrap_or_default();
+        eprintln!(
+            "bracket-trace: file node {} ({}) pos {} old ({},{}) new ({},{}) gen {g} t {}",
+            node.id.raw(),
+            eng.op(node.op()).name(),
+            pos.0,
+            o.closes,
+            o.opens,
+            b.closes,
+            b.opens,
+            eng.now_ns()
+        );
+    }
     inner.note_brackets(g, Filing::current());
+    Filing::note(node.id, g);
     node.bracket_gen.store(g, Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
@@ -6165,6 +6317,9 @@ pub(crate) struct Filing {
 
 thread_local! {
     static FILING: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The changes of brackets the commits under way on this thread
+    /// filed: (filing, node, scope count), [`Filing::note`].
+    static OWN_BRACKETS: std::cell::RefCell<Vec<(u64, NodeId, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 static FILINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -6180,11 +6335,45 @@ impl Filing {
     pub(crate) fn current() -> u64 {
         FILING.with(std::cell::Cell::get)
     }
+
+    /// Notes a change of `node`'s brackets at scope count `g` by the
+    /// commit under way, if any.
+    fn note(node: NodeId, g: u64) {
+        let me = Filing::current();
+        if me != 0 {
+            OWN_BRACKETS.with(|v| v.borrow_mut().push((me, node, g)));
+        }
+    }
+
+    /// Whether commit `me` filed a change of brackets other than the one at
+    /// scope count `g` at a node standing from `at` to `stop` (None: the
+    /// line's end): two of one commit's changes are each walked on the
+    /// brackets with the other filed, and the region of the first may hold
+    /// the second ([`first_bracket_change_since`]).
+    fn own_other_in(eng: &Engine, me: u64, g: u64, at: Pos, stop: Option<Pos>) -> bool {
+        me != 0
+            && OWN_BRACKETS.with(|v| {
+                v.borrow().iter().any(|&(c, n, h)| {
+                    c == me
+                        && h != g
+                        && eng.placed_node(n).is_some_and(|x| {
+                            let p = x.pos_hint();
+                            x.state() != State::Gone && p >= at && stop.is_none_or(|s| p <= s)
+                        })
+                })
+            })
+    }
 }
 
 impl Drop for Filing {
     fn drop(&mut self) {
-        FILING.with(|f| f.set(self.prev));
+        let me = FILING.with(|f| f.replace(self.prev));
+        OWN_BRACKETS.with(|v| {
+            let mut v = v.borrow_mut();
+            if !v.is_empty() {
+                v.retain(|x| x.0 != me);
+            }
+        });
     }
 }
 
@@ -6205,16 +6394,59 @@ impl Drop for Filing {
 /// end, each found to see what it saw (windycity's clean build at -j1:
 /// ~14 000 scope-kind readers, up to 3.4 s a commit, 61 s of the
 /// build's 110 s in re-asks).
-fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64, me: u64) -> Option<SegId> {
-    if eng.scope_gen.load(Ordering::Acquire) == g {
+fn first_bracket_change_since(
+    eng: &Engine,
+    by: NodeId,
+    at: Pos,
+    last: Option<(SegId, Pos)>,
+    g: u64,
+    me: u64,
+) -> Option<SegId> {
+    let moved = eng.scope_gen.load(Ordering::Acquire) != g;
+    let stop = last.map(|x| x.1);
+    if !moved && stop.is_none() {
         return None;
     }
     let first = eng.seg_for_pos(at).map(|s| s.id);
+    // (another change its own commit filed in the region: each walk of the
+    // two reckons on the other filed, and the readers in both regions read
+    // before either. Two closes a commit filed, its node's and a new
+    // placement's, after a scope its readers read inside, each stopped where
+    // the other's close agreed with it, and the readers past both kept the
+    // scope kind the scope's opener defined: msc at -j4, a reader's
+    // `[14, 1, 0, 1, 1, ()]` but now none, a paragraph set at the full width)
+    if moved && Filing::own_other_in(eng, me, g, at, stop) {
+        return first;
+    }
+    let last = last.map(|x| x.0);
     let mut cur = first;
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
-        if inner.brk_since_other_than(me) > g {
+        if moved && inner.brk_since_other_than(me) > g {
+            return Some(sid);
+        }
+        // (a bracket in the region filed before this change whose own walk
+        // reckoned on it, begun since or still to go: that walk found this
+        // change where it stops, and this one stops at it; the readers
+        // past both read before either. A close filed, then another before
+        // it whose walk stopped at the first, where the depths agree again,
+        // while the first's walk, begun after, found the depth the second
+        // made and its region empty: amsldoc at -j16, readers after both
+        // kept `[14, 1, 0, 1, 1, ()]`)
+        if stop.is_some()
+            && inner
+                .brackets
+                .range((Excluded(at), stop.map_or(Unbounded, Included)))
+                .any(|(_, &(n, _))| {
+                    n != by && {
+                        let x = eng.node(n);
+                        let h = x.bracket_gen.load(Ordering::Acquire);
+                        let walked = x.bracket_walked.load(Ordering::Acquire);
+                        h < g && (walked >= g || walked < h)
+                    }
+                })
+        {
             return Some(sid);
         }
         let lo = seg.lo;
@@ -6537,6 +6769,10 @@ fn reask_after_effect_with(
         })
     };
     let d0 = i64::from(read::depth_at(eng, at));
+    // (the brackets this walk reckons on: every change counted by now,
+    // read after the depth at `at`, `first_bracket_change_since`)
+    by.bracket_walked
+        .fetch_max(eng.scope_gen.load(Ordering::Acquire), Ordering::AcqRel);
     let (co, cn) = ((d0 - i64::from(old.closes)).max(0), (d0 - i64::from(new.closes)).max(0));
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
     // (the scopes both sides share: the common ones under the node's
@@ -6625,7 +6861,7 @@ fn reask_after_effect_with(
     let raced = if end.is_some_and(|(_, q)| q == at) {
         None
     } else {
-        first_bracket_change_since(eng, at, end.map(|(sid, _)| sid), g, Filing::current())
+        first_bracket_change_since(eng, by.id, at, end, g, Filing::current())
     };
     if let Some(from) = raced {
         // (the readers of the region from the first segment where one
@@ -6688,6 +6924,22 @@ fn reask_after_effect_with(
         }
     }
     st.scope_asked += readers.len() as u64;
+    if bracket_trace() {
+        eprintln!(
+            "bracket-trace: walk by {} at {} old ({},{}) new ({},{}) end {:?} raced {:?} all {} readers {} t {}",
+            by.id.raw(),
+            at.0,
+            old.closes,
+            old.opens,
+            new.closes,
+            new.opens,
+            end.map(|(_, q)| q.0),
+            raced.map(|x| x.0),
+            reach.all,
+            readers.len(),
+            eng.now_ns()
+        );
+    }
     {
         let _memo = read::WalkMemo::new();
         for (f, r) in &readers {
@@ -7502,6 +7754,96 @@ mod tests {
             e.node(r).state(),
             crate::node::State::Clean,
             "R kept f, which both closes hide from it"
+        );
+    }
+
+    #[test]
+    fn two_closes_one_commit_filed_reask_the_readers_after_both() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // As above, but one commit files both closes (a node's and its new
+        // placement's) and walks them: its walks took the other close for
+        // its own, no race, and each stopped where the other agreed with
+        // it. R read f inside the scope and now finds none (msc at four
+        // threads: a reader kept `[14, 1, 0, 1, 1, ()]` but now none, a
+        // paragraph set at the full width).
+        let e = Engine::new();
+        let opens = e.register(Arc::new(Opens));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, opens, vec![f, v.int(7)]);
+        let x = e.push(u, reads, vec![f]);
+        let y = e.push(u, reads, vec![f]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(7));
+        let close = crate::api::Brackets {
+            closes: 1,
+            opens: 0,
+            before: false,
+        };
+        let _filing = super::Filing::begin();
+        let file = |n: NodeId| {
+            let node = e.node(n);
+            let (_, mut inner) = super::own_write(&e, node).expect("on the line");
+            super::file_brackets(&e, &mut inner, node, node.pos_hint(), close).expect("a change")
+        };
+        let (ox, oy) = (file(x), file(y));
+        let mut st = super::CommitStats::default();
+        super::reask_after_effect(&e, None, e.node(x), e.node(x).pos_hint(), ox, close, &mut st);
+        super::reask_after_effect(&e, None, e.node(y), e.node(y).pos_hint(), oy, close, &mut st);
+        assert_ne!(
+            e.node(r).state(),
+            crate::node::State::Clean,
+            "R kept f, which both closes hide from it"
+        );
+    }
+
+    #[test]
+    fn a_walk_owed_from_a_label_goes_from_there_when_the_node_is_lifted() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // D defines f before R. A commit of D takes f back under its lock,
+        // its walk to go after it; D is lifted and lands after R before
+        // that walk goes, so the walk starts where D then stands, past R.
+        // R read D's f and now finds none: it has to run again (layout_d
+        // at four threads: a page's finisher took its \@currlist back and
+        // was moved past a paragraph whose append stood on it, its floats
+        // listed twice, "Float(s) lost").
+        let e = Engine::new();
+        let def = e.register(Arc::new(Def));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f, v.int(5)]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(5));
+        let dn = e.node(d);
+        let walking = super::Walking::new(dn);
+        {
+            let (_, mut inner) = super::own_write(&e, dn).expect("on the line");
+            let p = dn.pos_hint();
+            let m = inner.defs.get_mut(&crate::values::Field(f)).expect("f filed");
+            assert!(m.remove(&p).is_some(), "D's f at its label");
+            walking.add(std::iter::once(crate::values::Field(f)));
+        }
+        let mut st = super::CommitStats::default();
+        assert!(super::relocate(
+            &e,
+            None,
+            d,
+            dn,
+            super::Target::After(r),
+            &Default::default(),
+            &mut st
+        ));
+        drop(walking);
+        assert_ne!(
+            e.node(r).state(),
+            crate::node::State::Clean,
+            "R kept the f D took back where it stood"
         );
     }
 

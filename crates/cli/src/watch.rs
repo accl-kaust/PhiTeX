@@ -351,11 +351,24 @@ fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>
         c.origins.clone(),
     );
     let st = ui.st;
+    // (its build's time, and whether it was a clean build or an edit of
+    // the last marked-up text)
+    let run = c.report.as_ref().map(|r| {
+        let cold = r.runs.first().is_some_and(|x| x.why == "cold");
+        (r.wall, cold)
+    });
     let mut line = format!(
         "diff {}: {n} change{}",
         c.label,
         if n == 1 { "" } else { "s" }
     );
+    if let Some((wall, cold)) = run {
+        line.push_str(&st.dim(&format!(
+            " · {} {}",
+            if cold { "built in" } else { "edited in" },
+            ms(wall)
+        )));
+    }
     if errors > 0 {
         line.push_str(&st.red(&format!(
             " · {errors} error{} in the marked-up document",
@@ -367,7 +380,34 @@ fn diff_told(ui: &Ui, v: &View, ours: &Ours, c: Option<&crate::compare::Compare>
     for e in c.errors(st.color).iter().take(3) {
         ui.line(e);
     }
-    ui.event(&json!({"event": "diff", "label": c.label, "changes": n, "errors": errors}));
+    ui.event(&json!({
+        "event": "diff",
+        "label": c.label,
+        "changes": n,
+        "errors": errors,
+        "ms": run.map(|(w, _)| w.as_secs_f64() * 1e3),
+        "cold": run.map(|(_, cold)| cold),
+    }));
+}
+
+/// The diff's marked-up document built if a build is due, as a build of
+/// the document's is: the viewer told it builds, the terminal's spinner
+/// and tree on the diff's own status (its phases, its pages), `what` the
+/// spinner's text. Whether it built.
+fn diff_build(ui: &Ui, v: &View, c: &mut crate::compare::Compare, what: String) -> bool {
+    if !c.due() {
+        return false;
+    }
+    c.status().take();
+    v.building(true);
+    let spin = ui.spin(what, c.status().clone());
+    let built = c.build().map(|r| (r.pages(), r.out.pages_changed.clone()));
+    if let Some((pages, changed)) = &built {
+        spin.built(*pages, changed);
+    }
+    spin.done();
+    v.building(false);
+    built.is_some()
 }
 
 /// What a line on standard input (a pipe) asks.
@@ -646,15 +686,32 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
 
 /// `rows` as a tree under `head`: `├─ name  value`, the last `└─`; a
 /// value wider than the terminal goes on under itself, broken at its
-/// ` · `s.
+/// ` · `s, and a line still wider (a part too long for any line, a
+/// terminal too narrow) cut at the terminal's edge.
 fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<String> {
-    let cols = crate::keys::width().unwrap_or(100).max(50);
+    tree_at(
+        st,
+        head,
+        rows,
+        crate::keys::width().unwrap_or(100).saturating_sub(1),
+    )
+}
+
+/// [`tree`] at `cols` columns.
+fn tree_at(
+    st: crate::ui::Style,
+    head: String,
+    rows: &[(String, String)],
+    cols: usize,
+) -> Vec<String> {
+    let cols = cols.max(1);
     let mut out = vec![head];
     for (k, (name, value)) in rows.iter().enumerate() {
         let last = k + 1 == rows.len();
         let branch = if last { "└─" } else { "├─" };
         let stem = if last { "  " } else { "│ " };
-        let room = cols.saturating_sub(2 + 3 + 15).max(20);
+        // (the indent, the branch and the name's column before the value)
+        let room = cols.saturating_sub(2 + 3 + 15).max(10);
         let mut lines: Vec<String> = vec![String::new()];
         for part in value.split(" · ") {
             let cur = lines.last_mut().expect("a line");
@@ -680,7 +737,15 @@ fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<St
             }
         }
     }
-    out
+    out.into_iter()
+        .map(|l| {
+            if crate::ui::width(&l) > cols {
+                crate::ui::clip(&crate::ui::plain(&l), cols)
+            } else {
+                l
+            }
+        })
+        .collect()
 }
 
 /// `cold / wall` as `14×` or `2.5×`, when an edit beat the cold build.
@@ -791,6 +856,14 @@ fn reconfigured(
 /// ends, or the editor's settings call for another (its target and
 /// options).
 #[allow(clippy::too_many_lines)]
+/// What a target resolved to, every field of it but what reading the
+/// settings warned of: two equal ones build the same.
+fn build_of(t: &Target) -> String {
+    let mut t = t.clone();
+    t.warnings.clear();
+    format!("{t:?}")
+}
+
 fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
     let st = ui.st;
     let lsp = kept.lsp.clone();
@@ -802,6 +875,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // is the only way to see them; `copy-pdf` copies the file written.
     // Writing, the PDF comes with its .synctex.gz unless that was turned off)
     let writing = o.write || t.watch_write || !o.view || t.copy_pdf.is_some();
+    // (the target as resolved, and where: a settings' file that changed and
+    // resolves to both again changed nothing a build reads)
+    let resolved = (build_of(t), std::env::current_dir().ok());
     let mut t2 = t.clone();
     if writing && !t.synctex_said {
         t2.synctex = true;
@@ -1062,12 +1138,43 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         }
     }
     // (the pages a cold build streams, where a viewer shows them: each
-    // drawn from its own file until the build is in)
+    // drawn from its own file until the build is in; a page streamed again
+    // with another hash shown redone in the live tree. Only where the
+    // viewer listens: a listener makes the clean build stream its pages,
+    // work the tree alone does not pay for)
     if let Some(v) = view.as_ref().map(View::viewer) {
+        let ui = ui.clone();
         status.meter().on_streamed(Box::new(move |p, pages| {
+            ui.streamed(p.page, p.hash);
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
                 v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
+        }));
+    }
+    // (the diff's session's own status (Compare, made when first asked):
+    // its build's progress and the pages it streams as the document's
+    // are, to the viewer and the terminal's tree; its pages are the
+    // diff's, shown while the diff is)
+    let diff_status = Arc::new(Status::default());
+    if let Some(v) = view.as_ref().map(View::viewer) {
+        let shown = v.clone();
+        diff_status
+            .meter()
+            .listen(Box::new(move |p| shown.progress(p)));
+        let ui = ui.clone();
+        diff_status.meter().on_streamed(Box::new(move |p, pages| {
+            ui.streamed(p.page, p.hash);
+            if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                v.diff_stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
+            }
+        }));
+    }
+    {
+        let ui = Mutex::new(ui.clone());
+        diff_status.meter().on_unreachable(Box::new(move |why| {
+            ui.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .warning(&format!("diff: {why}"));
         }));
     }
     // (a package that could not be had, `--shelf`: said here and to the
@@ -1345,7 +1452,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             (a, b) => a.or(b),
         };
         let mut r = match ran {
-            Ok(r) => r,
+            Ok(r) => {
+                spin.built(r.pages(), &r.out.pages_changed);
+                r
+            }
             Err(m) => {
                 spin.done();
                 building.store(false, Ordering::Relaxed);
@@ -2174,6 +2284,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         phitex_tex::timeline::lap("watch: the events gathered");
         let events = events.into_iter().map(|e| e.1);
         let mut why = Vec::new();
+        // (the files other than the main one changed, for the diff's
+        // session too; and whether every file is to be read again)
+        let mut diff_files: Vec<String> = Vec::new();
+        let mut diff_reread = false;
         let mut again = false;
         let mut main_changed = false;
         // (the editor's settings: another session, where they change it)
@@ -2193,6 +2307,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // (every input read again from disk: a change made
                         // outside that no event told)
                         s.reread_all();
+                        diff_reread = true;
                         again = true;
                         why.push("asked".to_owned());
                     }
@@ -2217,7 +2332,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     }
                     Key::Problems
                         if view.as_ref().is_some_and(|v| v.diff_is_shown())
-                            && comparing.is_some() =>
+                            && comparing.as_ref().is_some_and(|c| c.active) =>
                     {
                         let errs = comparing
                             .as_ref()
@@ -2324,7 +2439,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 for w in &t2.warnings {
                                     ui.warning(w);
                                 }
-                                next = Some(((t2, o.clone(), dir), "the settings changed"));
+                                // (only when what was resolved differs: the
+                                // viewer's own preferences (its filters, the
+                                // tips seen) are kept in the user's
+                                // phitex.toml, and a click on one is no new
+                                // session)
+                                if (build_of(&t2), Some(dir.clone())) != resolved {
+                                    next = Some(((t2, o.clone(), dir), "the settings changed"));
+                                }
                             }
                             Err(e) => ui.error(&format!(
                                 "the settings ({}): {e}",
@@ -2353,6 +2475,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         {
                             edits.buffers.remove(&rel);
                             edits.set(&mut s, &rel);
+                            if rel != main_rel {
+                                diff_files.push(rel.clone());
+                            }
                         }
                         // (the main file read once for all its events;
                         // another file the build reads again from disk)
@@ -2361,6 +2486,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 main_changed = true;
                             } else {
                                 edits.set(&mut s, &rel);
+                                diff_files.push(rel.clone());
                             }
                         }
                         why.push(rel);
@@ -2402,6 +2528,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 Event::Compacted(_, Err(e)) => ui.error(&e),
                 Event::Edited(file) => {
                     edits.set(&mut s, &file);
+                    if file != main_rel {
+                        diff_files.push(file.clone());
+                    }
                     why.push(format!("{file} (editor)"));
                     again = true;
                 }
@@ -2426,6 +2555,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 // (as `r`: every input read again from
                                 // disk, a change no event told)
                                 s.reread_all();
+                                diff_reread = true;
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
                             }
@@ -2454,6 +2584,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             }
                             Applied::Diff(a) => diff_asks.push(a),
                             Applied::Edited(file) => {
+                                if file != main_rel {
+                                    diff_files.push(file.clone());
+                                }
                                 why.push(format!("{file} (editor)"));
                                 again = true;
                             }
@@ -2577,37 +2710,58 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 root: &root,
                 buffers: &edits.buffers,
             };
-            let edited = again && comparing.as_ref().is_some_and(|c| c.to.is_none());
+            // (the files changed told the diff's session as the
+            // document's was, whether or not a diff is on: it is kept)
+            if let Some(c) = comparing.as_mut() {
+                c.files_changed(&edits.buffers, &diff_files);
+                if diff_reread {
+                    c.reread();
+                }
+            }
+            let edited = again && comparing.as_ref().is_some_and(|c| c.active);
             for a in std::mem::take(&mut diff_asks) {
                 match a {
                     Ask::DiffStart { rev, to } => {
-                        let spin = ui.spin(format!("{what}: diff against {rev}"), status.clone());
-                        let started = crate::compare::Git::open(&root).and_then(|g| {
-                            crate::compare::Compare::start(
-                                &g,
-                                &rev,
-                                to.as_deref(),
-                                &now,
-                                &main_rel,
-                                &s.job,
-                                s.files(),
-                                Arc::new(Status::default()),
-                                writing,
-                            )
-                        });
-                        spin.done();
-                        match started {
-                            Ok(c) => {
-                                // (its pages in first: then shown)
-                                diff_told(ui, v, &ours, Some(&c));
-                                comparing = Some(c);
+                        // (a session kept from the last diff: this one an
+                        // edit of it; else a new one, its first build a
+                        // clean build that streams its pages)
+                        let started =
+                            crate::compare::Git::open(&root).and_then(|g| {
+                                match comparing.as_mut() {
+                                    Some(c) => c.against(&g, &rev, to.as_deref(), &now, &main_rel),
+                                    None => crate::compare::Compare::start(
+                                        &g,
+                                        &rev,
+                                        to.as_deref(),
+                                        &now,
+                                        &main_rel,
+                                        &s.job,
+                                        s.files(),
+                                        diff_status.clone(),
+                                        writing,
+                                    )
+                                    .map(|c| comparing = Some(c)),
+                                }
+                            });
+                        match (started, comparing.as_mut()) {
+                            (Ok(()), Some(c)) => {
+                                // (its changes told and its pages shown at
+                                // once, each page as it is typeset; then
+                                // the build's own)
+                                v.diff_begins(c.state(false), c.text().to_owned());
                                 v.diff_shown(true);
+                                diff_build(ui, v, c, format!("{what}: diff against {rev}"));
+                                diff_told(ui, v, &ours, Some(c));
                             }
-                            Err(e) => {
+                            (Err(e), c) => {
+                                if let Some(c) = c {
+                                    c.active = false;
+                                }
                                 ui.warning(&format!("diff: {e}"));
                                 v.diff_stopped();
                                 ui.event(&json!({"event": "diff", "error": e}));
                             }
+                            (Ok(()), None) => {}
                         }
                     }
                     Ask::DiffShow(on) => v.diff_shown(on),
@@ -2617,7 +2771,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         add,
                         del,
                     } => {
-                        if let Some(c) = comparing.as_mut() {
+                        if let Some(c) = comparing.as_mut().filter(|c| c.active) {
                             let look = c.look_from(
                                 markup.as_deref(),
                                 subtype.as_deref(),
@@ -2627,6 +2781,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             match crate::compare::Git::open(&root) {
                                 Ok(g) => {
                                     c.restyle(look, &now, &g, &main_rel);
+                                    diff_build(ui, v, c, format!("{what}: diff restyled"));
                                     diff_told(ui, v, &ours, Some(c));
                                 }
                                 Err(e) => ui.warning(&format!("diff: {e}")),
@@ -2634,7 +2789,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         }
                     }
                     Ask::DiffStop => {
-                        comparing = None;
+                        // (its session kept: the next Compare an edit)
+                        if let Some(c) = comparing.as_mut() {
+                            c.active = false;
+                        }
                         v.diff_stopped();
                         ui.line(&st.dim("diff: stopped"));
                     }
@@ -2644,8 +2802,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             if edited && let Some(c) = comparing.as_mut() {
                 let t0 = Instant::now();
                 c.edited(&now, &main_rel);
-                diff_told(ui, v, &ours, Some(c));
-                ui.line(&st.dim(&format!("diff: again in {}", ms(t0.elapsed()))));
+                if diff_build(ui, v, c, format!("{what}: diff again")) {
+                    diff_told(ui, v, &ours, Some(c));
+                    ui.line(&st.dim(&format!("diff: again in {}", ms(t0.elapsed()))));
+                }
             }
         }
     }
@@ -2706,6 +2866,33 @@ fn build_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past a narrow terminal: a part too long for any line
+    /// and the name's column cut at its edge.
+    #[test]
+    fn rows_never_run_past_a_narrow_terminal() {
+        let st = crate::ui::Style {
+            color: false,
+            tty: false,
+        };
+        let rows = vec![
+            (
+                "memory".to_owned(),
+                "1.2 GB resident · 300 MB values · 2 collections".to_owned(),
+            ),
+            (
+                "hints".to_owned(),
+                "a-single-part-far-wider-than-any-terminal-line-is-cut-at-the-edge".to_owned(),
+            ),
+        ];
+        for cols in [20, 39, 60] {
+            let out = tree_at(st, "build 2  main.tex:4  12.0 ms".to_owned(), &rows, cols);
+            assert!(
+                out.iter().all(|l| crate::ui::width(l) <= cols),
+                "{cols}: {out:#?}"
+            );
+        }
+    }
 
     /// A stats row too wide for the terminal (no terminal in a test: 100
     /// columns) goes on under its value, broken at its ` · `s, every

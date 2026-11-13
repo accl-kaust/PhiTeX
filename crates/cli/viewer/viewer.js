@@ -730,7 +730,8 @@ var Viewer = class _Viewer {
     const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
     return [...s.el.querySelectorAll("text")].map((t) => {
       const r = t.getBoundingClientRect();
-      return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0: (r.top - b.top) * sy, x1: (r.right - b.left) * sx, y1: (r.bottom - b.top) * sy };
+      const y0 = (r.top - b.top) * sy, y1 = (r.bottom - b.top) * sy, base = Number(t.getAttribute("y"));
+      return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0, x1: (r.right - b.left) * sx, y1, b: Number.isFinite(base) ? base : y1 };
     }).filter((l) => l.t).sort((a, c) => a.y0 - c.y0 || a.x0 - c.x0);
   }
   /** An entry's label, where the bibliography prints one at its line's start ("[4]", "[Knu84]"). */
@@ -904,16 +905,19 @@ var Viewer = class _Viewer {
     }
     return waiting ? null : out;
   }
-  /** The bibliography's entry whose first line has its baseline at `y` on page `k` (the engine's place for it): its label, its text, its line's top. */
+  /**
+   * The bibliography's entry the engine places at `y` on page `k`: its label, its text, its
+   * line's top. `y` is where the entry's link goes, its destination's top, which hyperref
+   * raises above the entry's first baseline (\Hy@raisedlink, \HyperRaiseLinkDefault): the
+   * entry is the first text line whose baseline is at or below it. Read as the baseline and
+   * matched to the line around it, the place was the line above's, the previous entry's:
+   * every card one entry early, the first none.
+   */
   entryOn(k, y) {
     const lines2 = this.pageLines(k);
     let i = -1;
-    lines2.forEach((l, j) => l.y0 - 2 <= y && y <= l.y1 + 2 && (i < 0 || l.y0 > lines2[i].y0) && (i = j));
-    if (i < 0) {
-      const near = lines2.map((l, j) => [Math.abs((l.y0 + l.y1) / 2 - y), j]).sort((a, b) => a[0] - b[0])[0];
-      if (!near || near[0] > 12) return null;
-      i = near[1];
-    }
+    lines2.forEach((l, j) => l.b >= y && (i < 0 || l.b < lines2[i].b || l.b === lines2[i].b && l.x0 < lines2[i].x0) && (i = j));
+    if (i < 0) return null;
     const first = lines2[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
       const l = lines2[j];
@@ -4452,6 +4456,7 @@ var read = () => frames ??= (async () => {
   }
   return out;
 })();
+var preload = () => void read();
 var MORPH = 1150;
 var SETTLE = 220;
 var ease3 = (k) => k < 0.5 ? 4 * k * k * k : 1 - (-2 * k + 2) ** 3 / 2;
@@ -4646,6 +4651,9 @@ function lookOf(v) {
   if (v === "random" || v === "all" || v === "off") return v;
   const ids = looksIn(v);
   return ids.length ? lookFrom(ids) : "random";
+}
+function ready(look2) {
+  if (looksIn(look2).includes("badapple")) preload();
 }
 function play(look2, first, last, sheet, dark, doc) {
   const ids = looksIn(look2);
@@ -5451,14 +5459,14 @@ var Panel = class {
    * stopped, says so): which engine to run it with, as buttons.
    */
   engineCard(want, error) {
-    const ready = ENGINES[want].ready;
+    const ready2 = ENGINES[want].ready;
     const card = this.card();
     card.classList.add("engine");
     card.style.setProperty("--sev", "var(--ph-info)");
     card.insertAdjacentHTML("beforeend", `<div class="btns"></div>`);
     card.querySelector("h3").textContent = error ? `This project needs ${want === "lualatex" ? "LuaLaTeX" : "XeLaTeX or LuaLaTeX"}` : `This project runs with ${ENGINES[want].label}`;
     card.querySelector(".count").textContent = error ?? "Its preamble loads a package that pdfLaTeX can't run (fontspec, unicode-math, polyglossia, \u2026), or the engine was chosen for it.";
-    card.querySelector(".note").textContent = ready ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
+    card.querySelector(".note").textContent = ready2 ? `Run it with ${ENGINES[want].label}?` : `\u26A1 Instant doesn't run ${ENGINES[want].label} yet: only pdfLaTeX. ${this.words.notReady}, or try pdfLaTeX if the project can do without those packages.`;
     const btns = card.querySelector(".btns");
     const offer = this.engineNow?.engine === want ? ["pdflatex"] : want === "xelatex" ? ["xelatex", "lualatex"] : [want];
     for (const e of offer) {
@@ -5926,7 +5934,8 @@ var Panel = class {
     const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
-    const warm = !now && this.prefs.built.includes(this.builtKey());
+    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
+    const warm = !now && was !== void 0 && (!was.includes(" ") || was.split(" ")[1] === this.look);
     const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
     this.anim = anim;
     if (!warm) this.lastLook = id;
@@ -5946,9 +5955,9 @@ var Panel = class {
   }
   /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
   builtHere() {
-    const k = this.builtKey(), was = this.prefs.built ?? [];
-    if (was[0] === k) return;
-    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
+    if (was[0] === e) return;
+    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
     this.save();
   }
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
@@ -5999,8 +6008,18 @@ var Panel = class {
     });
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
-    void a.done(this.$("#viewer").querySelector(".slot canvas") ?? void 0).then(stop);
-    setTimeout(stop, 1600);
+    const viewer = this.$("#viewer");
+    let exited = false;
+    const exit = () => {
+      if (exited || this.anim !== a) return;
+      exited = true;
+      mo.disconnect();
+      void a.done(viewer.querySelector(".slot canvas") ?? void 0).then(stop);
+      setTimeout(stop, 1600);
+    };
+    const mo = new MutationObserver(() => viewer.querySelector(".slot canvas") && exit());
+    if (viewer.querySelector(".slot canvas")) exit();
+    else mo.observe(viewer, { childList: true, subtree: true }), setTimeout(exit, 800);
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
@@ -6298,27 +6317,29 @@ var Panel = class {
   problemsKey() {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
   }
-  /** The kinds of problem not shown (the filters): this browser's, and the host's (problemsHidden). */
-  hiddenKinds = (() => {
-    try {
-      return new Set(JSON.parse(localStorage.getItem("phitex.kinds.hidden") ?? "[]"));
-    } catch {
-      return /* @__PURE__ */ new Set();
+  /** The kinds of problem not shown (the filters): this document's (builtKey: the page's address and its main file), kept in this browser; another document's are its own. */
+  kindsOf = null;
+  get hiddenKinds() {
+    const key = `phitex.kinds.hidden.${this.builtKey()}`;
+    if (this.kindsOf?.key !== key) {
+      let hidden = /* @__PURE__ */ new Set();
+      try {
+        const v = JSON.parse(localStorage.getItem(key) ?? "[]");
+        if (Array.isArray(v)) hidden = new Set(v.filter((k) => KINDS.some(([x]) => x === k)));
+      } catch {
+      }
+      this.kindsOf = { key, hidden };
     }
-  })();
-  /** The kinds hidden as the host keeps them (the watch: the user's phitex.toml, on every port and document). */
-  problemsHidden(kinds) {
-    this.hiddenKinds = new Set(kinds.filter((k) => KINDS.some(([x]) => x === k)));
-    if (this.lastStatus) this.status(this.lastStatus);
+    return this.kindsOf.hidden;
   }
-  /** A kind's filter clicked: shown or hidden, everywhere, and kept. */
+  /** A kind's filter clicked: shown or hidden in this document, and kept for it. */
   toggleKind(k) {
-    if (!this.hiddenKinds.delete(k)) this.hiddenKinds.add(k);
+    const hidden = this.hiddenKinds;
+    if (!hidden.delete(k)) hidden.add(k);
     try {
-      localStorage.setItem("phitex.kinds.hidden", JSON.stringify([...this.hiddenKinds]));
+      localStorage.setItem(this.kindsOf.key, JSON.stringify([...hidden]));
     } catch {
     }
-    this.ev.onProblemsHidden?.([...this.hiddenKinds]);
     if (this.lastStatus) this.status(this.lastStatus);
   }
   /** The problems' list opened or closed. */
@@ -6728,7 +6749,7 @@ var Panel = class {
         set: async (v) => {
           const l = lookFrom(String(v).split(","));
           const why = await ev.onPref?.("opening", l);
-          if (!why) this.look = l;
+          if (!why) this.lookIs(l);
           return why;
         },
         tile: (id, box) => {
@@ -6791,7 +6812,7 @@ var Panel = class {
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p) {
     if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
-    if (p.opening) this.look = lookOf(p.opening);
+    if (p.opening) this.lookIs(lookOf(p.opening));
     if (p.underline !== void 0 && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
   /** Repaints so far: the first is the first build's. */
@@ -6822,6 +6843,11 @@ var Panel = class {
   }
   /** The loading animation (the host keeps the choice: viewPrefs). */
   look = "random";
+  /** The looks chosen: what they read ahead read now. */
+  lookIs(l) {
+    this.look = l;
+    ready(l);
+  }
   /** The last one played (random plays another). */
   lastLook = null;
   /** The host page's own theme (theme()): undefined, never said. */
@@ -9726,9 +9752,8 @@ var panel = new Panel(
       return [`PhiTeX ${r.ok ? String(r.json?.version ?? "?") : "?"} \xB7 phitex watch`];
     },
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
-    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
+    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } })
     // (the problems' filters: kept the same way)
-    onProblemsHidden: (kinds) => void sock.request({ op: "prefs", set: { "problems-hidden": kinds } })
   },
   // (the panel's settings: this browser's)
   {
@@ -9774,6 +9799,19 @@ var panel = new Panel(
   const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
   if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
 }
+var PAGE_PREFS = (() => {
+  try {
+    return JSON.parse(document.getElementById("phitex-prefs")?.textContent ?? "null");
+  } catch {
+    return null;
+  }
+})();
+function panelPrefs(p) {
+  if (!p) return;
+  panel.tipsSeen((p["tips-seen"] ?? []).filter((x) => typeof x === "string"));
+  panel.viewPrefs({ "dark-pdf": p["dark-pdf"], opening: p.opening, underline: p.underline !== false });
+}
+panelPrefs(PAGE_PREFS);
 var pane = document.createElement("div");
 pane.style.cssText = "position:fixed;inset:0";
 document.body.append(pane);
@@ -10226,13 +10264,14 @@ async function watchSettings() {
     { title: "Where", rows: [{ id: "w-file", label: "Your settings", help: "Every document and port: `phitex config` lists them all", kind: "info", value: file }] }
   ];
 }
+var applyPrefs = (p) => {
+  panelPrefs(p);
+  follow = String(p?.follow ?? "cursor");
+};
+if (PAGE_PREFS) follow = String(PAGE_PREFS.follow ?? "cursor");
 var prefs = async () => {
   const r = await sock.request({ op: "prefs" });
-  if (!r.ok) return;
-  panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
-  panel.problemsHidden((r.json?.["problems-hidden"] ?? []).filter((x) => typeof x === "string"));
-  panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
-  follow = String(r.json?.follow ?? "cursor");
+  if (r.ok) applyPrefs(r.json);
 };
 var opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());

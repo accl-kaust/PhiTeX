@@ -50,6 +50,13 @@ const read = () =>
     return out;
   })());
 
+/**
+ * The frames read now, ahead of an opening (index.ts `ready`, as soon as Bad Apple is among the looks
+ * chosen): read when it began, its first fifth of a second was the empty screen, and a build shorter than
+ * that, a rebuild's or a cached format's first open, ended it before its first frame.
+ */
+export const preload = (): void => void read();
+
 /** The page in, in ms: the morph, then the page itself taking over from its likeness. */
 const MORPH = 1150, SETTLE = 220;
 const ease = (k: number) => (k < 0.5 ? 4 * k * k * k : 1 - (-2 * k + 2) ** 3 / 2);

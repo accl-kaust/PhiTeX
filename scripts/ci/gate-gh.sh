@@ -30,8 +30,7 @@ if [ -d /src/out/store ]; then
   for x in "$w"/bin/tests/*; do [ -e "$x" ] && ln -sfn "$x" "$w/bin/"; done
 fi
 GATE_TIME_PY=$(cat scripts/accl/gate-time.py)
-GATE_LATEX_ORDER=$(tr '\n' ' ' < scripts/accl/gate-latex-order.txt)
-export GATE_TIME_PY GATE_LATEX_ORDER GATE_EDITKINDS=scripts/accl/gate-editkinds.py
+export GATE_TIME_PY GATE_EDITKINDS=scripts/accl/gate-editkinds.py
 export GATE_TEST_TIMEOUT=${GATE_TEST_TIMEOUT:-300} GATE_TEST_PAR=${GATE_TEST_PAR:-4} CARGO_BUILD_JOBS=4
 bash scripts/accl/gate-shard.sh "$@"
 st=$(cat "$r/status" 2>/dev/null || echo red)
