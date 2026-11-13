@@ -29,6 +29,7 @@ import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
+import { WASP_PRESETS, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -101,8 +102,16 @@ export interface SettingRow {
   label: string;
   /** A line under the label: what it does, where it is kept. */
   help?: string;
-  /** toggle: on or off; choice: a few buttons; select: a list; picks: any of `options`, as tiles (`value` those picked, comma separated); action: a button (`button` its label); info: `value` shown. */
-  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info";
+  /**
+   * toggle: on or off; choice: a few buttons; select: a list; picks: any of
+   * `options`, as tiles (`value` those picked, comma separated); action: a
+   * button (`button` its label); info: `value` shown; swatches: one of
+   * `options` as tiles, each `swatch`'s two colours; range: a slider from 0
+   * to 100 (`value` its number as text), set as it moves; colors: two
+   * colour pickers (`value` "#rrggbb,#rrggbb"), set as they move; custom:
+   * `make`'s element under the help.
+   */
+  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info" | "swatches" | "range" | "colors" | "custom";
   /** A choice's or a list's values and labels. */
   options?: [value: string, label: string][];
   value?: boolean | string;
@@ -111,6 +120,8 @@ export interface SettingRow {
   disabled?: string;
   /** A picks tile's picture, played in `box` while the tile is on screen: stopped by what it returns. */
   tile?(v: string, box: HTMLElement): () => void;
+  /** A custom row's element. */
+  make?(): HTMLElement;
   /** It set (a toggle's on, a choice's value; an action: nothing): the host's error text if it could not. */
   set?(v?: boolean | string): Promise<string | void> | string | void;
 }
@@ -294,13 +305,22 @@ export interface PanelPrefs {
   backs: boolean;
   flashes: boolean;
   newTabs: boolean;
-  /** The reading aid (wasp.ts): each line of text coloured by a gradient, alternating, as BeeLine does. */
+  /**
+   * The reading aid (wasp.ts, Settings' Colour lines): each line of text
+   * coloured by a gradient, alternating, as BeeLine does; its colours (a
+   * preset, or Custom's two), how far a line's fade goes (0 to 100), which
+   * text (the body's lines, or every line but display maths).
+   */
   wasp: boolean;
+  waspColours: WaspColours;
+  waspCustom: [string, string];
+  waspStrength: number;
+  waspText: "body" | "all";
   /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
   built: string[];
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, built: [] };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspText: "body", built: [] };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -672,6 +692,7 @@ export class Panel {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     this.$("#settings").onclick = (e) => void this.settingClicked(e);
     this.$("#settings").onchange = (e) => void this.settingClicked(e);
+    this.$("#settings").oninput = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
       // (a problem's Copy for an AI assistant)
@@ -2511,6 +2532,17 @@ export class Panel {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
       row.querySelector(".help")!.after(grid);
       if (r.tile) for (const b of row.querySelectorAll<HTMLElement>(".pick")) this.tileShown(b.querySelector(".lk")!, (box) => r.tile!(b.dataset.v!, box));
+    } else if (r.kind === "swatches") {
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
+      row.querySelector(".help")!.after(grid);
+      for (const t of row.querySelectorAll<HTMLElement>(".sw")) this.waspSwatch(t, t.dataset.v as WaspColours);
+    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="100" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
+    else if (r.kind === "colors") {
+      const [a, b] = String(r.value ?? "").split(",");
+      ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
+    } else if (r.kind === "custom") {
+      const made = r.make?.();
+      if (made) row.querySelector(".help")!.after(made);
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, (ctl.querySelector(".val")!.textContent = String(r.value ?? ""));
     return row;
@@ -2526,6 +2558,9 @@ export class Panel {
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
     else if (r.kind === "select" && e.type === "change") v = (t as HTMLSelectElement).value;
+    else if (r.kind === "swatches" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
+    else if (r.kind === "range" && e.type === "input") v = (t as HTMLInputElement).value;
+    else if (r.kind === "colors" && e.type === "input") v = [...row.querySelectorAll<HTMLInputElement>("input")].map((i) => i.value).join(",");
     else if (r.kind === "picks" && e.type === "click") {
       const all = t.closest<HTMLElement>("[data-all]")?.dataset.all, one = t.closest<HTMLElement>(".pick")?.dataset.v;
       const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
@@ -2543,7 +2578,7 @@ export class Panel {
     if (why) return;
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch")!.setAttribute("aria-checked", String(v === true));
-    if (r.kind === "choice") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "choice" || r.kind === "swatches") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
     if (r.kind === "picks") {
       const on = new Set(String(v).split(","));
       row.querySelectorAll<HTMLElement>(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v!))));
@@ -2611,18 +2646,6 @@ export class Panel {
         },
       },
     );
-    look.push({
-      id: "wasp",
-      label: "Colour lines",
-      help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line",
-      kind: "toggle",
-      value: this.prefs.wasp,
-      set: (on) => {
-        this.prefs.wasp = on === true;
-        this.linksShown();
-        this.save();
-      },
-    });
     if (ev.onBoxes) look.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     // (the problems' filters, the same as the buttons at the top of the problems list)
     const problems: SettingRow[] = KINDS.map(([k, name]) => ({
@@ -2643,6 +2666,7 @@ export class Panel {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look },
+      { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build },
@@ -2661,7 +2685,115 @@ export class Panel {
     const v = this.viewer, p = this.prefs;
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
-    v.waspShown(p.wasp === true);
+    this.waspApply();
+  }
+
+  // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
+
+  /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
+  private waspLook(): WaspLook {
+    const p = this.prefs;
+    const hex = (c: unknown, d: string) => (typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c : d);
+    const custom = Array.isArray(p.waspCustom) ? p.waspCustom : [];
+    return {
+      on: p.wasp === true,
+      colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
+      custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
+      strength: Number.isFinite(p.waspStrength) ? Math.min(100, Math.max(0, p.waspStrength)) / 100 : 1,
+      text: p.waspText === "all" ? "all" : "body",
+    };
+  }
+
+  /** The sample in the tab (null: the tab not drawn). */
+  private waspSample: HTMLElement | null = null;
+
+  /**
+   * The aid as chosen: the viewer told (on, which text), the colours put
+   * in the panel's variables (print.ts's bands read them: nothing drawn
+   * again for a colour or the strength), the tab's sample and Custom's
+   * swatch shown with them.
+   */
+  private waspApply(): void {
+    const l = this.waspLook();
+    const c = waspColours(l);
+    const st = this.win.style;
+    st.setProperty("--ph-wasp0", c.light[0]);
+    st.setProperty("--ph-wasp1", c.light[1]);
+    st.setProperty("--ph-wasp0-dark", c.dark[0]);
+    st.setProperty("--ph-wasp1-dark", c.dark[1]);
+    this.viewer.waspShown(l.on, l.text === "all");
+    const box = this.waspSample;
+    if (box?.isConnected) {
+      const dark = this.sheetDark();
+      box.classList.toggle("dark", dark);
+      const [a, b] = dark ? c.dark : c.light, ink = dark ? "#ffffff" : "#000000";
+      // (the heading a line of its own only for All text, as on the pages)
+      const all = l.text === "all";
+      box.querySelectorAll("i").forEach((band, k) => {
+        const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink}` : `${ink}, ${col}`})` : "none";
+      });
+    }
+    this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v as WaspColours));
+  }
+
+  /** A swatches tile's art: two lines of each colour's fade, as on the pages (Dark PDF's, the pages dark). */
+  private waspSwatch(tile: HTMLElement, id: WaspColours): void {
+    const art = tile.querySelector<HTMLElement>(".art");
+    if (!art) return;
+    const dark = this.sheetDark();
+    const c = waspColours({ ...this.waspLook(), colours: id, strength: 1 });
+    const [a, b] = dark ? c.dark : c.light, ink = dark ? "#e1e1e1" : "#202020";
+    art.classList.toggle("dark", dark);
+    const fades = [`${ink}, ${a}`, `${a}, ${ink}`, `${ink}, ${b}`, `${b}, ${ink}`];
+    art.querySelectorAll("i").forEach((line, n) => (line.style.background = `linear-gradient(to right, ${fades[n]})`));
+  }
+
+  /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
+  private waspRows(): SettingRow[] {
+    const p = this.prefs, l = this.waspLook();
+    const kept = <K extends keyof PanelPrefs>(k: K, v: PanelPrefs[K]) => {
+      p[k] = v;
+      this.waspApply();
+      this.save();
+    };
+    const colours: [string, string][] = [...WASP_PRESETS.map((x): [string, string] => [x.id, x.name]), ["custom", "Custom"]];
+    const sample = () => {
+      // (a paragraph's lines, as a page sets them: the text's ink, a band over each)
+      const box = html`<div class="wsample" aria-hidden="true"><span class="h">1 Introduction<i></i></span><span>Each line of the text fades into a colour at its end,<i></i></span><span>and the next line starts with that same colour, so the<i></i></span><span>eye, going back across the page, lands on the right<i></i></span><span>line. The colour changes every two lines.<i></i></span></div>`.firstElementChild as HTMLElement;
+      this.waspSample = box;
+      // (its bands drawn in waspApply)
+      queueMicrotask(() => this.waspApply());
+      return box;
+    };
+    return [
+      { id: "wasp", label: "Colour lines", help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
+      {
+        id: "wasp-colours",
+        label: "Colours",
+        help: "Each pair of lines fades into one colour, the next pair into the other",
+        kind: "swatches",
+        options: colours,
+        value: l.colours,
+        set: (v) => kept("waspColours", String(v) as WaspColours),
+      },
+      { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
+      { id: "wasp-strength", label: "Strength", help: "How far a line's fade goes: subtle, a hint of the colour; full, all of it", kind: "range", value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
+      { id: "wasp-sample", label: "Sample", kind: "custom", make: sample },
+    ];
+  }
+
+  /** Custom's colours picked: kept, and Custom chosen (its swatch ticked). */
+  private waspCustomSet(v: string): void {
+    const [a, b] = v.split(",");
+    this.prefs.waspCustom = [a, b];
+    this.prefs.waspColours = "custom";
+    const row = this.settingRows.get("wasp-colours");
+    if (row) row.value = "custom";
+    this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    this.waspApply();
+    this.save();
   }
 
   /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
@@ -2758,6 +2890,8 @@ export class Panel {
 
   private applyDark(): void {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || (this.dark === "theme" && this.hostDark()));
+    // (Colour lines' sample and swatches, open in Settings: as the pages are now)
+    if (this.waspSample?.isConnected) this.waspApply();
   }
 
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----

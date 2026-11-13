@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bands } from "../src/wasp.ts";
+import { bands, mix, waspColours, type WaspLook } from "../src/wasp.ts";
 import type { TextLine } from "../src/text.ts";
 
 const line = (text: string, y: number, x0 = 72, size = 10): TextLine => {
@@ -45,4 +45,22 @@ test("two columns: each line a band of its own column", () => {
   const b = bands([...left, ...right]);
   assert.equal(b.length, 8);
   assert.ok(b.slice(0, 4).every((x) => x.x < 300) && b.slice(4).every((x) => x.x > 300));
+});
+
+test("All text: a heading is a line too; a centred equation still is not", () => {
+  const lines = [line("Heading", 80, 72, 14), ...para(100, 3), line("x=y+z", 150, 250), ...para(170, 2)];
+  assert.equal(bands(lines).length, 5);
+  const b = bands(lines, true);
+  assert.equal(b.length, 6);
+  assert.ok(b[0].h > 15);
+});
+
+test("the colours: a preset's at full, mixed toward what leaves the ink at less; Custom's dark ones lightened", () => {
+  const look: WaspLook = { on: true, colours: "classic", custom: ["#0000ff", "#ff0000"], strength: 1, text: "body" };
+  assert.deepEqual(waspColours(look).light, ["#1747d6", "#d0202a"]);
+  assert.deepEqual(waspColours({ ...look, strength: 0 }), { light: ["#000000", "#000000"], dark: ["#ffffff", "#ffffff"] });
+  assert.equal(waspColours({ ...look, strength: 0.5 }).light[0], mix("#000000", "#1747d6", 0.5));
+  const c = waspColours({ ...look, colours: "custom" });
+  assert.deepEqual(c.light, ["#0000ff", "#ff0000"]);
+  assert.deepEqual(c.dark, ["#7373ff", "#ff7373"]);
 });

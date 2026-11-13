@@ -1758,18 +1758,19 @@ export class Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
-    if (this.wasp) waspOn(c);
+    if (this.wasp) waspOn(c, this.waspAll);
   }
 
-  // ---- The reading aid (wasp.ts): each line of the body's text coloured by a gradient, alternating ----
+  // ---- The reading aid (wasp.ts): each line of the text coloured by a gradient, alternating ----
 
   private wasp = false;
+  private waspAll = false;
 
-  /** The reading aid on or off (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
-  waspShown(on: boolean): void {
-    if (on === this.wasp) return;
-    this.wasp = on;
-    for (const s of this.slots) if (s.img) (on ? waspOn : waspOff)(s.img.canvas);
+  /** The reading aid on or off, `all` every line or only the body's (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
+  waspShown(on: boolean, all = false): void {
+    if (on === this.wasp && all === this.waspAll) return;
+    [this.wasp, this.waspAll] = [on, all];
+    for (const s of this.slots) if (s.img) (on ? waspOn(s.img.canvas, all) : waspOff(s.img.canvas));
   }
 
   /**
