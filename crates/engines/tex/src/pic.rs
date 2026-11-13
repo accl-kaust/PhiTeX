@@ -1559,6 +1559,16 @@ impl Operation for Pic {
     fn alike(&self) -> bool {
         false
     }
+    /// None: what it contributes is in its output, its parent's where
+    /// the picture stands ([`Run::pic_output`]). So the page layer folds
+    /// past a child that has not run (`Ctx::next_contribution`); a hole
+    /// there, its frontier stood at the child while the picture ran,
+    /// and the text after the figure was held at it: each of Grail's
+    /// figures was its run, then its picture's 1.2-1.6 s, then the
+    /// next figure's, one after another (accl 28310).
+    fn contributes(&self, _: &[ValueId], _: &phitex_defuse::Values, _: Field) -> bool {
+        false
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new("pic", cx.node().raw());
         let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 1, cx.node().raw());
