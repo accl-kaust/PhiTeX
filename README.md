@@ -28,7 +28,7 @@
   <a href="https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl"><img alt="Chrome Web Store" src="https://img.shields.io/chrome-web-store/v/joimneigjammmhdbgaonlepnlllceajl?label=Chrome%20Web%20Store&logo=googlechrome&logoColor=white"></a>
   <a href="https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/"><img alt="Firefox Add-ons" src="https://img.shields.io/amo/v/phitex-for-overleaf-unofficial?label=Firefox%20Add-ons&logo=firefoxbrowser&logoColor=white"></a>
   <a href="https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd"><img alt="Microsoft Edge Add-ons" src="https://img.shields.io/badge/Edge%20Add--ons-get-0078D7?logo=microsoftedge&logoColor=white"></a>
-  <a href="https://marketplace.visualstudio.com/items?itemName=accl-kaust.phitex"><img alt="VS Code Marketplace" src="https://img.shields.io/badge/VS%20Code%20Marketplace-install-007ACC?logo=visualstudiocode&logoColor=white"></a>
+  <a href="https://marketplace.visualstudio.com/items?itemName=accl-kaust.phitex"><img alt="VS Code Marketplace" src="https://vsmarketplacebadges.dev/version/accl-kaust.phitex.svg?label=VS%20Code%20Marketplace&color=007ACC"></a>
   <a href="https://open-vsx.org/extension/accl-kaust/phitex"><img alt="Open VSX" src="https://img.shields.io/open-vsx/v/accl-kaust/phitex?label=Open%20VSX&logo=eclipseide&logoColor=white"></a>
 </p>
 
