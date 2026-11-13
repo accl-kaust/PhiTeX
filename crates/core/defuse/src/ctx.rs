@@ -1539,6 +1539,18 @@ impl<'a> Ctx<'a> {
         x
     }
 
+    /// My run goes on on `guess` for the output of the node my `i`-th
+    /// placement of this run stands for, whatever output it has now (one
+    /// of inputs this run moves: a picture child whose placer hands it
+    /// other bindings): recorded as that read of the guess, so my commit,
+    /// finding an output that is not the guess, asks me again at once,
+    /// and that node's next commit with another asks me again too. With
+    /// [`Ctx::placed_output_wait`], a run that goes on without that output
+    /// and is never left standing on the guess.
+    pub fn placed_output_guessed(&mut self, i: usize, guess: ValueId) {
+        self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(guess));
+    }
+
     /// [`Ctx::placed_output_or`] through path `p`: the answer of `p` on
     /// the output of the node my `i`-th placement of this run stands for,
     /// if it has run, else on the output `guess` gives (asked only then,
@@ -1617,9 +1629,61 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// The output of the node my `i`-th placement of this run stands for
-    /// (my last run's of the same operation and arguments), if it has run.
-    fn placed_child_output(&mut self, i: usize) -> Option<ValueId> {
+    /// Whether every read the last run of the node my `i`-th placement
+    /// stands for made of field `f` gives what it gave with `f` defined
+    /// as `x`: the walk my commit of that definition makes would re-ask
+    /// it for none of them (a child's reads of the bindings its placer
+    /// hands it, which the placer defines anew where only keys the child
+    /// never read moved). False where that node has not run, or where a
+    /// read of `f` is not a path on its value alone (a derived or guarded
+    /// read, answered with another field). Not recorded, a peek.
+    pub fn placed_reads_hold(&mut self, i: usize, f: Field, x: ValueId) -> bool {
+        let Some(c) = self.placed_node_id(i) else {
+            return false;
+        };
+        let n = self.eng.node(c);
+        let Some(r) = n.run_record() else {
+            return false;
+        };
+        let eng = self.eng;
+        let plain = |p: PathId| {
+            p == PathId::WHOLE
+                || eng
+                    .path_steps(p)
+                    .is_some_and(|s| !s.iter().any(|x| matches!(x, Step::Derived(_) | Step::Member(_))))
+        };
+        r.reads.of_field(f).all(|rd| {
+            matches!(rd.kind(), ReadKind::Field { .. })
+                && plain(rd.path())
+                && read::apply_path(eng, Some(x), rd.path()) == rd.seen()
+        })
+    }
+
+    /// The node my `i`-th placement of this run stands for (my last run's
+    /// of the same operation and arguments), if one does.
+    fn placed_node_id(&mut self, i: usize) -> Option<NodeId> {
+        self.placed_keys_built();
+        let (op, args) = self.product.placements.get(i)?.key();
+        let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
+        (self.eng.node(c).state() != State::Gone).then_some(c)
+    }
+
+    /// Whether my last run placed a node of `op` on `args` that stands
+    /// and has run: a placement of it now would have an output to read
+    /// ([`Ctx::placed_output_peek`]). Not recorded, a peek, and no
+    /// placement.
+    pub fn placed_before_ran(&mut self, op: OpId, args: &[ValueId]) -> bool {
+        self.placed_keys_built();
+        self.placed_keys
+            .as_ref()
+            .and_then(|m| m.get(&(op, Arc::from(args))))
+            .is_some_and(|&c| {
+                let n = self.eng.node(c);
+                n.state() != State::Gone && n.run_record().is_some()
+            })
+    }
+
+    fn placed_keys_built(&mut self) {
         if self.placed_keys.is_none() {
             let mut m: FxHashMap<(OpId, Arc<[ValueId]>), NodeId> = FxHashMap::default();
             for &c in self.last.as_ref().map_or(&[][..], |r| &r.placed[..]) {
@@ -1629,6 +1693,12 @@ impl<'a> Ctx<'a> {
             }
             self.placed_keys = Some(m);
         }
+    }
+
+    /// The output of the node my `i`-th placement of this run stands for
+    /// (my last run's of the same operation and arguments), if it has run.
+    fn placed_child_output(&mut self, i: usize) -> Option<ValueId> {
+        self.placed_keys_built();
         self.product.placements.get(i).and_then(|p| {
             let (op, args) = p.key();
             let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;

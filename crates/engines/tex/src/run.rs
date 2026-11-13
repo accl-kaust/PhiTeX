@@ -194,6 +194,9 @@ pub(crate) struct Ops {
     /// Runs that ended at their text's end with a continuation
     /// (`crate::cut`; `Stats::text_cuts`).
     pub text_cuts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Pictures a run read inline where a child was placed or refused
+    /// (`crate::pic`; `Stats::pics_inline`).
+    pub pic_inline: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The commands a run does before it may be cut at its text's end
     /// ([`crate::Options::cut_min`], `crate::cut`).
     pub cut_min: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -780,6 +783,10 @@ pub(crate) struct Run<'c, 'a> {
     pub pic_stop: bool,
     /// The hashes of the pictures this run met, in order.
     pub pic_seen: Vec<u64>,
+    /// A picture of this run went on as if empty, its child's output to
+    /// come (`crate::pic`): the pictures after it in the run are given a
+    /// state without that one's work, so none is placed anew.
+    pub pic_pending: bool,
     pub pic_child: Option<crate::pic::PicChild>,
     /// The child's output, in place of the run's ([`Run::finish`]).
     pub pic_out: Option<ValueId>,
@@ -1386,6 +1393,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pic_on: false,
             pic_stop: false,
             pic_seen: Vec::new(),
+            pic_pending: false,
             pic_child: None,
             pic_out: None,
             pic_void: false,
