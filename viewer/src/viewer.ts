@@ -6,6 +6,7 @@
 import type { Link, PageImage } from "./types.ts";
 import type { CiteAnswer } from "./session.ts";
 import { LAYER_LINES } from "./text.ts";
+import { waspLength, waspOff, waspOn } from "./wasp.ts";
 
 export interface ViewerHost {
   /**
@@ -1757,6 +1758,25 @@ export class Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
+    if (this.wasp) waspOn(c, this.waspAll, this.waspLen);
+  }
+
+  // ---- The reading aid (wasp.ts): each line of the text coloured by a gradient, alternating ----
+
+  private wasp = false;
+  private waspAll = false;
+  private waspLen = 1;
+
+  /** The reading aid on or off, `all` every line or only the body's (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
+  waspShown(on: boolean, all = false, length = 1): void {
+    if (on === this.wasp && all === this.waspAll) {
+      // (the fade's length alone: the bands' ink stops moved, nothing drawn again)
+      if (length !== this.waspLen && on) waspLength(this.root, length);
+      this.waspLen = length;
+      return;
+    }
+    [this.wasp, this.waspAll, this.waspLen] = [on, all, length];
+    for (const s of this.slots) if (s.img) (on ? waspOn(s.img.canvas, all, length) : waspOff(s.img.canvas));
   }
 
   /**

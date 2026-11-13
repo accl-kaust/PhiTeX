@@ -248,6 +248,150 @@ function search(pages2, q, max = 1e3) {
   return out;
 }
 
+// viewer/src/wasp.ts
+var WASP_PRESETS = [
+  { id: "classic", name: "Classic", light: ["#1747d6", "#d0202a"], dark: ["#6e98ff", "#ff7b72"], vivid: ["#0000ff", "#ff0000"], vividDark: ["#4f86ff", "#ff4646"] },
+  { id: "blues", name: "Blues", light: ["#1a3ccf", "#0a8fc7"], dark: ["#7d93ff", "#5cc8ff"], vivid: ["#0028ff", "#00a2ff"], vividDark: ["#5a74ff", "#1fbcff"] },
+  { id: "gray", name: "Gray", light: ["#6e6e6e", "#8c8c8c"], dark: ["#8c8c8c", "#a6a6a6"], vivid: ["#9c9c9c", "#b8b8b8"], vividDark: ["#5e5e5e", "#787878"] },
+  { id: "warm", name: "Warm", light: ["#d8620a", "#8a2bbf"], dark: ["#ffa05a", "#c590ff"], vivid: ["#ff7000", "#a000ff"], vividDark: ["#ff8526", "#b060ff"] }
+];
+function saturate(c, t) {
+  const p = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) || 0);
+  const g = (p[0] + p[1] + p[2]) / 3;
+  return "#" + p.map((v) => Math.round(Math.min(255, Math.max(0, v + (v - g) * t))).toString(16).padStart(2, "0")).join("");
+}
+function mix(a, b, t) {
+  const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
+  const [x, y] = [p(a), p(b)];
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+function waspColours(l) {
+  const p = WASP_PRESETS.find((x) => x.id === l.colours);
+  const light = p ? p.light : l.custom;
+  const dark = p ? p.dark : l.custom.map((c) => mix(c, "#ffffff", 0.45));
+  const vivid = p ? p.vivid : l.custom.map((c) => saturate(c, 0.8));
+  const vividDark = p ? p.vividDark : l.custom.map((c) => mix(saturate(c, 0.8), "#ffffff", 0.3));
+  const s = Math.min(2, Math.max(0, l.strength));
+  const at = (base, none, more) => base.map((c, i) => s <= 1 ? mix(none, c, s) : mix(c, more[i], s - 1));
+  return { light: at(light, "#000000", vivid), dark: at(dark, "#ffffff", vividDark) };
+}
+function bands(lines2, all = false) {
+  const count = /* @__PURE__ */ new Map();
+  for (const l of lines2) {
+    const s = Math.round(l.size * 10) / 10;
+    count.set(s, (count.get(s) ?? 0) + l.text.replace(/\s/g, "").length);
+  }
+  let body = 0, most = 0;
+  for (const [s, n2] of count) if (n2 > most) most = n2, body = s;
+  if (!body) return [];
+  const em = body;
+  const runs = lines2.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
+  if (!runs.length) return [];
+  const long = runs.filter((l) => l.w > em * 15);
+  const spans2 = (long.length ? long : runs).map((l) => [l.x, l.x + l.w]).sort((a, b) => a[0] - b[0]);
+  const cols = [];
+  for (const s of spans2) {
+    const last = cols[cols.length - 1];
+    if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
+    else cols.push([...s]);
+  }
+  const colOf = (l) => {
+    const m = l.x + l.w / 2;
+    let best = 0, d = Infinity;
+    cols.forEach(([a, b], i) => {
+      const e = m < a ? a - m : m > b ? m - b : 0;
+      if (e < d) d = e, best = i;
+    });
+    return best;
+  };
+  const out = [];
+  let n = 0;
+  cols.forEach((col, ci) => {
+    const mine = runs.filter((l) => colOf(l) === ci).sort((a, b) => a.y - b.y || a.x - b.x);
+    const rows = [];
+    for (const l of mine) {
+      const last = rows[rows.length - 1];
+      const edges = [];
+      for (let i = 0; i < l.text.length; i++) if (l.text[i].trim()) edges.push([l.xs?.[i] ?? l.x, l.rs?.[i] ?? l.x + l.w]);
+      if (!l.xs) edges.splice(0, edges.length, [l.x, l.x + l.w]);
+      if (last && Math.abs(l.y - last.y) < Math.max(last.size, l.size, em) * 0.3) {
+        last.l = Math.min(last.l, l.x);
+        last.r = Math.max(last.r, l.x + l.w);
+        last.edges.push(...edges);
+        if (l.size > last.size) last.size = l.size, last.y = l.y;
+      } else rows.push({ l: l.x, r: l.x + l.w, y: l.y, size: l.size, edges });
+    }
+    for (const row of rows) {
+      const em2 = all ? row.size : body;
+      const inset = row.l > col[0] + em2 * 3;
+      const edges = row.edges.sort((a, b) => a[0] - b[0]);
+      let gap = 0, r = edges.length ? edges[0][1] : row.l;
+      for (const [a, b] of edges) gap = Math.max(gap, a - r), r = Math.max(r, b);
+      if (inset && (row.r < col[1] - em2 * 3 || gap > em2 * 3)) continue;
+      const pad = em2 * 0.15;
+      const dir = n % 2;
+      out.push({ x: row.l - pad, y: row.y - em2 * 0.82, w: row.r - row.l + 2 * pad, h: em2 * 1.14, dir, c: Math.floor(n / 2) % 2 });
+      n++;
+    }
+  });
+  return out;
+}
+var SVG = "http://www.w3.org/2000/svg";
+var made = 0;
+var HOLD = 0.85;
+function stopsAt(dir, length) {
+  const l = Math.min(2, Math.max(0, length));
+  const ink2 = Math.max(0, 1 - l), colour = l > 1 ? 1 - HOLD * (l - 1) : 1;
+  return dir ? [1 - ink2, 1 - colour] : [ink2, colour];
+}
+function waspLength(root, length) {
+  for (const s of root.querySelectorAll(".phx-wasp stop")) s.setAttribute("offset", stopsAt(s.dataset.dir === "1" ? 1 : 0, length)[s.classList.contains("wi") ? 0 : 1].toFixed(3));
+}
+function waspOn(page, all = false, length = 1) {
+  const had = page.querySelector(":scope > .phx-wasp");
+  if (had?.dataset.all === String(all)) return waspLength(page, length);
+  had?.remove();
+  const text = page.querySelector(":scope > .phx-text");
+  if (!text) return;
+  const lines2 = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l) => !!l);
+  const svg2 = document.createElementNS(SVG, "svg");
+  svg2.setAttribute("class", "phx-wasp");
+  svg2.setAttribute("viewBox", text.getAttribute("viewBox") ?? "");
+  svg2.setAttribute("preserveAspectRatio", "none");
+  svg2.setAttribute("aria-hidden", "true");
+  svg2.dataset.all = String(all);
+  const id = `phx-wasp${made++}`;
+  const defs = document.createElementNS(SVG, "defs");
+  for (const c of [0, 1])
+    for (const dir of [0, 1]) {
+      const g = document.createElementNS(SVG, "linearGradient");
+      g.id = `${id}-${c}${dir}`;
+      const [ink2, col] = stopsAt(dir, length).map((x) => x.toFixed(3));
+      for (const [off, cls] of [dir ? [col, `w${c}`] : [ink2, "wi"], dir ? [ink2, "wi"] : [col, `w${c}`]]) {
+        const s = document.createElementNS(SVG, "stop");
+        s.setAttribute("offset", off);
+        s.setAttribute("class", cls);
+        s.dataset.dir = String(dir);
+        g.append(s);
+      }
+      defs.append(g);
+    }
+  svg2.append(defs);
+  for (const b of bands(lines2, all)) {
+    const r = document.createElementNS(SVG, "rect");
+    r.setAttribute("x", b.x.toFixed(2));
+    r.setAttribute("y", b.y.toFixed(2));
+    r.setAttribute("width", b.w.toFixed(2));
+    r.setAttribute("height", b.h.toFixed(2));
+    r.setAttribute("fill", `url(#${id}-${b.c}${b.dir})`);
+    svg2.append(r);
+  }
+  page.insertBefore(svg2, text);
+}
+function waspOff(page) {
+  page.querySelector(":scope > .phx-wasp")?.remove();
+}
+
 // viewer/src/viewer.ts
 var spans = /* @__PURE__ */ new WeakMap();
 function inkSpan(c) {
@@ -1665,6 +1809,21 @@ var Viewer = class _Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
+    if (this.wasp) waspOn(c, this.waspAll, this.waspLen);
+  }
+  // ---- The reading aid (wasp.ts): each line of the text coloured by a gradient, alternating ----
+  wasp = false;
+  waspAll = false;
+  waspLen = 1;
+  /** The reading aid on or off, `all` every line or only the body's (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
+  waspShown(on, all = false, length = 1) {
+    if (on === this.wasp && all === this.waspAll) {
+      if (length !== this.waspLen && on) waspLength(this.root, length);
+      this.waspLen = length;
+      return;
+    }
+    [this.wasp, this.waspAll, this.waspLen] = [on, all, length];
+    for (const s of this.slots) if (s.img) on ? waspOn(s.img.canvas, all, length) : waspOff(s.img.canvas);
   }
   /**
    * A page drawn as a bitmap shown at its own pixels: its box exactly its
@@ -2091,6 +2250,17 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
+/* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
+   white), darken on Dark PDF's (its light ink takes a light colour, the grey stays); a stop "wi" leaves the ink as it is; the
+   colours the panel's variables (Panel.waspApply: the preset or the user's, at the strength chosen), Classic's at full without them */
+.phx-wasp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: lighten; }
+.phx-wasp .wi { stop-color: #000; }
+.phx-wasp .w0 { stop-color: var(--ph-wasp0, #1747d6); }
+.phx-wasp .w1 { stop-color: var(--ph-wasp1, #d0202a); }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
 .zooming .phx-text { display: none; }
@@ -2464,6 +2634,28 @@ header:active { cursor: grabbing; }
 .settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
 .settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
 .settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+/* Colour lines' tab: the presets as swatches, the strength's slider, Custom's two pickers, the sample */
+.settings .srow.swatches { grid-template-areas: "lab lab" "help help" "picks picks" "err err"; }
+.settings .swatches .tiles { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+.settings .sw { all: unset; cursor: pointer; display: grid; gap: 5px; justify-items: center; font-size: 12px; color: var(--ph-fg2); }
+.settings .sw .art { display: grid; gap: 3px; width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: var(--ph-radius); background: #fff; box-shadow: 0 0 0 1px var(--ph-border); }
+.settings .sw .art.dark { background: ${DARK_PAGE}; }
+.settings .sw .art i { display: block; height: 4px; border-radius: 2px; }
+.settings .sw .art i:last-child { width: 60%; }
+.settings .sw[aria-pressed="true"] { color: var(--ph-fg); font-weight: 600; }
+.settings .sw[aria-pressed="true"] .art { box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .sw:focus-visible .art { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.settings .sw:disabled { cursor: default; opacity: .55; }
+.settings input[type="range"] { width: 180px; accent-color: var(--ph-accent); }
+.settings .cols { display: inline-flex; gap: 8px; }
+.settings .cols input { width: 34px; height: 24px; padding: 0 2px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); background: var(--ph-menu); cursor: pointer; }
+.settings .srow.custom { grid-template-areas: "lab lab" "help help" "picks picks"; }
+.settings .wsample { grid-area: picks; margin-top: 8px; padding: 12px 16px; border-radius: var(--ph-radius); box-shadow: 0 0 0 1px var(--ph-border); background: #fff; color: #000; isolation: isolate; overflow: hidden; text-align: left; font: 13px/1.45 Georgia, "Times New Roman", serif; }
+.settings .wsample.dark { background: #282828; color: #e1e1e1; }
+.settings .wsample span { position: relative; display: block; width: fit-content; white-space: nowrap; }
+.settings .wsample span.h { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.settings .wsample span i { position: absolute; inset: 0 -2px; mix-blend-mode: lighten; pointer-events: none; }
+.settings .wsample.dark span i { mix-blend-mode: darken; }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
 .settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
 .settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
@@ -4064,12 +4256,12 @@ var FLY = 0.42;
 var STEPS = ["Reading the project", "Fetching packages", "Typesetting"];
 var ease = (u) => (u = Math.min(1, Math.max(0, u)), u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
 var lerp = (a, b, u) => a + (b - a) * u;
-var mix = (a, b, u) => a.map((p, i) => [lerp(p[0], b[i][0], u), lerp(p[1], b[i][1], u)]);
+var mix2 = (a, b, u) => a.map((p, i) => [lerp(p[0], b[i][0], u), lerp(p[1], b[i][1], u)]);
 var place2 = (pts, o) => pts.map(([x, y]) => [o.x + o.s * (x * Math.cos(o.r) - y * Math.sin(o.r)), o.y + o.s * (x * Math.sin(o.r) + y * Math.cos(o.r))]);
 var str = (pts) => pts.map((p) => p.map((v) => v.toFixed(2)).join(",")).join(" ");
 var folded = (f) => {
   const i = Math.min(2, Math.floor(f));
-  return mix(SHAPES2[i], SHAPES2[i + 1], ease(f - i));
+  return mix2(SHAPES2[i], SHAPES2[i + 1], ease(f - i));
 };
 function plane(box, dark) {
   const c = dark ? "#c9d4ea" : INK.light, paper = dark ? "#e9edf5" : "#fff", bg = dark ? PAPER.dark : "#eef3f8";
@@ -4482,9 +4674,9 @@ function blur(a, lw, lh, sigma) {
   return src;
 }
 function levels(a, lw, lh, norm) {
-  const made = [];
+  const made2 = [];
   return (l) => {
-    if (made[l]) return made[l];
+    if (made2[l]) return made2[l];
     const s = SIGMAS[l], b = s ? blur(a, lw, lh, s) : a.slice();
     if (norm) {
       const hist = new Uint32Array(256);
@@ -4498,7 +4690,7 @@ function levels(a, lw, lh, norm) {
       const k = (s ? 0.8 : 1.15) / Math.max(top / 255, 1e-3);
       for (let i = 0; i < b.length; i++) b[i] = Math.min(1, b[i] * k);
     }
-    return made[l] = b;
+    return made2[l] = b;
   };
 }
 function field(lw, lh, ink2, draw) {
@@ -4760,7 +4952,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", built: [] };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -5072,6 +5264,7 @@ var Panel = class {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     this.$("#settings").onclick = (e) => void this.settingClicked(e);
     this.$("#settings").onchange = (e) => void this.settingClicked(e);
+    this.$("#settings").oninput = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
       const copy = e.target.closest(".copyai");
@@ -6664,6 +6857,17 @@ var Panel = class {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
       row.querySelector(".help").after(grid);
       if (r.tile) for (const b of row.querySelectorAll(".pick")) this.tileShown(b.querySelector(".lk"), (box) => r.tile(b.dataset.v, box));
+    } else if (r.kind === "swatches") {
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
+      row.querySelector(".help").after(grid);
+      for (const t of row.querySelectorAll(".sw")) this.waspSwatch(t, t.dataset.v);
+    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
+    else if (r.kind === "colors") {
+      const [a, b] = String(r.value ?? "").split(",");
+      ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
+    } else if (r.kind === "custom") {
+      const made2 = r.make?.();
+      if (made2) row.querySelector(".help").after(made2);
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, ctl.querySelector(".val").textContent = String(r.value ?? "");
     return row;
@@ -6678,6 +6882,9 @@ var Panel = class {
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
     else if (r.kind === "select" && e.type === "change") v = t.value;
+    else if (r.kind === "swatches" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
+    else if (r.kind === "range" && e.type === "input") v = t.value;
+    else if (r.kind === "colors" && e.type === "input") v = [...row.querySelectorAll("input")].map((i) => i.value).join(",");
     else if (r.kind === "picks" && e.type === "click") {
       const all = t.closest("[data-all]")?.dataset.all, one = t.closest(".pick")?.dataset.v;
       const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
@@ -6695,7 +6902,7 @@ var Panel = class {
     if (why) return;
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch").setAttribute("aria-checked", String(v === true));
-    if (r.kind === "choice") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "choice" || r.kind === "swatches") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
     if (r.kind === "picks") {
       const on = new Set(String(v).split(","));
       row.querySelectorAll(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v))));
@@ -6777,6 +6984,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview2 },
       { title: "Appearance", rows: look2 },
+      { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },
@@ -6788,11 +6996,114 @@ var Panel = class {
   startAt(k, top) {
     this.viewer.startAt(k, top);
   }
-  /** The links' switches (PanelPrefs) given to the viewer. */
+  /** The links' switches and the reading aid (PanelPrefs) given to the viewer. */
   linksShown() {
     const v = this.viewer, p = this.prefs;
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
+    this.waspApply();
+  }
+  // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
+  /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
+  waspLook() {
+    const p = this.prefs;
+    const hex = (c, d) => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c : d;
+    const custom = Array.isArray(p.waspCustom) ? p.waspCustom : [];
+    return {
+      on: p.wasp === true,
+      colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
+      custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
+      // (0 to 200, 100 the default: the first scale's 0 to 100 the same numbers)
+      strength: Number.isFinite(p.waspStrength) ? Math.min(200, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(200, Math.max(0, p.waspLength)) / 100 : 1,
+      text: p.waspText === "all" ? "all" : "body"
+    };
+  }
+  /** The sample in the tab (null: the tab not drawn). */
+  waspSample = null;
+  /**
+   * The aid as chosen: the viewer told (on, which text), the colours put
+   * in the panel's variables (print.ts's bands read them: nothing drawn
+   * again for a colour or the strength), the tab's sample and Custom's
+   * swatch shown with them.
+   */
+  waspApply() {
+    const l = this.waspLook();
+    const c = waspColours(l);
+    const st = this.win.style;
+    st.setProperty("--ph-wasp0", c.light[0]);
+    st.setProperty("--ph-wasp1", c.light[1]);
+    st.setProperty("--ph-wasp0-dark", c.dark[0]);
+    st.setProperty("--ph-wasp1-dark", c.dark[1]);
+    this.viewer.waspShown(l.on, l.text === "all", l.length);
+    const box = this.waspSample;
+    if (box?.isConnected) {
+      const dark = this.sheetDark();
+      box.classList.toggle("dark", dark);
+      const [a, b] = dark ? c.dark : c.light, ink2 = dark ? "#ffffff" : "#000000";
+      const all = l.text === "all";
+      box.querySelectorAll("i").forEach((band, k) => {
+        const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
+        const [i, k2] = stopsAt(n % 2 ? 1 : 0, l.length).map((x) => `${(x * 100).toFixed(1)}%`);
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col} ${k2}, ${ink2} ${i}` : `${ink2} ${i}, ${col} ${k2}`})` : "none";
+      });
+    }
+    this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v));
+  }
+  /** A swatches tile's art: two lines of each colour's fade, as on the pages (Dark PDF's, the pages dark). */
+  waspSwatch(tile, id) {
+    const art3 = tile.querySelector(".art");
+    if (!art3) return;
+    const dark = this.sheetDark();
+    const c = waspColours({ ...this.waspLook(), colours: id, strength: 1 });
+    const [a, b] = dark ? c.dark : c.light, ink2 = dark ? "#e1e1e1" : "#202020";
+    art3.classList.toggle("dark", dark);
+    const fades = [`${ink2}, ${a}`, `${a}, ${ink2}`, `${ink2}, ${b}`, `${b}, ${ink2}`];
+    art3.querySelectorAll("i").forEach((line, n) => line.style.background = `linear-gradient(to right, ${fades[n]})`);
+  }
+  /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
+  waspRows() {
+    const p = this.prefs, l = this.waspLook();
+    const kept = (k, v) => {
+      p[k] = v;
+      this.waspApply();
+      this.save();
+    };
+    const colours = [...WASP_PRESETS.map((x) => [x.id, x.name]), ["custom", "Custom"]];
+    const sample = () => {
+      const box = html`<div class="wsample" aria-hidden="true"><span class="h">1 Introduction<i></i></span><span>Each line of the text fades into a colour at its end,<i></i></span><span>and the next line starts with that same colour, so the<i></i></span><span>eye, going back across the page, lands on the right<i></i></span><span>line. The colour changes every two lines.<i></i></span></div>`.firstElementChild;
+      this.waspSample = box;
+      queueMicrotask(() => this.waspApply());
+      return box;
+    };
+    return [
+      { id: "wasp", label: "Colour lines", help: "A reading aid, as BeeLine's: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
+      {
+        id: "wasp-colours",
+        label: "Colours",
+        help: "Each pair of lines fades into one colour, the next pair into the other",
+        kind: "swatches",
+        options: colours,
+        value: l.colours,
+        set: (v) => kept("waspColours", String(v))
+      },
+      { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
+      { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
+      { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
+      { id: "wasp-sample", label: "Sample", kind: "custom", make: sample }
+    ];
+  }
+  /** Custom's colours picked: kept, and Custom chosen (its swatch ticked). */
+  waspCustomSet(v) {
+    const [a, b] = v.split(",");
+    this.prefs.waspCustom = [a, b];
+    this.prefs.waspColours = "custom";
+    const row = this.settingRows.get("wasp-colours");
+    if (row) row.value = "custom";
+    this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    this.waspApply();
+    this.save();
   }
   /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
   linkRows() {
@@ -6872,6 +7183,7 @@ var Panel = class {
   }
   applyDark() {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || this.dark === "theme" && this.hostDark());
+    if (this.waspSample?.isConnected) this.waspApply();
   }
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
   tipAt = -1;
@@ -9063,14 +9375,14 @@ var Strips = class {
   /** The strips of `keys` in `buf` from byte `at` (each its size, then its pixels), made bitmaps and kept. */
   async take(keys, buf, at) {
     const dv = new DataView(buf);
-    const made = [];
+    const made2 = [];
     for (const key of keys) {
       if (at + 8 > buf.byteLength) break;
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
         const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
-        made.push(
+        made2.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
             const old = this.kept.get(key);
             if (old) this.bytes -= old.width * old.height * 4, old.close();
@@ -9081,7 +9393,7 @@ var Strips = class {
       }
       at += w * h * 4;
     }
-    await Promise.all(made);
+    await Promise.all(made2);
     for (const [k, b] of this.kept) {
       if (this.bytes <= this.max) break;
       this.bytes -= b.width * b.height * 4;
@@ -9094,14 +9406,14 @@ function pagewise(px) {
   const clone = globalThis.cloneInto;
   return clone ? clone(px, window) : px;
 }
-var SVG = "http://www.w3.org/2000/svg";
+var SVG2 = "http://www.w3.org/2000/svg";
 function textLayer(lines2, w, h) {
-  const svg2 = document.createElementNS(SVG, "svg");
+  const svg2 = document.createElementNS(SVG2, "svg");
   svg2.setAttribute("class", "phx-text");
   svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg2.setAttribute("preserveAspectRatio", "none");
   for (const l of lines2) {
-    const t = document.createElementNS(SVG, "text");
+    const t = document.createElementNS(SVG2, "text");
     t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));

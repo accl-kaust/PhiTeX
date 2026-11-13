@@ -286,6 +286,17 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
+/* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
+   white), darken on Dark PDF's (its light ink takes a light colour, the grey stays); a stop "wi" leaves the ink as it is; the
+   colours the panel's variables (Panel.waspApply: the preset or the user's, at the strength chosen), Classic's at full without them */
+.phx-wasp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: lighten; }
+.phx-wasp .wi { stop-color: #000; }
+.phx-wasp .w0 { stop-color: var(--ph-wasp0, #1747d6); }
+.phx-wasp .w1 { stop-color: var(--ph-wasp1, #d0202a); }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
 .zooming .phx-text { display: none; }
@@ -659,6 +670,28 @@ header:active { cursor: grabbing; }
 .settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
 .settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
 .settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+/* Colour lines' tab: the presets as swatches, the strength's slider, Custom's two pickers, the sample */
+.settings .srow.swatches { grid-template-areas: "lab lab" "help help" "picks picks" "err err"; }
+.settings .swatches .tiles { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+.settings .sw { all: unset; cursor: pointer; display: grid; gap: 5px; justify-items: center; font-size: 12px; color: var(--ph-fg2); }
+.settings .sw .art { display: grid; gap: 3px; width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: var(--ph-radius); background: #fff; box-shadow: 0 0 0 1px var(--ph-border); }
+.settings .sw .art.dark { background: ${DARK_PAGE}; }
+.settings .sw .art i { display: block; height: 4px; border-radius: 2px; }
+.settings .sw .art i:last-child { width: 60%; }
+.settings .sw[aria-pressed="true"] { color: var(--ph-fg); font-weight: 600; }
+.settings .sw[aria-pressed="true"] .art { box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .sw:focus-visible .art { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.settings .sw:disabled { cursor: default; opacity: .55; }
+.settings input[type="range"] { width: 180px; accent-color: var(--ph-accent); }
+.settings .cols { display: inline-flex; gap: 8px; }
+.settings .cols input { width: 34px; height: 24px; padding: 0 2px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); background: var(--ph-menu); cursor: pointer; }
+.settings .srow.custom { grid-template-areas: "lab lab" "help help" "picks picks"; }
+.settings .wsample { grid-area: picks; margin-top: 8px; padding: 12px 16px; border-radius: var(--ph-radius); box-shadow: 0 0 0 1px var(--ph-border); background: #fff; color: #000; isolation: isolate; overflow: hidden; text-align: left; font: 13px/1.45 Georgia, "Times New Roman", serif; }
+.settings .wsample.dark { background: #282828; color: #e1e1e1; }
+.settings .wsample span { position: relative; display: block; width: fit-content; white-space: nowrap; }
+.settings .wsample span.h { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.settings .wsample span i { position: absolute; inset: 0 -2px; mix-blend-mode: lighten; pointer-events: none; }
+.settings .wsample.dark span i { mix-blend-mode: darken; }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
 .settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
 .settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
