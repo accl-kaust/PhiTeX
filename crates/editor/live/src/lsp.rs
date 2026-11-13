@@ -44,7 +44,7 @@
 //! - **End.** `shutdown` answered; `exit` ends ([`Server::handle`]'s
 //!   false).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -387,8 +387,9 @@ struct State {
     /// The client attached to a watch another program started (its
     /// terminal's): `experimental.phitex.attached` in the answer.
     attached: bool,
-    /// The URIs of the last diagnostics published, not empty.
-    published: HashSet<String>,
+    /// The last diagnostics published, by URI, not empty: a file's sent
+    /// again only when they changed.
+    published: HashMap<String, Value>,
     run: Option<Run>,
     builds: u64,
     last: Facts,
@@ -966,20 +967,32 @@ impl Server {
                 .or_default()
                 .push(lsp_diagnostic(d));
         }
-        let gone: Vec<String> = {
+        // (each file's sent where they are not the ones it was sent last:
+        // a build that changed none, `r` with nothing changed, sends none;
+        // one whose file has none now sends its empty list once)
+        let main_uri = self.uri(&main);
+        let send: Vec<(String, Value)> = {
             let mut st = lock(&self.st);
-            let g = st.published.drain().collect();
-            for (uri, ds) in &by {
-                if !ds.is_empty() {
-                    st.published.insert(uri.clone());
+            let mut last = std::mem::take(&mut st.published);
+            let mut send = Vec::new();
+            for (uri, ds) in by {
+                let keep = !ds.is_empty() || uri == main_uri;
+                let ds = Value::Array(ds);
+                let was = last.remove(&uri);
+                if was.as_ref() != Some(&ds) && (keep || was.is_some()) {
+                    send.push((uri.clone(), ds.clone()));
+                }
+                if keep {
+                    st.published.insert(uri, ds);
                 }
             }
-            g
+            // (a file that had some and has none now)
+            for (uri, _) in last {
+                send.push((uri, Value::Array(Vec::new())));
+            }
+            send
         };
-        for g in gone {
-            by.entry(g).or_default();
-        }
-        for (uri, ds) in by {
+        for (uri, ds) in send {
             self.notify(
                 "textDocument/publishDiagnostics",
                 json!({"uri": uri, "diagnostics": ds}),

@@ -648,6 +648,121 @@ fn watch_word_edit_ms() -> f64 {
     ms
 }
 
+/// `phitex watch`, headless, with nothing changed: `r` (twice) and a
+/// file saved with its bytes evaluate nothing, run no node, write no
+/// PDF and change no page, and `r` reads no file again. The document
+/// asks for 40 files it does not find, as LaTeX's packages do, and
+/// writes a file it reads back, as LaTeX's `.aux`: `r` staged every
+/// name not found, and the file the watch itself wrote was a change
+/// made outside, evaluated (Grail's first `r` 13 ms, each later one
+/// 7 ms of 113 stagings of nothing). In a release build each build
+/// stays within 2 ms and 300 µs per 1000 nodes, and `r`'s check of the
+/// files within 50 µs a file.
+#[test]
+fn watch_no_change_rebuild() {
+    let _one = one();
+    let big = big();
+    let body = big
+        .strip_prefix(&format!("\\pdfoutput=1\n{}", plain()))
+        .and_then(|b| b.strip_suffix("\\bye\n"))
+        .expect("big()'s body");
+    let mut main = "\\pdfoutput=1\n".to_string() + &plain();
+    for k in 0..40 {
+        let _ = writeln!(main, "\\openin1=absent-{k}.cfg \\closein1");
+    }
+    main.push_str(
+        "\\openin1=\\jobname.lst \\ifeof1 \\closein1 \\else \\closein1 \\input \\jobname.lst \\fi\n\\input chap\n\\immediate\\openout2=\\jobname.lst \\immediate\\write2{\\message{read back}}\\immediate\\closeout2\n\\bye\n",
+    );
+    let dir = scratch("watch-noop");
+    std::fs::write(dir.join("big.tex"), &main).expect("the document");
+    std::fs::write(dir.join("chap.tex"), body).expect("its chapter");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "1",
+            "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut stdin = child.stdin.take().expect("its input");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let live = cold["stats"]["nodes"]["live"].as_u64().expect("live nodes");
+    #[allow(clippy::cast_precision_loss, reason = "a bound in ms")]
+    let bound = 2.0 + 0.3 * live as f64 / 1000.0;
+    let pdf = dir.join("big.pdf");
+    let stamp = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .expect("written")
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    let (pdf_at, lst_at) = (stamp(&pdf), stamp(&dir.join("big.lst")));
+    let check = |ev: &serde_json::Value, what: &str| {
+        assert_eq!(ev["ok"], true, "{what}: {ev}");
+        assert_eq!(ev["nodes_run"], 0, "{what} ran nodes: {ev}");
+        assert_eq!(ev["rounds"], 0, "{what} evaluated: {ev}");
+        assert_eq!(ev["evaluated"], false, "{what} evaluated: {ev}");
+        assert_eq!(ev["pages_changed"], serde_json::json!([]), "{what}: {ev}");
+        assert_eq!(stamp(&pdf), pdf_at, "{what} wrote the PDF again");
+        // (the build: nothing to do, within its bound; `r`'s check of the
+        // files, the keys of those found and the lookups of those not,
+        // within 50 µs a file)
+        let ms = update_ms(ev);
+        let checked = ev["reread"]["checked"].as_f64().unwrap_or(0.0);
+        let check_ms = ev["reread"]["ms"].as_f64().unwrap_or(0.0);
+        eprintln!(
+            "watch: {what}: the build {ms:.3} ms ({live} nodes), {checked} files checked in {check_ms:.3} ms"
+        );
+        if !cfg!(debug_assertions) {
+            assert!(
+                ms <= bound,
+                "{what}'s build took {ms:.3} ms, over {bound:.3} ms: {ev}"
+            );
+            assert!(
+                check_ms <= 0.05 * checked,
+                "{what} checked {checked} files in {check_ms:.3} ms, over 50 µs a file: {ev}"
+            );
+        }
+    };
+    for (k, b) in [(1, 2), (2, 3)] {
+        stdin.write_all(b"\n").expect("r");
+        stdin.flush().expect("r");
+        let ev = until(&mut lines, "build", &b.into(), &mut seen);
+        check(&ev, &format!("r {k}"));
+        assert_eq!(ev["reread"]["changed"], 0, "r {k} read files again: {ev}");
+        assert!(
+            ev["reread"]["checked"].as_u64().is_some_and(|n| n > 40),
+            "r {k} checked: {ev}"
+        );
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("chap.tex"), body).expect("the same bytes");
+    let ev = until(&mut lines, "build", &4.into(), &mut seen);
+    check(&ev, "a save of the same bytes");
+    assert_eq!(
+        stamp(&dir.join("big.lst")),
+        lst_at,
+        "the .lst written again"
+    );
+    let _ = stdin.write_all(b"q\n");
+    drop(stdin);
+    lines.for_each(drop);
+    let _ = child.wait();
+}
+
 /// The clean build's PDF file and `.synctex.gz` of `text` (`big.tex`,
 /// `-ini`, `--synctex`) at `-j threads`, built in the scratch directory
 /// `name` (a `.synctex.gz` names the files by their paths: a watch's is

@@ -239,8 +239,37 @@ fn idle_line(st: Style, t: &str, ok: Option<bool>, keys: &str, w: usize) -> Stri
         let gap = room - t.chars().count() - keys.chars().count();
         format!("{mark} {}{}{}", st.dim(t), " ".repeat(gap), st.dim(keys))
     } else {
-        format!("{mark} {}", st.dim(&clip(t, room)))
+        format!("{mark} {}", st.dim(&clip_parts(t, room)))
     }
+}
+
+/// `t`, parts joined by ` · `, in `max` characters: the parts that fit
+/// whole, then `…`; a part is never cut in its middle ("⚡ 13.10 s to
+/// the …" said nothing a reader could use), unless the first alone does
+/// not fit.
+fn clip_parts(t: &str, max: usize) -> String {
+    const SEP: &str = " · ";
+    if t.chars().count() <= max {
+        return t.to_owned();
+    }
+    let mut out = String::new();
+    for p in t.split(SEP) {
+        let with = if out.is_empty() {
+            p.to_owned()
+        } else {
+            format!("{out}{SEP}{p}")
+        };
+        if with.chars().count() + SEP.chars().count() + 1 > max {
+            break;
+        }
+        out = with;
+    }
+    if out.is_empty() {
+        return clip(t, max);
+    }
+    out.push_str(SEP);
+    out.push('…');
+    out
 }
 
 /// The terminal: what is printed, and the spinner.
@@ -1336,5 +1365,23 @@ mod tests {
             30,
         );
         assert!(width(&l) <= 30, "{l}");
+    }
+
+    /// The status line cut where it is too wide keeps its parts whole:
+    /// the user's Grail line at 80 columns ended "⚡ 13.10 s to the …".
+    #[test]
+    fn status_line_cut_between_parts() {
+        let t = "grail.tex · build 19 · 26 pages · 19.4 ms · 323 warnings · ⚡ 13.10 s to the screen · 1 viewer";
+        let st = Style {
+            color: false,
+            tty: false,
+        };
+        let l = idle_line(st, t, Some(true), "h: keys", 79);
+        assert_eq!(
+            l,
+            "● grail.tex · build 19 · 26 pages · 19.4 ms · 323 warnings · …"
+        );
+        assert_eq!(clip_parts(t, 200), t);
+        assert_eq!(clip_parts("one long part", 6), "one l…");
     }
 }
