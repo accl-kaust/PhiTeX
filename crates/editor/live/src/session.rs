@@ -2156,6 +2156,7 @@ impl Session {
                 }
                 b
             };
+            host.fed(&p, &bytes);
             Some((shown, bytes))
         })
     }
@@ -2169,10 +2170,12 @@ impl Session {
         let (host, buffers) = (self.host.clone(), self.buffers.clone());
         Some(Arc::new(move |s: phitex_tex::ToolSearch, name: &str| {
             let (p, bytes) = search(s, name)?;
-            match buffered(&*host, &buffers, &p) {
-                Some(t) => Some((p, tex::bytes(&t))),
-                None => Some((p, bytes)),
-            }
+            let bytes = match buffered(&*host, &buffers, &p) {
+                Some(t) => tex::bytes(&t),
+                None => bytes,
+            };
+            host.fed(Path::new(&p), &bytes);
+            Some((p, bytes))
         }))
     }
 

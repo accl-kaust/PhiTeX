@@ -66,6 +66,11 @@ pub type PrefsFn =
 /// other fields), ...; `None`: not here ([`Viewer::on_info`]).
 pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
 
+/// The host's answer to a review op (`review_*`: notes and changes,
+/// docs/spec-editor-protocol.md §9.5), the op's name and the request
+/// given ([`Viewer::on_review`]).
+pub type ReviewFn = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -297,6 +302,8 @@ pub struct Viewer {
     cache: Mutex<Option<CacheFn>>,
     prefs: Mutex<Option<PrefsFn>>,
     info: Mutex<Option<InfoFn>>,
+    /// The review ops' host (none: no notes here).
+    review: Mutex<Option<Arc<ReviewFn>>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -411,6 +418,7 @@ impl Default for Viewer {
             cache: Mutex::new(None),
             prefs: Mutex::new(None),
             info: Mutex::new(None),
+            review: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -782,6 +790,17 @@ impl Viewer {
     /// What the host tells for the `info` op ([`InfoFn`]).
     pub fn on_info(&self, info: InfoFn) {
         *lock(&self.info) = Some(info);
+    }
+
+    /// The review ops (`review_*`) answered by `review` ([`ReviewFn`]).
+    pub fn on_review(&self, review: ReviewFn) {
+        *lock(&self.review) = Some(Arc::new(review));
+    }
+
+    /// An event of the host's own (`v`, with its `event`) to every viewer:
+    /// the review's state (§9.5).
+    pub fn event(&self, v: &Value) {
+        self.emit(&v.to_string());
     }
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
@@ -1426,6 +1445,16 @@ impl Viewer {
                 match lock(&s.info).as_ref().and_then(|f| f(&what, req)) {
                     Some(v) => ok(v),
                     None => fail(&format!("no {what:?} here")),
+                }
+            }
+            o if o.starts_with("review_") => {
+                // (the host answers on this thread, the lock let go first:
+                // an answer may emit the review's event)
+                let f = lock(&s.review).clone();
+                match f.map(|f| f(o, req)) {
+                    Some(Ok(v)) => ok(v),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no notes here"),
                 }
             }
             "diff" => ok(lock(&s.diff).state.clone()),

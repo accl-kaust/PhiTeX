@@ -178,11 +178,24 @@ enum Sub {
         #[command(flatten)]
         watch: WatchArgs,
     },
-    /// The running watches an editor can attach to (--json: as JSON)
+    /// A running watch, for you and your agent: start, wait, problems,
+    /// notes, changes (`phitex session --help`)
     ///
-    /// Each `phitex watch` serves its language server on 127.0.0.1 and
-    /// says so in a file of its own (docs/spec-editor-protocol.md §8):
-    /// its main file, its viewer, its port and token.
+    /// Each verb finds the watch running in this folder
+    /// (docs/spec-editor-protocol.md §9): `phitex session start` runs one
+    /// in the background, `wait` returns once a build has read the files
+    /// as they are, `notes` and `changes` are the viewer's notes and your
+    /// edits under review. Exit status: 0 done, 1 TeX errors, 2 timed
+    /// out, 3 no running watch, 4 refused.
+    Session {
+        #[command(subcommand)]
+        verb: crate::session_cmd::Verb,
+        /// The watch to use, by its pid (default: the one running here)
+        #[arg(long, value_name = "PID", global = true)]
+        session: Option<u32>,
+    },
+    /// The running watches (now `phitex session list`)
+    #[command(hide = true)]
     Sessions,
     /// What is new in this version
     News,
@@ -429,6 +442,7 @@ pub enum Command {
     Upgrade,
     Config,
     Sessions,
+    Session,
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -437,6 +451,8 @@ pub enum Command {
 #[allow(clippy::struct_excessive_bools)]
 pub struct Options {
     pub command: Option<Command>,
+    /// `phitex session`'s verb and `--session PID`.
+    pub session: Option<(crate::session_cmd::Verb, Option<u32>)>,
     pub file: Option<String>,
     pub engine: Option<String>,
     pub output: Option<Output>,
@@ -534,6 +550,10 @@ impl Cli {
             }
             Some(Sub::News) => o.command = Some(Command::News),
             Some(Sub::Sessions) => o.command = Some(Command::Sessions),
+            Some(Sub::Session { verb, session }) => {
+                o.command = Some(Command::Session);
+                o.session = Some((verb, session));
+            }
             Some(Sub::Completions { shell }) => {
                 let mut cmd = <Cli as clap::CommandFactory>::command();
                 clap_complete::generate(shell, &mut cmd, "phitex", &mut std::io::stdout());
@@ -667,6 +687,8 @@ pub struct Target {
     pub synctex_said: bool,
     /// watch: write the files into the folder (`watch-write`).
     pub watch_write: bool,
+    /// watch: changes on disk count as accepted (`review-accept-disk`).
+    pub review_accept_disk: bool,
     /// `\write18` runs commands.
     pub shell_escape: bool,
     /// watch: the editor a double-click opens (`--editor`, `phitex.toml`).
@@ -993,6 +1015,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         synctex: o.synctex.or(rc_synctex).or(cfg.synctex).unwrap_or(false),
         synctex_said: o.synctex.or(rc_synctex).or(cfg.synctex).is_some(),
         watch_write: cfg.watch_write.unwrap_or(false),
+        review_accept_disk: cfg.review_accept_disk.unwrap_or(false),
         shell_escape: o.shell_escape || rc_shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
@@ -1563,6 +1586,11 @@ pub fn main(args: &[String]) -> ! {
     if command == Command::Sessions {
         std::process::exit(crate::attach::sessions(&ui, o.json));
     }
+    if command == Command::Session
+        && let Some((verb, pid)) = &o.session
+    {
+        std::process::exit(crate::session_cmd::main(verb, *pid, o.json, &ui));
+    }
     if command == Command::Config {
         if let Some(w) = &o.init {
             let yours = w == "yours";
@@ -1700,7 +1728,11 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News | Command::Upgrade | Command::Config | Command::Sessions => unreachable!(),
+        Command::News
+        | Command::Upgrade
+        | Command::Config
+        | Command::Sessions
+        | Command::Session => unreachable!(),
     }
 }
 

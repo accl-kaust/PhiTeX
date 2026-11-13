@@ -51,6 +51,12 @@ pub trait Host: Send + Sync {
     /// as a diagnostic names it); none: not readable.
     fn read(&self, path: &Path) -> Option<Vec<u8>>;
 
+    /// The session gave the engine `bytes` as the file at `path` (an
+    /// editor's buffer or the disk's, through the finder): what a build
+    /// read, for a watch's exact `wait` (docs/spec-editor-protocol.md
+    /// §9.2). Nothing by default.
+    fn fed(&self, _path: &Path, _bytes: &[u8]) {}
+
     /// A key of the file at `path` that changes when its bytes do, read
     /// without reading them (the CLI's: its size, modification time and
     /// inode, [`phitex_tex::file_stat_key`]); none: the host has none, and
