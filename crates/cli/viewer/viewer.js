@@ -250,11 +250,16 @@ function search(pages2, q, max = 1e3) {
 
 // viewer/src/wasp.ts
 var WASP_PRESETS = [
-  { id: "classic", name: "Classic", light: ["#1747d6", "#d0202a"], dark: ["#6e98ff", "#ff7b72"] },
-  { id: "blues", name: "Blues", light: ["#1a3ccf", "#0a8fc7"], dark: ["#7d93ff", "#5cc8ff"] },
-  { id: "gray", name: "Gray", light: ["#6e6e6e", "#8c8c8c"], dark: ["#8c8c8c", "#a6a6a6"] },
-  { id: "warm", name: "Warm", light: ["#d8620a", "#8a2bbf"], dark: ["#ffa05a", "#c590ff"] }
+  { id: "classic", name: "Classic", light: ["#1747d6", "#d0202a"], dark: ["#6e98ff", "#ff7b72"], vivid: ["#0000ff", "#ff0000"], vividDark: ["#4f86ff", "#ff4646"] },
+  { id: "blues", name: "Blues", light: ["#1a3ccf", "#0a8fc7"], dark: ["#7d93ff", "#5cc8ff"], vivid: ["#0028ff", "#00a2ff"], vividDark: ["#5a74ff", "#1fbcff"] },
+  { id: "gray", name: "Gray", light: ["#6e6e6e", "#8c8c8c"], dark: ["#8c8c8c", "#a6a6a6"], vivid: ["#9c9c9c", "#b8b8b8"], vividDark: ["#5e5e5e", "#787878"] },
+  { id: "warm", name: "Warm", light: ["#d8620a", "#8a2bbf"], dark: ["#ffa05a", "#c590ff"], vivid: ["#ff7000", "#a000ff"], vividDark: ["#ff8526", "#b060ff"] }
 ];
+function saturate(c, t) {
+  const p = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) || 0);
+  const g = (p[0] + p[1] + p[2]) / 3;
+  return "#" + p.map((v) => Math.round(Math.min(255, Math.max(0, v + (v - g) * t))).toString(16).padStart(2, "0")).join("");
+}
 function mix(a, b, t) {
   const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
   const [x, y] = [p(a), p(b)];
@@ -264,11 +269,11 @@ function waspColours(l) {
   const p = WASP_PRESETS.find((x) => x.id === l.colours);
   const light = p ? p.light : l.custom;
   const dark = p ? p.dark : l.custom.map((c) => mix(c, "#ffffff", 0.45));
-  const s = Math.min(1, Math.max(0, l.strength));
-  return {
-    light: light.map((c) => mix("#000000", c, s)),
-    dark: dark.map((c) => mix("#ffffff", c, s))
-  };
+  const vivid = p ? p.vivid : l.custom.map((c) => saturate(c, 0.8));
+  const vividDark = p ? p.vividDark : l.custom.map((c) => mix(saturate(c, 0.8), "#ffffff", 0.3));
+  const s = Math.min(2, Math.max(0, l.strength));
+  const at = (base, none, more) => base.map((c, i) => s <= 1 ? mix(none, c, s) : mix(c, more[i], s - 1));
+  return { light: at(light, "#000000", vivid), dark: at(dark, "#ffffff", vividDark) };
 }
 function bands(lines2, all = false) {
   const count = /* @__PURE__ */ new Map();
@@ -333,12 +338,14 @@ function bands(lines2, all = false) {
 }
 var SVG = "http://www.w3.org/2000/svg";
 var made = 0;
-function inkAt(dir, length) {
-  const l = Math.min(1, Math.max(0, length));
-  return dir ? l : 1 - l;
+var HOLD = 0.85;
+function stopsAt(dir, length) {
+  const l = Math.min(2, Math.max(0, length));
+  const ink2 = Math.max(0, 1 - l), colour = l > 1 ? 1 - HOLD * (l - 1) : 1;
+  return dir ? [1 - ink2, 1 - colour] : [ink2, colour];
 }
 function waspLength(root, length) {
-  for (const s of root.querySelectorAll(".phx-wasp stop.wi")) s.setAttribute("offset", inkAt(s.dataset.dir === "1" ? 1 : 0, length).toFixed(3));
+  for (const s of root.querySelectorAll(".phx-wasp stop")) s.setAttribute("offset", stopsAt(s.dataset.dir === "1" ? 1 : 0, length)[s.classList.contains("wi") ? 0 : 1].toFixed(3));
 }
 function waspOn(page, all = false, length = 1) {
   const had = page.querySelector(":scope > .phx-wasp");
@@ -359,12 +366,12 @@ function waspOn(page, all = false, length = 1) {
     for (const dir of [0, 1]) {
       const g = document.createElementNS(SVG, "linearGradient");
       g.id = `${id}-${c}${dir}`;
-      const ink2 = inkAt(dir, length).toFixed(3);
-      for (const [off, cls] of [dir ? ["0", `w${c}`] : [ink2, "wi"], dir ? [ink2, "wi"] : ["1", `w${c}`]]) {
+      const [ink2, col] = stopsAt(dir, length).map((x) => x.toFixed(3));
+      for (const [off, cls] of [dir ? [col, `w${c}`] : [ink2, "wi"], dir ? [ink2, "wi"] : [col, `w${c}`]]) {
         const s = document.createElementNS(SVG, "stop");
         s.setAttribute("offset", off);
         s.setAttribute("class", cls);
-        if (cls === "wi") s.dataset.dir = String(dir);
+        s.dataset.dir = String(dir);
         g.append(s);
       }
       defs.append(g);
@@ -6854,7 +6861,7 @@ var Panel = class {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
       row.querySelector(".help").after(grid);
       for (const t of row.querySelectorAll(".sw")) this.waspSwatch(t, t.dataset.v);
-    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="100" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
+    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
     else if (r.kind === "colors") {
       const [a, b] = String(r.value ?? "").split(",");
       ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
@@ -7006,8 +7013,9 @@ var Panel = class {
       on: p.wasp === true,
       colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
       custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
-      strength: Number.isFinite(p.waspStrength) ? Math.min(100, Math.max(0, p.waspStrength)) / 100 : 1,
-      length: Number.isFinite(p.waspLength) ? Math.min(100, Math.max(0, p.waspLength)) / 100 : 1,
+      // (0 to 200, 100 the default: the first scale's 0 to 100 the same numbers)
+      strength: Number.isFinite(p.waspStrength) ? Math.min(200, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(200, Math.max(0, p.waspLength)) / 100 : 1,
       text: p.waspText === "all" ? "all" : "body"
     };
   }
@@ -7036,8 +7044,8 @@ var Panel = class {
       const all = l.text === "all";
       box.querySelectorAll("i").forEach((band, k) => {
         const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
-        const at = `${(inkAt(n % 2 ? 1 : 0, l.length) * 100).toFixed(1)}%`;
-        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink2} ${at}` : `${ink2} ${at}, ${col}`})` : "none";
+        const [i, k2] = stopsAt(n % 2 ? 1 : 0, l.length).map((x) => `${(x * 100).toFixed(1)}%`);
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col} ${k2}, ${ink2} ${i}` : `${ink2} ${i}, ${col} ${k2}`})` : "none";
       });
     }
     this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v));
@@ -7080,8 +7088,8 @@ var Panel = class {
         set: (v) => kept("waspColours", String(v))
       },
       { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
-      { id: "wasp-strength", label: "Strength", help: "How far a line's fade goes: subtle, a hint of the colour; full, all of it", kind: "range", value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
-      { id: "wasp-length", label: "Fade length", help: "How much of a line fades: short, the colour only near its ends; long, the whole line", kind: "range", value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
+      { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
       { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
       { id: "wasp-sample", label: "Sample", kind: "custom", make: sample }
     ];

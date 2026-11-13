@@ -29,7 +29,7 @@ import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
-import { WASP_PRESETS, inkAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
+import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -106,8 +106,8 @@ export interface SettingRow {
    * toggle: on or off; choice: a few buttons; select: a list; picks: any of
    * `options`, as tiles (`value` those picked, comma separated); action: a
    * button (`button` its label); info: `value` shown; swatches: one of
-   * `options` as tiles, each `swatch`'s two colours; range: a slider from 0
-   * to 100 (`value` its number as text), set as it moves; colors: two
+   * `options` as tiles; range: a slider from 0 to `max` (`value` its
+   * number as text), set as it moves; colors: two
    * colour pickers (`value` "#rrggbb,#rrggbb"), set as they move; custom:
    * `make`'s element under the help.
    */
@@ -120,6 +120,8 @@ export interface SettingRow {
   disabled?: string;
   /** A picks tile's picture, played in `box` while the tile is on screen: stopped by what it returns. */
   tile?(v: string, box: HTMLElement): () => void;
+  /** A range's top (its bottom 0; absent: 100). */
+  max?: number;
   /** A custom row's element. */
   make?(): HTMLElement;
   /** It set (a toggle's on, a choice's value; an action: nothing): the host's error text if it could not. */
@@ -308,14 +310,15 @@ export interface PanelPrefs {
   /**
    * The reading aid (wasp.ts, Settings' Colour lines): each line of text
    * coloured by a gradient, alternating, as BeeLine does; its colours (a
-   * preset, or Custom's two), how far a line's fade goes (0 to 100), which
+   * preset, or Custom's two), how strong (0 to 200), which
    * text (the body's lines, or every line but display maths).
    */
   wasp: boolean;
   waspColours: WaspColours;
   waspCustom: [string, string];
+  /** 0 to 200, 100 the default (wasp.ts's WaspLook / 100). */
   waspStrength: number;
-  /** How much of a line fades (0 to 100): 100 the whole line; less, the colour only toward its end. */
+  /** How much of a line fades, 0 to 200: 100 the whole line (the default); less, the colour only toward its end; more, held flat over more of it. */
   waspLength: number;
   waspText: "body" | "all";
   /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
@@ -2538,7 +2541,7 @@ export class Panel {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
       row.querySelector(".help")!.after(grid);
       for (const t of row.querySelectorAll<HTMLElement>(".sw")) this.waspSwatch(t, t.dataset.v as WaspColours);
-    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="100" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
+    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
     else if (r.kind === "colors") {
       const [a, b] = String(r.value ?? "").split(",");
       ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
@@ -2701,8 +2704,9 @@ export class Panel {
       on: p.wasp === true,
       colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
       custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
-      strength: Number.isFinite(p.waspStrength) ? Math.min(100, Math.max(0, p.waspStrength)) / 100 : 1,
-      length: Number.isFinite(p.waspLength) ? Math.min(100, Math.max(0, p.waspLength)) / 100 : 1,
+      // (0 to 200, 100 the default: the first scale's 0 to 100 the same numbers)
+      strength: Number.isFinite(p.waspStrength) ? Math.min(200, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(200, Math.max(0, p.waspLength)) / 100 : 1,
       text: p.waspText === "all" ? "all" : "body",
     };
   }
@@ -2734,8 +2738,8 @@ export class Panel {
       const all = l.text === "all";
       box.querySelectorAll("i").forEach((band, k) => {
         const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
-        const at = `${(inkAt(n % 2 ? 1 : 0, l.length) * 100).toFixed(1)}%`;
-        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col}, ${ink} ${at}` : `${ink} ${at}, ${col}`})` : "none";
+        const [i, k2] = stopsAt(n % 2 ? 1 : 0, l.length).map((x) => `${(x * 100).toFixed(1)}%`);
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col} ${k2}, ${ink} ${i}` : `${ink} ${i}, ${col} ${k2}`})` : "none";
       });
     }
     this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v as WaspColours));
@@ -2782,8 +2786,8 @@ export class Panel {
         set: (v) => kept("waspColours", String(v) as WaspColours),
       },
       { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
-      { id: "wasp-strength", label: "Strength", help: "How far a line's fade goes: subtle, a hint of the colour; full, all of it", kind: "range", value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
-      { id: "wasp-length", label: "Fade length", help: "How much of a line fades: short, the colour only near its ends; long, the whole line", kind: "range", value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
+      { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
       { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
       { id: "wasp-sample", label: "Sample", kind: "custom", make: sample },
     ];

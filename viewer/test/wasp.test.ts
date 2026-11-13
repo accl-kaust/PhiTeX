@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bands, inkAt, mix, waspColours, type WaspLook } from "../src/wasp.ts";
+import { bands, mix, stopsAt, waspColours, type WaspLook } from "../src/wasp.ts";
 import type { TextLine } from "../src/text.ts";
 
 const line = (text: string, y: number, x0 = 72, size = 10): TextLine => {
@@ -65,10 +65,22 @@ test("the colours: a preset's at full, mixed toward what leaves the ink at less;
   assert.deepEqual(c.dark, ["#7373ff", "#ff7373"]);
 });
 
-test("the fade's length: the ink held from a line's other end, mirrored line to line", () => {
-  assert.equal(inkAt(0, 1), 0);
-  assert.equal(inkAt(1, 1), 1);
-  assert.equal(inkAt(0, 0.3), 0.7);
-  assert.equal(inkAt(1, 0.3), 0.3);
-  assert.equal(inkAt(0, 2), 0);
+test("the fade's length: the ink held from a line's other end below 1, the colour held flat from its end above, mirrored line to line", () => {
+  assert.deepEqual(stopsAt(0, 1), [0, 1]);
+  assert.deepEqual(stopsAt(1, 1), [1, 0]);
+  assert.deepEqual(stopsAt(0, 0.25), [0.75, 1]);
+  assert.deepEqual(stopsAt(1, 0.25), [0.25, 0]);
+  const [i0, c0] = stopsAt(0, 2), [i1, c1] = stopsAt(1, 2);
+  assert.equal(i0, 0);
+  assert.ok(Math.abs(c0 - 0.15) < 1e-9 && Math.abs(c1 - 0.85) < 1e-9 && i1 === 1);
+  assert.deepEqual(stopsAt(0, 5), stopsAt(0, 2));
+});
+
+test("strength past 1: toward the vivid colours, WaspLine's pure blue and red for Classic at 2", () => {
+  const look: WaspLook = { on: true, colours: "classic", custom: ["#1747d6", "#d0202a"], strength: 2, length: 1, text: "body" };
+  assert.deepEqual(waspColours(look).light, ["#0000ff", "#ff0000"]);
+  assert.deepEqual(waspColours({ ...look, strength: 1 }).light, ["#1747d6", "#d0202a"]);
+  assert.equal(waspColours({ ...look, strength: 1.5 }).light[0], mix("#1747d6", "#0000ff", 0.5));
+  // (Dark PDF's vivid ones never below its page's grey, #282828)
+  for (const c of waspColours(look).dark) for (const i of [1, 3, 5]) assert.ok(parseInt(c.slice(i, i + 2), 16) > 0x30);
 });

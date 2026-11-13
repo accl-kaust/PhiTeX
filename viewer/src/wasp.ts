@@ -25,21 +25,34 @@ import { LAYER_LINES, type TextLine } from "./text.ts";
 /** The colours (Settings, Colour lines): a preset's or the user's two. */
 export type WaspColours = "classic" | "blues" | "gray" | "warm" | "custom";
 
-/** The presets: their names, each one's two colours on a white page and on Dark PDF's (lighter: blended with darken over light ink). */
-export const WASP_PRESETS: { id: Exclude<WaspColours, "custom">; name: string; light: [string, string]; dark: [string, string] }[] = [
-  { id: "classic", name: "Classic", light: ["#1747d6", "#d0202a"], dark: ["#6e98ff", "#ff7b72"] },
-  { id: "blues", name: "Blues", light: ["#1a3ccf", "#0a8fc7"], dark: ["#7d93ff", "#5cc8ff"] },
-  { id: "gray", name: "Gray", light: ["#6e6e6e", "#8c8c8c"], dark: ["#8c8c8c", "#a6a6a6"] },
-  { id: "warm", name: "Warm", light: ["#d8620a", "#8a2bbf"], dark: ["#ffa05a", "#c590ff"] },
+/**
+ * The presets: their names, each one's two colours on a white page and on
+ * Dark PDF's (lighter: blended with darken over light ink), at strength
+ * 100; and at 200, `vivid` (WaspLine's pure blue and red for Classic) and
+ * `vividDark` (bright, saturated tints, still above Dark PDF's grey page).
+ */
+export const WASP_PRESETS: { id: Exclude<WaspColours, "custom">; name: string; light: [string, string]; dark: [string, string]; vivid: [string, string]; vividDark: [string, string] }[] = [
+  { id: "classic", name: "Classic", light: ["#1747d6", "#d0202a"], dark: ["#6e98ff", "#ff7b72"], vivid: ["#0000ff", "#ff0000"], vividDark: ["#4f86ff", "#ff4646"] },
+  { id: "blues", name: "Blues", light: ["#1a3ccf", "#0a8fc7"], dark: ["#7d93ff", "#5cc8ff"], vivid: ["#0028ff", "#00a2ff"], vividDark: ["#5a74ff", "#1fbcff"] },
+  { id: "gray", name: "Gray", light: ["#6e6e6e", "#8c8c8c"], dark: ["#8c8c8c", "#a6a6a6"], vivid: ["#9c9c9c", "#b8b8b8"], vividDark: ["#5e5e5e", "#787878"] },
+  { id: "warm", name: "Warm", light: ["#d8620a", "#8a2bbf"], dark: ["#ffa05a", "#c590ff"], vivid: ["#ff7000", "#a000ff"], vividDark: ["#ff8526", "#b060ff"] },
 ];
+
+/** `c` (#rrggbb) more saturated: pushed away from its grey, `t` of itself again (clamped). */
+export function saturate(c: string, t: number): string {
+  const p = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) || 0);
+  const g = (p[0] + p[1] + p[2]) / 3;
+  return "#" + p.map((v) => Math.round(Math.min(255, Math.max(0, v + (v - g) * t))).toString(16).padStart(2, "0")).join("");
+}
 
 /** The user's choices for the aid: on, its colours (`custom` the two of Custom, for a white page), how far a line's fade goes (0 to 1), which text. */
 export interface WaspLook {
   on: boolean;
   colours: WaspColours;
   custom: [string, string];
+  /** 0 to 2: 1 the colours as they are (the default), less mixed toward the ink, more toward their vivid ones. */
   strength: number;
-  /** How much of a line fades (0 to 1): 1 the whole line, less the ink held from its other end that much longer. */
+  /** 0 to 2: 1 the whole line a fade (the default), less the ink held from its other end that much longer, more the colour held flat from its end. */
   length: number;
   text: "body" | "all";
 }
@@ -53,20 +66,22 @@ export function mix(a: string, b: string, t: number): string {
 
 /**
  * The two colours a line fades to, on a white page and on Dark PDF's, at
- * the look's strength: each mixed with what leaves the ink as it is
- * (black under lighten, white under darken). Custom's dark pair its own
- * colours lightened, half way to white (light enough over Dark PDF's light
- * ink, and never below its grey page).
+ * the look's strength: up to 1, each mixed with what leaves the ink as it
+ * is (black under lighten, white under darken); past 1, toward its vivid
+ * one (Custom's: its own saturated). Custom's dark pair its own colours
+ * lightened, half way to white (light enough over Dark PDF's light ink,
+ * and never below its grey page).
  */
 export function waspColours(l: WaspLook): { light: [string, string]; dark: [string, string] } {
   const p = WASP_PRESETS.find((x) => x.id === l.colours);
   const light = p ? p.light : l.custom;
   const dark = p ? p.dark : (l.custom.map((c) => mix(c, "#ffffff", 0.45)) as [string, string]);
-  const s = Math.min(1, Math.max(0, l.strength));
-  return {
-    light: light.map((c) => mix("#000000", c, s)) as [string, string],
-    dark: dark.map((c) => mix("#ffffff", c, s)) as [string, string],
-  };
+  const vivid = p ? p.vivid : (l.custom.map((c) => saturate(c, 0.8)) as [string, string]);
+  const vividDark = p ? p.vividDark : (l.custom.map((c) => mix(saturate(c, 0.8), "#ffffff", 0.3)) as [string, string]);
+  const s = Math.min(2, Math.max(0, l.strength));
+  const at = (base: [string, string], none: string, more: [string, string]) =>
+    base.map((c, i) => (s <= 1 ? mix(none, c, s) : mix(c, more[i], s - 1))) as [string, string];
+  return { light: at(light, "#000000", vivid), dark: at(dark, "#ffffff", vividDark) };
 }
 
 /** A band to colour: its box (points from the page's top left) and its gradient (0: ink to the colour, 1: the colour to ink; its colour `c`, 0 or 1). */
@@ -160,19 +175,25 @@ export function bands(lines: TextLine[], all = false): Band[] {
 const SVG = "http://www.w3.org/2000/svg";
 let made = 0;
 
+/** How much of a line the colour holds flat at length 2 (the rest a short fade to ink). */
+const HOLD = 0.85;
+
 /**
- * Where a gradient's ink stop is for a fade over `length` of the line:
- * ink to the colour holds the ink until 1 - length of the way, the colour
- * to ink reaches it at `length`.
+ * Where a gradient's stops are (ink's, the colour's, fractions of the
+ * line) for `length`: up to 1, ink to the colour holds the ink until
+ * 1 - length of the way and fades to the colour at the end; past 1, it
+ * fades from the start and the colour reaches 1 - HOLD × (length - 1) of
+ * the way, flat from there. The colour to ink mirrored.
  */
-export function inkAt(dir: 0 | 1, length: number): number {
-  const l = Math.min(1, Math.max(0, length));
-  return dir ? l : 1 - l;
+export function stopsAt(dir: 0 | 1, length: number): [ink: number, colour: number] {
+  const l = Math.min(2, Math.max(0, length));
+  const ink = Math.max(0, 1 - l), colour = l > 1 ? 1 - HOLD * (l - 1) : 1;
+  return dir ? [1 - ink, 1 - colour] : [ink, colour];
 }
 
-/** The fade's length on a page's bands (or every page's under `root`): only their gradients' ink stops moved, nothing drawn again. */
+/** The fade's length on a page's bands (or every page's under `root`): only their gradients' stops moved, nothing drawn again. */
 export function waspLength(root: ParentNode, length: number): void {
-  for (const s of root.querySelectorAll<SVGStopElement>(".phx-wasp stop.wi")) s.setAttribute("offset", inkAt(s.dataset.dir === "1" ? 1 : 0, length).toFixed(3));
+  for (const s of root.querySelectorAll<SVGStopElement>(".phx-wasp stop")) s.setAttribute("offset", stopsAt(s.dataset.dir === "1" ? 1 : 0, length)[s.classList.contains("wi") ? 0 : 1].toFixed(3));
 }
 
 /** The aid over a page (strips.ts's `.phx-page`: its bitmaps and text layer), once (`all`: every line, not only the body's; `length`: how much of a line fades); none where the page has no text layer. */
@@ -196,13 +217,13 @@ export function waspOn(page: HTMLElement, all = false, length = 1): void {
     for (const dir of [0, 1]) {
       const g = document.createElementNS(SVG, "linearGradient");
       g.id = `${id}-${c}${dir}`;
-      // (the ink's stop where the fade's length puts it, waspLength)
-      const ink = inkAt(dir as 0 | 1, length).toFixed(3);
-      for (const [off, cls] of [dir ? ["0", `w${c}`] : [ink, "wi"], dir ? [ink, "wi"] : ["1", `w${c}`]]) {
+      // (the stops where the fade's length puts them, waspLength)
+      const [ink, col] = stopsAt(dir as 0 | 1, length).map((x) => x.toFixed(3));
+      for (const [off, cls] of [dir ? [col, `w${c}`] : [ink, "wi"], dir ? [ink, "wi"] : [col, `w${c}`]]) {
         const s = document.createElementNS(SVG, "stop");
         s.setAttribute("offset", off);
         s.setAttribute("class", cls);
-        if (cls === "wi") s.dataset.dir = String(dir);
+        s.dataset.dir = String(dir);
         g.append(s);
       }
       defs.append(g);
