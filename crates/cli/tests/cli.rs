@@ -619,6 +619,123 @@ fn watch_word_edit() {
     }
 }
 
+/// The clean build's PDF of `text` (`big.tex`, `-ini`) at `-j threads`.
+fn clean_pdf(text: &str, threads: &str, name: &str) -> Vec<u8> {
+    let dir = scratch(name);
+    std::fs::write(dir.join("big.tex"), text).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "--ini", "--etex", "-j", threads, "big.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read(dir.join("big.pdf")).expect("the clean build's PDF")
+}
+
+/// One `phitex watch --write` session on `text` at `-j threads`: the
+/// clean build, `edited` saved over it, `q` sent at once after the
+/// edit's build event (`after_build`) or at once after the save; the
+/// PDF file the watch leaves, read once it has ended.
+fn watch_quit(text: &str, edited: &str, threads: &str, after_build: bool, name: &str) -> Vec<u8> {
+    let dir = scratch(name);
+    std::fs::write(dir.join("big.tex"), text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            threads,
+            "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    until(&mut lines, "build", &1.into(), &mut seen);
+    std::fs::write(dir.join("big.tex"), edited).expect("the edit");
+    if after_build {
+        until(&mut lines, "build", &2.into(), &mut seen);
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    // (the rest of its output read, so that it never blocks on the pipe)
+    lines.for_each(drop);
+    let _ = child.wait();
+    std::fs::read(dir.join("big.pdf")).expect("the watch's PDF")
+}
+
+/// `phitex watch --write`, headless, quit (`q`) at once after an edit's
+/// build: the PDF file it leaves is the clean build's of the edited text,
+/// byte for byte, a paragraph inserted and a word edited, at -j1 and -j8,
+/// twelve sessions each. A watch writes an edit's PDF as an update section
+/// and the exact file when idle or on its way out; a `q` that came while
+/// its loop was still at the build's after-work ended the process at once
+/// and left the update sections (amsldoc: a paragraph inserted, 5 sessions
+/// of 12 at -j1 and -j8; a word, 1 of 6 at -j8; 2026-11-13). And `q` at
+/// once after the edit is saved (the edit's build dropped or done): the
+/// file is the clean build's of the one text or the other, exact.
+#[test]
+fn watch_quit_leaves_the_exact_pdf() {
+    let _one = one();
+    let text = big();
+    let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
+    let word = text[at..].find(" the ").expect("a word") + at;
+    let worded = format!("{} thy {}", &text[..word], &text[word + 5..]);
+    let par = text[at..].find("\n\n").expect("a paragraph's end") + at;
+    let parred = format!(
+        "{}\n\nAn inserted paragraph with a few new words in it.{}",
+        &text[..par],
+        &text[par..]
+    );
+    let original = clean_pdf(&text, "1", "watch-quit-clean");
+    let mut wrong = Vec::new();
+    for (kind, edited) in [("word", &worded), ("paragraph", &parred)] {
+        let clean = clean_pdf(edited, "1", "watch-quit-clean-edited");
+        assert!(
+            clean != original,
+            "the {kind} edit changed no byte of the PDF"
+        );
+        for threads in ["1", "8"] {
+            for i in 0..12 {
+                let got = watch_quit(&text, edited, threads, true, "watch-quit");
+                if got != clean {
+                    wrong.push(format!(
+                        "{kind} -j{threads} #{i}, q after the edit's build: {}",
+                        first_difference(&got, &clean)
+                    ));
+                }
+            }
+            for i in 0..4 {
+                let got = watch_quit(&text, edited, threads, false, "watch-quit");
+                if got != clean && got != original {
+                    wrong.push(format!(
+                        "{kind} -j{threads} #{i}, q after the save: {}",
+                        first_difference(&got, &clean)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the watch's PDF is not a clean build's in {} sessions:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
 /// `PHITEX_TIME_LIMIT_SECS=0` is no limit for the watch's builds, as it is
 /// for `phitex build`: the scoreboard's cold builds and reference rebuilds
 /// run under it so that none is cut short. The watch's session read it as
