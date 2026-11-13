@@ -685,6 +685,15 @@ impl Session {
         }
     }
 
+    /// Waits until the pages' files the last build asked are made (they
+    /// are made beside its evaluations, which do not wait for them:
+    /// `phitex_tex::Progress::wait_streamed`).
+    pub fn wait_streamed(&self) {
+        if let Some(b) = &self.build {
+            b.progress().wait_streamed();
+        }
+    }
+
     /// The last build's runs by operation (its engine's
     /// `Stats::runs_by_op`): what an edit ran again.
     pub fn runs_by_op(&self) -> Vec<(&'static str, u64)> {

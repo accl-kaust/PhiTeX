@@ -534,6 +534,14 @@ impl LspHost for DocumentHost {
 
 #[cfg(test)]
 mod tests {
+    /// [`Document::step`], and the pages' files it asked made (beside the
+    /// evaluation: `phitex_tex::Progress::stream_page_beside`).
+    fn step(d: &mut Document) -> Vec<Value> {
+        let e = d.step();
+        d.session().wait_streamed();
+        e
+    }
+
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -600,14 +608,14 @@ mod tests {
             &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
             "textDocument": {"uri": "file:///p/doc.tex", "text": text}}}),
         );
-        d.step();
+        step(&mut d);
         server.handle(
             &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
             "textDocument": {"uri": "file:///p/doc.tex"},
             "position": {"line": 0, "character": 6},
             "range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 6}}}}),
         );
-        let ev = d.step();
+        let ev = step(&mut d);
         let follow = ev.iter().find(|e| e["event"] == "follow").expect("follow");
         assert_eq!(
             follow,
@@ -660,7 +668,7 @@ mod tests {
             );
             s.stamp_records(stamp);
             let mut d = Document::new(s, "doc.tex");
-            let ev = d.step();
+            let ev = step(&mut d);
             assert!(ev.iter().any(|e| e["event"] == "build"), "{ev:?}");
         };
         build(1);
@@ -812,7 +820,7 @@ mod tests {
                 Arc::new(Status::default()),
             );
             let mut d = Document::new(s, "doc.tex");
-            let ev = d.step();
+            let ev = step(&mut d);
             let b = ev.iter().find(|e| e["event"] == "build").expect("a build");
             assert_eq!(b["ok"], true, "{ev:?}");
         };
@@ -949,7 +957,7 @@ mod tests {
     fn steps_build_the_buffers() {
         let sink = Arc::new(Memory::default());
         let mut d = Document::new(session(&pages(1), sink.clone()), "doc.tex");
-        let ev = d.step();
+        let ev = step(&mut d);
         let built = ev
             .iter()
             .find(|e| e["event"] == "build")
@@ -963,7 +971,7 @@ mod tests {
         assert!(d.step().iter().all(|e| e["event"] != "build"));
         let r = d.request(&json!({"id": 7, "op": "set_file", "file": "doc.tex", "text": pages(3)}));
         assert_eq!(r["id"], 7, "{r}");
-        let ev = d.step();
+        let ev = step(&mut d);
         let built = ev
             .iter()
             .find(|e| e["event"] == "build")
@@ -1005,18 +1013,18 @@ mod tests {
                 v.iter().filter(|d| d["severity"] == "warning").count()
             })
         };
-        let ev = d.step();
+        let ev = step(&mut d);
         let cold = ev
             .iter()
             .find(|e| e["event"] == "diagnostics")
             .expect("the cold build's");
         assert_eq!(warnings(cold), 1, "{ev:?}");
         while d.pending() {
-            d.step();
+            step(&mut d);
         }
         lock(&sent).clear();
         d.request(&json!({"id": 2, "op": "set_file", "file": "doc.tex", "text": doc(3, false)}));
-        let ev = d.step();
+        let ev = step(&mut d);
         assert!(ev.iter().any(|e| e["event"] == "build"), "{ev:?}");
         assert!(
             ev.iter().all(|e| e["event"] != "diagnostics"),
@@ -1064,7 +1072,7 @@ mod tests {
         assert_eq!(status["params"]["warnings_updating"], false, "{status}");
         // (an error: at once, at its place)
         d.request(&json!({"id": 3, "op": "set_file", "file": "doc.tex", "text": doc(1, true)}));
-        let ev = d.step();
+        let ev = step(&mut d);
         let now = ev
             .iter()
             .find(|e| e["event"] == "diagnostics")
@@ -1092,7 +1100,7 @@ mod tests {
             "rootUri": "file:///p", "capabilities": {"window": {"workDoneProgress": true}}}}),
         );
         server.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
-        let ev = d.step();
+        let ev = step(&mut d);
         let progress: Vec<&Value> = ev.iter().filter(|e| e["event"] == "progress").collect();
         assert!(
             progress.iter().any(|e| e["phase"] == "typesetting"
@@ -1141,7 +1149,7 @@ mod tests {
             &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
             "textDocument": {"uri": "file:///p/doc.tex", "text": pages(1)}}}),
         );
-        let ev = d.step();
+        let ev = step(&mut d);
         let built = ev.iter().find(|e| e["event"] == "build").expect("built");
         assert_eq!(built["pages"], 1, "{ev:?}");
         let got = lock(&sent).clone();
@@ -1208,7 +1216,7 @@ mod tests {
             }
             lock(&ev).push(v);
         });
-        d.step();
+        step(&mut d);
         // (a bound, not a wait for ever: an event never sent fails, named)
         let began = std::time::Duration::from_secs(60);
         assert_eq!(
@@ -1235,7 +1243,7 @@ mod tests {
             text: slow(4_000_000, 2),
         });
         let t = Instant::now();
-        d.step();
+        step(&mut d);
         let wall = t.elapsed();
         sender.join().unwrap();
         let ev = lock(&events).clone();
@@ -1246,7 +1254,7 @@ mod tests {
             "the edit sent while it ran (the build took {wall:?}): {ev:?}"
         );
         lock(&events).clear();
-        d.step();
+        step(&mut d);
         assert!(
             lock(&events).iter().all(|e| e["event"] != "build"),
             "built already: {:?}",
@@ -1267,7 +1275,7 @@ mod tests {
     #[test]
     fn ranged_edits_from_any_thread_splice_in_order() {
         let mut d = Document::new(session(&pages(1), Arc::new(Memory::default())), "doc.tex");
-        d.step();
+        step(&mut d);
         let text = pages(1);
         d.push(Ask::SetFile {
             file: "doc.tex".into(),
@@ -1287,7 +1295,7 @@ mod tests {
         .unwrap();
         let r = d.request(&json!({"id": 1, "op": "edit", "file": "doc.tex", "start": at, "end": at, "text": "\\shipout\\hbox{}"}));
         assert_eq!(r["id"], 1, "{r}");
-        let ev = d.step();
+        let ev = step(&mut d);
         let built = ev.iter().find(|e| e["event"] == "build").expect("built");
         assert_eq!(built["pages"], 3, "{ev:?}");
     }
@@ -1333,7 +1341,7 @@ mod tests {
                 .collect()
         };
         let mut d = Document::new(session(doc), "doc.tex");
-        d.step();
+        step(&mut d);
         // (the editor's buffer, as an open gives it: the edits apply to it)
         d.push(Ask::SetFile {
             file: "doc.tex".into(),
@@ -1347,7 +1355,7 @@ mod tests {
             let r = d.request(&json!({"id": k, "op": "edit", "file": "doc.tex", "start": u, "end": u, "text": ch}));
             assert_eq!(r["ok"], true, "edit {k}: {r}");
             text.insert_str(byte, ch);
-            let ev = d.step();
+            let ev = step(&mut d);
             let built = ev
                 .iter()
                 .find(|e| e["event"] == "build")
@@ -1474,7 +1482,7 @@ mod tests {
             Arc::new(Status::default()),
         );
         let mut d = Document::new(s, "doc.tex");
-        let ev = d.step();
+        let ev = step(&mut d);
         let line = "!pdfTeX error: pdftex (file nomap10): Font nomap10 at 72 not found";
         let diags = ev
             .iter()
@@ -1540,7 +1548,7 @@ mod tests {
             Arc::new(Status::default()),
         );
         let mut d = Document::new(s, "doc.tex");
-        let ev = d.step();
+        let ev = step(&mut d);
         let built = ev.iter().find(|e| e["event"] == "build").expect("built");
         assert_eq!(built["errors"], json!([]), "{ev:?}");
         assert_eq!(d.output().map(|o| o.0), Some("dvi"));
@@ -1558,7 +1566,7 @@ mod tests {
         );
         // (a host without a finder: no PDF, said)
         let mut d = Document::new(session(text, Arc::new(Memory::default())), "doc.tex");
-        let ev = d.step();
+        let ev = step(&mut d);
         let built = ev.iter().find(|e| e["event"] == "build").expect("built");
         assert!(
             built["errors"].to_string().contains("no dvipdfmx here"),
@@ -1654,7 +1662,7 @@ mod tests {
                 Arc::new(Status::default()),
             );
             let mut d = Document::new(s, "doc.tex");
-            let ev = d.step();
+            let ev = step(&mut d);
             let built = ev
                 .iter()
                 .find(|e| e["event"] == "build")
@@ -1742,7 +1750,7 @@ mod tests {
             )
         };
         let build = |d: &mut Document| {
-            let ev = d.step();
+            let ev = step(d);
             ev.iter()
                 .find(|e| e["event"] == "build")
                 .cloned()
@@ -2029,7 +2037,7 @@ mod tests {
                 lock(&ev).push(e);
             });
             let _ = viewer.set(d.viewer().clone());
-            d.step();
+            step(&mut d);
             let ev = lock(&events).clone();
             let at = |what: &str| ev.iter().position(|e| e["event"] == what);
             let settled = at("settled").expect("settled");
@@ -2213,7 +2221,7 @@ mod tests {
         threads: usize,
     ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
         let (mut d, events, files) = streaming(engine, text, host, threads);
-        d.step();
+        step(&mut d);
         let ev = lock(&events).clone();
         let files = lock(&files).clone();
         (d, ev, files)
@@ -2621,7 +2629,7 @@ mod tests {
                 streamed_host(),
                 threads,
             );
-            d.step();
+            step(&mut d);
             for (n, text) in edits.iter().enumerate() {
                 let before = settled_pages(&d);
                 lock(&events).clear();
@@ -2629,7 +2637,7 @@ mod tests {
                     file: "doc.tex".into(),
                     text: text.clone(),
                 });
-                d.step();
+                step(&mut d);
                 let ev = lock(&events).clone();
                 let after = settled_pages(&d);
                 let changed: std::collections::BTreeSet<u64> = (0..after.len())
@@ -2669,7 +2677,7 @@ mod tests {
                 streamed_host(),
                 threads,
             );
-            d.step();
+            step(&mut d);
             let ev = lock(&events).clone();
             let (told, none_after) = told_before_settled(&ev);
             assert!(none_after, "j{threads}: a page told after settled");
@@ -2722,7 +2730,7 @@ mod tests {
                 }
                 files.len()
             };
-            d.step();
+            step(&mut d);
             assert_eq!(
                 check(&d, &files, "clean"),
                 base.len(),
@@ -2736,7 +2744,7 @@ mod tests {
                     file: "doc.tex".into(),
                     text: text.clone(),
                 });
-                d.step();
+                step(&mut d);
                 let after = settled_pages(&d);
                 let changed = (0..after.len())
                     .filter(|&k| before.get(k) != Some(&after[k]))
@@ -2847,7 +2855,7 @@ mod tests {
             }
             files
         };
-        d.step();
+        step(&mut d);
         let files_now = check(&d, &files, "clean");
         assert_eq!(files_now.len(), 3, "every page");
         let seen = [glyphs("abc"), glyphs("abcxyz"), glyphs("abcxyzq")];
@@ -2863,7 +2871,7 @@ mod tests {
             file: "doc.tex".into(),
             text: doc("abw"),
         });
-        d.step();
+        step(&mut d);
         let files_now = check(&d, &files, "edit");
         assert_eq!(
             files_now.keys().copied().collect::<Vec<_>>(),
@@ -2924,7 +2932,7 @@ mod tests {
                 };
                 let text = |w| if engine == "xetex" { body(w) } else { pdf(w) };
                 let (mut d, events, _) = streaming(engine, &text(30), host, threads);
-                d.step();
+                step(&mut d);
                 let pages = exact_told(&lock(&events)).len();
                 assert!(pages > 4, "{engine} -j{threads}: {pages} pages");
                 lock(&events).clear();
@@ -2932,7 +2940,7 @@ mod tests {
                     file: "doc.tex".into(),
                     text: text(31),
                 });
-                d.step();
+                step(&mut d);
                 let told = exact_told(&lock(&events)).len();
                 let runs = d
                     .session()
@@ -2990,7 +2998,7 @@ mod tests {
                     });
                     quiet.set_text(text.clone());
                 }
-                d.step();
+                step(&mut d);
                 let r = quiet.build();
                 let ev = lock(&events).clone();
                 assert!(
@@ -3064,7 +3072,7 @@ mod tests {
             }
             files
         };
-        d.step();
+        step(&mut d);
         let f = check(&d, &files, "clean");
         assert_eq!(f.len(), 3, "every page");
         assert_eq!(
@@ -3077,7 +3085,7 @@ mod tests {
             file: "doc.tex".into(),
             text: doc("abq"),
         });
-        d.step();
+        step(&mut d);
         let f = check(&d, &files, "edit");
         assert_eq!(
             f.keys().copied().collect::<Vec<_>>(),

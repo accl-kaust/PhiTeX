@@ -215,6 +215,121 @@ pub struct Progress {
     doc_specials: std::sync::Mutex<FxHashMap<PageId, Vec<Vec<u8>>>>,
     /// Told at every job's start ([`Progress::on_tick`]).
     on_tick: OnceLock<TickHook>,
+    /// The pages' files made beside the evaluation
+    /// ([`Progress::stream_page_beside`]).
+    beside: Arc<PageFiles>,
+}
+
+/// What makes a page's file beside the evaluation
+/// ([`Progress::stream_page_beside`], as [`Progress::stream_page`]'s).
+pub(crate) type MakeFile = Box<dyn FnOnce(Option<&ColorStart>, Option<u64>) -> Option<Made> + Send>;
+
+/// A page's file to make beside the evaluation: the evaluation it was
+/// asked in, and the making.
+struct BesideJob {
+    evaluation: u64,
+    run: Box<dyn FnOnce() + Send>,
+}
+
+/// The pages' files made beside the evaluation, on a thread of their own
+/// at a lower priority than the evaluation's workers, in order; a page
+/// asked by an evaluation a newer one has begun after is dropped (the
+/// newer evaluation's edit superseded it). The evaluation never waits
+/// for them.
+#[derive(Default)]
+struct PageFiles {
+    q: std::sync::Mutex<FilesState>,
+    more: std::sync::Condvar,
+    idle: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct FilesState {
+    jobs: std::collections::VecDeque<BesideJob>,
+    /// A job running now.
+    busy: bool,
+    /// The progress is gone: the thread ends.
+    closed: bool,
+    started: bool,
+}
+
+impl std::fmt::Debug for PageFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PageFiles")
+    }
+}
+
+impl PageFiles {
+    /// The thread's loop: each job of an evaluation not superseded
+    /// (`now`, the evaluations begun) run, the others dropped.
+    fn work(&self, now: &dyn Fn() -> u64) {
+        loop {
+            let job = {
+                let mut g = self
+                    .q
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                g.busy = false;
+                if g.jobs.is_empty() {
+                    self.idle.notify_all();
+                }
+                loop {
+                    if g.closed {
+                        return;
+                    }
+                    if let Some(j) = g.jobs.pop_front() {
+                        g.busy = true;
+                        break j;
+                    }
+                    g = self
+                        .more
+                        .wait(g)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            };
+            if job.evaluation >= now() {
+                (job.run)();
+            }
+        }
+    }
+}
+
+/// The calling thread's scheduling priority lowered (`nice` 10): the
+/// pages' files' thread ([`PageFiles`]) yields its core to the
+/// evaluation's workers.
+fn lower_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        // (the thread's own id, `/proc/thread-self` -> `<pid>/task/<tid>`)
+        let tid = std::fs::read_link("/proc/thread-self")
+            .ok()
+            .and_then(|p| p.file_name()?.to_str()?.parse::<u32>().ok());
+        if let Some(tid) = tid {
+            #[allow(unsafe_code)]
+            // SAFETY: setpriority(2) with plain integers; `PRIO_PROCESS`
+            // (0) with a thread's id sets that thread's niceness on Linux.
+            unsafe {
+                unsafe extern "C" {
+                    fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+                }
+                setpriority(0, tid, 10);
+            }
+        }
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        let mut g = self
+            .beside
+            .q
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.closed = true;
+        g.jobs.clear();
+        self.beside.more.notify_all();
+        self.beside.idle.notify_all();
+    }
 }
 
 /// A page made while the build runs ([`Progress::on_stream`]): a PDF
@@ -467,6 +582,70 @@ impl Progress {
             colors: std::sync::Mutex::default(),
             doc_specials: std::sync::Mutex::new(FxHashMap::default()),
             on_tick: OnceLock::new(),
+            beside: Arc::default(),
+        }
+    }
+
+    /// [`Progress::stream_page`] beside the evaluation, not in it: the
+    /// page's file made on the pages' files' thread ([`PageFiles`]), the
+    /// evaluation going on at once (an edit's round ends without waiting
+    /// for its page's file, which streams as it is made). `make` owns what
+    /// it reads (the values may be collected once the evaluation ends).
+    /// Where threads are not (wasm), made here.
+    pub(crate) fn stream_page_beside(self: &Arc<Self>, k: u64, hash: u64, make: MakeFile) {
+        if cfg!(target_family = "wasm") {
+            self.stream_page(k, hash, make);
+            return;
+        }
+        let me = self.clone();
+        let job = BesideJob {
+            evaluation: self.evaluation(),
+            run: Box::new(move || me.stream_page(k, hash, make)),
+        };
+        let mut g = self
+            .beside
+            .q
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.jobs.push_back(job);
+        if !g.started {
+            g.started = true;
+            let b = self.beside.clone();
+            let weak = Arc::downgrade(self);
+            let spawned = std::thread::Builder::new()
+                .name("phitex-pages".to_owned())
+                .spawn(move || {
+                    lower_priority();
+                    b.work(&|| weak.upgrade().map_or(u64::MAX, |p| p.evaluation()));
+                });
+            if spawned.is_err() {
+                // (no thread: made here, now)
+                g.started = false;
+                let jobs: Vec<BesideJob> = g.jobs.drain(..).collect();
+                drop(g);
+                for j in jobs {
+                    (j.run)();
+                }
+                return;
+            }
+        }
+        self.beside.more.notify_one();
+    }
+
+    /// Waits until every page's file asked so far beside the evaluations
+    /// is made or dropped ([`Progress::stream_page_beside`]).
+    pub fn wait_streamed(&self) {
+        let mut g = self
+            .beside
+            .q
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !g.closed && g.started && (g.busy || !g.jobs.is_empty()) {
+            g = self
+                .beside
+                .idle
+                .wait(g)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
 
