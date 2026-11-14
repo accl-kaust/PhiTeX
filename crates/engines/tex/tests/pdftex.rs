@@ -757,7 +757,7 @@ fn glyph_origins_forms_and_pages() {
     let f = common::origin_failures(&b, &src, "orig.tex");
     if !f.is_empty() {
         eprintln!("DBGSRC {:?}", &src[1850..2000]);
-        let pdf: std::sync::Arc<[u8]> = std::sync::Arc::from(b.output_bytes());
+        let pdf: std::sync::Arc<[u8]> = std::sync::Arc::from(b.output_bytes().as_slice());
         let doc = phitex_codecs::pdfread::Doc::open(&pdf).unwrap();
         for (k, p) in b.all_page_origins().iter().enumerate() {
             let p = p.as_ref().unwrap();

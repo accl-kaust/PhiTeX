@@ -2463,6 +2463,12 @@ fn input_origins(case: &str, main: &str, files: &[(&str, String)], edit: (&str, 
                     .map(|f| format!("{file}: {f}")),
             );
         }
+        if !fails.is_empty() {
+            for (n, t, s, z) in b.node_spans() {
+                let t = t.map_or(String::from("doc"), |t| t.chars().take(12).collect());
+                eprintln!("SPAN {n:x} {t:?} {s}..{z}");
+            }
+        }
         assert!(
             fails.is_empty(),
             "{case} {when}: origins:\n{}",
