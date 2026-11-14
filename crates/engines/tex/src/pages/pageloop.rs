@@ -1490,6 +1490,17 @@ impl Run<'_, '_> {
         (prev, after, base): (Option<NodeId>, Option<(NodeId, NodeId)>, usize),
     ) {
         let v = self.v;
+        // (observe, `PHITEX_PAGE_PLACE`: each page's finisher and the
+        // piece it is placed after)
+        if crate::exec::obs_flag!("PHITEX_PAGE_PLACE") {
+            eprintln!(
+                "page-place: loop {} page {i} key {key:?} cursor {} prev {:?} after {:?}",
+                self.cx.node().raw(),
+                cursor.raw(),
+                prev.map(NodeId::raw),
+                after.map(|(c, f)| (c.raw(), f.raw()))
+            );
+        }
         self.loop_keys.taken.insert(key);
         self.cx
             .define_with(key.field(v, PAGE_OF), x, Locality::Global);
