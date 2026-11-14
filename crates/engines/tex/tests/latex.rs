@@ -1336,14 +1336,16 @@ fn latex_pictures_in_a_paragraph_are_children() {
 /// (each shows a `\ref` to a label at the document's end): its run takes
 /// all their new outputs in one run once their children have run, not
 /// one run per picture (lie-hasse's piece of diagrams ran once per
-/// picture moved, and again for its own guess). Counted as the
+/// picture moved, and again for its own guess). In latexmk's rounds,
+/// where the label's number reaches the pictures in the second (one
+/// round, as the test first ran, had them never change). Counted as the
 /// paragraphs' runs the pictures' outputs asked for (`Output pic`): one
-/// at most, at -j1 and -j8. Not as all the paragraphs' runs against the
-/// same document whose pictures do not change: at -j8 both make some 40
-/// runs more than at -j1, each asked for by the preamble's definitions
-/// their pieces ran before (`\@nodocument`, `\hsize`, ...), a number the
-/// schedule moves by five either way (#33). At -j1, where there are none
-/// of those, the counts are equal; the PDF the same at -j1 and -j8.
+/// at most, at -j1 and -j8 (one per picture made three). Not as all the
+/// paragraphs' runs against the same document whose pictures do not
+/// change: at -j8 both make some 40 runs more than at -j1, each asked for
+/// by the preamble's definitions their pieces ran before
+/// (`\@nodocument`, `\hsize`, ...), a number the schedule moves by five
+/// either way (#33). The PDF the same at -j1 and -j8.
 #[test]
 fn latex_pictures_that_all_change_take_one_run() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-change");
@@ -1394,11 +1396,15 @@ fn latex_pictures_that_all_change_take_one_run() {
             by_pictures(&a),
             a.stats.reruns
         );
+        // (at -j1 the runs the label's number adds where the pictures show
+        // it: the pictures' paragraph reads `\lastref`, which changed, its
+        // rest after it, and the pictures' outputs taken once: 33 against
+        // 30, where one per picture made 35)
         if threads == 1 {
-            assert_eq!(
-                ra, rb,
+            assert!(
+                ra <= rb + 3,
                 "-j1: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
-                a.stats.runs_by_op
+                a.stats.reruns
             );
         }
         out.push(a.output().0);
