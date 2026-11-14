@@ -3686,11 +3686,11 @@ function byline(svg2, word) {
 }
 function opening(box, fill, bg) {
   const tag = String(uid++);
-  const w = WORD, size = w.size, phi = w.letters[0];
+  const w = WORD, size2 = w.size, phi = w.letters[0];
   box.append(
     html`<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
     <defs><mask id="phx-hole${tag}" maskUnits="userSpaceOnUse" x="-1e5" y="-1e5" width="2e5" height="2e5"><rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="#fff"/>
-      <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size / 1e3} ${-size / 1e3})"/></mask></defs>
+      <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size2 / 1e3} ${-size2 / 1e3})"/></mask></defs>
     <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${svgArt(art(WOVEN, fill, tag))}</svg>`
   );
   const el = box.lastElementChild, hole2 = el.querySelector(".phx-hole");
@@ -3714,7 +3714,7 @@ function opening(box, fill, bg) {
     cy: (r.y0 + r.y1) / 2,
     s: Math.max((r.x1 - r.x0) / (fw * W2()), (r.y1 - r.y0) / (fh * H2()))
   });
-  const P = { x: phi.x + OPEN.into[0] * size, y: phi.y - OPEN.into[1] * size };
+  const P = { x: phi.x + OPEN.into[0] * size2, y: phi.y - OPEN.into[1] * size2 };
   const deep = () => OPEN.deep / W2();
   const still2 = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const T1 = OPEN.draw + 3 * OPEN.stagger, T2 = T1 + 200 + OPEN.sweep + 1.5 * OPEN.stagger, T3 = T2 + OPEN.rest;
@@ -4400,7 +4400,7 @@ function ink(box, dark) {
     void e.offsetWidth;
     e.classList.add("bleed");
   };
-  const size = (s) => (el.style.setProperty("--s", String(s)), blot.style.setProperty("--s", String(s)));
+  const size2 = (s) => (el.style.setProperty("--s", String(s)), blot.style.setProperty("--s", String(s)));
   const drop = () => {
     const d = document.createElement("div");
     d.className = "drop";
@@ -4424,7 +4424,7 @@ function ink(box, dark) {
       clearInterval(rain);
       if (pct === void 0 && seen.size) rain = window.setInterval(drop, 1100);
     }
-    size(pct !== void 0 ? 0.25 + 0.6 * (pct / 100) : seen.size ? 0.9 : 0.12);
+    size2(pct !== void 0 ? 0.25 + 0.6 * (pct / 100) : seen.size ? 0.9 : 0.12);
   };
   const hint = (text) => write($(".hint"), `Did you know? ${plain(text)}`);
   return ending(
@@ -5266,6 +5266,123 @@ function firstPage(cv, dark) {
   }
 }
 
+// viewer/src/sheetline.ts
+var LINE_GAP = 250;
+var realClock = {
+  now: () => performance.now(),
+  later: (f, ms) => setTimeout(f, ms),
+  cancel: (h) => clearTimeout(h)
+};
+var Calm = class {
+  drawnAt = -Infinity;
+  drawn;
+  next;
+  timer;
+  draw;
+  clock;
+  gap;
+  key;
+  constructor(draw, clock = realClock, gap = LINE_GAP, key = (v) => JSON.stringify(v)) {
+    this.draw = draw;
+    this.clock = clock;
+    this.gap = gap;
+    this.key = key;
+  }
+  set(v) {
+    const k = this.key(v);
+    if (k === this.drawn) return void this.drop();
+    const wait = this.drawnAt + this.gap - this.clock.now();
+    if (wait <= 0) return void (this.drop(), this.put(v, k));
+    this.next = v;
+    this.timer ??= this.clock.later(() => {
+      this.timer = void 0;
+      const n = this.next;
+      this.next = void 0;
+      if (n !== void 0) this.put(n, this.key(n));
+    }, wait);
+  }
+  /** The pending value drawn now (none: nothing). */
+  flush() {
+    const n = this.next;
+    this.drop();
+    if (n !== void 0) this.put(n, this.key(n));
+  }
+  /** Nothing pending, and the next value drawn at once (a new opening). */
+  reset() {
+    this.drop();
+    this.drawnAt = -Infinity;
+    this.drawn = void 0;
+  }
+  /** A value is waiting for the end of the gap. */
+  get pending() {
+    return this.next !== void 0;
+  }
+  drop() {
+    if (this.timer !== void 0) this.clock.cancel(this.timer);
+    this.timer = void 0;
+    this.next = void 0;
+  }
+  put(v, k) {
+    this.drawnAt = this.clock.now();
+    this.drawn = k;
+    this.draw(v);
+  }
+};
+var SheetLine = class {
+  rank = 0;
+  calm;
+  constructor(draw, clock = realClock, gap = LINE_GAP) {
+    this.calm = new Calm(draw, clock, gap);
+  }
+  say(rank, s) {
+    if (rank < this.rank) return false;
+    this.rank = rank;
+    this.calm.set(s);
+    return true;
+  }
+  /** The step now (its rank): a writer composing its detail asks. */
+  get at() {
+    return this.rank;
+  }
+  /** A new opening (a rebuild, another document): from the first step again, drawn at once. */
+  reset() {
+    this.rank = 0;
+    this.calm.reset();
+  }
+  flush() {
+    this.calm.flush();
+  }
+};
+function size(b) {
+  return b ? b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB` : "";
+}
+function packName(id) {
+  return id.replace(/-[0-9a-f]{12}$/, "");
+}
+var Tally = class {
+  f = { done: 0, bytes: 0, missing: 0, name: "" };
+  base = { done: 0, bytes: 0 };
+  update(p) {
+    const f = this.f;
+    f.done = Math.max(f.done, (p.done ?? 0) - this.base.done);
+    f.bytes = Math.max(f.bytes, (p.bytes ?? 0) - this.base.bytes);
+    f.missing = Math.max(f.missing, p.missing ?? 0);
+    if (p.loading.length) f.name = packName(p.loading[p.loading.length - 1]);
+    return { ...f };
+  }
+  get now() {
+    return { ...this.f };
+  }
+  /** Counted from none again; `from`: the host's totals so far (a burst after the first page counts its own). */
+  reset(from2) {
+    this.f = { done: 0, bytes: 0, missing: 0, name: "" };
+    this.base = { done: from2?.done ?? 0, bytes: from2?.bytes ?? 0 };
+  }
+};
+function fetchedLine(f, name = true) {
+  return [`${f.done} fetched`, size(f.bytes), f.missing ? `${f.missing} not found` : "", name ? f.name : ""].filter(Boolean).join(" \xB7 ");
+}
+
 // viewer/src/review.ts
 var KIND_WORD = { highlight: "Highlight", note: "Note", comment: "Comment" };
 var VERDICT_WORD = { approve: "Approved", request_changes: "Changes requested", reject: "Rejected", comment: "Commented" };
@@ -5280,7 +5397,7 @@ var PATHS = {
   comment: "M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18zM18 14H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z",
   link: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"
 };
-var icon = (name, size = 16) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name] ?? ""}"></path></svg>`;
+var icon = (name, size2 = 16) => html`<svg class="icon" viewBox="0 0 24 24" width="${size2}" height="${size2}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name] ?? ""}"></path></svg>`;
 function ago(iso, now = Date.now()) {
   const t = Date.parse(iso);
   if (!Number.isFinite(t)) return "";
@@ -5832,8 +5949,8 @@ var Review = class {
     if (sel && !sel.isCollapsed) return;
     const r = slot.getBoundingClientRect();
     const k = Number(slot.dataset.k);
-    const size = this.p.viewer.pageSize();
-    const x = (e.clientX - r.left) / r.width * size.w, y = (e.clientY - r.top) / r.height * size.h;
+    const size2 = this.p.viewer.pageSize();
+    const x = (e.clientX - r.left) / r.width * size2.w, y = (e.clientY - r.top) / r.height * size2.h;
     if (e.altKey) {
       e.preventDefault();
       const at = await this.host.spot(k, x, y);
@@ -5984,6 +6101,7 @@ var Review = class {
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
+var PKG_QUIET = 600;
 var KIND_HELP = {
   error: "LaTeX errors and files not found",
   overfull: "Lines that stick out into the margin",
@@ -6051,7 +6169,7 @@ var PATHS2 = {
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
 var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon2("copy", 16)}</button>`;
-var icon2 = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS2[name]}"/></svg>`.firstElementChild;
+var icon2 = (name, size2 = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size2}" height="${size2}" aria-hidden="true"><path fill="currentColor" d="${PATHS2[name]}"/></svg>`.firstElementChild;
 function zoomToward(f, goal, dt) {
   if (!(f > 0) || !Number.isFinite(f)) return goal;
   const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
@@ -6063,7 +6181,6 @@ function zoomOf(z) {
   return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
 }
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
-var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
 var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
 var bars = (parts, cycle = Infinity) => html`<div class="tbar">${parts.map(([, ms], i) => html`<i class="c${i % cycle}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`)}</div><div class="legend">${parts.map(([n, ms], i) => html`<span><i class="c${i % cycle}"></i>${n} ${dur(ms)}</span>`)}</div>`;
 function framePart(json) {
@@ -6475,8 +6592,10 @@ var Panel = class {
     if (this.ending) this.stopSheet();
     this.reopen = true;
     this.typesetting = false;
-    this.loadPct = 0;
     this.loadDone = -1;
+    this.tally.reset();
+    this.line.reset();
+    this.lineNow = void 0;
     this.paints = 0;
     this.walk = null;
     this.opened = false;
@@ -6553,7 +6672,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.firstStep(), void 0, "", false);
+    if (on && !this.last) this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
   }
   wasShown;
   save() {
@@ -6602,6 +6721,8 @@ var Panel = class {
   }
   /** Packages on their way after the first page, and a build running on: said in the bar, or in the corner. */
   pkgNow;
+  /** The packages' note, drawn calmly (sheetline.ts): at most four times a second, the latest. */
+  toastLine = new Calm((t) => this.toast("pkgs", { ...t, pct: void 0, icon: "download" }));
   buildSince = 0;
   actTick;
   prepSince = 0;
@@ -6618,7 +6739,7 @@ var Panel = class {
   streaming(s) {
     this.streamed = s ? s.pages : void 0;
     this.making = s?.phase === "format";
-    if (s && this.firstPending()) this.typesetting = true, this.step(this.words.steps[2], void 0, this.making ? MAKING : `Page ${s.pages + 1}`);
+    if (s && this.firstPending()) this.typesetting = true, this.sayTypesetting();
     this.activity();
   }
   busy(on) {
@@ -6627,18 +6748,17 @@ var Panel = class {
   }
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
   activity() {
-    const p = this.pkgNow;
     const now = performance.now();
+    if (this.pkgNow?.quiet && now - this.pkgNow.quiet > PKG_QUIET) this.pkgNow = void 0;
+    const p = this.pkgNow;
     const prep = !!this.prepSince && now - this.prepSince > 400;
     const long = !!this.buildSince && now - this.buildSince > 400 || prep;
     if (long || this.buildSince || this.prepSince || p) this.actTick ??= setInterval(() => this.activity(), 250);
     else clearInterval(this.actTick), this.actTick = void 0;
     this.renderStatus();
     if (!this.last && this.viewer.pages === 0) return;
-    if (p) {
-      const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
-      return this.toast("pkgs", { title: `Fetching ${names}`, detail: `${p.done} of ${p.total} files${known(p.source) ? ` \xB7 from ${p.source}` : ""}`, pct: p.pct, icon: "download" });
-    }
+    if (p) return this.toastLine.set({ title: `Fetching packages${known(p.source) ? ` from ${p.source}` : ""}`, detail: fetchedLine(p.fetched) });
+    this.toastLine.reset();
     if (this.toastKind === "pkgs") this.toast("pkgs", null);
     if (this.ownBar) return;
     if (long && this.words.preparing) {
@@ -6656,7 +6776,7 @@ var Panel = class {
     let t, m = "", err = false;
     if (this.offline) t = "Disconnected", err = true;
     else if (this.firstPending() && this.stepNow) t = this.stepNow;
-    else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.done} of ${this.pkgNow.total}`;
+    else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.fetched.done} fetched`;
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1e3;
       t = this.making ? `${MAKING}\u2026` : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
@@ -7081,31 +7201,18 @@ var Panel = class {
       this.msg("Couldn't copy to the clipboard", true, true);
     }
   }
-  /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
-  readNow;
-  readDrawn = 0;
-  readTimer;
+  /** The packages fetched so far: the first page's (since the opening began), and after it a burst's (one note in the corner). */
   loadDone = -1;
-  loadPct = 0;
+  tally = new Tally();
+  burst = new Tally();
   /**
    * Reading the project, before the packages: what is happening (the
    * download from Overleaf, each file unpacked, each figure handed to the
    * engine), the file in hand and how far, so the first seconds read as work.
+   * (said as often as the host says it: the sheet's line draws it calmly, sheetline.ts)
    */
   reading(r) {
     if (this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readNow = r;
-    const wait = 50 - (performance.now() - this.readDrawn);
-    if (wait > 0) {
-      this.readTimer ??= setTimeout(() => (this.readTimer = void 0, this.drawReading()), wait);
-      return;
-    }
-    this.drawReading();
-  }
-  drawReading() {
-    const r = this.readNow;
-    if (!r || this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readDrawn = performance.now();
     const pct = r.pct ?? (r.total ? Math.round(100 * (r.done ?? 0) / r.total) : void 0);
     const count = r.total ? `${r.done ?? 0} of ${r.total}` : "";
     this.step(r.h, pct, [r.detail, count].filter(Boolean).join(" \xB7 "));
@@ -7116,32 +7223,42 @@ var Panel = class {
     if (p.loading.length && d.since === void 0) d.since = now;
     else if (!p.loading.length && d.since !== void 0) d.ms += now - d.since, d.since = void 0;
     d.n = done, d.bytes = p.bytes ?? 0;
-    const total = done + p.loading.length;
-    if (done !== this.loadDone) this.loadDone = done;
-    const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
+    this.loadDone = done;
     if (this.firstPending()) {
+      const f = this.tally.update({ done, bytes: p.bytes, loading: p.loading, missing: p.unavailable.length });
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
         if (this.stopped()) return;
-        if (this.typesetting) this.step(this.words.steps[2], void 0, downloaded(done, p.bytes));
-        else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
+        if (this.typesetting) this.sayTypesetting();
+        else if (f.done) this.step(this.words.steps[1], void 0, fetchedLine(f));
         return;
       }
       this.pkgBusy = true;
-      if (p.loading.length) {
-        const name = p.loading[0];
-        const what = `${name} \xB7 ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`;
-        if (this.typesetting) this.step(this.words.steps[2], void 0, `fetching ${what}`);
-        else this.step(this.words.steps[1], pct, what);
-      } else this.typesetting = true, this.step(this.words.steps[2], void 0, downloaded(done, p.bytes));
+      if (p.loading.length && !this.typesetting) this.step(this.words.steps[1], void 0, fetchedLine(f));
+      else this.typesetting = true, this.sayTypesetting();
       return;
     }
-    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : void 0;
     if (p.failed?.length && !p.loading.length) {
+      this.pkgNow = void 0;
+      this.toastLine.reset();
       const f = p.failed[0];
-      this.toast("pkgs", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      this.toast("pkgfail", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      return this.activity();
+    }
+    if (p.loading.length) {
+      if (!this.pkgNow) this.burst.reset({ done, bytes: p.bytes });
+      this.pkgNow = { fetched: this.burst.update({ done, bytes: p.bytes, loading: p.loading, missing: 0 }), source: p.source, quiet: 0 };
+    } else if (this.pkgNow) {
+      this.pkgNow.fetched = this.burst.update({ done, bytes: p.bytes, loading: [], missing: 0 });
+      this.pkgNow.quiet ||= now;
     }
     this.activity();
+  }
+  /** Typesetting's detail, one shape: the page it is on (or the format made first), then the packages fetched for it. */
+  sayTypesetting() {
+    const f = this.tally.now;
+    const page = this.making ? MAKING : this.streamed !== void 0 ? `Page ${this.streamed + 1}` : "";
+    this.step(this.words.steps[2], void 0, [page, f.done ? fetchedLine(f, false) : ""].filter(Boolean).join(" \xB7 "));
   }
   /**
    * The first page's step `k` (0, 1, 2 of the words' steps), saying `text`
@@ -7183,22 +7300,36 @@ var Panel = class {
     };
     this.hintTimer = setTimeout(show, 2e3);
   }
-  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  /**
+   * The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said
+   * only (the panel shown, nothing built yet). Every writer says it here, and the line
+   * (sheetline.ts) draws it calmly: at most four times a second, the latest, and the step
+   * forward only (the project, the packages, typesetting) until the opening begins again.
+   */
   step(what, pct, detail = "", raise = true) {
     if (!this.firstPending()) return;
+    const k = !raise ? 0 : what === this.words.steps[2] ? 2 : what === this.words.steps[1] ? 1 : 0;
+    if (!this.line.say(k, { what, pct, detail })) return;
     this.walkTo(what);
     if (raise) this.sheetUp();
     if (this.anim) this.hints(true);
+  }
+  /** The line said now (the step, the bar, the detail): an opening put up later says it too. */
+  lineNow;
+  drawLine(s) {
+    if (!this.firstPending()) return;
+    this.lineNow = s;
     const el = this.$("#opening");
-    this.stepNow = what;
-    el.querySelector(".what").textContent = what;
-    el.querySelector(".detail").textContent = detail;
+    this.stepNow = s.what;
+    el.querySelector(".what").textContent = s.what;
+    el.querySelector(".detail").textContent = s.detail;
     const track = el.querySelector(".track");
-    track.classList.toggle("unknown", pct === void 0);
-    track.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
-    this.anim?.step?.(what, pct, detail);
+    track.classList.toggle("unknown", s.pct === void 0);
+    track.querySelector("i").style.width = s.pct === void 0 ? "" : `${s.pct}%`;
+    this.anim?.step?.(s.what, s.pct, s.detail);
     this.renderStatus();
   }
+  line = new SheetLine((s) => this.drawLine(s));
   /**
    * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
    * at a build's step; `now`: a Rebuild asked for. Put up once the stage is laid out, at the
@@ -7231,7 +7362,7 @@ var Panel = class {
     this.anim = anim;
     if (id !== "off") this.lastLook = id, this.seen(["opening"]);
     this.$("#opening").classList.toggle("owns", !!anim.step);
-    if (anim.step) anim.step(this.stepNow || this.firstStep(), void 0, "");
+    if (anim.step) anim.step(this.stepNow || this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "");
     this.animSince = performance.now();
   }
   /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
@@ -7345,7 +7476,7 @@ var Panel = class {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.replaceChildren(html`<div class="t">${t.icon ? icon2(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon2(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : t.pct === void 0 ? html`<div class="track unknown"><i></i></div>` : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span").textContent = t.title;
     el.querySelector(".d").textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -8597,8 +8728,8 @@ var Panel = class {
     const d = this.downloads;
     if (!d.n && d.since === void 0) return "";
     const ms = d.ms + (d.since === void 0 ? 0 : performance.now() - d.since);
-    const size = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
-    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
+    const size2 = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
+    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size2}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
   }
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   times = { edits: [] };
@@ -8866,7 +8997,6 @@ var Panel = class {
     this.nav();
   }
 };
-var downloaded = (n, bytes) => n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "";
 function foldedDetail(text, label) {
   const d = document.createElement("details");
   d.className = "folded";
@@ -10456,9 +10586,9 @@ var Strips = class {
    * drawn at (the box that shows them one to one).
    */
   async page(k, scale, view) {
-    const size = this.sizes.get(k) ?? this.sizes.values().next().value;
-    if (view && !size) await this.frame(k, Math.min(scale, 1));
-    const sz = this.sizes.get(k) ?? size;
+    const size2 = this.sizes.get(k) ?? this.sizes.values().next().value;
+    if (view && !size2) await this.frame(k, Math.min(scale, 1));
+    const sz = this.sizes.get(k) ?? size2;
     const px = sz ? sz.w * sz.h * scale * scale : 0;
     if (!view || !sz || px <= BUDGET) {
       const f = await this.frame(k, sz && px > BUDGET ? Math.sqrt(BUDGET / (sz.w * sz.h)) : scale);
@@ -11103,7 +11233,7 @@ function statsIn(s) {
 }
 function statsLines(s) {
   const n = s.nodes ?? {};
-  const size = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const size2 = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
   const pc = s.pages_changed;
   const changed = pc === void 0 ? "?" : pc.length && pc.length <= 8 ? `${pc.length} (${pc.join(", ")})` : String(pc.length);
   return [
@@ -11111,7 +11241,7 @@ function statsLines(s) {
     `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur2(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur2(ms)}`).join(" \xB7 ")}`,
     `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} \xB7 ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds \xB7 pages ${changed} of ${s.pages ?? "?"} changed`,
     `${s.cores_busy == null ? `threads ${s.threads ?? "?"}` : `parallel ${s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy`} \xB7 busy ${dur2(s.busy_ms ?? 0)}, engine ${dur2(s.engine_ms ?? 0)}, wasted ${dur2(s.wasted_ms ?? 0)}`,
-    `memory ${s.resident_kb === void 0 ? "?" : size(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : size(s.values_bytes)}`,
+    `memory ${s.resident_kb === void 0 ? "?" : size2(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : size2(s.values_bytes)}`,
     `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "\u2014"}`
   ];
 }
@@ -11200,13 +11330,13 @@ var sock = new Socket();
 sock.onStale = staleBar;
 var pages = new Pages(sock);
 async function clearCache() {
-  const mb2 = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+  const mb = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
   const now = await sock.request({ op: "cache" });
   if (!now.ok) return void panel.msg(`Couldn't clear the cache: ${now.error ?? "not available"}`, true, true);
   const bytes = Number(now.json?.bytes ?? 0);
-  if (!confirm(`Clear PhiTeX's cache (${mb2(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
+  if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
   const r = await sock.request({ op: "cache", clear: true });
-  panel.msg(r.ok ? `Cache cleared: ${mb2(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
+  panel.msg(r.ok ? `Cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
 }
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
 var review = {
@@ -11785,7 +11915,7 @@ async function watchSettings() {
   const p = r.json ?? {}, at = info.ok ? info.json ?? {} : {};
   const file = String(p.file ?? "phitex.toml");
   const project = "In the project's phitex.toml (or the command line): the page never changes a project's files";
-  const mb2 = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const mb = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
   const toggle2 = (id, label, help) => ({ id, label, help, kind: "toggle", value: !!p[id], set: (v) => setPref(id, v) });
   const cores = Number(p.cores ?? 1);
   return [
@@ -11826,7 +11956,7 @@ async function watchSettings() {
     {
       title: "Packages",
       rows: [
-        { id: "cache", label: "The cache", help: cache.ok ? `${mb2(Number(cache.json?.bytes ?? 0))} in ${cache.json?.dir ?? "its folder"}: packages and formats, fetched again when a build needs them` : "Its size: not available", kind: "action", button: "Clear", set: () => void clearCache() },
+        { id: "cache", label: "The cache", help: cache.ok ? `${mb(Number(cache.json?.bytes ?? 0))} in ${cache.json?.dir ?? "its folder"}: packages and formats, fetched again when a build needs them` : "Its size: not available", kind: "action", button: "Clear", set: () => void clearCache() },
         {
           id: "cache-limit",
           label: "Keep at most",
