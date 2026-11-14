@@ -734,6 +734,126 @@ fn watch_save_starts_at_once() {
     let _ = child.wait();
 }
 
+/// `phitex watch`, headless: an edit whose node makes what it made before
+/// (a comment's words changed, spaces after a control word added) runs
+/// that node and nothing after it, no reader asked again, no page folded
+/// or written, no link (one run in all); the PDF the watch leaves is a
+/// clean build's of the edited text. pdfTeX and XeTeX, -j1 and -j8.
+#[test]
+fn watch_an_edit_that_makes_what_it_made_runs_its_node_alone() {
+    let _one = one();
+    let big = big();
+    let at = big.find("\\message{[part 2 story]}").expect("part 2");
+    let base = format!(
+        "{}% a note on the story\n% and a second one, its words\n{}",
+        &big[..at],
+        &big[at..]
+    );
+    let edits = [
+        (
+            "a comment's words",
+            base.replace(
+                "% and a second one, its words",
+                "% and another one, its words",
+            ),
+        ),
+        (
+            "spaces after a control word",
+            base.replacen(
+                "\\message{[part 3 story]}",
+                "\\message   {[part 3 story]}",
+                1,
+            ),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for engine in ["pdftex", "xetex"] {
+        let doc = |t: &str| {
+            if engine == "xetex" {
+                t.strip_prefix("\\pdfoutput=1\n").unwrap_or(t).to_owned()
+            } else {
+                t.to_owned()
+            }
+        };
+        for (what, edited) in &edits {
+            assert_ne!(edited, &base, "{what}: an edit");
+            let clean = {
+                let dir = scratch("watch-same-clean");
+                std::fs::write(dir.join("big.tex"), doc(edited)).expect("the document");
+                let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args([
+                        "build",
+                        "--no-synctex",
+                        "--ini",
+                        "--etex",
+                        "--engine",
+                        engine,
+                        "big.tex",
+                    ])
+                    .output()
+                    .expect("phitex build runs");
+                assert!(
+                    out.status.success(),
+                    "{engine}: the clean build failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                std::fs::read(dir.join("big.pdf")).expect("the clean build's PDF")
+            };
+            for threads in ["1", "8"] {
+                let dir = scratch("watch-same");
+                std::fs::write(dir.join("big.tex"), doc(&base)).expect("the document");
+                let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args([
+                        "watch",
+                        "--write",
+                        "--json",
+                        "--no-view",
+                        "--no-synctex",
+                        "--ini",
+                        "--etex",
+                        "--engine",
+                        engine,
+                        "-j",
+                        threads,
+                        "big.tex",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("phitex watch runs");
+                let mut stdin = child.stdin.take().expect("its input");
+                let stdout = child.stdout.take().expect("its output");
+                let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+                let mut seen = Vec::new();
+                let cold = until(&mut lines, "build", &1.into(), &mut seen);
+                assert_eq!(cold["ok"], true, "{engine}: {cold}");
+                std::fs::write(dir.join("big.tex"), doc(edited)).expect("the edit");
+                let ev = until(&mut lines, "build", &2.into(), &mut seen);
+                let _ = stdin.write_all(b"q\n");
+                drop(stdin);
+                lines.for_each(drop);
+                let _ = child.wait();
+                let runs = ev["runs"].as_u64().unwrap_or(u64::MAX);
+                if runs > 1 {
+                    wrong.push(format!(
+                        "{engine} -j{threads}, {what}: {runs} runs, not the edited node's alone: {}",
+                        ev["notes"]
+                    ));
+                }
+                let pdf = std::fs::read(dir.join("big.pdf")).expect("the watch's PDF");
+                if pdf != clean {
+                    wrong.push(format!(
+                        "{engine} -j{threads}, {what}: the PDF is not the clean build's ({})",
+                        first_difference(&pdf, &clean)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// `phitex watch`, headless, with nothing changed: `r` (twice) and a
 /// file saved with its bytes evaluate nothing, run no node, write no
 /// PDF and change no page, and `r` reads no file again. The document
