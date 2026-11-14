@@ -755,6 +755,27 @@ fn glyph_origins_forms_and_pages() {
     let b = origins_build(&src, 1, true);
     assert!(b.pages().len() >= 3, "pages: {}", b.pages().len());
     let f = common::origin_failures(&b, &src, "orig.tex");
+    if !f.is_empty() {
+        eprintln!("DBGSRC {} {:?}", src.len(), &src[5900.min(src.len())..]);
+        let p = b.all_page_origins();
+        for (k, p) in p.iter().enumerate() {
+            let p = p.as_ref().unwrap();
+            let v: Vec<String> = (0..p.len())
+                .filter(|&i| p.start[i] > 5900)
+                .take(30)
+                .map(|i| {
+                    format!(
+                        "{}:{}-{}{}",
+                        p.file[i] as i64,
+                        p.start[i],
+                        p.end[i],
+                        if p.is_synth(i) { "s" } else { "" }
+                    )
+                })
+                .collect();
+            eprintln!("DBGPAGE {k} {} {:?}", p.len(), v);
+        }
+    }
     assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
     let b8 = origins_build(&src, 8, true);
     assert_eq!(
