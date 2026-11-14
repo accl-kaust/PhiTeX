@@ -1802,6 +1802,18 @@ impl Run<'_, '_> {
                 i64::try_from(j).unwrap_or(i64::MAX),
             ),
         );
+        if crate::exec::obs_flag!("PHITEX_PAGE_PLACE") {
+            eprintln!(
+                "page-fire: loop {} key nth {} at {} k {} in_material {} best {} last spans {:?}",
+                self.cx.node().raw(),
+                page.key.nth,
+                page.at.raw(),
+                page.k,
+                page.in_material,
+                page.best,
+                &page.spans[page.spans.len().saturating_sub(3)..]
+            );
+        }
         self.emit_page(i, page.key, page.at, x, args, (prev, ls.after, ls.base));
         ls.checkpoints.push(Checkpoint {
             key: page.key,
