@@ -363,7 +363,7 @@ fn hello(pdf: bool) -> Build {
     {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
         if let Some(bytes) = b.export_prelude() {
-            let _ = std::fs::write(&cache, bytes);
+            common::write_whole(&cache, &bytes);
         }
     }
     let (out, log) = b.output();
@@ -427,7 +427,7 @@ fn latex_loop_rounds() {
                 && let Some(bytes) = b.export_prelude()
             {
                 let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
-                let _ = std::fs::write(&cache, bytes);
+                common::write_whole(&cache, &bytes);
             }
             let cold = (b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run);
             let keys = b.wkeys();
@@ -493,7 +493,7 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     if !cached {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
         if let Some(bytes) = b.export_prelude() {
-            let _ = std::fs::write(&cache, bytes);
+            common::write_whole(&cache, &bytes);
         }
     }
     let regions = b.stats.nodes_text_frames;
