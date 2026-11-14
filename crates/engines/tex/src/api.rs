@@ -5272,6 +5272,14 @@ fn culprit(
         {
             return Some((ls + s, ls + e));
         }
+        // (on a line read before it: a command that looked ahead for an
+        // optional argument, fontspec's `\newfontfamily\x{IPAexMincho}`,
+        // fails with TeX reading the next line; the argument is the last
+        // one read that holds the key)
+        let read = &text[from.min(ls)..ls];
+        if let Some((s, e)) = key_argument(read, key) {
+            return Some((from.min(ls) + s, from.min(ls) + e));
+        }
     }
     if let Some(cs) = named_cs(message)
         && let Some(k) = last_cs_token(&text[from..b], &cs)
@@ -5288,12 +5296,22 @@ fn culprit(
     None
 }
 
-/// The first text `m` quotes TeX's way (`` `x' ``).
+/// The first text `m` quotes TeX's way (`` `x' ``), else in double
+/// quotes (`LaTeX3`'s messages, fontspec's `The font "x" cannot be found`).
 fn quoted(m: &str) -> Option<&str> {
-    let i = m.find('`')?;
-    let r = &m[i + 1..];
-    let k = &r[..r.find('\'')?];
-    (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+    let tex = || {
+        let i = m.find('`')?;
+        let r = &m[i + 1..];
+        let k = &r[..r.find('\'')?];
+        (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+    };
+    let double = || {
+        let i = m.find('"')?;
+        let r = &m[i + 1..];
+        let k = &r[..r.find('"')?];
+        (!k.is_empty() && !k.contains('\n')).then_some(k)
+    };
+    tex().or_else(double)
 }
 
 /// Bytes of `before` of the command whose argument holds `key` (`{key}`,
@@ -6237,6 +6255,7 @@ fn shown(t: &str) -> std::borrow::Cow<'_, str> {
 /// TeX's errors in the prelude (`text`, its own text) at their places:
 /// the file and line, TeX's context (§318), as [`Build::diagnostics`]
 /// places a document's.
+#[allow(clippy::too_many_lines)]
 fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> Vec<Diagnostic> {
     let v = g.eng.values();
     let xe = g.ops.xe.get().is_some();
@@ -6317,12 +6336,26 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
             .collect::<String>()
             .trim_end_matches('\r')
             .to_owned();
-        let start = if message == "Undefined control sequence" {
-            before
+        // (the culprit: an undefined name the one just read; else the
+        // command whose argument holds the key the message names, on
+        // this line or one read before it, [`culprit`])
+        let (start, end) = if message == "Undefined control sequence" {
+            let s = before
                 .rfind('\\')
-                .map_or(ci, |k| ls + before[..k].chars().count())
+                .map_or(ci, |k| ls + before[..k].chars().count());
+            (s, ci)
         } else {
-            ci
+            let t: String = chars[..ci].iter().collect();
+            let at = |k: usize| chars[..k].iter().map(|c| c.len_utf8()).sum::<usize>();
+            culprit(&message, &t, at(ls), t.len(), 0, false).map_or((ci, ci), |(s, e)| {
+                (t[..s].chars().count(), t[..e].chars().count())
+            })
+        };
+        // (the diagnostic's line the culprit's; TeX's in the context)
+        let place_line = if start < ls {
+            chars[..start].iter().filter(|&&c| c == '\n').count() + 1
+        } else {
+            line
         };
         let lead = format!("l.{line} ");
         let context = format!(
@@ -6331,8 +6364,8 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
         );
         out.push(Diagnostic {
             file,
-            range: (start, ci),
-            line,
+            range: (start, end),
+            line: place_line,
             severity: Severity::Error,
             message,
             context,
@@ -9189,13 +9222,45 @@ impl Build {
                     .rfind('\\')
                     .map(|k| (ls + k, ls + k + cs_len(&before[k..])))
             } else if kind == 1 || kind == 3 {
-                let from = node_from.map_or(ls, |f| f.min(ls));
+                // (from the node's start, and at least from the line
+                // with text before this one: a command that looked ahead
+                // for an optional argument, `\newfontfamily\x{F}`, fails
+                // with TeX on the next line, which may be the next node's)
+                let prev = {
+                    let mut p = ls;
+                    while p > 0 {
+                        let s = text[..p - 1].rfind('\n').map_or(0, |k| k + 1);
+                        p = s;
+                        // (blank lines and comments' lines read past)
+                        if text[s..ls]
+                            .lines()
+                            .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('%'))
+                        {
+                            break;
+                        }
+                    }
+                    p
+                };
+                let from = node_from.map_or(prev, |f| f.min(prev));
                 culprit(&message, text, ls, b, from, kind == 3)
             } else {
                 None
             };
             // (places in `text`, made the file's bytes below)
             let (start, end) = found.unwrap_or((b, b));
+            // (a culprit on a line read before TeX's: the diagnostic's
+            // line is the culprit's, TeX's stays in the context)
+            let place_line = if start < ls {
+                if file == docname {
+                    doc_lines.partition_point(|&k| k <= start)
+                } else {
+                    file_lines
+                        .get(&file)
+                        .map_or(line, |ls| ls.partition_point(|&k| k <= start))
+                }
+            } else {
+                line
+            };
             // (the context as TeX shows the line: the file's bytes read as
             // UTF-8 where they are, not one character a byte)
             let (shown_before, shown_after) = (shown(&before), shown(&after));
@@ -9240,7 +9305,7 @@ impl Build {
             let d = Diagnostic {
                 file,
                 range: (start, end),
-                line,
+                line: place_line,
                 severity: match kind {
                     0 | 3 => Severity::Warning,
                     1 => Severity::Error,
