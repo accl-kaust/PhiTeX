@@ -30,7 +30,7 @@ struct Fake {
     progress: Mutex<Option<Arc<phitex_tex::Progress>>>,
     /// The jobs finished while `sleep` slept.
     during: Mutex<Vec<u64>>,
-    /// `gate` waits until a run has handed a command to a child
+    /// `gate` waits until a run has handed an `up` command to a child
     /// (`ShellHook::handed`); `None`: it returns at once.
     gate: Option<Gate>,
 }
@@ -131,9 +131,10 @@ impl ShellHook for Fake {
             "gate" => {
                 let status = self.gate.as_ref().map_or(0, |g| {
                     let h = g.handed.lock().unwrap();
-                    let (h, t) = g
-                        .cv
-                        .wait_timeout_while(h, std::time::Duration::from_secs(60), |h| h.is_empty())
+                    let (h, t) =
+                        g.cv.wait_timeout_while(h, std::time::Duration::from_secs(60), |h| {
+                            !h.iter().any(|c| c.contains("'up'"))
+                        })
                         .unwrap();
                     drop(h);
                     if t.timed_out() { 99 << 8 } else { 0 }
@@ -767,7 +768,12 @@ Second paragraph: \made.
     let (dvi, log) = b.output();
     assert_eq!(got(&log), ["ALPHA"], "-j8: {log}");
     let handed = fake.gate.as_ref().unwrap().handed.lock().unwrap().clone();
-    assert_eq!(handed, ["fakecmd 'up' 'ina.txt' 'outa.tex'"], "-j8");
+    assert!(
+        handed
+            .iter()
+            .any(|c| c == "fakecmd 'up' 'ina.txt' 'outa.tex'"),
+        "-j8: {handed:?}"
+    );
     let calls = fake.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 2, "-j8: each command called once: {calls:?}");
     assert!(

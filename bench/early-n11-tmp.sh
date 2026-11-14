@@ -29,6 +29,12 @@ build)
 run)
   tag=$2 doc=$3 js=$4 reps=$5; shift 5
   for i in $(seq 1 $reps); do for j in $js; do one $tag $doc $j $i "$@"; done; done ;;
+test)
+  # test COMMIT "cargo test args..."  (scoped)
+  c=$2; shift 2
+  [ -d $S ] || git clone -q $HOME/code/flinner/phitex.git $S
+  cd $S && git fetch -q origin && git checkout -q -f $c || exit 1
+  CARGO_TARGET_DIR=$R/target-t nice $HOME/.cargo/bin/cargo +nightly-2026-08-08 test -j 16 -q --release "$@" 2>&1 | tail -40 ;;
 ab)
   tags=$2 doc=$3 js=$4 reps=$5; shift 5
   for i in $(seq 1 $reps); do for j in $js; do for t in $tags; do one $t $doc $j $i "$@"; done; done; done ;;
