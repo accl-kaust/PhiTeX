@@ -2432,6 +2432,7 @@ fn latex_glyph_origins() {
 /// codes have one each, the same at -j1 and -j8; after a word's edit in a
 /// chapter, a cold build's answers.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn latex_glyph_origins_of_input_files() {
     let dir = common::scratch("origins-input");
     let para = |k: usize, what: &str| {
