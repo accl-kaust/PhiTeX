@@ -1637,6 +1637,20 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// How long my longest run that committed took, ns (0: none yet).
+    #[must_use]
+    pub fn longest_run_ns(&self) -> u64 {
+        self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How long the longest committed run of the node my `i`-th placement
+    /// stands for took, ns (0: none, or no such node).
+    pub fn placed_longest_run_ns(&mut self, i: usize) -> u64 {
+        self.placed_node_id(i).map_or(0, |c| {
+            self.eng.node(c).full_ns.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
     /// Whether the node my `i`-th placement stands for is to run again
     /// (asked again, not run since): its output is of what it read
     /// before. Not recorded, a peek.

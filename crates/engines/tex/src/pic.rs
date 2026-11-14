@@ -599,6 +599,22 @@ impl Run<'_, '_> {
                 }
                 return false;
             }
+            if !holds && self.cx.longest_run_ns() > self.cx.placed_longest_run_ns(i) {
+                // (its view moved, and my run costs more than the
+                // picture's: read here, inline, its child placed on the
+                // view for the runs after. Gone on as if empty, the run
+                // went again once the child had run: lie-hasse's
+                // paragraphs of diagrams, 30 s a run for a 12 s picture,
+                // twice each where TeX reads them once)
+                self.pic_inline_count();
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: its view moved, the run dearer than the picture: inline",
+                        body.name
+                    );
+                }
+                return false;
+            }
             if !holds {
                 // (its view moved where the child read it: the run goes on
                 // as if the picture were empty, the child asked again by the
