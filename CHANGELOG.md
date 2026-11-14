@@ -10,33 +10,38 @@ milestones, not versions.
 
 ## 1.0.2 (2026-11-14)
 
-An agent you can work with from the terminal, faster edits and clean
-builds, and a calmer, sharper live preview.
+A big one :) Lots of speed, and a first taste of writing papers together
+with an AI agent!
 
-- `phitex session` lets an agent such as Claude work with a running
-  watch: wait for a build, read its problems, and write the PDF
-  (`phitex session pdf`; `--synctex` adds the .synctex.gz).
-- Notes and review, an experimental feature (off until you turn it on
-  in Settings, Experimental): select text on the pages to highlight it
-  or leave a note for your agent, and review its edits as a git-style
-  diff, with Accept all, proposals and Show diff.
-- Colour lines, a reading aid: lines shaded in alternating colours, in
-  its own Settings tab.
-- Edits are faster: a rebuild that changes nothing takes a couple of milliseconds, a
-  word in a large plain TeX file takes milliseconds, and a page with
-  pictures or images is no longer drawn again from scratch.
-- Clean builds run each TikZ picture once; documents with many pictures
-  build in a third less time.
-- Every page streams to the preview as it is typeset, edits included.
-- Two-column papers: a selection stays in its column, and Colour lines
-  keep the columns apart.
-- A link's preview window zooms (Ctrl+wheel, a pinch, its buttons) and
-  pans.
-- Quitting a watch leaves the exact PDF on disk however it ends (q,
-  Ctrl-C, a signal); its question can be cancelled, and
-  `watch-ask-write` turns it off.
-- `phitex upgrade` shows its download's progress.
-- Fonts are found as xelatex finds them.
+- **Your agent can drive PhiTeX now!** Claude (or any agent) can hop onto
+  the watch you already have running with `phitex session`: wait for a
+  build, read the errors, and write the PDF when you ask. No more
+  copy-pasting logs around.
+- **Notes and review (experimental).** Turn it on in Settings, then
+  Experimental. Select text on the page to leave a note for your agent,
+  and review its edits like a pull request: accept or reject each one,
+  or see the typeset diff. It's off by default while we polish it, but
+  give it a spin!
+- **Edits feel instant.** Pressing `r` with nothing changed takes a
+  couple of milliseconds, big plain TeX files edit in a few ms instead
+  of fifty, and pages with figures aren't redrawn from scratch.
+- **TikZ-heavy papers build about a third faster** from clean. Each
+  picture is drawn just once now.
+- **Pages stream in as they're typeset,** after every edit too, not only
+  on the first build.
+- **Colour lines!** A reading aid that shades lines in alternating
+  colours, so your eyes don't lose their place. It has its own Settings
+  tab.
+- **Two-column papers behave.** Selecting text no longer grabs half the
+  page, and Colour lines keep the columns apart.
+- **Zoom into link previews** with Ctrl+scroll, a pinch, or the buttons.
+- **Quitting a watch always leaves the right PDF,** whether you press q,
+  hit Ctrl-C, or close the terminal. You can cancel the question now, or
+  switch it off with `phitex config watch-ask-write off`.
+- **`phitex upgrade` has a progress bar.** Small thing, very satisfying.
+- **Fonts are found the way xelatex finds them.**
+
+Thanks for all the feedback, keep it coming!
 
 ## 1.0.1 (2026-11-12)
 
