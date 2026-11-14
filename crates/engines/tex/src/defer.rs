@@ -12,8 +12,67 @@ use crate::run::Run;
 use crate::state::Loc;
 use crate::val::Tok;
 
-/// The prefix of a symbol's internal name: `\u{10FFFE}sym\u{2}<register>\u{2}<node raw>`.
+/// The prefix of a symbol's internal name: `\u{10FFFE}sym\u{2}<number>`,
+/// the number its place in the engine's [`SymTable`].
 pub(crate) const SYM_PREFIX: &str = "\u{10FFFE}sym\u{2}";
+
+/// What a symbol's token stands for ([`SymTable`]): a register's value
+/// as of a piece ([`Sym`]), or a derived name made with one ([`DName`]).
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum SymKey {
+    Reg(i32, u64, i32),
+    Name(i32, u64, i32, Box<str>, Box<str>),
+}
+
+/// The symbols of one engine, by number: a symbol's token is the
+/// internal control sequence `<SYM_PREFIX><number>` (a derived name's
+/// `<SYM_PREFIX>dn\u{2}<number>`), its register, piece and steps here.
+/// Control sequence names live as long as the process (`val::CsId`), and
+/// a name of its own for each register, piece and steps was a new one in
+/// every build (a piece's node numbers are the build's): a session's
+/// builds filled the internal names' range and the frozen tokens
+/// numbered after it were taken for ordinary ones (#32). Numbered per
+/// engine, the names are the same few in every build.
+#[derive(Default)]
+pub(crate) struct SymTable {
+    by: std::sync::RwLock<(phitex_defuse::FxHashMap<SymKey, u32>, Vec<SymKey>)>,
+}
+
+impl SymTable {
+    /// The number of `k`, given it on its first sight.
+    fn number(&self, k: SymKey) -> u32 {
+        if let Some(&i) = self
+            .by
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .get(&k)
+        {
+            return i;
+        }
+        let mut t = self
+            .by
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(&i) = t.0.get(&k) {
+            return i;
+        }
+        let i = u32::try_from(t.1.len()).unwrap_or(u32::MAX);
+        t.1.push(k.clone());
+        t.0.insert(k, i);
+        i
+    }
+
+    /// What number `i` stands for.
+    fn key(&self, i: u32) -> Option<SymKey> {
+        self.by
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
+            .get(i as usize)
+            .cloned()
+    }
+}
 
 /// A symbol: integer register `reg`'s value as of piece `node`. By the
 /// register's number: a symbol goes from run to run in what a macro or
@@ -47,28 +106,28 @@ impl Sym {
     }
 }
 
-/// The token of symbol `s` (an internal control sequence, interned once
-/// per (register, piece): `Tok::cs` of its name).
-pub(crate) fn sym_tok(s: Sym) -> Tok {
-    Tok::cs(&format!(
-        "{SYM_PREFIX}{}\u{2}{}\u{2}{}",
-        s.reg,
-        s.node.raw(),
-        s.j
-    ))
+/// The token of symbol `s` (an internal control sequence by its number
+/// in the engine's [`SymTable`]).
+pub(crate) fn sym_tok(ops: &crate::run::Ops, s: Sym) -> Tok {
+    let i = ops.syms.number(SymKey::Reg(s.reg, s.node.raw(), s.j));
+    Tok::cs(&format!("{SYM_PREFIX}{i}"))
 }
 
-/// The symbol a token is, if it is one (its name starts with
-/// [`SYM_PREFIX`]; parsed back, `CsId::name`).
-pub(crate) fn sym_of(t: Tok) -> Option<Sym> {
-    let rest = t.as_cs()?.name().strip_prefix(SYM_PREFIX)?;
-    let (reg, rest) = rest.split_once('\u{2}')?;
-    let (node, j) = rest.split_once('\u{2}')?;
-    Some(Sym {
-        reg: reg.parse().ok()?,
-        node: NodeId::from_raw(node.parse().ok()?),
-        j: j.parse().ok()?,
-    })
+/// The symbol a token is, if it is one (its name [`SYM_PREFIX`] and a
+/// number of the engine's [`SymTable`]).
+pub(crate) fn sym_of(ops: &crate::run::Ops, t: Tok) -> Option<Sym> {
+    if !t.is_internal_cs() {
+        return None;
+    }
+    let i = t.as_cs()?.name().strip_prefix(SYM_PREFIX)?.parse().ok()?;
+    match ops.syms.key(i)? {
+        SymKey::Reg(reg, node, j) => Some(Sym {
+            reg,
+            node: NodeId::from_raw(node),
+            j,
+        }),
+        SymKey::Name(..) => None,
+    }
 }
 
 /// Whether register `loc` is a page-layer register in this run: `count:0`,
@@ -135,7 +194,7 @@ pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
     r.st.note_symbol(loc);
     r.st.note_read(loc);
     let reg = r.count_reg(loc).expect("deferrable: an integer register");
-    sym_tok(Sym { reg, node, j })
+    sym_tok(r.ops, Sym { reg, node, j })
 }
 
 /// [`symbol_for`] with steps `j` given: a register's value reaching the
@@ -145,7 +204,7 @@ pub(crate) fn symbol_with(r: &mut Run<'_, '_>, loc: Loc, j: i32) -> Tok {
     r.st.note_symbol(loc);
     r.st.note_read(loc);
     let reg = r.count_reg(loc).expect("deferrable: an integer register");
-    sym_tok(Sym { reg, node, j })
+    sym_tok(r.ops, Sym { reg, node, j })
 }
 
 /// A symbol's digits where they are needed: forced in a piece, resolved
@@ -176,11 +235,8 @@ pub(crate) fn digits_of(r: &mut Run<'_, '_>, toks: &[Tok]) -> crate::run::R<Opti
 
 /// The symbol `t` is when it is an integer register's (not a file
 /// size's).
-pub(crate) fn reg_sym(t: Tok) -> Option<Sym> {
-    if !is_sym(t) || size_of(t).is_some() {
-        return None;
-    }
-    sym_of(t)
+pub(crate) fn reg_sym(ops: &crate::run::Ops, t: Tok) -> Option<Sym> {
+    sym_of(ops, t)
 }
 
 /// Whether `t` is a symbol: an internal name past [`SYM_PREFIX`].
@@ -316,7 +372,7 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
         r.ck()?;
     }
     let t = r.cur.tok;
-    let Some(s) = sym_of(t) else {
+    let Some(s) = sym_of(r.ops, t) else {
         r.back_input(t);
         return Ok(false);
     };
@@ -592,7 +648,7 @@ pub(crate) fn digits_str(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Option<St
     if let Some((part, key)) = size_of(t) {
         return size_digits(r, part, &key).map(Some);
     }
-    let Some(s) = sym_of(t) else {
+    let Some(s) = sym_of(r.ops, t) else {
         return Ok(None);
     };
     let mut d = String::new();
@@ -616,7 +672,8 @@ pub(crate) fn expand_any(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
 // ------------------------------------------------------- derived names
 
 /// The tag of a derived name's symbol, past [`SYM_PREFIX`]:
-/// `<SYM_PREFIX>dn\u{2}<register>\u{2}<node raw>\u{2}<j>\u{2}<prefix>\u{2}<suffix>`.
+/// `<SYM_PREFIX>dn\u{2}<number>`, the number its place in the engine's
+/// [`SymTable`].
 const DNAME_TAG: &str = "dn\u{2}";
 
 /// A relative name (docs/spec-relative-counters.md §2.2): the control
@@ -633,18 +690,18 @@ pub(crate) struct DName {
 }
 
 /// The token of derived name `d`, if its parts can be told apart in one.
-pub(crate) fn dname_tok(d: &DName) -> Option<Tok> {
+pub(crate) fn dname_tok(ops: &crate::run::Ops, d: &DName) -> Option<Tok> {
     if d.prefix.contains('\u{2}') || d.suffix.contains('\u{2}') {
         return None;
     }
-    Some(Tok::cs(&format!(
-        "{SYM_PREFIX}{DNAME_TAG}{}\u{2}{}\u{2}{}\u{2}{}\u{2}{}",
+    let i = ops.syms.number(SymKey::Name(
         d.s.reg,
         d.s.node.raw(),
         d.s.j,
-        d.prefix,
-        d.suffix
-    )))
+        d.prefix.as_str().into(),
+        d.suffix.as_str().into(),
+    ));
+    Some(Tok::cs(&format!("{SYM_PREFIX}{DNAME_TAG}{i}")))
 }
 
 /// Whether `t` is a derived name's symbol.
@@ -659,21 +716,29 @@ pub(crate) fn is_dname(t: Tok) -> bool {
 }
 
 /// The derived name a token is, if it is one.
-pub(crate) fn dname_of(t: Tok) -> Option<DName> {
+pub(crate) fn dname_of(ops: &crate::run::Ops, t: Tok) -> Option<DName> {
+    if !t.is_internal_cs() {
+        return None;
+    }
     let c = t.as_cs()?;
-    let name = c.name();
-    let rest = name.strip_prefix(SYM_PREFIX)?.strip_prefix(DNAME_TAG)?;
-    let mut it = rest.splitn(5, '\u{2}');
-    let reg = it.next()?.parse().ok()?;
-    let node = NodeId::from_raw(it.next()?.parse().ok()?);
-    let j = it.next()?.parse().ok()?;
-    let prefix = it.next()?.to_owned();
-    let suffix = it.next()?.to_owned();
-    Some(DName {
-        s: Sym { reg, node, j },
-        prefix,
-        suffix,
-    })
+    let i = c
+        .name()
+        .strip_prefix(SYM_PREFIX)?
+        .strip_prefix(DNAME_TAG)?
+        .parse()
+        .ok()?;
+    match ops.syms.key(i)? {
+        SymKey::Name(reg, node, j, prefix, suffix) => Some(DName {
+            s: Sym {
+                reg,
+                node: NodeId::from_raw(node),
+                j,
+            },
+            prefix: prefix.into(),
+            suffix: suffix.into(),
+        }),
+        SymKey::Reg(..) => None,
+    }
 }
 
 /// The characters of a `\csname` or `\ifcsname` name into `name`, as
@@ -695,7 +760,7 @@ pub(crate) fn name_chars(
             break Err(e);
         }
         if r.cur.cmd == cmd::SYM
-            && let Some(s) = sym_of(r.cur.tok)
+            && let Some(s) = sym_of(r.ops, r.cur.tok)
         {
             if keep && kept.is_none() && s.node == r.sym_node() {
                 kept = Some((name.len(), s));
@@ -808,7 +873,7 @@ fn numbered_like(name: &str, pre: &str, suf: &str) -> bool {
 /// A derived name made concrete: its symbol's digits forced (resolved
 /// in a finisher), the control sequence they name.
 pub(crate) fn dname_concrete(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Tok> {
-    let d = dname_of(t).expect("a derived name's token");
+    let d = dname_of(r.ops, t).expect("a derived name's token");
     let n = forced_name(r, d.s, &d.prefix, &d.suffix)?;
     Ok(Tok::cs(&n))
 }
@@ -816,7 +881,7 @@ pub(crate) fn dname_concrete(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Tok> 
 /// A derived name's meaning, read through the derived read (whole); its
 /// concrete name's where that read cannot stand.
 pub(crate) fn dname_meaning(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<crate::val::Mean> {
-    let d = dname_of(t).expect("a derived name's token");
+    let d = dname_of(r.ops, t).expect("a derived name's token");
     if let Some(Answer(x)) =
         derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
     {
@@ -831,7 +896,7 @@ pub(crate) fn dname_meaning(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<crate:
 /// the derived read; any other meaning by its concrete name, put back
 /// for the fetch to take as TeX's.
 pub(crate) fn expand_dname(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
-    let d = dname_of(t).expect("a derived name's token");
+    let d = dname_of(r.ops, t).expect("a derived name's token");
     if let Some(Answer(x)) =
         derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
         && let crate::val::Mean::Macro(m) = crate::val::Mean::decode(r.v, x)

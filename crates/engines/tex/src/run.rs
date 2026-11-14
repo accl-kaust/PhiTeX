@@ -155,6 +155,8 @@ pub(crate) struct Ops {
     /// The lines before the pieces runs cut of a file's rest
     /// (`api::RestLines`).
     pub rest_lines: crate::api::RestLines,
+    /// The deferred counters' symbols, by number (`crate::defer::SymTable`).
+    pub syms: std::sync::Arc<crate::defer::SymTable>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// What the last two finishers running each output routine defined,

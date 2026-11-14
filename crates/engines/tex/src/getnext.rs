@@ -610,7 +610,7 @@ impl Run<'_, '_> {
     fn size_stop_here(&self) -> bool {
         (self.size_stop == Some(self.expand_depth) && crate::defer::is_size(self.cur.tok))
             || (self.reg_stop == Some(self.expand_depth)
-                && crate::defer::sym_of(self.cur.tok).is_some())
+                && crate::defer::sym_of(self.ops, self.cur.tok).is_some())
     }
 
     /// `get_x_token` (§380): a halt is raised, never returned.
