@@ -800,6 +800,13 @@ impl Session {
     /// whose key moved, or not found then and found now. How many were
     /// checked, and how many are to be read again.
     pub fn reread_all(&mut self) -> (usize, usize) {
+        let r = self.reread_all_timed();
+        (r.checked, r.changed)
+    }
+
+    /// [`Session::reread_all`], with what its check cost by kind: the
+    /// keys of the files found, the lookups of the names not found.
+    pub fn reread_all_timed(&mut self) -> Reread {
         // (a file found whose key is the one it had when the build read
         // it: unchanged, not read again; one not found is looked up again,
         // and read only if the host finds it now; one read from an
@@ -813,10 +820,12 @@ impl Session {
         }
         let trace = phitex_tex::OBSERVE && std::env::var_os("PHITEX_REREAD_TRACE").is_some();
         let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut keys, mut lookups, mut looked_up) = (Duration::ZERO, Duration::ZERO, 0);
         let stale: Vec<String> = self
             .inputs
             .iter()
             .filter(|(n, found, p, _)| {
+                let t = Instant::now();
                 let (stale, why) = match (found, p) {
                     (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
                         (Some(a), Some(_)) if a.is_empty() => (true, "read under two keys"),
@@ -837,6 +846,12 @@ impl Session {
                         },
                     },
                 };
+                if *found {
+                    keys += t.elapsed();
+                } else {
+                    lookups += t.elapsed();
+                    looked_up += 1;
+                }
                 if trace {
                     eprintln!(
                         "reread: {n}: {why}: {}",
@@ -848,9 +863,15 @@ impl Session {
             .map(|(n, ..)| plain_name(n))
             .collect();
         drop(stamps);
-        let counts = (self.inputs.len(), stale.len());
+        let r = Reread {
+            checked: self.inputs.len(),
+            changed: stale.len(),
+            looked_up,
+            keys,
+            lookups,
+        };
         self.changed.extend(stale);
-        counts
+        r
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -2949,4 +2970,19 @@ mod out_name_tests {
             assert!(!out_name_ok(bad), "{bad}");
         }
     }
+}
+
+/// What `r`'s check of the files did ([`Session::reread_all_timed`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Reread {
+    /// The files and names checked.
+    pub checked: usize,
+    /// Those to be read again.
+    pub changed: usize,
+    /// Of those checked, the names not found, looked up again.
+    pub looked_up: usize,
+    /// The time the keys of the files found took (a stat each).
+    pub keys: Duration,
+    /// The time the lookups of the names not found took.
+    pub lookups: Duration,
 }

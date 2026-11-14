@@ -1864,7 +1864,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (`r`: the files the builds read, how many were checked, how many
     // had changed and were read again, and the time the check took; told
     // with the build it asked for)
-    let reread: Cell<Option<(usize, usize, Duration)>> = Cell::new(None);
+    let reread: Cell<Option<(phitex_live::session::Reread, Duration)>> = Cell::new(None);
     // (the evaluation the last build's result was of: a build that ran
     // none says so)
     let last_settled: Cell<Option<(u64, u64)>> = Cell::new(None);
@@ -2361,7 +2361,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             } else {
                 rows.push(("nodes".to_owned(), format!("{nodes} run")));
             }
-            if let Some((checked, changed, d)) = asked_reread {
+            if let Some((
+                phitex_live::session::Reread {
+                    checked, changed, ..
+                },
+                d,
+            )) = asked_reread
+            {
                 rows.push((
                     "files".to_owned(),
                     format!(
@@ -2512,10 +2518,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             // watch did meanwhile, `Busy::waited`)
             "waited": before.as_ref().map(|w| w.iter().map(|(k, d)| json!([k, d.as_secs_f64() * 1e3])).collect::<Vec<_>>()),
             // (`r`: the files checked, those changed and read again)
-            "reread": asked_reread.map(|(checked, changed, d)| json!({
-                "checked": checked,
-                "changed": changed,
+            // (and the check's time by kind: the keys of the files found,
+            // a stat each, and the lookups of the names not found)
+            "reread": asked_reread.map(|(r, d)| json!({
+                "checked": r.checked,
+                "changed": r.changed,
                 "ms": d.as_secs_f64() * 1e3,
+                "looked_up": r.looked_up,
+                "keys_ms": r.keys.as_secs_f64() * 1e3,
+                "lookups_ms": r.lookups.as_secs_f64() * 1e3,
             })),
             // (runs in all, a node run again counted again: past
             // nodes_run, the work an edit did again)
@@ -2905,8 +2916,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // outside that no event told; those whose key did
                         // not move are not read)
                         let t = Instant::now();
-                        let (checked, changed) = s.reread_all();
-                        reread.set(Some((checked, changed, t.elapsed())));
+                        let r = s.reread_all_timed();
+                        reread.set(Some((r, t.elapsed())));
                         diff_reread = true;
                         again = true;
                         why.push("asked".to_owned());
@@ -3208,8 +3219,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 // (as `r`: every input read again from
                                 // disk, a change no event told)
                                 let t = Instant::now();
-                                let (checked, changed) = s.reread_all();
-                                reread.set(Some((checked, changed, t.elapsed())));
+                                let r = s.reread_all_timed();
+                                reread.set(Some((r, t.elapsed())));
                                 diff_reread = true;
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
