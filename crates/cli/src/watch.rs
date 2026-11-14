@@ -393,11 +393,16 @@ fn is_read(a: &Ask) -> bool {
 struct ReadsWorker {
     tx: mpsc::Sender<Ask>,
     /// The builds begun, and what the last one ended with (none while one
-    /// runs).
+    /// runs, or until a read of it is asked).
     now: Arc<(
         Mutex<(u64, Option<Arc<phitex_live::session::Reads>>)>,
         std::sync::Condvar,
     )>,
+    /// Whether the last build ended, and whether a read was asked since
+    /// it began: what it ended with is taken only then, on the asking
+    /// path, never on every build's ([`ReadsWorker::wants`]).
+    ended: std::cell::Cell<bool>,
+    asked: std::cell::Cell<bool>,
 }
 
 impl ReadsWorker {
@@ -487,7 +492,12 @@ impl ReadsWorker {
                     }
                 }
             });
-        ReadsWorker { tx, now }
+        ReadsWorker {
+            tx,
+            now,
+            ended: std::cell::Cell::new(false),
+            asked: std::cell::Cell::new(false),
+        }
     }
 
     /// A read the thread answers (one it does not: false).
@@ -496,7 +506,22 @@ impl ReadsWorker {
             return false;
         }
         let _ = self.tx.send(a.clone());
+        self.asked.set(true);
         true
+    }
+
+    /// Whether what the last build ended with is to be taken now: it
+    /// ended, a read of it was asked, and nothing was taken yet.
+    fn wants(&self) -> bool {
+        self.ended.get()
+            && self.asked.get()
+            && self
+                .now
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1
+                .is_none()
     }
 
     /// A build begins: what the last one left is read no more.
@@ -504,12 +529,20 @@ impl ReadsWorker {
         let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
         g.0 += 1;
         g.1 = None;
+        self.ended.set(false);
+        self.asked.set(false);
     }
 
-    /// The build ended with `r` (none: no build to read).
+    /// The build ended (what it ended with taken when a read is asked).
+    fn ended(&self) {
+        self.ended.set(true);
+    }
+
+    /// What the build ended with (none: no build to read, the reads
+    /// answered with nothing).
     fn built(&self, r: Option<phitex_live::session::Reads>) {
         let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
-        g.1 = r.map(Arc::new);
+        g.1 = Some(Arc::new(r.unwrap_or_default()));
         self.now.1.notify_all();
     }
 }
@@ -1801,7 +1834,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     v.building(false);
                 }
                 if let Some(rw) = &reads {
-                    rw.built(s.reads());
+                    rw.ended();
+                    if rw.wants() {
+                        rw.built(s.reads());
+                    }
                 }
                 if let Some(l) = &lsp {
                     l.built(&b);
@@ -1952,7 +1988,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 v.building(false);
             }
             if let Some(rw) = &reads {
-                rw.built(s.reads());
+                rw.ended();
+                if rw.wants() {
+                    rw.built(s.reads());
+                }
             }
             phitex_tex::timeline::lap("watch: the viewers told");
             if let Some(l) = &lsp {
@@ -2967,7 +3006,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     for a in asks {
                         // (a page's origins, a source place's pages, a
                         // citation: answered off this loop, [`ReadsWorker`])
-                        if reads.as_ref().is_some_and(|rw| rw.ask(&a)) {
+                        if let Some(rw) = reads.as_ref().filter(|rw| rw.ask(&a)) {
+                            // (what the build ended with, taken at its
+                            // first read)
+                            if rw.wants() {
+                                let t = Instant::now();
+                                rw.built(s.reads());
+                                busy.borrow_mut().did("the reads' build taken", t);
+                            }
                             continue;
                         }
                         // (the transcript never holds a change's build

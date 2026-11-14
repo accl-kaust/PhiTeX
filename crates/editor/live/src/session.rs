@@ -438,7 +438,8 @@ impl Report {
 
 /// A build's answers to the viewer's reads, taken apart from the session
 /// ([`Session::reads`]): made on a thread of their own, never on the
-/// one that builds.
+/// one that builds. The default: no build, nothing to answer with.
+#[derive(Default)]
 pub struct Reads {
     origins: Option<Arc<phitex_tex::OriginsCapture>>,
     aux: String,

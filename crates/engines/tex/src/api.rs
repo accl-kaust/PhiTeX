@@ -7872,7 +7872,7 @@ impl Build {
             // or a frame's name, a name compared by its value)
             let mut span: Option<(ValueId, usize, usize)> = None;
             v.with_list(fs, |frames| {
-                for &f in frames {
+                for (k, &f) in frames.iter().enumerate() {
                     let Some((name, s, e)) = v
                         .with_list(f, |xs| match xs {
                             &[t, seg, _, _, _, name, pos] if t == s_tag => {
@@ -7885,6 +7885,20 @@ impl Build {
                     else {
                         continue;
                     };
+                    // (the span is of the first frame's file: one that is
+                    // no file's text, the document's own lines, has none,
+                    // and the rest of its frames are not read)
+                    if k == 0
+                        && texts
+                            .entry(name)
+                            .or_insert_with(|| {
+                                let n = str_of(v, name);
+                                self.g.file_text(&n).map(|t| (n, t))
+                            })
+                            .is_none()
+                    {
+                        break;
+                    }
                     span = Some(match span {
                         Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
                         Some(sp) => sp,
