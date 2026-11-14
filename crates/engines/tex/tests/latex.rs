@@ -4236,6 +4236,57 @@ fn a_macro_call_counts_its_tokens_toward_the_runs_checks() {
     );
 }
 
+/// A file whose last paragraph has no blank line after it, then an
+/// `\input` of a file that begins with a section: the paragraph reads on
+/// into the second file to its `\section`, so a run reads that file's
+/// first lines itself, numbered as a file's, and cuts the rest into
+/// pieces. Those pieces' lines are the file's, not a fold of the lines the
+/// nodes before them began, which missed the lines read with numbers
+/// (Grail's appendix at -j1: every line in the log two short). The log is
+/// the same at one and eight threads, and names the paragraph's lines.
+#[test]
+fn a_files_rest_read_on_into_keeps_its_line_numbers() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rest-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::write(
+        dir.join("prev.tex"),
+        "\\section{Prev}\n\nA paragraph of the previous file\nthat ends without a blank line.\n",
+    )
+    .expect("prev.tex");
+    std::fs::write(
+        dir.join("app.tex"),
+        "\\section{Next}\n\\label{sec:next}\n\nA first paragraph\nof two lines.\n\n\
+         The second paragraph aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+         goes on a line\nand another.\n\nLast.\n",
+    )
+    .expect("app.tex");
+    let doc = "\\documentclass{article}\n\\begin{document}\nSome text before.\n\n\
+               \\input{prev}\n\\input{app}\n\n\\end{document}\n";
+    let mut logs = Vec::new();
+    for threads in [1, 8] {
+        let b = common::build(
+            Options {
+                threads: Some(threads),
+                ..pdf_opts("restlines", &dir)
+            },
+            Some(&prelude(true)),
+            doc,
+        );
+        let log = b.output().1.clone();
+        let at: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("in paragraph at lines"))
+            .collect();
+        assert!(
+            at.len() == 1 && at[0].ends_with("in paragraph at lines 7--10"),
+            "-j{threads}: {at:?}"
+        );
+        logs.push(log);
+    }
+    assert_eq!(logs[0], logs[1]);
+}
+
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
 /// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
 /// (microtype's font expansion). A reader cares which ratios are there,
