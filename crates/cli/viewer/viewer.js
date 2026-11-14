@@ -11010,6 +11010,17 @@ var Socket = class {
   onClose = () => {
   };
   /**
+   * Called on every open, beside `onOpen` (which later code assigns over:
+   * a listener chained into it was dropped by that, so the notes were asked
+   * for on no open, and a reloaded tab showed none until the next build).
+   */
+  opens = [];
+  /** `f` on every open from now on, and now if it is open. */
+  onOpened(f) {
+    this.opens.push(f);
+    if (this.ws?.readyState === WebSocket.OPEN) f();
+  }
+  /**
    * Join the watch: first asked over HTTP whether it is there, so a tab
    * left open after its watch ended never opens WebSockets to a dead port
    * (Firefox opens one WebSocket at a time to an address, and delays
@@ -11043,7 +11054,11 @@ var Socket = class {
     const url = new URL("ws", location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.ws = new WebSocket(url);
-    this.ws.onopen = () => (this.wait = 1e3, this.onOpen());
+    this.ws.onopen = () => {
+      this.wait = 1e3;
+      this.onOpen();
+      for (const f of this.opens) f();
+    };
     this.ws.onmessage = (m) => {
       const r = JSON.parse(m.data);
       if (r.event) return this.events.forEach((f) => f(r));
@@ -11216,11 +11231,7 @@ var review = {
   request: (op, params) => sock.request({ op, ...params }),
   onState(cb) {
     sock.onEvent((e) => e.event === "review" && cb(e));
-    const was = sock.onOpen;
-    sock.onOpen = () => {
-      was();
-      void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json));
-    };
+    sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json)));
   },
   // TEMPORARY, remove with its cause: the glyph origins give an \input
   // file's text the bytes of the \input command (an engine bug, its root
