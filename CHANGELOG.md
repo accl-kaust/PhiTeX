@@ -10,18 +10,8 @@ milestones, not versions.
 
 ## 1.0.2 (2026-11-14)
 
-A big one :) Lots of speed, and a first taste of writing papers together
-with an AI agent!
+A big one :) Lots of speed, and a nicer preview to read your paper in!
 
-- **Your agent can drive PhiTeX now!** Claude (or any agent) can hop onto
-  the watch you already have running with `phitex session`: wait for a
-  build, read the errors, and write the PDF when you ask. No more
-  copy-pasting logs around.
-- **Notes and review (experimental).** Turn it on in Settings, then
-  Experimental. Select text on the page to leave a note for your agent,
-  and review its edits like a pull request: accept or reject each one,
-  or see the typeset diff. It's off by default while we polish it, but
-  give it a spin!
 - **Edits feel instant.** Pressing `r` with nothing changed takes a
   couple of milliseconds, big plain TeX files edit in a few ms instead
   of fifty, and pages with figures aren't redrawn from scratch.
