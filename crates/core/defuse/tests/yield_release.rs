@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use phitex_defuse::{Ctx, Engine, Operation, Stop, ValueId};
 
+/// 1 in the edit whose order is forced; 0 in the clean build before it.
+static PHASE: AtomicU32 = AtomicU32::new(0);
 static GATE: AtomicBool = AtomicBool::new(false);
 static END: AtomicBool = AtomicBool::new(false);
 static PARKED: AtomicU32 = AtomicU32::new(0);
@@ -47,9 +49,10 @@ impl Operation for Gate {
     }
 
     fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        eprintln!("yr: gate runs");
+        if PHASE.load(Ordering::SeqCst) == 0 {
+            return Ok(ValueId::UNIT);
+        }
         hold_until(|| GATE.load(Ordering::SeqCst));
-        eprintln!("yr: gate goes");
         Ok(ValueId::UNIT)
     }
 }
@@ -64,9 +67,10 @@ impl Operation for Settled {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        eprintln!("yr: settled {} runs", cx.node().raw());
+        if PHASE.load(Ordering::SeqCst) == 0 {
+            return Ok(ValueId::UNIT);
+        }
         if let Err(s) = cx.wait_settled() {
-            eprintln!("yr: settled {} waits", cx.node().raw());
             if !GATE.load(Ordering::SeqCst) {
                 PARKED.fetch_add(1, Ordering::SeqCst);
             }
@@ -89,7 +93,9 @@ impl Operation for Yielder {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        eprintln!("yr: yielder runs");
+        if PHASE.load(Ordering::SeqCst) == 0 {
+            return Ok(ValueId::UNIT);
+        }
         if YIELDER_GAVE.load(Ordering::SeqCst) {
             YIELDER_AGAIN.store(true, Ordering::SeqCst);
             return Ok(ValueId::UNIT);
@@ -114,10 +120,17 @@ fn a_run_that_gave_its_worker_runs_again_once_that_node_is_taken() {
     let settled = e.register(Arc::new(Settled));
     let yielder = e.register(Arc::new(Yielder));
     let u = e.new_unit();
-    e.push(u, gate, vec![]);
-    e.push(u, settled, vec![v.int(1)]);
-    e.push(u, settled, vec![v.int(0)]);
+    let g = e.push(u, gate, vec![]);
+    let w1 = e.push(u, settled, vec![v.int(1)]);
+    let w2 = e.push(u, settled, vec![v.int(0)]);
     let y = e.push(u, yielder, vec![]);
+    e.evaluate(2).unwrap();
+    // (the edit: all four to run again, on two workers)
+    PHASE.store(1, Ordering::SeqCst);
+    e.replace(g, gate, vec![]);
+    e.replace(w1, settled, vec![v.int(1)]);
+    e.replace(w2, settled, vec![v.int(0)]);
+    e.replace(y, yielder, vec![]);
     let watch = std::thread::spawn(|| {
         // (the gate let go once both waiters have parked on it; then the
         // yielder's second run, while `Wait1` still holds)
@@ -132,6 +145,7 @@ fn a_run_that_gave_its_worker_runs_again_once_that_node_is_taken() {
     });
     let r = e.evaluate(2).unwrap();
     let again = watch.join().unwrap();
+    PHASE.store(0, Ordering::SeqCst);
     assert!(
         YIELDER_GAVE.load(Ordering::SeqCst),
         "the yielder gave its worker: {r:?}"
