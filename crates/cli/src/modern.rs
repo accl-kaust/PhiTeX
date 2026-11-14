@@ -194,9 +194,6 @@ enum Sub {
         #[arg(long, value_name = "PID", global = true)]
         session: Option<u32>,
     },
-    /// The running watches (now `phitex session list`)
-    #[command(hide = true)]
-    Sessions,
     /// What is new in this version
     News,
     /// Shell completions: phitex completions bash > ~/.local/share/bash-completion/completions/phitex
@@ -441,7 +438,6 @@ pub enum Command {
     News,
     Upgrade,
     Config,
-    Sessions,
     Session,
 }
 
@@ -549,7 +545,6 @@ impl Cli {
                 o.output_dir = output_dir;
             }
             Some(Sub::News) => o.command = Some(Command::News),
-            Some(Sub::Sessions) => o.command = Some(Command::Sessions),
             Some(Sub::Session { verb, session }) => {
                 o.command = Some(Command::Session);
                 o.session = Some((verb, session));
@@ -1583,9 +1578,6 @@ pub fn main(args: &[String]) -> ! {
         crate::news::print(o.json);
         std::process::exit(0);
     }
-    if command == Command::Sessions {
-        std::process::exit(crate::attach::sessions(&ui, o.json));
-    }
     if command == Command::Session
         && let Some((verb, pid)) = &o.session
     {
@@ -1728,11 +1720,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News
-        | Command::Upgrade
-        | Command::Config
-        | Command::Sessions
-        | Command::Session => unreachable!(),
+        Command::News | Command::Upgrade | Command::Config | Command::Session => unreachable!(),
     }
 }
 

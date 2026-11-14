@@ -707,7 +707,7 @@ folder:
   changes, and removed when the watch ends.
 - A file whose watch does not run (its process gone, or its port not
   answering) is ignored and removed by its readers.
-- `phitex sessions` lists the running watches; `phitex sessions --json`
+- `phitex session list` lists the running watches; `phitex session list --json`
   prints their files' objects as one JSON array on one line.
 - An editor picks the watch whose `root` holds the buffer's file,
   preferring the one whose `main` is that file.
@@ -760,7 +760,7 @@ phitex session problems [--errors] [--warnings] [--file F] [--context N]
 phitex session rebuild [--clean]
 phitex session log [--tail N] [--build N]
 phitex session stop                            # as q: the exact PDF written, then the watch ends
-phitex session list                            # the running watches (`phitex sessions`, hidden, one release)
+phitex session list                            # the running watches
 phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | changes
 ```
 

@@ -1730,7 +1730,7 @@ fn watch_lsp() {
 
 /// Editors attached to a terminal's `phitex watch` (docs/spec-editor-protocol.md
 /// §8): its discovery file (0600, in a 0700 folder) names its port and
-/// token, and `phitex sessions --json` lists it; two clients attach, each
+/// token, and `phitex session list --json` lists it; two clients attach, each
 /// told so in `initialize`; one's unsaved edit makes an error both are
 /// shown at its place at once (a terminal's watch places an edit's
 /// errors as one with a viewer does); the other detaches (`shutdown`, `exit`: its connection closed)
@@ -1807,10 +1807,10 @@ fn watch_attach() {
     let token = info["lsp"]["token"].as_str().expect("a token").to_owned();
     assert_eq!(token.len(), 32, "{info}");
     let listed = command(bin, &dir)
-        .args(["sessions", "--json"])
+        .args(["session", "list", "--json"])
         .env("XDG_RUNTIME_DIR", &run)
         .output()
-        .expect("phitex sessions runs");
+        .expect("phitex session list runs");
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
     assert_eq!(listed, json!([info.clone()]), "{listed}");
     let connect = || {
