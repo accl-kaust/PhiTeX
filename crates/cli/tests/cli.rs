@@ -3107,8 +3107,10 @@ fn watch_plain_edit() {
 }
 
 /// `phitex watch`, headless: the user's phitex.toml changed in a viewer's
-/// preference only (a problems' filter, as the viewer writes it) is no
-/// new session: the next build is the edit's, not a clean build again.
+/// preference only (a problems' filter, as the viewer writes it), or in
+/// a setting no build reads (the review's switch and mode, the quit's
+/// question: the viewer's Settings) is no new session: the next build is
+/// the edit's, not a clean build again.
 /// A change the target reads (`synctex`) is one.
 #[test]
 fn watch_a_viewer_preference_is_no_new_session() {
@@ -3140,9 +3142,9 @@ fn watch_a_viewer_preference_is_no_new_session() {
     assert_eq!(cold["ok"], true, "{cold}");
     std::fs::write(
         &user,
-        "opening = \"random\"\nproblems-hidden = [\"other\"]\n",
+        "opening = \"random\"\nproblems-hidden = [\"other\"]\nexperimental-review = true\nreview-mode = \"propose\"\nwatch-ask-write = false\n",
     )
-    .expect("a viewer's preference");
+    .expect("a viewer's preference, and the settings no build reads");
     // (the watch's file events settle: a new session would start now)
     std::thread::sleep(Duration::from_millis(1500));
     let at = text.find(" the ").expect("a word");
@@ -3159,7 +3161,7 @@ fn watch_a_viewer_preference_is_no_new_session() {
     // (a setting a build reads: a new session, its clean build)
     std::fs::write(
         &user,
-        "opening = \"random\"\nproblems-hidden = [\"other\"]\nsynctex = false\n",
+        "opening = \"random\"\nproblems-hidden = [\"other\"]\nexperimental-review = true\nreview-mode = \"propose\"\nwatch-ask-write = false\nsynctex = false\n",
     )
     .expect("a build's setting");
     let ev = until(&mut lines, "build", &1.into(), &mut seen);

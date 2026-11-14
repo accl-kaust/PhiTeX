@@ -1177,7 +1177,42 @@ fn reconfigured(
 fn build_of(t: &Target) -> String {
     let mut t = t.clone();
     t.warnings.clear();
+    // (the settings no build reads, which a running session takes as they
+    // change (`Live`): the review's switch, its mode, edits from the disk
+    // accepted, the quit's question. Changed, they made a new session, a
+    // clean build of the document for a switch in the viewer's Settings)
+    let Live {
+        experimental_review,
+        review_mode,
+        review_accept_disk,
+        watch_ask_write,
+    } = Live::default();
+    t.experimental_review = experimental_review;
+    t.review_mode = review_mode;
+    t.review_accept_disk = review_accept_disk;
+    t.watch_ask_write = watch_ask_write;
     format!("{t:?}")
+}
+
+/// The settings a running session takes as they change, without a new
+/// session: none of them is read by a build ([`build_of`] leaves them out).
+#[derive(Default, Clone, PartialEq, Eq)]
+struct Live {
+    experimental_review: bool,
+    review_mode: Option<String>,
+    review_accept_disk: bool,
+    watch_ask_write: bool,
+}
+
+impl Live {
+    fn of(t: &Target) -> Live {
+        Live {
+            experimental_review: t.experimental_review,
+            review_mode: t.review_mode.clone(),
+            review_accept_disk: t.review_accept_disk,
+            watch_ask_write: t.watch_ask_write,
+        }
+    }
 }
 
 fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
@@ -1239,6 +1274,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     );
     hub.set_changes(t.experimental_review);
     hub.set_mode(t.review_mode.as_deref().unwrap_or("direct"));
+    // (the settings taken as they change, `Live`: the quit's question)
+    let ask_write = std::cell::Cell::new(t.watch_ask_write);
+    let mut live = Live::of(t);
     hub.about(serde_json::json!({
         "engine": job.engine.name,
         "engine_why": t.engine_why,
@@ -1674,7 +1712,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // way out writes nothing)
         // (a signal's way out asks nothing: no one may be there to answer)
         // (`watch-ask-write` off: nothing asked, nothing written; `-y` still writes)
-        let ask = o.no_confirm || t.watch_ask_write;
+        let ask = o.no_confirm || ask_write.get();
         let pending = if ask {
             unwritten.borrow_mut().take()
         } else {
@@ -3008,6 +3046,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 // session)
                                 if (build_of(&t2), Some(dir.clone())) != resolved {
                                     next = Some(((t2, o.clone(), dir), "the settings changed"));
+                                } else if Live::of(&t2) != live {
+                                    // (only settings no build reads: taken
+                                    // by this session, no build)
+                                    live = Live::of(&t2);
+                                    hub.set_changes(live.experimental_review);
+                                    hub.set_mode(live.review_mode.as_deref().unwrap_or("direct"));
+                                    hub.set_accept_disk(live.review_accept_disk);
+                                    ask_write.set(live.watch_ask_write);
                                 }
                             }
                             Err(e) => ui.error(&format!(
