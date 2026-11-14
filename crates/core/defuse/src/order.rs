@@ -12,6 +12,10 @@
 //! segment (nodes keep their labels). The order's list maps a label to its
 //! segment by binary search and changes only on a split or a new unit.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::lock::Lock;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -30,13 +34,54 @@ pub(crate) const UNIT_SPAN: u64 = 1 << 44;
 /// The segments in order of their first label.
 pub(crate) struct Order {
     pub(crate) segs: Lock<Vec<(Pos, SegId)>>,
+    /// The list's changes so far, counted under its write lock, each before
+    /// the lock is let go ([`Order::with_segs`]).
+    gen: AtomicU64,
+    /// Distinct per order in the process, for the threads' copies.
+    id: u64,
 }
+
+thread_local! {
+    /// This thread's copy of an order's list: (order, its `gen` when
+    /// copied, the list). A lookup takes no lock and writes no line another
+    /// thread reads: every read of the list by every worker took its lock,
+    /// and the lock's count bounced between the cores (amsldoc at -j8: 8x
+    /// the cycles of -j1 in the lock alone).
+    static SEGS: RefCell<(u64, u64, Rc<[(Pos, SegId)]>)> = RefCell::new((0, 0, Rc::from(Vec::new())));
+}
+
+static ORDERS: AtomicU64 = AtomicU64::new(1);
 
 impl Order {
     pub(crate) fn new() -> Order {
         Order {
             segs: Lock::new(Vec::new()),
+            gen: AtomicU64::new(0),
+            id: ORDERS.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// `f` of the list as it stands: this thread's copy where the list has
+    /// not changed since it was made, else a copy made now under the read
+    /// lock. A change counts `gen` under the write lock, before it lets
+    /// go: a reader that loads the count from before a change is ordered
+    /// before it, as a reader that took the lock first; one ordered after
+    /// it (through any lock or atomic it synchronised with since) loads the
+    /// new count and copies the list again. Never a list the thread has
+    /// seen replaced.
+    fn with_segs<R>(&self, f: impl FnOnce(&[(Pos, SegId)]) -> R) -> R {
+        let g = self.gen.load(Ordering::Acquire);
+        let mine = SEGS.with_borrow(|c| (c.0 == self.id && c.1 == g).then(|| Rc::clone(&c.2)));
+        let list = mine.unwrap_or_else(|| {
+            let segs = self.segs.read();
+            // (stable under the read lock: changes count under the write)
+            let g = self.gen.load(Ordering::Acquire);
+            let list: Rc<[(Pos, SegId)]> = Rc::from(&segs[..]);
+            drop(segs);
+            SEGS.with_borrow_mut(|c| *c = (self.id, g, Rc::clone(&list)));
+            list
+        });
+        f(&list)
     }
 
     /// The segment whose range holds `p`.
@@ -45,15 +90,17 @@ impl Order {
     }
 
     pub(crate) fn next(&self, _s: SegId, lo: Pos) -> Option<SegId> {
-        let segs = self.segs.read();
-        let i = segs.partition_point(|(l, _)| *l <= lo);
-        segs.get(i).map(|x| x.1)
+        self.with_segs(|segs| {
+            let i = segs.partition_point(|(l, _)| *l <= lo);
+            segs.get(i).map(|x| x.1)
+        })
     }
 
     pub(crate) fn prev(&self, _s: SegId, lo: Pos) -> Option<SegId> {
-        let segs = self.segs.read();
-        let i = segs.partition_point(|(l, _)| *l < lo);
-        i.checked_sub(1).map(|j| segs[j].1)
+        self.with_segs(|segs| {
+            let i = segs.partition_point(|(l, _)| *l < lo);
+            i.checked_sub(1).map(|j| segs[j].1)
+        })
     }
 
     /// Registers a segment starting at `lo` (a split's upper half, a unit's
@@ -62,6 +109,7 @@ impl Order {
         let mut segs = self.segs.write();
         let i = segs.partition_point(|(l, _)| *l < lo);
         segs.insert(i, (lo, s));
+        self.gen.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Registers segments in one insert (`Engine::push_many`'s).
@@ -69,26 +117,28 @@ impl Order {
         let mut segs = self.segs.write();
         segs.extend(new);
         segs.sort_unstable();
+        self.gen.fetch_add(1, Ordering::AcqRel);
     }
 
     /// The first segment at or after `p`'s, for walks forward.
     pub(crate) fn at_or_after(&self, p: Pos) -> Option<SegId> {
-        let segs = self.segs.read();
-        let i = segs.partition_point(|(l, _)| *l <= p);
-        i.checked_sub(1).map(|j| segs[j].1)
+        self.with_segs(|segs| {
+            let i = segs.partition_point(|(l, _)| *l <= p);
+            i.checked_sub(1).map(|j| segs[j].1)
+        })
     }
 
     /// The segments in order, a snapshot.
     pub(crate) fn all(&self) -> Vec<SegId> {
-        self.segs.read().iter().map(|x| x.1).collect()
+        self.with_segs(|segs| segs.iter().map(|x| x.1).collect())
     }
 
     pub(crate) fn first(&self) -> Option<SegId> {
-        self.segs.read().first().map(|x| x.1)
+        self.with_segs(|segs| segs.first().map(|x| x.1))
     }
 
     pub(crate) fn count(&self) -> u32 {
-        u32::try_from(self.segs.read().len()).unwrap_or(u32::MAX)
+        self.with_segs(|segs| u32::try_from(segs.len()).unwrap_or(u32::MAX))
     }
 }
 
@@ -209,6 +259,7 @@ impl Order {
         let mut segs = self.segs.write();
         if let Ok(i) = segs.binary_search(&(lo, id)) {
             segs.remove(i);
+            self.gen.fetch_add(1, Ordering::AcqRel);
         }
     }
 

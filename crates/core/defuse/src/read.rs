@@ -55,8 +55,39 @@ fn env_reaching(eng: &Engine, f: Field) -> Reaching {
 /// The environment's value of `f`: the client's settings, then its
 /// provider once, cached.
 pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
-    if let Some(x) = eng.env.values.read().get(&f) {
-        return *x;
+    let inst = eng.values().instance();
+    // (this thread's copy first, of the count now: no lock, no line
+    // written that another thread reads. Every environment read of every
+    // worker took the map's read lock, its count bouncing between cores)
+    let g = eng.env.gen.load(Ordering::Acquire);
+    if let Some(x) = ENV.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&f).copied()).flatten()) {
+        return x;
+    }
+    let x = env_value_shared(eng, f);
+    x.1
+}
+
+/// [`env_value`] from the shared map (and its provider on a miss), kept
+/// in this thread's copy with the count it was read at: (count, value).
+fn env_value_shared(eng: &Engine, f: Field) -> (u64, Option<ValueId>) {
+    let inst = eng.values().instance();
+    let keep = |g: u64, x: Option<ValueId>| {
+        ENV.with_borrow_mut(|c| {
+            if c.0 != inst || c.1 != g {
+                *c = (inst, g, FxHashMap::default());
+            }
+            c.2.insert(f, x);
+        });
+        (g, x)
+    };
+    {
+        let vals = eng.env.values.read();
+        // (stable under the read lock: a replacement counts under the
+        // write lock)
+        let g = eng.env.gen.load(Ordering::Acquire);
+        if let Some(x) = vals.get(&f) {
+            return keep(g, *x);
+        }
     }
     // (asked once: a miss being answered is waited for, not answered
     // again beside it. A clean build's first paragraphs, one a worker, all
@@ -79,7 +110,14 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
         x
     });
     eng.env.asking.lock().remove(&f);
-    x
+    // (what the map holds now, with its count: the answer, or a value set
+    // meanwhile)
+    let vals = eng.env.values.read();
+    let g = eng.env.gen.load(Ordering::Acquire);
+    match vals.get(&f) {
+        Some(&y) => keep(g, y),
+        None => (g, x),
+    }
 }
 
 /// The last definition of `f` in the last indexed segment before the one
@@ -139,6 +177,14 @@ pub(crate) enum Met {
 }
 
 thread_local! {
+    /// This thread's copy of the environment's values: (values instance,
+    /// `Env::gen` when read, the values read) ([`env_value`]).
+    static ENV: std::cell::RefCell<(u64, u64, FxHashMap<Field, Option<ValueId>>)> =
+        std::cell::RefCell::new((0, 0, FxHashMap::default()));
+    /// This thread's copies of the segments' scope chains at their starts:
+    /// (values instance, `Engine::scope_gen`, by segment) ([`chain_start`]).
+    static CHAINS: std::cell::RefCell<(u64, u64, FxHashMap<SegId, Arc<[u64]>>)> =
+        std::cell::RefCell::new((0, 0, FxHashMap::default()));
     /// What the reads on one layout running on this thread met, innermost
     /// last ([`on_one_layout`]).
     static MET: std::cell::RefCell<Vec<Met>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1872,7 +1918,30 @@ pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
 /// brackets read now are not all those before the next).
 fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
     let g = eng.scope_gen.load(Ordering::Acquire);
-    let cached = |t: &Segment| t.chain.lock().as_ref().filter(|c| c.0 == g).map(|c| c.1.clone());
+    let inst = eng.values().instance();
+    // (this thread's copy of a segment's chain at `g` first: the same chain
+    // the segment holds for `g`, copied from it or found by this thread and
+    // kept on it, with no lock taken and no count shared with another
+    // thread. Every scoped read of every worker took the segment's lock and
+    // cloned its chain: amsldoc at -j8, 14x the cycles of -j1 there)
+    let mine = |t: &Segment| {
+        CHAINS.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&t.id).cloned()).flatten())
+    };
+    let keep = |t: &Segment, c: &[u64]| {
+        CHAINS.with_borrow_mut(|m| {
+            if m.0 != inst || m.1 != g {
+                *m = (inst, g, FxHashMap::default());
+            }
+            m.2.insert(t.id, Arc::from(c));
+        });
+    };
+    let cached = |t: &Segment| {
+        mine(t).or_else(|| {
+            let c = t.chain.lock().as_ref().filter(|c| c.0 == g).map(|c| c.1.clone())?;
+            keep(t, &c);
+            Some(c)
+        })
+    };
     if let Some(c) = cached(s) {
         return Some(c);
     }
@@ -1893,6 +1962,7 @@ fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
     let store = |t: &Segment, c: &Arc<[u64]>| {
         if eng.scope_gen.load(Ordering::Acquire) == g {
             *t.chain.lock() = Some((g, c.clone()));
+            keep(t, c);
         }
     };
     let (mut prev, mut c) = match known {
