@@ -443,6 +443,11 @@ impl Run<'_, '_> {
     /// in one pass (the body with the argument ranges copied in) and
     /// pushed as the macro's level. No list per argument, no buffer of
     /// the run's own. A halt is raised, never returned.
+    /// Tokens written by macro calls a tick counts for
+    /// ([`Run::tok_work`]): about the time of 4096 commands (8192 tokens
+    /// took 1.8 ms in Grail's runaway resume, acclnode11).
+    const TOK_WORK_TICK: u64 = 1 << 13;
+
     pub(crate) fn macro_call(&mut self) {
         let command = std::mem::take(&mut self.command_call);
         // (the engine bounds a run on a guess by its work: an expansion
@@ -524,6 +529,16 @@ impl Run<'_, '_> {
             self.input.pop_spent();
             let range = self.input.arena.expand_body(&m.body, &m.segs, base);
             self.push_range(range, crate::input::ty::MACRO);
+            // (the engine bounds a run on a guess by its work: the tokens
+            // written count too, [`Run::tok_work`])
+            self.tok_work += u64::from(range.end - range.start);
+            if self.tok_work >= Self::TOK_WORK_TICK {
+                self.tok_work = 0;
+                if let Err(s) = self.cx.tick(Self::TOK_WORK_TICK) {
+                    self.input.arena.scratch_end(base);
+                    return self.raise(crate::run::Halt::Stop(s));
+                }
+            }
         }
         self.input.arena.scratch_end(base);
     }

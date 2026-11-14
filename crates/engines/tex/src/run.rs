@@ -724,6 +724,13 @@ pub(crate) struct Run<'c, 'a> {
     /// Macro expansions so far: told the engine every 4096 as its work
     /// (`Ctx::tick`), as the commands are.
     pub exps: u64,
+    /// Tokens the macro calls with arguments wrote since the last tick
+    /// that counted them ([`Run::macro_call`]): an expansion whose
+    /// arguments grow as it recurses (acmart's `\\Sectionformat` let to
+    /// itself on a state that moved, `{\\ACM@sect@format{...}}` one token
+    /// longer a level) copies tokens by the million in a few thousand
+    /// calls and commands, which the engine's bound by work never saw.
+    pub tok_work: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
     /// Set while the command loop fetches its next token
@@ -1387,6 +1394,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mode_zero: false,
             cmds: 0,
             exps: 0,
+            tok_work: 0,
             command_call: false,
             cmd_fetch: false,
             skel: None,
