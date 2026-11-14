@@ -531,9 +531,11 @@ impl Run<'_, '_> {
             self.push_range(range, crate::input::ty::MACRO);
             // (the engine bounds a run on a guess by its work: the tokens
             // written count too, [`Run::tok_work`])
+            // (one a `TOK_WORK_TICK` written, the rest carried: a call
+            // that writes more makes as many)
             self.tok_work += u64::from(range.end - range.start);
-            if self.tok_work >= Self::TOK_WORK_TICK {
-                self.tok_work = 0;
+            while self.tok_work >= Self::TOK_WORK_TICK {
+                self.tok_work -= Self::TOK_WORK_TICK;
                 if let Err(s) = self.cx.tick(Self::TOK_WORK_TICK) {
                     self.input.arena.scratch_end(base);
                     return self.raise(crate::run::Halt::Stop(s));

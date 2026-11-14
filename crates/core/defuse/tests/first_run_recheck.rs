@@ -33,7 +33,10 @@ impl Operation for Def {
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let t = Instant::now();
+        // (checking in: what waits behind it on its worker goes to another,
+        // `Ctx::tick`)
         while !self.0.read.load(Ordering::SeqCst) && t.elapsed() < Duration::from_secs(2) {
+            cx.tick(1)?;
             std::thread::sleep(Duration::from_millis(1));
         }
         cx.define(Field(cx.args()[0]), cx.args()[1]);
