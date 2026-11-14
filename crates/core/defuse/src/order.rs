@@ -13,7 +13,7 @@
 //! segment by binary search and changes only on a split or a new unit.
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::lock::Lock;
@@ -33,7 +33,9 @@ pub(crate) const UNIT_SPAN: u64 = 1 << 44;
 
 /// The segments in order of their first label.
 pub(crate) struct Order {
-    pub(crate) segs: Lock<Vec<(Pos, SegId)>>,
+    /// Shared with the threads' copies: a change makes a new list where
+    /// one holds the old (`Arc::make_mut`), once, not once per reader.
+    pub(crate) segs: Lock<Arc<Vec<(Pos, SegId)>>>,
     /// The list's changes so far, counted under its write lock, each before
     /// the lock is let go ([`Order::with_segs`]).
     changes: AtomicU64,
@@ -42,7 +44,7 @@ pub(crate) struct Order {
 }
 
 /// A thread's copy of an order's list: (order, its count, the list).
-type SegsCopy = (u64, u64, Rc<[(Pos, SegId)]>);
+type SegsCopy = (u64, u64, Arc<Vec<(Pos, SegId)>>);
 
 thread_local! {
     /// This thread's copy of an order's list: (order, its `changes` when
@@ -50,7 +52,7 @@ thread_local! {
     /// thread reads: every read of the list by every worker took its lock,
     /// and the lock's count bounced between the cores (amsldoc at -j8: 8x
     /// the cycles of -j1 in the lock alone).
-    static SEGS: RefCell<SegsCopy> = RefCell::new((0, 0, Rc::from(Vec::new())));
+    static SEGS: RefCell<SegsCopy> = RefCell::new((0, 0, Arc::new(Vec::new())));
 }
 
 static ORDERS: AtomicU64 = AtomicU64::new(1);
@@ -58,7 +60,7 @@ static ORDERS: AtomicU64 = AtomicU64::new(1);
 impl Order {
     pub(crate) fn new() -> Order {
         Order {
-            segs: Lock::new(Vec::new()),
+            segs: Lock::new(Arc::new(Vec::new())),
             changes: AtomicU64::new(0),
             id: ORDERS.fetch_add(1, Ordering::Relaxed),
         }
@@ -74,17 +76,16 @@ impl Order {
     /// seen replaced.
     fn with_segs<R>(&self, f: impl FnOnce(&[(Pos, SegId)]) -> R) -> R {
         let g = self.changes.load(Ordering::Acquire);
-        let mine = SEGS.with_borrow(|c| (c.0 == self.id && c.1 == g).then(|| Rc::clone(&c.2)));
-        let list = mine.unwrap_or_else(|| {
+        let fresh = SEGS.with_borrow(|c| c.0 == self.id && c.1 == g);
+        if !fresh {
             let segs = self.segs.read();
             // (stable under the read lock: changes count under the write)
             let g = self.changes.load(Ordering::Acquire);
-            let list: Rc<[(Pos, SegId)]> = Rc::from(&segs[..]);
+            let list = Arc::clone(&segs);
             drop(segs);
-            SEGS.with_borrow_mut(|c| *c = (self.id, g, Rc::clone(&list)));
-            list
-        });
-        f(&list)
+            SEGS.with_borrow_mut(|c| *c = (self.id, g, list));
+        }
+        SEGS.with_borrow(|c| f(&c.2))
     }
 
     /// The segment whose range holds `p`.
@@ -110,6 +111,7 @@ impl Order {
     /// first segment).
     pub(crate) fn insert(&self, lo: Pos, s: SegId) {
         let mut segs = self.segs.write();
+        let segs = Arc::make_mut(&mut segs);
         let i = segs.partition_point(|(l, _)| *l < lo);
         segs.insert(i, (lo, s));
         self.changes.fetch_add(1, Ordering::AcqRel);
@@ -118,6 +120,7 @@ impl Order {
     /// Registers segments in one insert (`Engine::push_many`'s).
     pub(crate) fn insert_many(&self, new: Vec<(Pos, SegId)>) {
         let mut segs = self.segs.write();
+        let segs = Arc::make_mut(&mut segs);
         segs.extend(new);
         segs.sort_unstable();
         self.changes.fetch_add(1, Ordering::AcqRel);
@@ -260,6 +263,7 @@ impl Order {
     /// its left neighbour by `spread`).
     fn remove(&self, lo: Pos, id: SegId) {
         let mut segs = self.segs.write();
+        let segs = Arc::make_mut(&mut segs);
         if let Ok(i) = segs.binary_search(&(lo, id)) {
             segs.remove(i);
             self.changes.fetch_add(1, Ordering::AcqRel);
