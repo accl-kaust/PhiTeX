@@ -845,7 +845,7 @@ fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
                 .and_then(Object::into_string)
                 .map(|s| text_string(s.as_bytes()))
                 .unwrap_or_default();
-            let mut dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
+            let mut dest = |o: Object<'_>| -> Option<Place> {
                 match o {
                     Object::Array(a) => dest_of(pages, &a),
                     Object::String(s) => names.place(pdf, pages, s.as_bytes()),

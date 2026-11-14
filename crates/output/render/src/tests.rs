@@ -256,7 +256,7 @@ fn links_are_read() {
         format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
         "<< /Type /Annot /Subtype /Link /Rect [72 698 100 712] /A << /S /URI /URI (https://example.org/) >> >>".to_owned(),
-        "<< /Type /Annot /Subtype /Link /Rect [72 600 100 612] /Dest [3 0 R /XYZ 0 500 null] >>".to_owned(),
+        "<< /Type /Annot /Subtype /Link /Rect [72 600 100 612] /Dest [3 0 R /XYZ 72 500 null] >>".to_owned(),
     ];
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut at = Vec::new();
@@ -290,6 +290,9 @@ fn links_are_read() {
         "{:?}",
         f.links[1]
     );
+    // (the destination's left: where hyperref's anchor is, a bibliography
+    // entry's column)
+    assert_eq!(f.links[1].left, Some(72.0), "{:?}", f.links[1]);
 }
 
 /// The outline's entries, nested, with their pages and places; a page's
