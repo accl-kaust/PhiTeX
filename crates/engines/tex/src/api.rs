@@ -7760,7 +7760,9 @@ impl Build {
             match m.as_ref().filter(|x| x.0 == key) {
                 Some(x) => x.1.clone(),
                 None => {
+                    let t0 = std::time::Instant::now();
                     let sp: Arc<[_]> = Arc::from(self.spans_named());
+                    crate::timeline::note("origins: the nodes' spans made", t0.elapsed());
                     *m = Some((key, sp.clone()));
                     sp
                 }

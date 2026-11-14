@@ -2337,8 +2337,12 @@ impl crate::Build {
     /// file it wrote while the next edit's build runs).
     #[must_use]
     pub fn origins_capture(&self) -> OriginsCapture {
+        let t0 = std::time::Instant::now();
         let inp = self.origins_input();
+        crate::timeline::note("origins: the input (the nodes' spans)", t0.elapsed());
+        let t0 = std::time::Instant::now();
         let glyphs = inp.shown.iter().map(|&id| kept(inp.inst, id)).collect();
+        crate::timeline::note("origins: the pages' glyphs", t0.elapsed());
         OriginsCapture {
             st: self.origins_shared(),
             inst: inp.inst,
