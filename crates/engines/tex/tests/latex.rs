@@ -4191,6 +4191,47 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
     }
 }
 
+/// A macro call with arguments counts the tokens it writes toward its
+/// run's work ticks, one a 8192 (`Run::tok_work`): a recursion whose
+/// argument grows (Grail's resumes on a moved `\Sectionformat`) copies
+/// millions of tokens in a few thousand calls and commands, and its run
+/// must be checked as often as that work says, or one on a read that
+/// moved runs on to "TeX capacity exceeded". Here 1500 calls, the
+/// argument 8 tokens longer a call: at least 8 * 1500 * 1499 / 2 tokens
+/// written, so at least that / 8192 ticks, where calls and commands
+/// alone make none.
+#[test]
+fn a_macro_call_counts_its_tokens_toward_the_runs_checks() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/tok-ticks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |calls: u32| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\
+             \\def\\r#1{{\\advance\\count255 1 \\ifnum\\count255<{calls} \\expandafter\\r\\else\\expandafter\\@gobble\\fi{{#1aaaaaaaa}}}}\n\
+             \\makeatother\n\\begin{{document}}\n\\count255=0 \\r{{}}Done: \\the\\count255.\n\\end{{document}}\n"
+        )
+    };
+    let ticks = |calls: u32| {
+        let b = common::build(
+            Options {
+                threads: Some(1),
+                ..pdf_opts("tokticks", &dir)
+            },
+            Some(&prelude(true)),
+            &doc(calls),
+        );
+        b.stats.ticks
+    };
+    let (none, many) = (ticks(1), ticks(1500));
+    let tokens = 8 * 1500 * 1499 / 2;
+    assert!(
+        many >= none + tokens / 8192,
+        "1500 growing calls made {many} checks, one call {none}: at least {} more for {tokens} tokens",
+        tokens / 8192
+    );
+}
+
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
 /// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
 /// (microtype's font expansion). A reader cares which ratios are there,

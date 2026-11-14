@@ -1968,6 +1968,9 @@ pub struct Stats {
     /// Waits on a node whose declared set was pending.
     pub pending_sets: u64,
     pub stops: u64,
+    /// The runs' periodic checks (`phitex_defuse::Report::ticks`), summed
+    /// over the build's evaluations.
+    pub ticks: u64,
     /// Attempts that resumed a stopped run at its blocked read, and that
     /// started over though one was kept (a read changed).
     pub resumed: u64,
@@ -2864,6 +2867,7 @@ impl Stats {
             self.reruns.push((n.raw(), op, why));
         }
         self.stood.extend(r.stood.iter().map(|n| n.raw()));
+        self.ticks += r.ticks;
         if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
             let log = std::mem::take(&mut *crate::ops::RUN_LOG.locked());
             let round = self.rounds;

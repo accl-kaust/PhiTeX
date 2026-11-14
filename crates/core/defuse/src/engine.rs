@@ -1760,6 +1760,7 @@ impl Engine {
             rep.waits += load(&w.waits);
             rep.stale_panics += load(&w.stale_panics);
             rep.stopped_stale += load(&w.stopped_stale);
+            rep.ticks += load(&w.ticks);
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.relative_resolved += load(&w.relative_resolved);
