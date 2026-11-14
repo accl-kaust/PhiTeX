@@ -182,6 +182,7 @@ impl GlyphTap for Recorder {
     }
 
     fn xobject(&mut self, obj: usize) {
+        eprintln!("DBG xobject {obj}");
         self.g.codes.push(Code {
             kind: XOBJECT,
             lig: u32::try_from(obj).unwrap_or(u32::MAX),
@@ -192,6 +193,7 @@ impl GlyphTap for Recorder {
     }
 
     fn xobject_codes(&mut self, obj: usize, codes: usize) {
+        eprintln!("DBG xcodes {obj} {codes}");
         let obj = u32::try_from(obj).unwrap_or(u32::MAX);
         if !self.g.xcodes.iter().any(|&(o, _)| o == obj) {
             self.g.xcodes.push((obj, codes));

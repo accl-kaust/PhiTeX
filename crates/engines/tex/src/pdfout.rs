@@ -2786,6 +2786,9 @@ fn write_page_with(
         };
         st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
+    if tap {
+        eprintln!("DBG page apart: {:?}", res.as_ref().err());
+    }
     let _ = res.err();
     drop(st.set_tap(None));
     let g = out.and_then(|o| o.locked().take());
