@@ -168,6 +168,31 @@ function errorNeeds(message) {
 
 // viewer/src/text.ts
 var LAYER_LINES = /* @__PURE__ */ new WeakMap();
+var PENDING = /* @__PURE__ */ new WeakMap();
+function deferText(svg2, fill) {
+  PENDING.set(svg2, fill);
+  svg2.setAttribute("data-pending", "");
+}
+var WAITING = ".phx-text[data-pending], .phx-text[data-hold]";
+function textPending(root) {
+  return !!root.querySelector(WAITING) || isWaiting(root);
+}
+var isWaiting = (n) => "matches" in n && n.matches(WAITING);
+function holdText(root) {
+  for (const svg2 of root.querySelectorAll(".phx-text:not([data-pending])")) svg2.setAttribute("data-hold", "");
+}
+function ensureText(root) {
+  if (!root) return;
+  const all = [...isWaiting(root) ? [root] : [], ...root.querySelectorAll(WAITING)];
+  for (const svg2 of all) {
+    svg2.removeAttribute("data-hold");
+    if (!svg2.hasAttribute("data-pending")) continue;
+    const fill = PENDING.get(svg2);
+    PENDING.delete(svg2);
+    svg2.removeAttribute("data-pending");
+    fill?.();
+  }
+}
 function fold(c) {
   const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
   return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
@@ -353,6 +378,7 @@ function waspOn(page, all = false, length = 1) {
   had?.remove();
   const text = page.querySelector(":scope > .phx-text");
   if (!text) return;
+  ensureText(text);
   const lines2 = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l) => !!l);
   const svg2 = document.createElementNS(SVG, "svg");
   svg2.setAttribute("class", "phx-wasp");
@@ -434,6 +460,7 @@ var Viewer = class _Viewer {
     this.io = new IntersectionObserver((es) => this.seen(es), { root: scroller, rootMargin: "100% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] });
     let frame = 0;
     scroller.addEventListener("scroll", () => {
+      this.moved();
       if (!frame)
         frame = requestAnimationFrame(() => {
           frame = 0;
@@ -487,7 +514,15 @@ var Viewer = class _Viewer {
       });
     });
     let dragFrame = 0;
-    root.addEventListener("pointerdown", () => told = "");
+    root.addEventListener("pointerdown", () => {
+      told = "";
+      for (const k of this.visible) ensureText(this.slots[k]?.el);
+    });
+    root.addEventListener("pointermove", (e) => {
+      if (!e.movementX && !e.movementY) return;
+      const slot = e.target?.closest?.(".slot");
+      if (slot && textPending(slot)) ensureText(slot);
+    }, { passive: true });
     root.addEventListener("pointermove", (e) => {
       if (!(e.buttons & 1) || dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
@@ -748,6 +783,7 @@ var Viewer = class _Viewer {
     if (!s) return "";
     const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
     const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    ensureText(s.el);
     for (const el of s.el.querySelectorAll("text")) {
       const tr = el.getBoundingClientRect();
       if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
@@ -880,6 +916,7 @@ var Viewer = class _Viewer {
     const s = this.slots[k];
     if (!s) return [];
     const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
+    ensureText(s.el);
     return [...s.el.querySelectorAll("text")].map((t) => {
       const r = t.getBoundingClientRect();
       const y0 = (r.top - b.top) * sy, y1 = (r.bottom - b.top) * sy, base = Number(t.getAttribute("y"));
@@ -1017,6 +1054,7 @@ var Viewer = class _Viewer {
     if (!s) return null;
     const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
     const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    ensureText(s.el);
     for (const el of s.el.querySelectorAll("text")) {
       const tr = el.getBoundingClientRect();
       if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
@@ -1171,6 +1209,7 @@ var Viewer = class _Viewer {
     if (!at) return null;
     let words2 = "", far = Infinity;
     const y = v.top + 12;
+    ensureText(this.slots[at.k]?.el);
     for (const t of this.slots[at.k]?.el.querySelectorAll("text") ?? []) {
       const r = t.getBoundingClientRect();
       if (r.bottom < y - 4 || !t.textContent?.trim()) continue;
@@ -1222,6 +1261,7 @@ var Viewer = class _Viewer {
     s.el.querySelector(".phx-flash")?.remove();
     const y0 = top ?? 0, b = s.el.getBoundingClientRect(), sy = this.size.h / b.height, sx = this.size.w / b.width;
     let box = exact ?? null;
+    if (!exact) ensureText(s.el);
     for (const t2 of exact ? [] : s.el.querySelectorAll("text")) {
       if (!t2.textContent?.trim()) continue;
       const r2 = t2.getBoundingClientRect(), ty = (r2.top - b.top) * sy, tb = (r2.bottom - b.top) * sy;
@@ -1387,6 +1427,7 @@ var Viewer = class _Viewer {
       const r = sel.getRangeAt(i);
       for (const s of this.slots) {
         if (!r.intersectsNode(s.el)) continue;
+        ensureText(s.el);
         for (const t of s.el.querySelectorAll("text")) {
           const l = LAYER_LINES.get(t);
           if (!l || !l.text || !r.intersectsNode(t)) continue;
@@ -1480,6 +1521,7 @@ var Viewer = class _Viewer {
       if (!s) continue;
       if (rule && boxes2.length) {
         const [x, y, bw, bh] = boxes2[0];
+        ensureText(s.el);
         const lines2 = [...s.el.querySelectorAll("text")].map((t) => LAYER_LINES.get(t)).filter((l) => !!l && !!l.text).sort((a, b) => a.y - b.y);
         const right = (l) => l.rs?.[l.rs.length - 1] ?? l.x + l.w;
         let at = lines2.findIndex((l) => l.y >= y && l.y - l.size <= y + bh);
@@ -1721,6 +1763,49 @@ var Viewer = class _Viewer {
     this.toPaint.add(s);
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
+  // ---- The pages' text layers: filled once the view rests (text.ts's deferText) ----
+  /** The view's motion (a scroll, a zoom's frames) last seen, and the wait for it to rest. */
+  restTimer;
+  filling = 0;
+  /**
+   * The view moved (a scroll; a zoom gesture's frame, Panel.zoomLay): the
+   * pages' text layers still to fill wait until it rests 120 ms. A page's
+   * text built in the frame it came into view was the long frames of a
+   * scroll or a zoom (its SVG text made and laid out); read before then (a
+   * selection, a link's text, the reading aid), a layer is filled at once.
+   */
+  moved() {
+    this.waitText();
+  }
+  /** The text layers shown so far held out of the layout too, shown again a page a frame once the view rests (a zoom's end: text.ts's holdText). */
+  holdText() {
+    holdText(this.root);
+    this.waitText();
+  }
+  waitText() {
+    cancelAnimationFrame(this.filling);
+    this.filling = 0;
+    clearTimeout(this.restTimer);
+    this.restTimer = setTimeout(() => (this.restTimer = void 0, this.fillText()), 120);
+  }
+  /**
+   * The text layers still to fill or show, those in view first, a page a frame
+   * (its layout, after, is most of its cost), until a motion begins again.
+   */
+  fillText() {
+    if (this.restTimer !== void 0 || this.filling) return;
+    const step = () => {
+      this.filling = 0;
+      for (const k of [...this.visible, ...this.slots.keys()]) {
+        const el = this.slots[k]?.el;
+        if (!el || !textPending(el)) continue;
+        ensureText(el);
+        this.filling = requestAnimationFrame(step);
+        return;
+      }
+    };
+    this.filling = requestAnimationFrame(step);
+  }
   toPaint = /* @__PURE__ */ new Set();
   paintFrame = 0;
   paintSome() {
@@ -1738,6 +1823,7 @@ var Viewer = class _Viewer {
     painted.forEach((s, i) => this.snap(s, boxes2[i]));
     if (this.culpritMarks.some((m) => m.rule && painted.some((s) => Number(s.el.dataset.k) === m.k))) this.culprits(this.culpritMarks);
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
+    this.fillText();
   }
   /** The format changed: every page is to be drawn again (as it comes into view). */
   invalidate() {
@@ -1910,17 +1996,27 @@ var Viewer = class _Viewer {
   }
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n) {
+    const to = this.turnTop(n);
+    if (to !== null) this.scroller.scrollTo({ top: to, behavior: "auto" });
+  }
+  /**
+   * Where `turn(n)` scrolls to (the scroller's scroll top), counted from scroll
+   * top `from` (by default where it is): from where a motion under way is
+   * going, a page key pressed again turns on from the page it was going to.
+   */
+  turnTop(n, from2 = this.scroller.scrollTop) {
     const v = this.scroller.getBoundingClientRect();
-    const top = (k) => this.slots[k].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
-    const at = this.scroller.scrollTop + 12;
+    const top = (k2) => this.slots[k2].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
+    const at = from2 + 12;
     let lo = 0, hi = this.slots.length - 1;
-    if (hi < 0) return;
+    if (hi < 0) return null;
     while (lo < hi) {
       const mid = lo + hi + 1 >> 1;
       if (top(mid) <= at + 1) lo = mid;
       else hi = mid - 1;
     }
-    this.goTo(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n);
+    const k = Math.max(0, Math.min(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n, this.slots.length - 1));
+    return Math.max(0, Math.min(top(k) - 12, this.scroller.scrollHeight - this.scroller.clientHeight));
   }
   seen(es) {
     for (const e of es) {
@@ -2321,7 +2417,7 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
-.zooming .phx-text { display: none; }
+.zooming .phx-text, .phx-text[data-hold] { display: none; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
@@ -3077,6 +3173,165 @@ li.folded > .phx-row .phx-fold::before { content: "\u25B8"; }
 .phx-none { color: var(--ph-fg2, #777); padding: 8px 16px; margin: 0; }
 `;
 
+// viewer/src/glide.ts
+var LINE = 60;
+var SPEED = 1.5;
+var OMEGA = 1 / 50;
+var ZOOM_RATE = Math.LN2 / 1e3;
+var ZOOM_STEP = 1.1;
+function springStep(a, t0, u, dt, w = OMEGA) {
+  if (!(dt > 0)) return { x: a.x, v: a.v };
+  const rest = -2 * u / w;
+  const f = a.x - t0 - rest;
+  const g = a.v - u;
+  const E = Math.exp(-w * dt);
+  const c = g + w * f;
+  return { x: t0 + u * dt + rest + (f + c * dt) * E, v: u + (g - w * c * dt) * E };
+}
+var HELD_FROM = 0;
+var HELD_RAMP = 200;
+function heldRamp(held) {
+  const x = (held - HELD_FROM) / HELD_RAMP;
+  if (!(x > 0)) return 0;
+  if (x >= 1) return HELD_RAMP / 2 + (held - HELD_FROM - HELD_RAMP);
+  return HELD_RAMP * (x * x * x - x * x * x * x / 2);
+}
+function heldReach(held, n, line = LINE, rate = SPEED) {
+  return n * line + rate * heldRamp(held);
+}
+var Glide = class {
+  base = [0, 0, 0];
+  holds = /* @__PURE__ */ new Map();
+  ax = [{ x: 0, v: 0 }, { x: 0, v: 0 }];
+  /** The target at the last frame (steps since: a tap's, a page's, a press's, added at once). */
+  prev = [0, 0, 0];
+  /** What was scrolled so far, in whole pixels (the place rounded: the sum of the moves is exact). */
+  done = [0, 0];
+  last = 0;
+  id = 0;
+  host;
+  constructor(host2) {
+    this.host = host2;
+  }
+  now() {
+    return this.host.now?.() ?? performance.now();
+  }
+  target(i, t) {
+    let s = this.base[i];
+    for (const h of this.holds.values()) if (h.axis === i) s += h.dir * (i === 2 ? heldReach(t - h.t0, h.n, Math.log(ZOOM_STEP), ZOOM_RATE) : heldReach(t - h.t0, h.n));
+    return s;
+  }
+  /** Whether a frame is coming (a motion under way). */
+  get moving() {
+    return this.id !== 0;
+  }
+  /** Where the scroll is still going: its target less its place, per axis (px). */
+  ahead() {
+    const t = this.now();
+    return [this.target(0, t) - this.done[0], this.target(1, t) - this.done[1]];
+  }
+  /**
+   * A key pressed and held: `id` its own (its code), released by `release(id)`.
+   * Axis 0, 1: it moves `n` lines at once, then on at SPEED. Axis 2 (zoom):
+   * the tap's step is the caller's; held, the zoom goes on from there.
+   */
+  press(id, axis, dir, n = 1) {
+    this.release(id);
+    const t0 = this.now();
+    const h = { axis, dir, n, t0 };
+    const step = axis === 2 ? dir * n * Math.log(ZOOM_STEP) : dir * n * LINE;
+    this.holds.set(id, h);
+    this.prev[axis] += step;
+    this.run();
+  }
+  /** The key let go: its target kept where it reached (the spring eases out to it). */
+  release(id) {
+    const h = this.holds.get(id);
+    if (!h) return;
+    const t = this.now();
+    const before = this.target(h.axis, t);
+    this.holds.delete(id);
+    this.base[h.axis] += before - this.target(h.axis, t);
+  }
+  /** Whether the key `id` is held (pressed, its keyup not yet come). */
+  holding(id) {
+    return this.holds.has(id);
+  }
+  /** Every key let go (the window lost the keys: no keyup will come). */
+  releaseAll() {
+    for (const id of [...this.holds.keys()]) this.release(id);
+  }
+  /** Scroll by (`dx`, `dy`) eased: the target moved on from where it was going. */
+  by(dx, dy) {
+    this.base[0] += dx;
+    this.base[1] += dy;
+    this.prev[0] += dx;
+    this.prev[1] += dy;
+    this.run();
+  }
+  /** Stopped where it is (a jump: Home, a page by number): nothing still to come. */
+  stop() {
+    this.holds.clear();
+    if (this.id && this.host.cancel) this.host.cancel(this.id);
+    else if (this.id) cancelAnimationFrame(this.id);
+    this.id = 0;
+    for (const i of [0, 1]) {
+      this.base[i] = this.prev[i] = this.ax[i].x = this.done[i];
+      this.ax[i].v = 0;
+    }
+    this.base[2] = this.prev[2] = 0;
+  }
+  run() {
+    if (this.id) return;
+    this.last = 0;
+    const frame = this.host.frame ?? ((cb) => requestAnimationFrame(cb));
+    const step = (t) => {
+      this.id = 0;
+      const dt = this.last ? Math.min(100, Math.max(0, t - this.last)) : 16;
+      this.last = t;
+      if (this.tick(t, dt)) this.id = frame(step);
+    };
+    this.id = frame(step);
+  }
+  /** One frame at time `t`, `dt` ms after the last: false once at rest. */
+  tick(t, dt) {
+    const want = [0, 0];
+    let busy2 = false;
+    for (const i of [0, 1]) {
+      const to = this.target(i, t);
+      const u = dt > 0 ? (to - this.prev[i]) / dt : 0;
+      const a = springStep(this.ax[i], this.prev[i], u, dt);
+      this.prev[i] = to;
+      const held = [...this.holds.values()].some((h) => h.axis === i);
+      if (!held && Math.abs(to - a.x) < 0.1 && Math.abs(a.v) < 3e-3) a.x = to, a.v = 0;
+      else busy2 = true;
+      this.ax[i] = a;
+      want[i] = Math.round(a.x) - this.done[i];
+    }
+    if (want[0] || want[1]) {
+      const got = this.host.scroll(want[0], want[1]);
+      for (const i of [0, 1]) {
+        this.done[i] += got[i];
+        if (got[i] !== want[i]) {
+          this.ax[i] = { x: this.done[i], v: 0 };
+          for (const h of this.holds.values()) if (h.axis === i) h.t0 = t, h.n = 0;
+          this.base[i] += this.done[i] - this.target(i, t);
+          this.prev[i] = this.done[i];
+        }
+      }
+    }
+    const z = this.target(2, t);
+    if (z !== this.prev[2]) this.host.zoom?.(Math.exp(z - this.prev[2]));
+    this.prev[2] = z;
+    if ([...this.holds.values()].some((h) => h.axis === 2)) busy2 = true;
+    return busy2;
+  }
+};
+function zoomAnchor(r, p) {
+  const over = !!p && p.x >= r.left && p.x < r.left + r.width && p.y >= r.top && p.y < r.top + r.height;
+  return over ? [p.x - r.left, p.y - r.top] : [r.width / 2, r.height / 2];
+}
+
 // viewer/src/keys.ts
 var KEYS = [
   ["j k  \u2193 \u2191", "scroll down, up"],
@@ -3098,18 +3353,48 @@ var KEYS = [
   ["?", "these keys"],
   ["Esc", "close; forget a count"]
 ];
-var LINE = 60;
 function typing(e) {
   const el = e.composedPath?.()[0] ?? e.target;
   return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName ?? ""));
 }
+var reduced = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 function bindKeys(on, t) {
   let count = "";
   let g = false;
   let helping = false;
   const times = () => Math.max(1, Number(count) || 1);
-  const page = (delta) => t.turn(delta);
-  const by = (dx, dy) => t.scroller.scrollBy({ left: dx, top: dy, behavior: "auto" });
+  const scroll = (dx, dy) => {
+    if (t.scrollBy) return t.scrollBy(dx, dy);
+    const s = t.scroller, x = s.scrollLeft, y = s.scrollTop;
+    s.scrollBy({ left: dx, top: dy, behavior: "auto" });
+    const end = (d, was, now) => d && Math.round(now - was) !== d ? Math.round(now - was) : d;
+    return [end(dx, x, s.scrollLeft), end(dy, y, s.scrollTop)];
+  };
+  const glide = new Glide({ scroll, zoom: (f) => t.zoomBy?.(f, true) });
+  const by = (dx, dy) => reduced() ? (glide.stop(), void scroll(dx, dy)) : glide.by(dx, dy);
+  const page = (n) => {
+    if (reduced() || !t.turnTop) return glide.stop(), t.turn(n);
+    const from2 = t.scroller.scrollTop + glide.ahead()[1];
+    glide.by(0, t.turnTop(n, from2) - from2);
+  };
+  const jump = (f) => (glide.stop(), f());
+  const line = (e, axis, dir, n) => {
+    if (reduced()) return void scroll(axis ? 0 : dir * n * LINE, axis ? dir * n * LINE : 0);
+    if (!e.repeat || !glide.holding(e.code || e.key)) glide.press(e.code || e.key, axis, dir, n);
+  };
+  const zoom = (e, dir, n) => {
+    if (!t.zoomBy) return t.zoom(ZOOM_STEP ** (dir * n));
+    const instant = reduced();
+    if (e.repeat && !instant && glide.holding(e.code || e.key)) return;
+    t.zoomBy(ZOOM_STEP ** (dir * n), !instant);
+    if (!instant) glide.press(e.code || e.key, 2, dir, n);
+  };
+  const up = (ev) => {
+    const e = ev;
+    glide.release(e.code || e.key);
+    if (!e.code) glide.release(e.key === e.key.toLowerCase() ? e.key.toUpperCase() : e.key.toLowerCase());
+  };
+  const lost = () => glide.releaseAll();
   const handler = (ev) => {
     const e = ev;
     if (typing(e)) return;
@@ -3135,7 +3420,7 @@ function bindKeys(on, t) {
       return;
     }
     const n = times();
-    const goToCount = (last) => t.goTo(count ? Math.min(t.pages, Number(count)) - 1 : last ? t.pages - 1 : 0);
+    const goToCount = (last) => jump(() => t.goTo(count ? Math.min(t.pages, Number(count)) - 1 : last ? t.pages - 1 : 0));
     let done = true;
     if (g) {
       g = false;
@@ -3145,17 +3430,17 @@ function bindKeys(on, t) {
       switch (k) {
         case "j":
         case "ArrowDown":
-          by(0, n * LINE);
+          line(e, 1, 1, n);
           break;
         case "k":
         case "ArrowUp":
-          by(0, -n * LINE);
+          line(e, 1, -1, n);
           break;
         case "h":
-          by(-n * LINE, 0);
+          line(e, 0, -1, n);
           break;
         case "l":
-          by(n * LINE, 0);
+          line(e, 0, 1, n);
           break;
         case " ":
           page(e.shiftKey ? -n : n);
@@ -3169,10 +3454,10 @@ function bindKeys(on, t) {
           page(-n);
           break;
         case "Home":
-          t.goTo(0);
+          jump(() => t.goTo(0));
           break;
         case "End":
-          t.goTo(t.pages - 1);
+          jump(() => t.goTo(t.pages - 1));
           break;
         case "g":
           g = true;
@@ -3184,18 +3469,18 @@ function bindKeys(on, t) {
         case "K":
         case "+":
         case "=":
-          t.zoom(1.1 ** n);
+          zoom(e, 1, n);
           break;
         case "J":
         case "-":
-          t.zoom(1.1 ** -n);
+          zoom(e, -1, n);
           break;
         case "0":
         case "w":
-          t.fitWidth();
+          jump(() => t.fitWidth());
           break;
         case "f":
-          t.fitPage();
+          jump(() => t.fitPage());
           break;
         case "?":
           helping = !helping;
@@ -3214,7 +3499,15 @@ function bindKeys(on, t) {
     if (done) e.preventDefault();
   };
   on.addEventListener("keydown", handler);
-  return () => on.removeEventListener("keydown", handler);
+  on.addEventListener("keyup", up);
+  const win = typeof window === "undefined" ? null : window;
+  win?.addEventListener("blur", lost);
+  return () => {
+    on.removeEventListener("keydown", handler);
+    on.removeEventListener("keyup", up);
+    win?.removeEventListener("blur", lost);
+    glide.stop();
+  };
 }
 
 // viewer/src/report.ts
@@ -3494,7 +3787,7 @@ function still() {
 var INK = { light: "#1d3e72", dark: "#e4e6ea" };
 var PAPER = { light: "#ffffff", dark: "#2c2e33" };
 var RIBBON = ["#00a8a4", "#d3c72a", "#f0b225", "#f58f2d"];
-var reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+var reduced2 = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 var registered = false;
 function register() {
   if (registered) return;
@@ -3566,7 +3859,7 @@ function ending(el, exit, cleanup = () => {
     ...says,
     done: (page) => ending2 ??= new Promise((ok) => {
       if (over) return ok();
-      const ms = reduced() ? 0 : exit(page);
+      const ms = reduced2() ? 0 : exit(page);
       setTimeout(() => (stop(), ok()), ms);
     }),
     stop
@@ -7292,6 +7585,20 @@ var Panel = class {
       turn: (n) => this.viewer.turn(n),
       scroller: stage,
       zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      zoomBy: (f, ease4) => {
+        const [x, y] = zoomAnchor(stage.getBoundingClientRect(), this.pointer);
+        this.zoomAt(f, x, y, ease4);
+      },
+      scrollBy: (dx, dy) => {
+        if (this.gesture) return this.zoomScroll(this.gesture, dx, dy, false), [dx, dy];
+        const moved = (d, was, max) => was + d < 0 ? -was : was + d > max ? max - was : d;
+        const mx = moved(dx, stage.scrollLeft, stage.scrollWidth - stage.clientWidth);
+        const my = moved(dy, stage.scrollTop, stage.scrollHeight - stage.clientHeight);
+        if (mx) stage.scrollLeft += mx;
+        if (my) stage.scrollTop += my;
+        return [Math.round(mx), Math.round(my)];
+      },
+      turnTop: (n, from2) => this.viewer.turnTop(n, from2) ?? from2,
       fitWidth: () => this.zoomTo("fit"),
       fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
       help: (show) => {
@@ -7407,21 +7714,43 @@ var Panel = class {
     if (!g) {
       const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, sx: 0, sy: 0, ix: 0, iy: 0 };
     }
     if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
     if (!ease4) g.f = g.goal;
-    const gg = g;
-    const step = (t) => {
-      gg.frame = 0;
-      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
-      gg.last = t;
-      this.zoomLay(gg);
-      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-    };
-    if (!g.frame) g.frame = requestAnimationFrame((t) => (gg.last = t - 16, step(t)));
+    this.zoomRun(g);
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
+  }
+  /**
+   * A scroll (pixels) while a zoom gesture runs, made in the gesture's frames: each frame
+   * keeps the place under the pointer there (keepAt sets the scroll), which undid a scroll
+   * made apart from it (the browser's smooth scroll of a wheel, a key's glide), the pages
+   * not scrolling until the zoom rested. `ease`: eased as a browser's smooth scroll (a
+   * wheel's notch); else all of it at the next frame (the keys', eased already).
+   */
+  zoomScroll(g, dx, dy, ease4) {
+    if (ease4) g.sx += dx, g.sy += dy;
+    else g.ix += dx, g.iy += dy;
+    this.zoomRun(g);
+  }
+  /** The gesture's frames, until its zoom is at its goal and its scroll all made. */
+  zoomRun(g) {
+    const step = (t) => {
+      g.frame = 0;
+      const dt = t - g.last;
+      g.f = zoomToward(g.f, g.goal, dt);
+      g.last = t;
+      const k = 1 - Math.exp(-Math.max(0, dt) / 50);
+      const tx = (Math.abs(g.sx) < 1 ? g.sx : g.sx * k) + g.ix;
+      const ty = (Math.abs(g.sy) < 1 ? g.sy : g.sy * k) + g.iy;
+      g.sx -= tx - g.ix;
+      g.sy -= ty - g.iy;
+      g.ix = g.iy = 0;
+      this.zoomLay(g, false, tx, ty);
+      if (g.f !== g.goal || g.sx || g.sy) g.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => (g.last = t - 16, step(t)));
   }
   /**
    * The gesture's zoom now, as pdf.js's viewer zooms: the pages laid out at it each frame
@@ -7432,21 +7761,24 @@ var Panel = class {
    * not what the layout made of them (a narrow page is centred, the gaps between pages
    * keep their size, pages come into view as it zooms out): they jumped when it rested.
    */
-  zoomLay(g, final = false) {
+  zoomLay(g, final = false, dx = 0, dy = 0) {
     this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const st = this.$("#stage");
     st.classList.remove("fit");
     st.classList.toggle("zooming", !final);
+    if (final) this.viewer.holdText();
+    else this.viewer.moved();
     this.viewer.redraw(true);
-    if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
+    if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
+    if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
   }
   /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
   zoomEnd() {
     const g = this.gesture;
     if (!g) return;
-    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal || g.sx || g.sy || g.ix || g.iy) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = void 0;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);
@@ -7461,6 +7793,8 @@ var Panel = class {
   findTimer;
   /** The pointer over the panel (in a host's page, its keys only then). */
   hover = false;
+  /** The pointer's last place over the pages (client pixels): where the zoom keys zoom. */
+  pointer = null;
   /** The find field opened (its text selected) or closed (the marks gone). */
   find(on) {
     const box = this.$("#find");
@@ -7514,10 +7848,19 @@ var Panel = class {
   findAndZoom(all) {
     const stage = this.$("#stage");
     this.win.addEventListener("pointerenter", () => this.hover = true);
+    stage.addEventListener("pointermove", (e) => this.pointer = { x: e.clientX, y: e.clientY }, { passive: true });
+    stage.addEventListener("pointerleave", () => this.pointer = null);
     this.win.addEventListener("pointerleave", () => this.hover = false);
     stage.addEventListener(
       "wheel",
       (e) => {
+        const g = this.gesture;
+        if (!e.ctrlKey && g) {
+          e.preventDefault();
+          const u = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
+          const x = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, y = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+          return this.zoomScroll(g, x * u, y * u, !matchMedia("(prefers-reduced-motion: reduce)").matches);
+        }
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();
@@ -10123,7 +10466,7 @@ var Strips = class {
       const el2 = document.createElement("div");
       el2.className = "phx-page";
       Object.assign(el2.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
-      el2.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
+      el2.append(this.canvas(f), textLayer(f.text, f.w, f.h));
       return { el: el2, w: f.w, h: f.h, links: f.links, hash: f.hash };
     }
     const grow = (a, b2, most2) => {
@@ -10149,7 +10492,7 @@ var Strips = class {
       width: `${w / part3.pw * 100}%`,
       height: `${h / part3.ph * 100}%`
     });
-    el.append(this.canvas(base), tile, textLayer(base.text.map(composeLine), base.w, base.h));
+    el.append(this.canvas(base), tile, textLayer(base.text, base.w, base.h));
     return { el, w: base.w, h: base.h, links: base.links, hash: base.hash === part3.hash ? base.hash : base.hash === void 0 ? void 0 : "" };
   }
   /** Page `k`'s frame at `scale` (only `win` of it, if given), its strips fetched and kept. */
@@ -10242,15 +10585,17 @@ function textLayer(lines2, w, h) {
   svg2.setAttribute("class", "phx-text");
   svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg2.setAttribute("preserveAspectRatio", "none");
-  for (const l of lines2) {
-    const t = document.createElementNS(SVG2, "text");
-    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
-    t.setAttribute("y", String(l.y));
-    t.setAttribute("font-size", String(l.size));
-    t.textContent = l.text;
-    LAYER_LINES.set(t, l);
-    svg2.append(t);
-  }
+  deferText(svg2, () => {
+    for (const l of lines2.map(composeLine)) {
+      const t = document.createElementNS(SVG2, "text");
+      t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
+      t.setAttribute("y", String(l.y));
+      t.setAttribute("font-size", String(l.size));
+      t.textContent = l.text;
+      LAYER_LINES.set(t, l);
+      svg2.append(t);
+    }
+  });
   return svg2;
 }
 

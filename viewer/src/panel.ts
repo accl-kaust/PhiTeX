@@ -25,6 +25,7 @@ import { charOffset } from "./edits.ts";
 import { html, rich } from "./html.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
+import { zoomAnchor } from "./glide.ts";
 import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
@@ -2157,6 +2158,22 @@ export class Panel {
       turn: (n) => this.viewer.turn(n),
       scroller: stage,
       zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      zoomBy: (f, ease) => {
+        // (at the pointer over the pages, else the view's centre; the place kept is the gesture's first)
+        const [x, y] = zoomAnchor(stage.getBoundingClientRect(), this.pointer);
+        this.zoomAt(f, x, y, ease);
+      },
+      scrollBy: (dx, dy) => {
+        // (while a zoom runs, the gesture's: its frames keep a place, see zoomScroll)
+        if (this.gesture) return this.zoomScroll(this.gesture, dx, dy, false), [dx, dy];
+        const moved = (d: number, was: number, max: number) => (was + d < 0 ? -was : was + d > max ? max - was : d);
+        const mx = moved(dx, stage.scrollLeft, stage.scrollWidth - stage.clientWidth);
+        const my = moved(dy, stage.scrollTop, stage.scrollHeight - stage.clientHeight);
+        if (mx) stage.scrollLeft += mx;
+        if (my) stage.scrollTop += my;
+        return [Math.round(mx), Math.round(my)];
+      },
+      turnTop: (n, from) => this.viewer.turnTop(n, from) ?? from,
       fitWidth: () => this.zoomTo("fit"),
       fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
       help: (show) => {
@@ -2272,7 +2289,22 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; goal: number; last: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout> }
+    | {
+        from: number;
+        f: number;
+        goal: number;
+        last: number;
+        x: number;
+        y: number;
+        at: { k: number; fx: number; fy: number } | null;
+        frame: number;
+        end?: ReturnType<typeof setTimeout>;
+        /** A scroll while it zooms, still to make: eased (a wheel's), and at the next frame (the keys', eased already). */
+        sx: number;
+        sy: number;
+        ix: number;
+        iy: number;
+      }
     | undefined;
 
   /**
@@ -2290,21 +2322,46 @@ export class Panel {
     if (!g) {
       const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, sx: 0, sy: 0, ix: 0, iy: 0 };
     }
     if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
     if (!ease) g.f = g.goal;
-    const gg = g;
-    const step = (t: number) => {
-      gg.frame = 0;
-      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
-      gg.last = t;
-      this.zoomLay(gg);
-      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-    };
-    if (!g.frame) g.frame = requestAnimationFrame((t) => ((gg.last = t - 16), step(t)));
+    this.zoomRun(g);
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
+  }
+
+  /**
+   * A scroll (pixels) while a zoom gesture runs, made in the gesture's frames: each frame
+   * keeps the place under the pointer there (keepAt sets the scroll), which undid a scroll
+   * made apart from it (the browser's smooth scroll of a wheel, a key's glide), the pages
+   * not scrolling until the zoom rested. `ease`: eased as a browser's smooth scroll (a
+   * wheel's notch); else all of it at the next frame (the keys', eased already).
+   */
+  private zoomScroll(g: NonNullable<Panel["gesture"]>, dx: number, dy: number, ease: boolean): void {
+    if (ease) (g.sx += dx), (g.sy += dy);
+    else (g.ix += dx), (g.iy += dy);
+    this.zoomRun(g);
+  }
+
+  /** The gesture's frames, until its zoom is at its goal and its scroll all made. */
+  private zoomRun(g: NonNullable<Panel["gesture"]>): void {
+    const step = (t: number) => {
+      g.frame = 0;
+      const dt = t - g.last;
+      g.f = zoomToward(g.f, g.goal, dt);
+      g.last = t;
+      // (most of the way in 150 ms, as a browser's smooth scroll; the last pixel at once)
+      const k = 1 - Math.exp(-Math.max(0, dt) / 50);
+      const tx = (Math.abs(g.sx) < 1 ? g.sx : g.sx * k) + g.ix;
+      const ty = (Math.abs(g.sy) < 1 ? g.sy : g.sy * k) + g.iy;
+      g.sx -= tx - g.ix;
+      g.sy -= ty - g.iy;
+      g.ix = g.iy = 0;
+      this.zoomLay(g, false, tx, ty);
+      if (g.f !== g.goal || g.sx || g.sy) g.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => ((g.last = t - 16), step(t)));
   }
 
   /**
@@ -2316,7 +2373,7 @@ export class Panel {
    * not what the layout made of them (a narrow page is centred, the gaps between pages
    * keep their size, pages come into view as it zooms out): they jumped when it rested.
    */
-  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false): void {
+  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false, dx = 0, dy = 0): void {
     this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const st = this.$("#stage");
@@ -2324,8 +2381,14 @@ export class Panel {
     // (the pages' text, for selection and find, out of the layout until the gesture rests:
     // SVG text, its glyphs laid out again at each size, was most of each frame's layout)
     st.classList.toggle("zooming", !final);
+    // (the pages' text layers still to fill wait for the zoom to rest, Viewer.moved; at its
+    // end, those shown before held out of the layout too, shown again a page a frame)
+    if (final) this.viewer.holdText();
+    else this.viewer.moved();
     this.viewer.redraw(true);
-    if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
+    // (scrolled by `dx`, `dy` too: the place kept moved by them, then the one under the pointer kept)
+    if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
+    if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
   }
 
@@ -2334,7 +2397,7 @@ export class Panel {
     const g = this.gesture;
     if (!g) return;
     // (still easing toward its goal: ended once there, not cut short by a jump)
-    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal || g.sx || g.sy || g.ix || g.iy) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = undefined;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);
@@ -2350,6 +2413,8 @@ export class Panel {
   private findTimer: ReturnType<typeof setTimeout> | undefined;
   /** The pointer over the panel (in a host's page, its keys only then). */
   private hover = false;
+  /** The pointer's last place over the pages (client pixels): where the zoom keys zoom. */
+  private pointer: { x: number; y: number } | null = null;
 
   /** The find field opened (its text selected) or closed (the marks gone). */
   find(on: boolean): void {
@@ -2410,11 +2475,21 @@ export class Panel {
   private findAndZoom(all: boolean): void {
     const stage = this.$("#stage");
     this.win.addEventListener("pointerenter", () => (this.hover = true));
+    stage.addEventListener("pointermove", (e) => (this.pointer = { x: e.clientX, y: e.clientY }), { passive: true });
+    stage.addEventListener("pointerleave", () => (this.pointer = null));
     this.win.addEventListener("pointerleave", () => (this.hover = false));
     // (Ctrl+wheel, a trackpad's pinch too: the pages zoom at the pointer, not the browser's page)
     stage.addEventListener(
       "wheel",
       (e) => {
+        const g = this.gesture;
+        if (!e.ctrlKey && g) {
+          // (a scroll while it zooms: the gesture's, see zoomScroll)
+          e.preventDefault();
+          const u = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
+          const x = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, y = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+          return this.zoomScroll(g, x * u, y * u, !matchMedia("(prefers-reduced-motion: reduce)").matches);
+        }
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();

@@ -24,6 +24,55 @@ export interface TextLine {
  */
 export const LAYER_LINES = new WeakMap<Element, TextLine>();
 
+/**
+ * Text layers made but not yet filled (strips.ts's textLayer): an empty SVG
+ * (nothing to lay out) until the view rests or something reads its lines
+ * (`ensureText`). Filled as each page arrived, a page's thousands of SVG
+ * text elements built and laid out in the frame it came into view were the
+ * long frames of a scroll and a zoom, by the wheel as by the keys.
+ */
+const PENDING = new WeakMap<Element, () => void>();
+
+/** `svg`'s lines, built by `fill` when first needed. */
+export function deferText(svg: Element, fill: () => void): void {
+  PENDING.set(svg, fill);
+  svg.setAttribute("data-pending", "");
+}
+
+/** Layers still to fill, or held out of the layout (`holdText`). */
+const WAITING = ".phx-text[data-pending], .phx-text[data-hold]";
+
+/** Whether `root` (a page, a slot, the pages) has text layers still to fill or show. */
+export function textPending(root: ParentNode): boolean {
+  return !!root.querySelector(WAITING) || isWaiting(root);
+}
+
+const isWaiting = (n: ParentNode): n is Element => "matches" in n && (n as Element).matches(WAITING);
+
+/**
+ * The filled text layers in `root` held out of the layout (hidden) until
+ * shown again by `ensureText`: at a zoom's end, every page's text laid out
+ * again at its new size at once was a freeze of a third of a second on a
+ * dense paper; shown a page a frame once the view rests, it is not.
+ */
+export function holdText(root: ParentNode): void {
+  for (const svg of root.querySelectorAll(".phx-text:not([data-pending])")) svg.setAttribute("data-hold", "");
+}
+
+/** Every text layer in `root` (or `root` itself) filled and shown now: read before its lines are (a selection, a link's text, the wasp bands). */
+export function ensureText(root: ParentNode | null | undefined): void {
+  if (!root) return;
+  const all = [...(isWaiting(root) ? [root] : []), ...root.querySelectorAll(WAITING)];
+  for (const svg of all) {
+    svg.removeAttribute("data-hold");
+    if (!svg.hasAttribute("data-pending")) continue;
+    const fill = PENDING.get(svg);
+    PENDING.delete(svg);
+    svg.removeAttribute("data-pending");
+    fill?.();
+  }
+}
+
 /** A match of a search: its page (from 0) and its boxes, [x, y top, w, h] in PDF points from the page's top left. */
 export interface Hit {
   k: number;
