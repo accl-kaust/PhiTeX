@@ -562,7 +562,7 @@ pub(crate) fn max_char_end(xetex: bool) -> i64 {
 }
 
 /// Where `\inputlineno` reads (`line`, §304: the innermost file's).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum FileLine {
     /// The line's number is known here.
     Known(i64),
