@@ -2522,6 +2522,14 @@ fn latex_glyph_origins_of_input_files() {
             .collect::<Vec<_>>()
     };
     let (e, c) = (named(&b), named(&cold));
+    if e != c {
+        for (w, x) in [("edit", &b), ("cold", &cold)] {
+            for (n, t, s, z) in x.node_spans() {
+                let t = t.map_or(String::from("doc"), |t| t.chars().take(12).collect());
+                eprintln!("SPAN {w} {n:x} {t:?} {s}..{z}");
+            }
+        }
+    }
     let first = e.iter().zip(&c).enumerate().find_map(|(k, (x, y))| {
         if x == y {
             return None;

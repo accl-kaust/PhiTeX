@@ -2786,9 +2786,6 @@ fn write_page_with(
         };
         st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
-    if tap {
-        eprintln!("DBG page apart: {:?}", res.as_ref().err());
-    }
     let _ = res.err();
     drop(st.set_tap(None));
     let g = out.and_then(|o| o.locked().take());
@@ -6195,10 +6192,26 @@ fn link(
                         .filter(|w| alone.is_none_or(|a| a.keeps(w)))
                         .map(|w| relocated(w, &reloc))
                 };
+                // (origins on: the page's glyphs as this writer shows
+                // them, which knows the forms and images it draws that
+                // the writer the page was written apart on did not)
+                let gid = shown_id(x.raw(), Some(&h));
+                let inst = v.instance();
+                let out = crate::origins::has(inst, gid).then(|| {
+                    let (r, out) = crate::origins::Recorder::new();
+                    st.set_tap(Some(Box::new(r)));
+                    out
+                });
                 if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| {
                     st.ship_out_with(bx, &src, &mut wh)
                 }) {
                     errors.push((e, pc.node));
+                }
+                if let Some(out) = out {
+                    drop(st.set_tap(None));
+                    if let Some(g) = out.locked().take() {
+                        crate::origins::keep(inst, gid, g);
+                    }
                 }
                 shipped += 1;
             } else {
