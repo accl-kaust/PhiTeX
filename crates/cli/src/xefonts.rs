@@ -574,7 +574,14 @@ mod fcconf {
                     Some("xdg") => xdg(elem == "include").map(|b| b.join(&body)),
                     Some("relative") => Some(here.join(&body)),
                     _ if body.starts_with('~') => tilde(&body),
-                    _ if Path::new(&body).is_absolute() => Some(PathBuf::from(&body)),
+                    // (absolute as fontconfig takes it, `FcStrIsAbsFilename`:
+                    // a leading `/` on every host, a drive's path on
+                    // Windows too; `Path::is_absolute` alone on Windows
+                    // took `/usr/share/fonts` as relative and joined it to
+                    // the current directory's drive, `D:/usr/share/fonts`)
+                    _ if body.starts_with('/') || Path::new(&body).is_absolute() => {
+                        Some(PathBuf::from(&body))
+                    }
                     // (a relative `<include>`: the configuration
                     // directory's; a relative `<dir>`: the current
                     // directory's, fontconfig's "default" and "cwd")
@@ -641,8 +648,8 @@ mod tests {
             s(&c.files),
             [
                 main.display().to_string(),
-                d.join("conf.d/10-a.conf").display().to_string(),
-                d.join("conf.d/20-b.conf").display().to_string(),
+                d.join("conf.d").join("10-a.conf").display().to_string(),
+                d.join("conf.d").join("20-b.conf").display().to_string(),
                 "/no/such.conf".to_owned()
             ]
         );
