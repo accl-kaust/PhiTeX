@@ -6714,6 +6714,19 @@ impl<'c, 'a> Run<'c, 'a> {
     /// for its fragments' hints), each slice with its hint.
     fn doc_file_regions(&self, f: &FileRest) -> Vec<Vec<ValueId>> {
         let v = self.v;
+        // (observe, `PHITEX_DLINE_ENV`: how a file's rest is cut)
+        if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+            eprintln!(
+                "doc-file-regions: node {} {} lazy {} cut {:?} units {} off {} line {}",
+                self.cx.node().raw(),
+                v.render(f.name),
+                f.lazy(),
+                f.cut.map(|k| v.render(k)),
+                f.units.is_some(),
+                f.off,
+                f.line
+            );
+        }
         // (a file the job writes, not read here: one piece per unit, its
         // arguments the unit's field (its text's hash) alone, as a
         // document slice's are its text; the piece reads its unit; its
