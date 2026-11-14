@@ -4181,7 +4181,8 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
                 None,
                 "-j{threads} first {first}"
             );
-            let on: Vec<&String> = r.iter().filter(|x| x.contains("kl@a")).collect();
+            // (by the cause, not the node's text, which names it too)
+            let on: Vec<&String> = r.iter().filter(|x| x.contains(" cs:kl@a [")).collect();
             assert!(
                 on.is_empty(),
                 "-j{threads} first {first}: ran again on kl@a: {on:?}"
