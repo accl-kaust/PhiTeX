@@ -1348,7 +1348,7 @@ fn latex_pictures_that_all_change_take_one_run() {
             "\\begin{{tikzpicture}}\\foreach \\i in {{1,...,12}}{{\\draw (\\i*0.3,0) circle (0.1);}}\\node at (1,0.5) {{{inside}}};\\end{{tikzpicture}}"
         );
         format!(
-            "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\begin{{document}}\nFirst words, a paragraph of its own.\n\nWords {pic} and {pic} then {pic} and {pic} end the paragraph.\n\nLast words.\\label{{last}}\n\\end{{document}}\n"
+            "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\usepackage{{refcount}}\n\\begin{{document}}\n\\xdef\\lastref{{\\getrefnumber{{last}}}}First words, a paragraph of its own.\n\nWords {pic} and {pic} then {pic} and {pic} end the paragraph.\n\n\\section{{One}}\\section{{Two}}Last words.\\label{{last}}\n\\end{{document}}\n"
         )
     };
     let runs = |b: &phitex_tex::Build| common::runs_of(b, "exec") + common::runs_of(b, "resume");
@@ -1358,7 +1358,7 @@ fn latex_pictures_that_all_change_take_one_run() {
             threads: Some(threads),
             ..pdf_opts(name, &dir)
         };
-        let moving = doc("see \\ref{last}");
+        let moving = doc("see \\lastref");
         let still = doc("see one");
         std::fs::write(dir.join("moving.tex"), &moving).expect("write");
         std::fs::write(dir.join("still.tex"), &still).expect("write");
