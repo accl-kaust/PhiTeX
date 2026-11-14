@@ -135,6 +135,20 @@ fn command(program: &Path, dir: &Path) -> Command {
     c
 }
 
+/// TeX Live's kpathsea as the watch's TeX job has it (`tex::kpse`:
+/// the tree of the `tex` on the path, pdfTeX's program name).
+fn texlive_kpse() -> phitex_kpse::Kpse {
+    let tex = std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("tex"))
+                .filter_map(|t| t.canonicalize().ok())
+                .find(|t| t.is_file())
+        })
+        .expect("TeX Live's tex on the path");
+    phitex_kpse::Kpse::new(tex.parent().expect("its folder"), "pdftex", "pdftex")
+}
+
 /// [`command`] with `timeout --foreground`: a signal sent to `timeout` is
 /// given to the program alone, once (without it, `timeout` gives it to
 /// the program and then to its whole process group: twice). The program
@@ -927,9 +941,23 @@ fn watch_an_edit_that_makes_what_it_made_runs_its_node_alone() {
 /// made outside, evaluated (Grail's first `r` 13 ms, each later one
 /// 7 ms of 113 stagings of nothing). In a release build each build
 /// stays within 2 ms and 300 µs per 1000 nodes, and `r`'s check of the
-/// files within 50 µs a file.
+/// files within a small multiple of what the same calls cost this
+/// machine, timed beside it: a stat of each file found, kpathsea's lookup
+/// of each name not found (a bound in µs a file failed on loaded
+/// runners, 54 to 70 µs a file, #31; a file read again, or a second call
+/// a file, is over it on any machine).
 #[test]
+#[allow(clippy::too_many_lines, reason = "one watch session, step by step")]
 fn watch_no_change_rebuild() {
+    /// The `r`s timed.
+    const CHECKS: u64 = 5;
+    /// `r`'s keys of the files found, at most this many times as many
+    /// stat calls (0.96-1.59 on accl, 8 runs; a second stat a file
+    /// 2.16-2.69, a read 8.6-10.2).
+    const KEYS_PER_STAT: f64 = 1.9;
+    /// `r`'s lookups of the names not found, at most this many times
+    /// kpathsea's (1.57-1.99 on accl; a second lookup a name 3.1-3.9).
+    const LOOKUPS_PER_LOOKUP: f64 = 2.5;
     let _one = one();
     let big = big();
     let body = big
@@ -980,6 +1008,41 @@ fn watch_no_change_rebuild() {
     };
     std::thread::sleep(Duration::from_millis(100));
     let (pdf_at, lst_at) = (stamp(&pdf), stamp(&dir.join("big.lst")));
+    // (the machine's own cost of the same calls, timed beside `r`'s:
+    // a stat of as many files found, the document's and TeX Live's fonts
+    // in turn, and kpathsea's lookup of the names not found, as the watch
+    // makes it, `tex::Tree::input`)
+    let mut kpse = texlive_kpse();
+    let found: Vec<PathBuf> = ["cmr10.tfm", "cmmi10.tfm", "cmsy10.tfm", "cmbx10.tfm"]
+        .iter()
+        .map(|n| {
+            let p = kpse
+                .find_file(n.as_bytes(), phitex_kpse::Format::Tfm, false)
+                .expect("TeX Live's fonts");
+            PathBuf::from(String::from_utf8(p).expect("a path"))
+        })
+        .chain(
+            ["big.tex", "chap.tex", "big.lst"]
+                .iter()
+                .map(|n| dir.join(n)),
+        )
+        .collect();
+    let absent: Vec<String> = (0..40).map(|k| format!("absent-{k}.cfg")).collect();
+    let mut machine = |keys: usize, lookups: usize| {
+        let t = Instant::now();
+        for p in found.iter().cycle().take(keys) {
+            std::hint::black_box(std::fs::metadata(p).ok());
+        }
+        let stats = t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
+        for n in absent.iter().cycle().take(lookups) {
+            std::hint::black_box(kpse.find_file(n.as_bytes(), phitex_kpse::Format::Tex, false));
+        }
+        (stats, t.elapsed().as_secs_f64() * 1e3)
+    };
+    // (kpathsea's databases read, the files' entries cached, before any
+    // is timed)
+    machine(found.len(), absent.len());
     let check = |ev: &serde_json::Value, what: &str| {
         assert_eq!(ev["ok"], true, "{what}: {ev}");
         assert_eq!(ev["nodes_run"], 0, "{what} ran nodes: {ev}");
@@ -987,40 +1050,66 @@ fn watch_no_change_rebuild() {
         assert_eq!(ev["evaluated"], false, "{what} evaluated: {ev}");
         assert_eq!(ev["pages_changed"], serde_json::json!([]), "{what}: {ev}");
         assert_eq!(stamp(&pdf), pdf_at, "{what} wrote the PDF again");
-        // (the build: nothing to do, within its bound; `r`'s check of the
-        // files, the keys of those found and the lookups of those not,
-        // within 50 µs a file)
+        // (the build: nothing to do, within its bound)
         let ms = update_ms(ev);
-        let checked = ev["reread"]["checked"].as_f64().unwrap_or(0.0);
-        let check_ms = ev["reread"]["ms"].as_f64().unwrap_or(0.0);
-        eprintln!(
-            "watch: {what}: the build {ms:.3} ms ({live} nodes), {checked} files checked in {check_ms:.3} ms"
-        );
+        eprintln!("watch: {what}: the build {ms:.3} ms ({live} nodes)");
         if !cfg!(debug_assertions) {
             assert!(
                 ms <= bound,
                 "{what}'s build took {ms:.3} ms, over {bound:.3} ms: {ev}"
             );
-            assert!(
-                check_ms <= 0.05 * checked,
-                "{what} checked {checked} files in {check_ms:.3} ms, over 50 µs a file: {ev}"
-            );
         }
     };
-    for (k, b) in [(1, 2), (2, 3)] {
+    // (`r`'s check of the files, the keys of those found and the lookups
+    // of those not, each against the same calls made here right after it:
+    // the least of each over the `r`s, so that a moment's load on a
+    // shared machine, on either side, is not taken for the check's cost)
+    let mut least = [f64::INFINITY; 4];
+    let (mut keys, mut lookups) = (0, 0);
+    for k in 1..=CHECKS {
         stdin.write_all(b"\n").expect("r");
         stdin.flush().expect("r");
-        let ev = until(&mut lines, "build", &b.into(), &mut seen);
+        let ev = until(&mut lines, "build", &(k + 1).into(), &mut seen);
         check(&ev, &format!("r {k}"));
-        assert_eq!(ev["reread"]["changed"], 0, "r {k} read files again: {ev}");
+        let r = &ev["reread"];
+        assert_eq!(r["changed"], 0, "r {k} read files again: {ev}");
+        let n = |x: &serde_json::Value| usize::try_from(x.as_u64().unwrap_or(0)).expect("a count");
+        let checked = n(&r["checked"]);
+        lookups = n(&r["looked_up"]);
+        keys = checked - lookups;
+        assert!(checked > 40 && lookups >= 40, "r {k} checked: {ev}");
+        let ms = |f: &str| r[f].as_f64().expect("the check's times");
+        let (keys_ms, lookups_ms) = (ms("keys_ms"), ms("lookups_ms"));
+        let (stats_ms, kpse_ms) = machine(keys, lookups);
+        eprintln!(
+            "watch: r {k}: {keys} keys {keys_ms:.3} ms ({keys} stat calls {stats_ms:.3} ms), {lookups} lookups {lookups_ms:.3} ms (kpathsea's {kpse_ms:.3} ms)"
+        );
+        for (l, x) in least
+            .iter_mut()
+            .zip([keys_ms, stats_ms, lookups_ms, kpse_ms])
+        {
+            *l = l.min(x);
+        }
+    }
+    let [keys_ms, stats_ms, lookups_ms, kpse_ms] = least;
+    eprintln!(
+        "watch: r at best: the keys {:.2}x the stat calls, the lookups {:.2}x kpathsea's",
+        keys_ms / stats_ms,
+        lookups_ms / kpse_ms
+    );
+    if !cfg!(debug_assertions) {
         assert!(
-            ev["reread"]["checked"].as_u64().is_some_and(|n| n > 40),
-            "r {k} checked: {ev}"
+            keys_ms <= KEYS_PER_STAT * stats_ms,
+            "r's keys of {keys} files took {keys_ms:.3} ms at best, over {KEYS_PER_STAT}x the {stats_ms:.3} ms of as many stat calls"
+        );
+        assert!(
+            lookups_ms <= LOOKUPS_PER_LOOKUP * kpse_ms,
+            "r's lookups of {lookups} names took {lookups_ms:.3} ms at best, over {LOOKUPS_PER_LOOKUP}x the {kpse_ms:.3} ms of kpathsea's"
         );
     }
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("chap.tex"), body).expect("the same bytes");
-    let ev = until(&mut lines, "build", &4.into(), &mut seen);
+    let ev = until(&mut lines, "build", &(CHECKS + 2).into(), &mut seen);
     check(&ev, "a save of the same bytes");
     assert_eq!(
         stamp(&dir.join("big.lst")),
