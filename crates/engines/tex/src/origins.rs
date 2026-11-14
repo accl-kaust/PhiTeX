@@ -1730,7 +1730,7 @@ pub(crate) struct Input<'a> {
     /// The text nodes: raw id, file (none: the document) and its text,
     /// byte range, the document node it is under.
     #[allow(clippy::type_complexity)]
-    pub spans: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)>,
+    pub spans: Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
     /// The document's name and the text its nodes hold (its canonical
     /// text where `doc_raw` is the text given).
     pub doc_name: String,
@@ -1739,6 +1739,10 @@ pub(crate) struct Input<'a> {
     /// The pages' glyphs, by place in `shown`, where they were taken
     /// with the rest ([`OriginsCapture`]); none: the kept ones.
     pub glyphs: Option<&'a [Option<Arc<PageGlyphs>>]>,
+    /// Which state of the Build this is (`crate::Build::origins_key`):
+    /// the same key, the same spans, texts and pages; 0: not known, made
+    /// afresh.
+    pub key: u64,
 }
 
 /// A text node as placed: its file (index into the files) and start.
@@ -1757,12 +1761,26 @@ struct Span {
 /// file's text (as held, and how offsets in it become the file's bytes).
 struct Ctx<'a> {
     inp: Input<'a>,
+    m: Arc<Made>,
+}
+
+/// What a [`Ctx`] is made of, made once for the Build's state an
+/// [`Input::key`] names and kept: each page asked of that state answered
+/// from it, not from a look at every node again.
+struct Made {
     index: Arc<Index>,
     spans: FxHashMap<u64, Span>,
     /// Per file (by index): its text as the nodes hold it.
     texts: Vec<Option<Arc<str>>>,
     bytes: Mutex<FxHashMap<u32, Arc<Bytes>>>,
     canon: OnceLock<(Vec<u32>, Vec<u32>)>,
+}
+
+impl std::ops::Deref for Ctx<'_> {
+    type Target = Made;
+    fn deref(&self) -> &Made {
+        &self.m
+    }
 }
 
 /// The Build's origins memos: the nodes' scans, the index, the pages'
@@ -1780,6 +1798,8 @@ pub(crate) struct State {
     /// The PDF a DVI or XDV build's file became, as its client made it
     /// ([`crate::Build::set_origins_pdf`]): its forms' codes.
     pdf: Mutex<Option<Arc<Vec<u8>>>>,
+    /// The last [`Made`], by the [`Input::key`] it was made for.
+    made: Mutex<Option<(u64, Arc<Made>)>>,
 }
 
 /// A page's match and the glyphs it was made from.
@@ -1838,6 +1858,18 @@ impl State {
     /// hundred nodes: a keystroke waits for none of it).
     #[allow(clippy::too_many_lines)]
     fn ctx_until<'a>(&self, inp: Input<'a>, stop: &dyn Fn(bool) -> bool) -> Option<Ctx<'a>> {
+        // (made already for this state of the Build: a page's answer looks
+        // at its own nodes only)
+        if inp.key != 0
+            && let Some(m) = self
+                .made
+                .locked()
+                .as_ref()
+                .filter(|x| x.0 == inp.key)
+                .map(|x| x.1.clone())
+        {
+            return Some(Ctx { inp, m });
+        }
         let doc = self.file_index(&inp.doc_name);
         let mut texts: Vec<Option<Arc<str>>> = Vec::new();
         let mut spans: FxHashMap<u64, Span> = FxHashMap::default();
@@ -1951,14 +1983,17 @@ impl State {
         });
         // (the document's own text, as given: where the nodes hold its
         // canonical text, offsets go over by line and column)
-        Some(Ctx {
-            inp,
+        let m = Arc::new(Made {
             index,
             spans,
             texts,
             bytes: Mutex::new(FxHashMap::default()),
             canon: OnceLock::new(),
-        })
+        });
+        if inp.key != 0 {
+            *self.made.locked() = Some((inp.key, m.clone()));
+        }
+        Some(Ctx { inp, m })
     }
 
     /// Page `k`'s match, kept while its glyphs are the same and every
@@ -2265,6 +2300,43 @@ fn answer_fresh(
     (out, of)
 }
 
+/// [`crate::Build::pages_of_source`] of the state `cx` is made of.
+fn pages_of(st: &State, cx: &Ctx<'_>, file: &str, at: u32) -> Vec<usize> {
+    let file = file.trim_start_matches("./");
+    let names = st.files.locked().clone();
+    let Some(fi) = names
+        .iter()
+        .position(|n| n == file || format!("{n}.tex") == file)
+        .and_then(|i| u32::try_from(i).ok())
+    else {
+        return Vec::new();
+    };
+    let raws: phitex_defuse::FxHashSet<i64> = cx
+        .spans
+        .iter()
+        .filter(|(_, sp)| {
+            sp.file == fi
+                && cx.place(sp.file, sp.doc, sp.s) <= at
+                && at < cx.place(sp.file, sp.doc, sp.s + sp.len).max(1)
+        })
+        .map(|(&raw, _)| raw.cast_signed())
+        .collect();
+    if raws.is_empty() {
+        return Vec::new();
+    }
+    let memo = piece_memo().locked();
+    cx.inp
+        .shown
+        .iter()
+        .enumerate()
+        .filter(|&(_, &id)| {
+            memo.get(&(cx.inp.inst, id))
+                .is_some_and(|ps| ps.iter().any(|p| raws.contains(p)))
+        })
+        .map(|(k, _)| k)
+        .collect()
+}
+
 impl crate::Build {
     /// The PDF a DVI or XDV file became (dvipdfmx, xdvipdfmx), made by
     /// the client: where a page draws a picture or a form, the codes it
@@ -2362,8 +2434,12 @@ impl crate::Build {
     /// file it wrote while the next edit's build runs).
     #[must_use]
     pub fn origins_capture(&self) -> OriginsCapture {
+        let t0 = std::time::Instant::now();
         let inp = self.origins_input();
+        crate::timeline::note("origins: the input (the nodes' spans)", t0.elapsed());
+        let t0 = std::time::Instant::now();
         let glyphs = inp.shown.iter().map(|&id| kept(inp.inst, id)).collect();
+        crate::timeline::note("origins: the pages' glyphs", t0.elapsed());
         OriginsCapture {
             st: self.origins_shared(),
             inst: inp.inst,
@@ -2374,6 +2450,7 @@ impl crate::Build {
             doc_raw: inp.doc_raw.map(Arc::from),
             glyphs,
             pdf: self.origins_pdf_later(),
+            key: inp.key,
         }
     }
 
@@ -2393,40 +2470,7 @@ impl crate::Build {
     #[must_use]
     pub fn pages_of_source(&self, file: &str, at: u32) -> Vec<usize> {
         let st = self.origins_state();
-        let cx = st.ctx(self.origins_input());
-        let file = file.trim_start_matches("./");
-        let names = st.files.locked().clone();
-        let Some(fi) = names
-            .iter()
-            .position(|n| n == file || format!("{n}.tex") == file)
-            .and_then(|i| u32::try_from(i).ok())
-        else {
-            return Vec::new();
-        };
-        let raws: phitex_defuse::FxHashSet<i64> = cx
-            .spans
-            .iter()
-            .filter(|(_, sp)| {
-                sp.file == fi
-                    && cx.place(sp.file, sp.doc, sp.s) <= at
-                    && at < cx.place(sp.file, sp.doc, sp.s + sp.len).max(1)
-            })
-            .map(|(&raw, _)| raw.cast_signed())
-            .collect();
-        if raws.is_empty() {
-            return Vec::new();
-        }
-        let memo = piece_memo().locked();
-        cx.inp
-            .shown
-            .iter()
-            .enumerate()
-            .filter(|&(_, &id)| {
-                memo.get(&(cx.inp.inst, id))
-                    .is_some_and(|ps| ps.iter().any(|p| raws.contains(p)))
-            })
-            .map(|(k, _)| k)
-            .collect()
+        pages_of(st, &st.ctx(self.origins_input()), file, at)
     }
 
     /// The files origins name, by their index in [`PageOrigins::file`]:
@@ -2495,7 +2539,7 @@ impl crate::Build {
                 file_bytes(inp.doc_raw.unwrap_or(inp.doc_text)),
             )];
             let mut seen: phitex_defuse::FxHashSet<String> = phitex_defuse::FxHashSet::default();
-            for (_, f, ..) in &inp.spans {
+            for (_, f, ..) in inp.spans.iter() {
                 if let Some((n, t)) = f
                     && seen.insert(n.clone())
                 {
@@ -2624,19 +2668,19 @@ pub struct OriginsCapture {
     inst: u64,
     shown: Vec<u64>,
     #[allow(clippy::type_complexity)]
-    spans: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)>,
+    spans: Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
     doc_name: String,
     doc_text: Arc<str>,
     doc_raw: Option<Arc<str>>,
     glyphs: Vec<Option<Arc<PageGlyphs>>>,
     pdf: Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync>,
+    key: u64,
 }
 
 impl OriginsCapture {
-    /// The Build's [`crate::Build::origins_snapshot`] when it was taken.
-    #[must_use]
-    pub fn snapshot(&self) -> OriginsSnapshot {
-        let inp = Input {
+    /// The input it was taken of.
+    fn input(&self) -> Input<'_> {
+        Input {
             inst: self.inst,
             shown: self.shown.clone(),
             spans: self.spans.clone(),
@@ -2644,7 +2688,35 @@ impl OriginsCapture {
             doc_text: &self.doc_text,
             doc_raw: self.doc_raw.as_deref(),
             glyphs: Some(&self.glyphs),
-        };
+            key: self.key,
+        }
+    }
+
+    /// The Build's [`crate::Build::page_origins`] of page `k` when it was
+    /// taken, made on any thread whatever the Build has become.
+    #[must_use]
+    pub fn page(&self, k: usize) -> Option<Arc<PageOrigins>> {
+        let cx = self.st.ctx(self.input());
+        answer(&self.st, &cx, k, &|| (self.pdf)())
+    }
+
+    /// The Build's [`crate::Build::pages_of_source`] when it was taken.
+    #[must_use]
+    pub fn pages_of_source(&self, file: &str, at: u32) -> Vec<usize> {
+        let cx = self.st.ctx(self.input());
+        pages_of(&self.st, &cx, file, at)
+    }
+
+    /// The files origins name ([`crate::Build::origin_files`]).
+    #[must_use]
+    pub fn files(&self) -> Vec<String> {
+        self.st.files.locked().clone()
+    }
+
+    /// The Build's [`crate::Build::origins_snapshot`] when it was taken.
+    #[must_use]
+    pub fn snapshot(&self) -> OriginsSnapshot {
+        let inp = self.input();
         snapshot_until(&self.st, inp, &|| (self.pdf)(), &|_| false).unwrap_or_else(|| {
             OriginsSnapshot {
                 pages: Vec::new(),

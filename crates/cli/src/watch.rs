@@ -381,6 +381,172 @@ fn is_read(a: &Ask) -> bool {
     )
 }
 
+/// The viewer's reads (a page's origins, the pages of a source place, a
+/// citation) answered on a thread of their own, from what the last build
+/// left ([`phitex_live::session::Reads`], taken as it ends): the watch's
+/// loop only builds, and a save never waits behind a read, whatever the
+/// machine's load (a page's origins made on the loop held a save 222 ms
+/// on a loaded node, though each read gave way to a save between the
+/// steps it could stop at). While a build runs there is nothing to read:
+/// the reads wait for its end, and one made of the build before it is
+/// not given ([`ReadsWorker::building`]).
+struct ReadsWorker {
+    tx: mpsc::Sender<Ask>,
+    /// The builds begun, and what the last one ended with (none while one
+    /// runs, or until a read of it is asked).
+    now: Arc<(
+        Mutex<(u64, Option<Arc<phitex_live::session::Reads>>)>,
+        std::sync::Condvar,
+    )>,
+    /// Whether the last build ended, and whether a read was asked since
+    /// it began: what it ended with is taken only then, on the asking
+    /// path, never on every build's ([`ReadsWorker::wants`]).
+    ended: AtomicBool,
+    asked: AtomicBool,
+}
+
+impl ReadsWorker {
+    fn start(v: Arc<phitex_live::view::Viewer>) -> ReadsWorker {
+        let (tx, rx) = mpsc::channel::<Ask>();
+        let now: Arc<(
+            Mutex<(u64, Option<Arc<phitex_live::session::Reads>>)>,
+            std::sync::Condvar,
+        )> = Arc::default();
+        let at = now.clone();
+        let _ = std::thread::Builder::new()
+            .name("phitex-watch-reads".into())
+            .spawn(move || {
+                let mut asked: VecDeque<Ask> = VecDeque::new();
+                loop {
+                    if asked.is_empty() {
+                        match rx.recv() {
+                            Ok(a) => asked.push_back(a),
+                            Err(_) => return,
+                        }
+                    }
+                    while let Ok(a) = rx.try_recv() {
+                        if !asked.contains(&a) {
+                            asked.push_back(a);
+                        }
+                    }
+                    let (n, reads) = {
+                        let (m, cv) = &*at;
+                        let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+                        if g.1.is_none() {
+                            // (a build runs: its end awaited, new reads
+                            // taken meanwhile)
+                            g = cv
+                                .wait_timeout(g, Duration::from_millis(50))
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .0;
+                        }
+                        (g.0, g.1.clone())
+                    };
+                    let Some(reads) = reads else { continue };
+                    let Some(a) = asked.pop_front() else { continue };
+                    // (made, then given only if no build began meanwhile:
+                    // the viewer asks the new build's again)
+                    let give: Box<dyn FnOnce()> = match a {
+                        Ask::Origins(k) => {
+                            let (files, page) = reads.page_origins(k);
+                            let v = v.clone();
+                            Box::new(move || v.put_origins(k, files, page))
+                        }
+                        Ask::PageOf { file, at } => {
+                            let pages = reads.pages_of_source(&file, at);
+                            let v = v.clone();
+                            Box::new(move || v.put_page_of(file, at, pages))
+                        }
+                        Ask::Cites { page, x, y } => {
+                            let links = v.cite_links(
+                                page,
+                                f64::from(f32::from_bits(x)),
+                                f64::from(f32::from_bits(y)),
+                            );
+                            let cites = if links.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                let (labels, numbers) = reads.cite_labels();
+                                serde_json::Value::Array(
+                                    links
+                                        .into_iter()
+                                        .map(|(key, p, top)| {
+                                            json!({
+                                                "key": key,
+                                                "label": labels.get(&key),
+                                                "number": numbers.get(&key),
+                                                "at": [p, top],
+                                            })
+                                        })
+                                        .collect(),
+                                )
+                            };
+                            let v = v.clone();
+                            Box::new(move || v.put_cites(page, x, y, json!({ "cites": cites })))
+                        }
+                        _ => continue,
+                    };
+                    let g = at.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if g.0 == n && g.1.is_some() {
+                        give();
+                    }
+                }
+            });
+        ReadsWorker {
+            tx,
+            now,
+            ended: AtomicBool::new(false),
+            asked: AtomicBool::new(false),
+        }
+    }
+
+    /// A read the thread answers (one it does not: false).
+    fn ask(&self, a: &Ask) -> bool {
+        if !matches!(a, Ask::Origins(_) | Ask::PageOf { .. } | Ask::Cites { .. }) {
+            return false;
+        }
+        let _ = self.tx.send(a.clone());
+        self.asked.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Whether what the last build ended with is to be taken now: it
+    /// ended, a read of it was asked, and nothing was taken yet.
+    fn wants(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
+            && self.asked.load(Ordering::Relaxed)
+            && self
+                .now
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1
+                .is_none()
+    }
+
+    /// A build begins: what the last one left is read no more.
+    fn building(&self) {
+        let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
+        g.0 += 1;
+        g.1 = None;
+        self.ended.store(false, Ordering::Relaxed);
+        self.asked.store(false, Ordering::Relaxed);
+    }
+
+    /// The build ended (what it ended with taken when a read is asked).
+    fn ended(&self) {
+        self.ended.store(true, Ordering::Relaxed);
+    }
+
+    /// What the build ended with (none: no build to read, the reads
+    /// answered with nothing).
+    fn built(&self, r: Option<phitex_live::session::Reads>) {
+        let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
+        g.1 = Some(Arc::new(r.unwrap_or_default()));
+        self.now.1.notify_all();
+    }
+}
+
 /// Whether a change of the files (a save, an editor's) has come and waits:
 /// the events come since taken into `held`, in order.
 fn change_waits(
@@ -992,6 +1158,21 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the review's hub: notes, changes, `phitex session`; before the
     // first build, which it records)
     let hub = crate::review::hub().clone();
+    // (each build's record made on a thread of its own, in order: the
+    // files followed read and diffed against the accepted text, 5 ms of
+    // each Grail keystroke on this loop, ahead of the next one)
+    let (hub_tx, hub_rx) =
+        std::sync::mpsc::channel::<Box<dyn FnOnce() -> crate::review::BuildFacts + Send>>();
+    {
+        let hub = hub.clone();
+        let _ = std::thread::Builder::new()
+            .name("review".into())
+            .spawn(move || {
+                for f in hub_rx {
+                    hub.built(f());
+                }
+            });
+    }
     hub.start(
         &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         job.path.to_string_lossy().trim_start_matches("./"),
@@ -1329,6 +1510,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             v.on_review(Box::new(move |op, req| h.viewer(op, req)));
         }
     }
+    // (the viewer's reads, answered off this loop)
+    let reads = view.as_ref().map(|v| ReadsWorker::start(v.viewer()));
     // (what the viewer and the editor asked, taken together)
     let take_asks = || {
         let mut a = view.as_ref().map(|v| v.take_asks()).unwrap_or_default();
@@ -1613,6 +1796,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(v) = &view {
             v.building(true);
         }
+        if let Some(rw) = &reads {
+            rw.building();
+        }
         let spin = ui.spin(
             format!("{what}: build {builds} ({})", crate::ui::said_why(why)),
             status.clone(),
@@ -1677,6 +1863,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if let Some(v) = &view {
                     v.built(&b);
                     v.building(false);
+                }
+                if let Some(rw) = &reads {
+                    rw.ended();
+                    if rw.wants() {
+                        rw.built(s.reads());
+                    }
                 }
                 if let Some(l) = &lsp {
                     l.built(&b);
@@ -1826,6 +2018,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 v.built(&b);
                 v.building(false);
             }
+            if let Some(rw) = &reads {
+                rw.ended();
+                if rw.wants() {
+                    rw.built(s.reads());
+                }
+            }
             phitex_tex::timeline::lap("watch: the viewers told");
             if let Some(l) = &lsp {
                 // (the language server's none says "made later": it is
@@ -1859,44 +2057,52 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             // (the review's record of it: what it read, its problems; a
             // `wait` answered by it, the notes moved)
             let w = s.watched();
-            let found: HashSet<String> = w
-                .paths
-                .iter()
-                .map(|p| p.to_string_lossy().trim_start_matches("./").to_owned())
-                .collect();
-            let missing = w
-                .names
-                .iter()
-                .filter(|n| {
-                    let n = n.trim_start_matches("./");
-                    !found.contains(n) && !found.contains(&format!("{n}.tex"))
-                })
-                .flat_map(|n| {
-                    let n = n.trim_start_matches("./").to_owned();
-                    let tex = (Path::new(&n).extension().is_none()).then(|| format!("{n}.tex"));
-                    std::iter::once(n).chain(tex)
-                })
-                .collect();
-            hub.built(crate::review::BuildFacts {
-                n: builds,
-                ok: !failed,
-                pages: r.pages(),
-                ms: r.wall.as_secs_f64() * 1e3,
-                errors: r.out.errors.clone(),
-                main: (main_rel.clone(), s.source(&main_rel)),
-                paths: w
+            phitex_tex::timeline::lap("watch: the files the build read");
+            // (the record's lists made on the review's thread)
+            let (n, ok, pages, ms) = (builds, !failed, r.pages(), r.wall.as_secs_f64() * 1e3);
+            let (errors, diags) = (r.out.errors.clone(), b.diagnostics.clone());
+            let main = (main_rel.clone(), s.source(&main_rel));
+            let pdf = written.as_ref().map(|p| p.display().to_string());
+            let _ = hub_tx.send(Box::new(move || {
+                let found: HashSet<String> = w
                     .paths
                     .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect(),
-                missing,
-                diags_pending: pending,
-                // (pending: its errors at once, the last warnings with them)
-                diags: b.diagnostics.clone(),
-                pdf: written.as_ref().map(|p| p.display().to_string()),
-            });
+                    .map(|p| p.to_string_lossy().trim_start_matches("./").to_owned())
+                    .collect();
+                let missing = w
+                    .names
+                    .iter()
+                    .filter(|n| {
+                        let n = n.trim_start_matches("./");
+                        !found.contains(n) && !found.contains(&format!("{n}.tex"))
+                    })
+                    .flat_map(|n| {
+                        let n = n.trim_start_matches("./").to_owned();
+                        let tex = (Path::new(&n).extension().is_none()).then(|| format!("{n}.tex"));
+                        std::iter::once(n).chain(tex)
+                    })
+                    .collect();
+                crate::review::BuildFacts {
+                    n,
+                    ok,
+                    pages,
+                    ms,
+                    errors,
+                    main,
+                    paths: w
+                        .paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    missing,
+                    diags_pending: pending,
+                    // (pending: its errors at once, the last warnings with them)
+                    diags,
+                    pdf,
+                }
+            }));
             status.set("");
-            phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
+            phitex_tex::timeline::lap("watch: the review given the build");
         }
         spin.done();
         building.store(false, Ordering::Relaxed);
@@ -2829,35 +3035,23 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     let mut asks = std::mem::take(&mut held_asks);
                     asks.extend(take_asks());
                     for a in asks {
-                        // (a viewer's read never holds a change's build
-                        // back: put off while one is to be built, from
-                        // this gathering or come since, and asked again
-                        // after it. Each is made on this loop, a page's
-                        // origins up to 0.3 s of Grail's: a browser that
-                        // asked for every page it shows held a save 5 s)
-                        if is_read(&a) && (again || change_waits(&rx, &mut held)) {
-                            held_asks.push(a);
+                        // (a page's origins, a source place's pages, a
+                        // citation: answered off this loop, [`ReadsWorker`])
+                        if let Some(rw) = reads.as_ref().filter(|rw| rw.ask(&a)) {
+                            // (what the build ended with, taken at its
+                            // first read)
+                            if rw.wants() {
+                                let t = Instant::now();
+                                rw.built(s.reads());
+                                busy.borrow_mut().did("the reads' build taken", t);
+                            }
                             continue;
                         }
-                        // (a page's origins given up for a change come
-                        // while they are made, asked again after its build)
-                        if let (Ask::Origins(k), Some(v)) = (&a, view.as_deref()) {
-                            let t = Instant::now();
-                            let came: RefCell<VecDeque<(Instant, Event)>> = RefCell::default();
-                            let stop = |_: bool| {
-                                let mut c = came.borrow_mut();
-                                while let Ok(e) = rx.try_recv() {
-                                    c.push_back(e);
-                                }
-                                c.iter()
-                                    .any(|e| matches!(e.1, Event::Files(_) | Event::Edited(_)))
-                            };
-                            match s.page_origins_until(*k, &stop) {
-                                Some((files, page)) => v.put_origins(*k, files, page),
-                                None => held_asks.push(a),
-                            }
-                            held.extend(came.into_inner());
-                            busy.borrow_mut().did("the viewer's asks", t);
+                        // (the transcript never holds a change's build
+                        // back: put off while one is to be built, from this
+                        // gathering or come since, and asked again after it)
+                        if is_read(&a) && (again || change_waits(&rx, &mut held)) {
+                            held_asks.push(a);
                             continue;
                         }
                         if a == Ask::Transcript {
@@ -3009,7 +3203,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                         .insert(file.clone(), splice_utf16(&cur, start, end, text));
                                 }
                                 other => {
-                                    held_asks.push(other);
+                                    // (a read: to its thread, which answers
+                                    // it once this build ends)
+                                    if !reads.as_ref().is_some_and(|rw| rw.ask(&other)) {
+                                        held_asks.push(other);
+                                    }
                                     continue;
                                 }
                             }
