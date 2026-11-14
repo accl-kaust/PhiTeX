@@ -781,6 +781,8 @@ export class Panel {
         opts.review,
       ));
       const b = this.$("#b-review");
+      // (shown only while the review is on: the user's Experimental switch)
+      rv.onEnabled((on) => offer("#x-review, #b-review", on));
       b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
       rv.counts((open, pending) => {
         const n = open + pending;
@@ -789,7 +791,7 @@ export class Panel {
       });
       new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
       window.addEventListener("keydown", (e) => {
-        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e) || !rv.enabled) return;
         e.preventDefault();
         rv.open();
       });
