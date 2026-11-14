@@ -108,6 +108,11 @@ pub(crate) struct Shared {
     /// Each worker's node at work on (its raw id plus one, 0: none), for
     /// [`Pool::release_past_only`].
     pub(crate) at_work: Box<[AtomicU64]>,
+    /// Whether each worker is in a run expected to be long (its node's
+    /// last run [`offer_ns`] or longer, or none known), by `ix`: a thief
+    /// takes such a worker's earliest queued node, else the one after it
+    /// ([`Ready::steal`]).
+    long_run: Box<[AtomicBool]>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -514,14 +519,41 @@ impl Queues {
     }
 
     fn pop(&mut self, eng: &Engine) -> Option<NodeId> {
-        let (k, front) = self.first(eng)?;
-        if front {
-            self.at_frontier.pop();
-        } else {
-            self.placed.pop();
-        }
-        Some(NodeId::from_raw(k.3))
+        self.take(eng).map(|(id, _)| id)
     }
+
+    /// `pop`, with what puts the entry back ([`Queues::put_back`]).
+    fn take(&mut self, eng: &Engine) -> Option<(NodeId, Taken)> {
+        let (k, front) = self.first(eng)?;
+        let t = if front {
+            Taken::Front(self.at_frontier.pop().expect("its first").0)
+        } else {
+            Taken::Placed(self.placed.pop().expect("its first").0)
+        };
+        Some((NodeId::from_raw(k.3), t))
+    }
+
+    fn put_back(&mut self, t: Taken) {
+        match t {
+            Taken::Front(k) => self.at_frontier.push(std::cmp::Reverse(k)),
+            Taken::Placed(k) => self.placed.push(std::cmp::Reverse(k)),
+        }
+    }
+
+    /// The node after the first, the first left in place: a thief's while
+    /// the owner, in no long run, takes the first next.
+    fn pop_second(&mut self, eng: &Engine) -> Option<NodeId> {
+        let (_, first) = self.take(eng)?;
+        let second = self.pop(eng);
+        self.put_back(first);
+        second
+    }
+}
+
+/// An entry [`Queues::take`] took, with its key.
+enum Taken {
+    Front(FrontierKey),
+    Placed(ReadyKey),
 }
 
 pub(crate) struct Ready {
@@ -586,13 +618,25 @@ impl Ready {
     /// engine's: 5.3% of worker time at 32 threads,
     /// `commits_do_not_wait_on_each_other`). None before it has waited
     /// ([`Ready::waited`]).
-    fn steal(&self, eng: &Engine) -> Option<NodeId> {
+    ///
+    /// The earliest node is its owner's, the next of the chain its commit
+    /// woke, and run where the commit ran, on the lines it just wrote: a
+    /// thief takes it only while the owner is in a long run (`long`), else
+    /// the node after it, or none. Taken by an idle worker, the text's
+    /// next run went to another worker for 136 of 344 links at amsldoc
+    /// -j8 and ran 1.55 times as long as at -j1, against 1.27 where it
+    /// stayed (n11, the same commands).
+    fn steal(&self, eng: &Engine, long: bool) -> Option<NodeId> {
         if self.len.load(Ordering::Relaxed) == 0 || !self.waited(ns(self.t0)) {
             return None;
         }
-        let x = self.heap.try_lock()?.pop(eng)?;
+        let x = self.take_as_thief(&mut *self.heap.try_lock()?, eng, long)?;
         self.len.fetch_sub(1, Ordering::Relaxed);
         Some(x)
+    }
+
+    fn take_as_thief(&self, q: &mut Queues, eng: &Engine, long: bool) -> Option<NodeId> {
+        if long { q.pop(eng) } else { q.pop_second(eng) }
     }
 
     /// The node a `pop` takes next, if any: a peek.
@@ -612,11 +656,13 @@ impl Ready {
     }
 
     /// A thief's `pop`, waiting for the lock of a heap that has waited.
-    fn steal_waiting(&self, eng: &Engine) -> Option<NodeId> {
+    fn steal_waiting(&self, eng: &Engine, long: bool) -> Option<NodeId> {
         if self.len.load(Ordering::Relaxed) == 0 || !self.waited(ns(self.t0)) {
             return None;
         }
-        self.pop(eng)
+        let x = self.take_as_thief(&mut self.heap.lock(), eng, long)?;
+        self.len.fetch_sub(1, Ordering::Relaxed);
+        Some(x)
     }
 
     fn len(&self) -> usize {
@@ -753,6 +799,7 @@ impl Pool {
             waiting: Mx::new(crate::values::FxHashMap::default()),
             frontier_waiting: Mx::new(Vec::new()),
             at_work: (0..n.max(1)).map(|_| AtomicU64::new(0)).collect(),
+            long_run: (0..n.max(1)).map(|_| AtomicBool::new(false)).collect(),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -1052,7 +1099,7 @@ impl Pool {
         let n = self.n;
         for k in 1..n {
             let v = (w.ix + k) % n;
-            if let Some(x) = self.shared.ready[v].steal(eng) {
+            if let Some(x) = self.shared.ready[v].steal(eng, self.shared.long_run[v].load(Ordering::Relaxed)) {
                 Worker::add(&w.steals, 1);
                 // (one woken at a time, each for what is left)
                 if self.shared.ready[v].len() > 0 {
@@ -1064,7 +1111,7 @@ impl Pool {
         // (one held meanwhile, not empty: waited for, no work left behind)
         for k in 1..n {
             let v = (w.ix + k) % n;
-            if let Some(x) = self.shared.ready[v].steal_waiting(eng) {
+            if let Some(x) = self.shared.ready[v].steal_waiting(eng, self.shared.long_run[v].load(Ordering::Relaxed)) {
                 Worker::add(&w.steals, 1);
                 if self.shared.ready[v].len() > 0 {
                     self.shared.wake_one();
@@ -2713,10 +2760,19 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     cx.frontier_pass = node.frontier_pass.swap(false, Ordering::AcqRel);
     let retries0 = crate::read::retries();
     let stands = cx.last_run_stands();
+    // (a long run, or one not known: a thief may take the node its
+    // queue holds first, `Ready::steal`)
+    let long = pool.shared.n > 1 && (first || last_ns >= offer_ns());
+    if long {
+        pool.shared.long_run[w.ix].store(true, Ordering::Relaxed);
+    }
     let r = match stands {
         Some(out) => Ok(Ok(out)),
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
+    if long {
+        pool.shared.long_run[w.ix].store(false, Ordering::Relaxed);
+    }
     if run_log() {
         let how = match &r {
             Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
