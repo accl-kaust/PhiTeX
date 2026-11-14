@@ -4287,9 +4287,9 @@ fn a_files_rest_read_on_into_keeps_its_line_numbers() {
     assert_eq!(logs[0], logs[1]);
 }
 
-/// A page fires at a candidate a piece's run goes on past: TeX ran the
-/// routine there, so its `[1]` comes before what the paragraphs after the
-/// fire log, wherever the cuts are. Cut at every candidate (`cut_min` 1)
+/// A page fires at a candidate a piece's run goes on past (inside a
+/// group of the run's own): TeX ran the routine there, so its `[1]` comes
+/// before what the paragraphs after the fire log, wherever the cuts are. Cut at every candidate (`cut_min` 1)
 /// or at none (`cut_min` the most), the logs are one: the finisher, placed
 /// after the whole piece, has its events where the piece passed the fire
 /// (lie-hasse at -j8: `[21]` after 420 lines the paragraphs after it
@@ -4299,13 +4299,18 @@ fn a_page_fired_inside_a_piece_logs_where_tex_ran_its_routine() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/fire-log");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
-    let mut doc = String::from("\\documentclass{article}\n\\begin{document}\n");
+    // (the paragraphs in a group of one run's own: its candidates are cut
+    // only once it has done `cut_min` commands)
+    let mut many = String::from("\\begingroup ");
     for i in 0..60 {
-        doc.push_str(&format!(
-            "\\message{{P{i}}}Paragraph {i} has words enough to fill a line or two of the page, words and words and more words to set.\n\n"
+        many.push_str(&format!(
+            "\\message{{P{i}}}Paragraph {i} has words enough to fill a line or two of the page, words and words and more words to set.\\par "
         ));
     }
-    doc.push_str("\\end{document}\n");
+    many.push_str("\\endgroup");
+    let doc = format!(
+        "\\documentclass{{article}}\n\\def\\many{{{many}}}\n\\begin{{document}}\n\\many\n\\end{{document}}\n"
+    );
     let log = |cut_min: u64| {
         let b = common::build(
             Options {
