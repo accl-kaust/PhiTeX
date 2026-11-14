@@ -4158,6 +4158,7 @@ impl Graph {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = held;
             }
+            crate::timeline::lap("engine: the finishers' table, the roots held");
             let t0 = std::time::Instant::now();
             // (every evaluation on the pool: it starts no thread for a
             // few nodes (`sched`: workers start when a deque holds more
@@ -4200,6 +4201,7 @@ impl Graph {
                 done.store(true, std::sync::atomic::Ordering::Relaxed);
                 r
             });
+            crate::timeline::lap("engine: the evaluation proper");
             {
                 // (the PDF commands no record names any more: dropped now,
                 // with no run in work)
@@ -4209,6 +4211,7 @@ impl Graph {
                     crate::pdfout::prune_cmds(v, &line, &self.ops.pdf_cmds);
                     crate::pdfout::prune_pieces(v, &line);
                 }
+                crate::timeline::lap("engine: the PDF commands pruned");
                 // (the hints of nodes gone, by their arguments: a
                 // continuation run again is another node's arguments)
                 let live: phitex_defuse::FxHashSet<u64> = self
@@ -4219,6 +4222,7 @@ impl Graph {
                     .map(|i| crate::hints::args_key(&i.args))
                     .collect();
                 crate::hints::prune(&self.ops.hints, &live);
+                crate::timeline::lap("engine: the hints pruned");
             }
             if let (Ok(r), Some(path)) = (&res, crate::exec::env_str!("PHITEX_CHAIN_TSV")) {
                 dump_chain(&self.eng, r, path);
