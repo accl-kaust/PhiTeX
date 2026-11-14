@@ -30,6 +30,7 @@ import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
+import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./sheetline.ts";
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 
@@ -38,6 +39,8 @@ const STALE_GRACE_MS = 1000;
 
 /** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
 const MAKING = "Making the format, once per PhiTeX update";
+/** A burst of packages after the first page ends once none is asked for in this long (ms): the next asked for as the last arrives is the same burst, its note kept up. */
+const PKG_QUIET = 600;
 
 /** The diff bar's state (Panel.diffBar). */
 export interface DiffBar {
@@ -407,7 +410,6 @@ const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"]
 
 /** A page's lines in a tip's demo, as wide as given (%). */
 /** Bytes fetched so far, as the sheet says them (" · 3.8 MB"; nothing before any). */
-const mb = (b?: number) => (b ? ` · ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "");
 
 /** A duration as it reads best: 0.7 ms, 42 ms, 2.6 s, 14 s. */
 const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
@@ -862,9 +864,12 @@ export class Panel {
     if (this.ending) this.stopSheet();
     this.reopen = true;
     this.typesetting = false;
-    // (the new build's packages counted from none: the sheet says its own, not the last document's)
-    this.loadPct = 0;
+    // (the new build's packages counted from none: the sheet says its own, not the last document's;
+    // its steps from the first again, said at once)
     this.loadDone = -1;
+    this.tally.reset();
+    this.line.reset();
+    this.lineNow = undefined;
     // (its first page is a first build's, "First build · 5.4 s", not a keystroke's)
     this.paints = 0;
     this.walk = null;
@@ -958,7 +963,7 @@ export class Panel {
     // waits for a build's own step (the host reading the files, packages fetched, its
     // phases, typesetting). Put up here, it played while the panel connected to a document
     // already built (the watch's last build), the pages a moment away)
-    if (on && !this.last) this.step(this.firstStep(), undefined, "", false);
+    if (on && !this.last) this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
   }
   private wasShown?: boolean;
 
@@ -1014,7 +1019,9 @@ export class Panel {
   }
 
   /** Packages on their way after the first page, and a build running on: said in the bar, or in the corner. */
-  private pkgNow?: { names: string[]; done: number; total: number; pct: number; source: string; failed: { name: string; error: string }[] };
+  private pkgNow?: { fetched: Fetched; source: string; quiet: number };
+  /** The packages' note, drawn calmly (sheetline.ts): at most four times a second, the latest. */
+  private toastLine = new Calm<{ title: string; detail: string }>((t) => this.toast("pkgs", { ...t, pct: undefined, icon: "download" }));
   private buildSince = 0;
   private actTick: ReturnType<typeof setInterval> | undefined;
 
@@ -1034,7 +1041,7 @@ export class Panel {
   streaming(s: { pages: number; phase: string } | null): void {
     this.streamed = s ? s.pages : undefined;
     this.making = s?.phase === "format";
-    if (s && this.firstPending()) (this.typesetting = true), this.step(this.words.steps[2], undefined, this.making ? MAKING : `Page ${s.pages + 1}`);
+    if (s && this.firstPending()) (this.typesetting = true), this.sayTypesetting();
     this.activity();
   }
 
@@ -1045,8 +1052,10 @@ export class Panel {
 
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
   private activity(): void {
-    const p = this.pkgNow;
     const now = performance.now();
+    // (a burst's end: nothing asked for in PKG_QUIET ms)
+    if (this.pkgNow?.quiet && now - this.pkgNow.quiet > PKG_QUIET) this.pkgNow = undefined;
+    const p = this.pkgNow;
     const prep = !!this.prepSince && now - this.prepSince > 400;
     const long = (!!this.buildSince && now - this.buildSince > 400) || prep;
     if (long || this.buildSince || this.prepSince || p) this.actTick ??= setInterval(() => this.activity(), 250);
@@ -1054,10 +1063,9 @@ export class Panel {
     this.renderStatus();
     // (before any page, the sheet says it all)
     if (!this.last && this.viewer.pages === 0) return;
-    if (p) {
-      const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
-      return this.toast("pkgs", { title: `Fetching ${names}`, detail: `${p.done} of ${p.total} files${known(p.source) ? ` · from ${p.source}` : ""}`, pct: p.pct, icon: "download" });
-    }
+    // (one shape, as the sheet's: "Fetching packages from Shelf", "3 fetched · 120 KB · tikz-cd")
+    if (p) return this.toastLine.set({ title: `Fetching packages${known(p.source) ? ` from ${p.source}` : ""}`, detail: fetchedLine(p.fetched) });
+    this.toastLine.reset();
     if (this.toastKind === "pkgs") this.toast("pkgs", null);
     // (no bar: the rest of a long build in the corner, quietly; with the bar its status says it)
     if (this.ownBar) return;
@@ -1079,7 +1087,7 @@ export class Panel {
     if (this.offline) (t = "Disconnected"), (err = true);
     // (an opening up: its step (loading the compiler, fetching, typesetting), not "Building…")
     else if (this.firstPending() && this.stepNow) t = this.stepNow;
-    else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.done} of ${this.pkgNow.total}`);
+    else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.fetched.done} fetched`);
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1000;
       t = this.making ? `${MAKING}…` : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
@@ -1563,33 +1571,19 @@ export class Panel {
     }
   }
 
-  /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
-  private readNow: { h: string; detail?: string; done?: number; total?: number; pct?: number } | undefined;
-  private readDrawn = 0;
-  private readTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The packages fetched so far: the first page's (since the opening began), and after it a burst's (one note in the corner). */
   private loadDone = -1;
-  private loadPct = 0;
+  private tally = new Tally();
+  private burst = new Tally();
 
   /**
    * Reading the project, before the packages: what is happening (the
    * download from Overleaf, each file unpacked, each figure handed to the
    * engine), the file in hand and how far, so the first seconds read as work.
+   * (said as often as the host says it: the sheet's line draws it calmly, sheetline.ts)
    */
   reading(r: { h: string; detail?: string; done?: number; total?: number; pct?: number }): void {
     if (this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readNow = r;
-    const wait = 50 - (performance.now() - this.readDrawn);
-    if (wait > 0) {
-      this.readTimer ??= setTimeout(() => ((this.readTimer = undefined), this.drawReading()), wait);
-      return;
-    }
-    this.drawReading();
-  }
-
-  private drawReading(): void {
-    const r = this.readNow;
-    if (!r || this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readDrawn = performance.now();
     const pct = r.pct ?? (r.total ? Math.round((100 * (r.done ?? 0)) / r.total) : undefined);
     const count = r.total ? `${r.done ?? 0} of ${r.total}` : "";
     this.step(r.h, pct, [r.detail, count].filter(Boolean).join(" · "));
@@ -1602,12 +1596,14 @@ export class Panel {
     if (p.loading.length && d.since === undefined) d.since = now;
     else if (!p.loading.length && d.since !== undefined) (d.ms += now - d.since), (d.since = undefined);
     (d.n = done), (d.bytes = p.bytes ?? 0);
-    const total = done + p.loading.length;
-    if (done !== this.loadDone) this.loadDone = done;
-    // (never backwards: a build asking for more grows the total)
-    const pct = (this.loadPct = Math.max(this.loadPct, total ? Math.round((100 * done) / total) : 100));
-    // (before the first page, or a rebuild's or another document's opening: the sheet's step)
+    this.loadDone = done;
+    // (before the first page, or a rebuild's or another document's opening: the sheet's step.
+    // One shape all through, "12 fetched · 2.8 MB · l3kernel": the count never back, the name
+    // kept between two fetches (a cold open's packs come one after the other, 70 ms apart, and
+    // the line had jumped between "pdfescape · 25 of 26" and "26 of 26" a dozen times a
+    // second). The bar not known: a pack read asks for the next, the total is never known)
     if (this.firstPending()) {
+      const f = this.tally.update({ done, bytes: p.bytes, loading: p.loading, missing: p.unavailable.length });
       if (!p.loading.length && !p.building) {
         // (done: the build's own state says the rest. Files not found are optional ones LaTeX
         // only checks for (amsart.cfg, …): the problems list them, and an error says when one was needed)
@@ -1615,26 +1611,40 @@ export class Panel {
         if (this.stopped()) return;
         // (between two downloads, the build not yet begun: still fetching, not typesetting;
         // nothing downloaded at all (all kept on this machine): the step as it is)
-        if (this.typesetting) this.step(this.words.steps[2], undefined, downloaded(done, p.bytes));
-        else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
+        if (this.typesetting) this.sayTypesetting();
+        else if (f.done) this.step(this.words.steps[1], undefined, fetchedLine(f));
         return;
       }
       this.pkgBusy = true;
-      if (p.loading.length) {
-        const name = p.loading[0];
-        const what = `${name} · ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` · ${p.unavailable.length} not found` : ""}`;
-        // (typesetting under way asks for a package as it reads: said under its step, not a step back to fetching and on again)
-        if (this.typesetting) this.step(this.words.steps[2], undefined, `fetching ${what}`);
-        else this.step(this.words.steps[1], pct, what);
-      } else (this.typesetting = true), this.step(this.words.steps[2], undefined, downloaded(done, p.bytes));
+      // (typesetting under way asks for a package as it reads: its count under its step, not a step back to fetching and on again)
+      if (p.loading.length && !this.typesetting) this.step(this.words.steps[1], undefined, fetchedLine(f));
+      else (this.typesetting = true), this.sayTypesetting();
       return;
     }
-    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : undefined;
+    // (after it: one note while packages come, counted from the burst's first; a gap between
+    // two fetches, the next asked for as the last arrives, is the same burst, the note kept up)
     if (p.failed?.length && !p.loading.length) {
+      this.pkgNow = undefined;
+      this.toastLine.reset();
       const f = p.failed[0];
-      this.toast("pkgs", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      this.toast("pkgfail", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      return this.activity();
+    }
+    if (p.loading.length) {
+      if (!this.pkgNow) this.burst.reset({ done, bytes: p.bytes });
+      this.pkgNow = { fetched: this.burst.update({ done, bytes: p.bytes, loading: p.loading, missing: 0 }), source: p.source, quiet: 0 };
+    } else if (this.pkgNow) {
+      this.pkgNow.fetched = this.burst.update({ done, bytes: p.bytes, loading: [], missing: 0 });
+      this.pkgNow.quiet ||= now;
     }
     this.activity();
+  }
+
+  /** Typesetting's detail, one shape: the page it is on (or the format made first), then the packages fetched for it. */
+  private sayTypesetting(): void {
+    const f = this.tally.now;
+    const page = this.making ? MAKING : this.streamed !== undefined ? `Page ${this.streamed + 1}` : "";
+    this.step(this.words.steps[2], undefined, [page, f.done ? fetchedLine(f, false) : ""].filter(Boolean).join(" · "));
   }
 
   /**
@@ -1685,23 +1695,39 @@ export class Panel {
     this.hintTimer = setTimeout(show, 2000);
   }
 
-  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  /**
+   * The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said
+   * only (the panel shown, nothing built yet). Every writer says it here, and the line
+   * (sheetline.ts) draws it calmly: at most four times a second, the latest, and the step
+   * forward only (the project, the packages, typesetting) until the opening begins again.
+   */
   private step(what: string, pct: number | undefined, detail = "", raise = true): void {
     if (!this.firstPending()) return;
+    // (the panel shown before any build's step: a first word, never ahead of one said)
+    const k = !raise ? 0 : what === this.words.steps[2] ? 2 : what === this.words.steps[1] ? 1 : 0;
+    if (!this.line.say(k, { what, pct, detail })) return;
     this.walkTo(what);
     if (raise) this.sheetUp();
     // (the hints with the sheet: none while a first open waits to put it up)
     if (this.anim) this.hints(true);
+  }
+
+  /** The line said now (the step, the bar, the detail): an opening put up later says it too. */
+  private lineNow: Said | undefined;
+  private drawLine(s: Said): void {
+    if (!this.firstPending()) return;
+    this.lineNow = s;
     const el = this.$("#opening");
-    this.stepNow = what;
-    el.querySelector(".what")!.textContent = what;
-    el.querySelector(".detail")!.textContent = detail;
+    this.stepNow = s.what;
+    el.querySelector(".what")!.textContent = s.what;
+    el.querySelector(".detail")!.textContent = s.detail;
     const track = el.querySelector<HTMLElement>(".track")!;
-    track.classList.toggle("unknown", pct === undefined);
-    track.querySelector("i")!.style.width = pct === undefined ? "" : `${pct}%`;
-    this.anim?.step?.(what, pct, detail);
+    track.classList.toggle("unknown", s.pct === undefined);
+    track.querySelector("i")!.style.width = s.pct === undefined ? "" : `${s.pct}%`;
+    this.anim?.step?.(s.what, s.pct, s.detail);
     this.renderStatus();
   }
+  private line = new SheetLine((s) => this.drawLine(s));
 
   /**
    * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
@@ -1746,7 +1772,7 @@ export class Panel {
     // (one that says the steps itself: the sheet's own not shown)
     this.$("#opening").classList.toggle("owns", !!anim.step);
     // (and the step the sheet says now, a rebuild's first: the watch says no other)
-    if (anim.step) anim.step(this.stepNow || this.firstStep(), undefined, "");
+    if (anim.step) anim.step(this.stepNow || this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "");
     this.animSince = performance.now();
   }
 
@@ -1867,7 +1893,7 @@ export class Panel {
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** A note in the corner, of `kind` (a later one replaces it), or that kind's gone (null). */
-  private toast(kind: string, t: { title: string; detail?: string; pct: number | null; icon?: string; err?: boolean; ms?: number } | null): void {
+  private toast(kind: string, t: { title: string; detail?: string; pct: number | null | undefined; icon?: string; err?: boolean; ms?: number } | null): void {
     const el = this.$("#toast");
     if (!t) {
       if (this.toastKind !== kind) return;
@@ -1881,7 +1907,7 @@ export class Panel {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : t.pct === undefined ? html`<div class="track unknown"><i></i></div>` : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span")!.textContent = t.title;
     el.querySelector(".d")!.textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -2520,7 +2546,11 @@ export class Panel {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        // (the element the key went to, inside the panel's shadow root: a window's
+        // listener sees `e.target` retargeted to the shadow host, so a "/" typed
+        // in a note's text box opened the search)
+        const into = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+        const typing = !!into && into !== q && (into.isContentEditable || !!into.closest?.("input, textarea, select, [contenteditable=true], [contenteditable=\"\"]"));
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);
@@ -3631,7 +3661,6 @@ export class Panel {
 export type DarkPdf = "off" | "on" | "theme";
 
 /** The packages a first build downloaded, said under its step ("" when all were kept on this machine: none to count). */
-const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
 export type { OpeningLook } from "./openings/index.ts";

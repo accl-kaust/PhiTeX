@@ -94,11 +94,18 @@ export function bindKeys(on: Window | HTMLElement, t: KeyTarget): () => void {
   const glide = new Glide({ scroll, zoom: (f) => t.zoomBy?.(f, true) });
   /** A distance at once (reduced motion), or eased on from where the motion is going. */
   const by = (dx: number, dy: number) => (reduced() ? (glide.stop(), void scroll(dx, dy)) : glide.by(dx, dy));
-  /** Page keys: from where the motion is going, the page `n` on. */
+  /**
+   * Page keys (←/→, PageUp/PageDown, Space): the page `n` on, at once, as a
+   * page turned: no glide (the user's call: switching pages is instant). From
+   * where a glide under way was going, so a turn after a j/k lands on the page
+   * it was heading for.
+   */
   const page = (n: number) => {
-    if (reduced() || !t.turnTop) return glide.stop(), t.turn(n);
+    if (!t.turnTop) return glide.stop(), t.turn(n);
     const from = t.scroller.scrollTop + glide.ahead()[1];
-    glide.by(0, t.turnTop(n, from) - from);
+    const to = t.turnTop(n, from);
+    glide.stop();
+    scroll(0, to - t.scroller.scrollTop);
   };
   /** A jump (a page by number, the ends, a fit): no motion left to land after it. */
   const jump = (f: () => void) => (glide.stop(), f());

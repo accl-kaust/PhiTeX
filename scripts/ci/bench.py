@@ -474,6 +474,8 @@ def cmd_json(args):
         "timing": {"cold": cold, "edit": edit},
         "differences": differences, "slow": slow,
     }
+    if args.release:
+        out["release"] = args.release
     if args.note:
         out["note"] = args.note
     if args.method:
@@ -511,6 +513,7 @@ def main():
     p.add_argument("--edits", nargs="*")
     p.add_argument("--out", required=True)
     p.add_argument("--commit")
+    p.add_argument("--release", help="the release measured (vX.Y.Z): the page names it")
     p.add_argument("--machine")
     p.add_argument("--note")
     p.add_argument("--corpora", default="manuals,research")

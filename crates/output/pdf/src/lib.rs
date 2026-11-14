@@ -936,6 +936,9 @@ pub struct PdfState {
     /// A page's file of its own ([`PdfState::stream_with`]): its fonts'
     /// programs and images' streams from this memo.
     stream_memo: Option<Arc<StreamMemo>>,
+    /// Where a PNG's streams are kept, made once a build: the pages'
+    /// files' memo, which the build's link reads too.
+    png_memo: Option<Arc<StreamMemo>>,
     // `\pdfinfo` and friends, concatenated
     info_toks: Option<digest::Toks>,
     catalog_toks: Option<digest::Toks>,
@@ -1075,6 +1078,7 @@ impl PdfState {
             font_reads: Vec::new(),
             last_arg_other_subr3: 3,
             stream_memo: None,
+            png_memo: None,
             info_toks: None,
             catalog_toks: None,
             catalog_openaction: 0,

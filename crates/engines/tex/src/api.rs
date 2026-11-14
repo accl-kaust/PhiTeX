@@ -5339,12 +5339,18 @@ fn culprit(
         {
             return Some((ls + s, ls + e));
         }
-        // (on a line read before it: a command that looked ahead for an
-        // optional argument, fontspec's `\newfontfamily\x{IPAexMincho}`,
-        // fails with TeX reading the next line; the argument is the last
-        // one read that holds the key)
+        // (on a line read before it: a command that looked ahead for a
+        // trailing optional argument, fontspec's
+        // `\newfontfamily\x{IPAexMincho}`, fails with TeX reading the
+        // next line; the argument is the last one read that holds the
+        // key. Only a LaTeX3 message's key, in double quotes: xparse's
+        // commands read trailing optional arguments; LaTeX2e's (`\ref`,
+        // `\cite`, `\input`, keys in `` `x' ``) end at their argument,
+        // so their key on an earlier line is another command's)
         let read = &text[from.min(ls)..ls];
-        if let Some((s, e)) = key_argument(read, key) {
+        if latex3_quoted(message) == Some(key)
+            && let Some((s, e)) = key_argument(read, key)
+        {
             return Some((from.min(ls) + s, from.min(ls) + e));
         }
     }
@@ -5371,6 +5377,18 @@ fn font_not_found(message: &str) -> bool {
     (message.contains("font \"") && message.contains("cannot be found"))
         || message.contains("installed font not found")
         || (message.contains("LaTeX Error: Font ") && message.ends_with("not found."))
+}
+
+/// The text `m` quotes in double quotes, `LaTeX3`'s way, where it has
+/// no key quoted TeX's way before it ([`quoted`]'s second choice).
+fn latex3_quoted(m: &str) -> Option<&str> {
+    if m.contains('`') && m.find('`') < m.find('"') {
+        return None;
+    }
+    let i = m.find('"')?;
+    let r = &m[i + 1..];
+    let k = &r[..r.find('"')?];
+    (!k.is_empty() && !k.contains('\n')).then_some(k)
 }
 
 /// The first text `m` quotes TeX's way (`` `x' ``), else in double

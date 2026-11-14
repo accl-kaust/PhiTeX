@@ -181,9 +181,127 @@ pub fn warning(m: &str) -> String {
     )
 }
 
+/// The packages that run only under XeTeX or LuaTeX, and the engine each
+/// asks for (fontspec and unicode-math run under both: XeTeX's is the one
+/// PhiTeX runs). LuaTeX's come first: a document with luacode and fontspec
+/// needs LuaTeX. The CLI's choice of engine reads them too.
+pub const NATIVE_PACKAGES: [(&str, &str); 14] = [
+    ("luacode", "luatex"),
+    ("luatexja", "luatex"),
+    ("luatexja-fontspec", "luatex"),
+    ("luaotfload", "luatex"),
+    ("luamplib", "luatex"),
+    ("fontspec", "xetex"),
+    ("unicode-math", "xetex"),
+    ("polyglossia", "xetex"),
+    ("xeCJK", "xetex"),
+    ("xltxtra", "xetex"),
+    ("xunicode", "xetex"),
+    ("mathspec", "xetex"),
+    ("xgreek", "xetex"),
+    ("bidi", "xetex"),
+];
+
+/// A package's engine check failed (fontspec's "requires either XeTeX or
+/// LuaTeX" under pdflatex, unicode-math's "Cannot be run with pdftex!"):
+/// the error's help says which engine the document needs and how to name
+/// it, before the package's own help. `engine` is the program run
+/// (`pdflatex`, `xelatex`, ...).
+pub fn engine_needed(ds: &mut [phitex_tex::Diagnostic], engine: &str) {
+    let xetex = engine.starts_with("xe");
+    let latex = engine.ends_with("latex");
+    for d in ds
+        .iter_mut()
+        .filter(|d| d.severity == phitex_tex::Severity::Error)
+    {
+        let m = d.message.trim_start_matches("Fatal ");
+        let Some(name) = m
+            .strip_prefix("Package ")
+            .and_then(|r| r.split_once(" Error"))
+            .map(|(n, _)| n)
+        else {
+            continue;
+        };
+        let Some(&(_, needs)) = NATIVE_PACKAGES.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        let about_engine = ["XeTeX", "LuaTeX", "pdftex", "pdfTeX", "engine"]
+            .iter()
+            .any(|w| m.contains(w));
+        if !about_engine || (needs == "xetex" && xetex) {
+            continue;
+        }
+        let say = if needs == "luatex" {
+            format!(
+                "{name} runs only under LuaTeX: the document needs {}, which PhiTeX does not support yet",
+                if latex { "LuaLaTeX" } else { "LuaTeX" }
+            )
+        } else {
+            let (prog, word) = if latex {
+                ("xelatex", "XeLaTeX")
+            } else {
+                ("xetex", "XeTeX")
+            };
+            format!(
+                "{name} runs only under XeTeX or LuaTeX, and this build ran {engine}: build with {word} (--engine {prog}, or `% !TEX program = {prog}` in the main file); LuaLaTeX is not supported yet"
+            )
+        };
+        d.help = Some(match d.help.take() {
+            Some(h) if !h.is_empty() => format!("{say}\n{h}"),
+            _ => say,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn error(message: &str) -> phitex_tex::Diagnostic {
+        phitex_tex::Diagnostic {
+            file: "fontspec.sty".into(),
+            range: (0, 0),
+            line: 100,
+            severity: phitex_tex::Severity::Error,
+            message: message.into(),
+            context: String::new(),
+            help: None,
+        }
+    }
+
+    #[test]
+    fn a_packages_engine_check_says_which_engine_to_name() {
+        let mut ds = vec![
+            error("Fatal Package fontspec Error: The fontspec package requires either XeTeX or"),
+            error("Package unicode-math Error: Cannot be run with pdftex!"),
+            error("Package hyperref Error: Wrong DVI mode driver option `dvipdfmx'"),
+            error("Undefined control sequence"),
+        ];
+        engine_needed(&mut ds, "pdflatex");
+        let h = ds[0].help.as_deref().unwrap_or("");
+        assert!(h.starts_with("fontspec runs only under XeTeX or LuaTeX, and this build ran pdflatex: build with XeLaTeX (--engine xelatex, or `% !TEX program = xelatex` in the main file)"), "{h}");
+        assert!(h.contains("LuaLaTeX is not supported yet"), "{h}");
+        assert!(
+            ds[1]
+                .help
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("unicode-math runs only")
+        );
+        assert_eq!((ds[2].help.as_deref(), ds[3].help.as_deref()), (None, None));
+        let mut ds = vec![
+            error("Package luacode Error: LuaTeX is required"),
+            error("Package fontspec Error: The font \"X\" cannot be found"),
+        ];
+        engine_needed(&mut ds, "xelatex");
+        assert_eq!(
+            ds[0].help.as_deref(),
+            Some(
+                "luacode runs only under LuaTeX: the document needs LuaLaTeX, which PhiTeX does not support yet"
+            )
+        );
+        assert_eq!(ds[1].help, None);
+    }
 
     #[test]
     fn hook_panic_names_its_node() {

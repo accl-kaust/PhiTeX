@@ -1354,6 +1354,7 @@ impl Session {
         } else {
             b.diagnostics()
         };
+        crate::failure::engine_needed(&mut diagnostics, self.job.engine.name);
         if let Some(d) = self.format_unpublished() {
             diagnostics.push(d);
         }
@@ -1748,10 +1749,13 @@ impl Session {
     /// warnings, the engine's), made now: an edit's report leaves them
     /// for when the editing pauses ([`Report::diagnostics_pending`]).
     pub fn diagnostics_now(&self) -> Vec<phitex_tex::Diagnostic> {
-        self.build
+        let mut ds = self
+            .build
             .as_ref()
             .map(phitex_tex::Build::diagnostics)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::failure::engine_needed(&mut ds, self.job.engine.name);
+        ds
     }
 
     fn text_now(&self) -> Arc<str> {
@@ -2486,6 +2490,17 @@ impl Session {
         let gz = self.synctex_bytes(stop)?;
         self.synctex_due.store(false, Relaxed);
         Some(gz)
+    }
+
+    /// The last build's `JOB.synctex.gz` made now from its pages' glyph
+    /// origins, whatever was made before (`phitex session pdf`); none
+    /// without a build or its origins.
+    pub fn synctex_now(&self) -> Option<Vec<u8>> {
+        let b = self.build.as_ref()?;
+        if !(self.job.origins || self.job.synctex) {
+            return None;
+        }
+        crate::synctex::Writer::default().write_capture(&b.origins_capture(), &self.synctex_root())
     }
 
     /// `JOB.synctex.gz` written: the file and its bytes' hash.

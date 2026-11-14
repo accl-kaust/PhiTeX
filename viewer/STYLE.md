@@ -43,7 +43,11 @@ Before the first page, the first page's sheet (A4, whole in the view)
 plays the opening (opening.ts: the logo, assets/logo-concepts.html's
 "Opening a document"), and under it the step: what, a thin bar (its
 length when the host knows it), the detail (the file, the package, `n of
-m`, as the host counts them; never invented). When the first page comes,
+m`, as the host counts them; never invented). The line is calm (sheetline.ts): drawn
+at most four times a second, the latest; the step forward only (the
+project, the packages, typesetting); the packages one shape throughout,
+"12 fetched · 2.8 MB · l3kernel", the count never back, the name kept
+between two fetches, the bar not known (each pack read asks for the next). When the first page comes,
 the zoom stays whole-page and only the sheet's width eases to the page's
 shape; then the logo dives into the page. A page there at once (a project
 built before) is shown at once. A package fetched later, a build that

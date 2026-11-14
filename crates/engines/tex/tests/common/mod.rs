@@ -494,6 +494,21 @@ pub fn plain_paragraphs(pars: usize, pdf: bool) -> (String, String) {
 /// A scratch directory of its own under the tests' temporary directory,
 /// made empty.
 #[allow(dead_code)]
+/// `bytes` written to `path` whole as another reader sees it: under
+/// another name, then renamed. A cache file the suite's tests share (the
+/// format, `pdflatex.fmt`) is read by each test as it starts, and one
+/// that read it half written started from a prelude cut short.
+pub fn write_whole(path: &Path, bytes: &[u8]) {
+    let tmp = path.with_extension(format!(
+        "part.{}.{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 pub fn scratch(name: &str) -> PathBuf {
     let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&d);

@@ -922,55 +922,84 @@ impl PdfState {
 
     // ---- on the page ----
 
-    /// `out_image` (pdfTeX §1620).
-    pub(crate) fn out_image(&mut self, n: usize, width: Scaled, height: Scaled, depth: Scaled) {
-        let Some(x) = self.aux.ximages.get(&n) else {
+    /// `out_image` (pdfTeX §1620) at (`h`, `v`) ([`PdfState::xobject_ops`]):
+    /// an image without its picture shows nothing.
+    pub(crate) fn out_image(&mut self, n: usize, vertical: bool, h: Scaled, v: Scaled) {
+        let Some((pdf, png, group_ref)) = self.aux.ximages.get(&n).and_then(|x| {
+            let i = x.image.as_ref()?;
+            Some((
+                matches!(i.kind, Kind::Pdf(_)),
+                matches!(i.kind, Kind::Png),
+                x.group_ref,
+            ))
+        }) else {
             return;
         };
-        let Some(image) = x.image.clone() else {
-            return;
-        };
-        let group_ref = x.group_ref;
-        let (img_w, img_h) = image.shown();
         self.end_text();
-        self.print_ln(b"q");
         if !self.ximage_list.contains(&n) {
             self.ximage_list.push(n);
         }
-        let px = self.cur_h - self.origin_h;
-        let py = self.origin_v - self.cur_v;
-        let total = height + depth;
-        if let Kind::Pdf(p) = &image.kind {
+        if pdf {
             self.show_ximage_group(n);
-            self.print_real(ext_xn_over_d(width, TEN_POW[6], i64::from(img_w)), 6);
-            self.print(b" 0 0 ");
-            self.print_real(ext_xn_over_d(total, TEN_POW[6], i64::from(img_h)), 6);
-            self.pdf_out(b' ');
-            self.print_bp(px - ext_xn_over_d(width, i64::from(p.orig_x), i64::from(img_w)));
-            self.pdf_out(b' ');
-            self.print_bp(py - ext_xn_over_d(total, i64::from(p.orig_y), i64::from(img_h)));
-        } else {
-            if matches!(image.kind, Kind::Png) && group_ref > 0 && self.page_group_val == 0 {
-                self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
-            }
-            let hb = i64::from(ONE_HUNDRED_BP);
-            self.print_real(ext_xn_over_d(width, TEN_POW[6], hb), 4);
-            self.print(b" 0 0 ");
-            self.print_real(ext_xn_over_d(total, TEN_POW[6], hb), 4);
-            self.pdf_out(b' ');
-            self.print_bp(px);
-            self.pdf_out(b' ');
-            self.print_bp(py);
+        } else if png && group_ref > 0 && self.page_group_val == 0 {
+            self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
         }
-        self.print_ln(b" cm");
-        self.print(b"/Im");
-        self.print_int(self.objs[n].info);
-        self.print_ln(b" Do");
+        if let Some(ops) = self.xobject_ops(n, false, vertical, h, v) {
+            self.print(&ops);
+        }
         if let Some(t) = self.tap.sink.as_mut() {
             t.xobject(n);
             t.xobject_codes(n, image.codes());
         }
-        self.print_ln(b"Q");
+    }
+
+    /// Image `n`'s matrix ([`PdfState::xobject_ops`]), on `o`: its box
+    /// placed `h` right of the origin and `v` below it (a vlist's top,
+    /// `vertical`: down by its height and depth; else the baseline: down
+    /// by its depth).
+    pub(crate) fn image_ops(
+        &self,
+        n: usize,
+        vertical: bool,
+        h: Scaled,
+        v: Scaled,
+        o: &mut Vec<u8>,
+    ) -> Option<()> {
+        let x = self.aux.ximages.get(&n)?;
+        let image = x.image.as_ref()?;
+        let (width, height, depth) = (x.width, x.height, x.depth);
+        let (img_w, img_h) = image.shown();
+        let px = h;
+        let py = v - if vertical { height + depth } else { depth };
+        let total = height + depth;
+        let dd = self.dd;
+        if let Kind::Pdf(p) = &image.kind {
+            crate::num::real(o, ext_xn_over_d(width, TEN_POW[6], i64::from(img_w)), 6);
+            o.extend_from_slice(b" 0 0 ");
+            crate::num::real(o, ext_xn_over_d(total, TEN_POW[6], i64::from(img_h)), 6);
+            o.push(b' ');
+            crate::num::bp(
+                o,
+                px - ext_xn_over_d(width, i64::from(p.orig_x), i64::from(img_w)),
+                dd,
+            );
+            o.push(b' ');
+            crate::num::bp(
+                o,
+                py - ext_xn_over_d(total, i64::from(p.orig_y), i64::from(img_h)),
+                dd,
+            );
+        } else {
+            let hb = i64::from(ONE_HUNDRED_BP);
+            crate::num::real(o, ext_xn_over_d(width, TEN_POW[6], hb), 4);
+            o.extend_from_slice(b" 0 0 ");
+            crate::num::real(o, ext_xn_over_d(total, TEN_POW[6], hb), 4);
+            o.push(b' ');
+            crate::num::bp(o, px, dd);
+            o.push(b' ');
+            crate::num::bp(o, py, dd);
+        }
+        Some(())
     }
 
     // ---- writing ----
@@ -1158,7 +1187,7 @@ impl PdfState {
             };
             Ok((img.color_type, img.bit_depth, streams))
         };
-        let memo = self.stream_memo.clone();
+        let memo = self.png_memo.clone();
         let (made, raw) = match &memo {
             Some(m) => (Some(self.stream_png(m, &image.data, decode)?), None),
             None => (None, Some(decode()?)),

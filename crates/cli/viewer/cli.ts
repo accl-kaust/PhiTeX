@@ -37,6 +37,17 @@ class Socket implements CoreTransport {
   private events: ((e: CoreEvent) => void)[] = [];
   onOpen: () => void = () => {};
   onClose: () => void = () => {};
+  /**
+   * Called on every open, beside `onOpen` (which later code assigns over:
+   * a listener chained into it was dropped by that, so the notes were asked
+   * for on no open, and a reloaded tab showed none until the next build).
+   */
+  private opens: (() => void)[] = [];
+  /** `f` on every open from now on, and now if it is open. */
+  onOpened(f: () => void): void {
+    this.opens.push(f);
+    if (this.ws?.readyState === WebSocket.OPEN) f();
+  }
 
   /**
    * Join the watch: first asked over HTTP whether it is there, so a tab
@@ -78,7 +89,11 @@ class Socket implements CoreTransport {
     const url = new URL("ws", location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.ws = new WebSocket(url);
-    this.ws.onopen = () => ((this.wait = 1000), this.onOpen());
+    this.ws.onopen = () => {
+      this.wait = 1000;
+      this.onOpen();
+      for (const f of this.opens) f();
+    };
     this.ws.onmessage = (m) => {
       const r = JSON.parse(m.data as string);
       if (r.event) return this.events.forEach((f) => f(r));
@@ -338,12 +353,9 @@ const review: ReviewHost = {
   request: (op, params) => sock.request({ op, ...params }),
   onState(cb) {
     sock.onEvent((e: any) => e.event === "review" && cb(e as ReviewState));
-    // (joined again after the watch restarted: the state asked anew)
-    const was = sock.onOpen;
-    sock.onOpen = () => {
-      was();
-      void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState));
-    };
+    // (asked at every open: a tab opened or reloaded, or joined again after
+    // the watch restarted)
+    sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState)));
   },
   // TEMPORARY, remove with its cause: the glyph origins give an \input
   // file's text the bytes of the \input command (an engine bug, its root
@@ -1055,6 +1067,23 @@ async function watchSettings(): Promise<SettingsGroup[]> {
           options: [["500MB", "500 MB"], ["1GB", "1 GB"], ["4GB", "4 GB"], ["16GB", "16 GB"]],
           value: { 5e8: "500MB", 1e9: "1GB", 4e9: "4GB", 16e9: "16GB" }[Number(p["cache-limit"] ?? 4e9)] ?? "",
           set: (v) => setPref("cache-limit", v),
+        },
+      ],
+    },
+    {
+      title: "Experimental",
+      rows: [
+        {
+          id: "experimental-review",
+          label: "Review your agent's edits",
+          help: "Its edits to your files shown here change by change, to accept, reject or comment on (the Changes tab beside the pages). Off: nothing of it is shown or kept. For this watch now, and from the next on.",
+          kind: "toggle",
+          value: !!p["experimental-review"],
+          set: async (v) => {
+            const r = await sock.request({ op: "review_changes", on: !!v });
+            if (!r.ok) return r.error ?? "not changed";
+            return (await setPref("experimental-review", !!v)) ?? undefined;
+          },
         },
       ],
     },

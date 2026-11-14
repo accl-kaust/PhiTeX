@@ -87,6 +87,8 @@ export interface ReviewState {
   /** The verdicts, newest first. */
   verdicts?: ReviewVerdict[];
   git: boolean;
+  /** Reviewing the agent's edits on (Settings, Experimental; off by default): off, no Changes tab, no marks of them. */
+  changes?: boolean;
 }
 
 /** Where the review's state lives (the watch), and what the pages give it. */
@@ -388,6 +390,10 @@ export class Review {
     const focused = this.p.root.activeElement as HTMLElement | null;
     const focusKey = focused && this.body.contains(focused) ? (focused.dataset.focus ?? null) : null;
     const top = this.body.scrollTop;
+    // (reviewing the agent's edits off: the notes alone)
+    const changesOn = this.s.changes !== false;
+    this.side.querySelector<HTMLElement>('[data-tab="changes"]')!.hidden = !changesOn;
+    if (!changesOn && this.tab === "changes") this.tab = "notes";
     this.body.replaceChildren(this.tab === "notes" ? this.notesView() : this.changesView());
     // (what was typed in a reply or a comment, put back)
     for (const ta of this.body.querySelectorAll<HTMLTextAreaElement>("textarea[data-reply], textarea[data-comment]"))

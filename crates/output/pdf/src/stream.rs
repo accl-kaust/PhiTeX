@@ -132,10 +132,17 @@ pub(crate) struct PngMade {
 }
 
 impl PdfState {
+    /// This writer's PNGs' streams taken from `memo`, made there where
+    /// they are not (the build's link: the pages' files made them).
+    pub fn png_memo_with(&mut self, memo: Arc<StreamMemo>) {
+        self.png_memo = Some(memo);
+    }
+
     /// This writer writes a page's file of its own (a page streamed): its
     /// Type 1 fonts' programs and its images' streams taken from `memo`,
     /// made there where they are not ([`StreamMemo`]).
     pub fn stream_with(&mut self, memo: Arc<StreamMemo>) {
+        self.png_memo = Some(memo.clone());
         self.stream_memo = Some(memo);
     }
 
@@ -253,20 +260,6 @@ impl PdfState {
         let bytes = made.packed(desc.subset_tag.unwrap_or_default(), self.p.compress_level);
         let e = &made.e;
         Ok(([e.length1, e.length2, e.length3], bytes))
-    }
-
-    /// Whether a page's file wrote Type 1 font `file` (map entry `fm`)
-    /// before ([`PdfState::stream_t1`]).
-    pub(crate) fn stream_knows(
-        memo: &StreamMemo,
-        file: &Arc<[u8]>,
-        fm: &crate::map::MapEntry,
-    ) -> bool {
-        memo.fonts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&(file.as_ptr() as usize, file.len()))
-            .is_some_and(|e| e.iter().any(|(f, _)| f == fm))
     }
 
     /// The glyph names of encoding file `bytes` ([`crate::enc::load_enc`]),
