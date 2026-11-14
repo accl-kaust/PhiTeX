@@ -2857,10 +2857,16 @@ impl Stats {
         for (n, c) in &r.rerun_causes {
             let op = eng.node_info(*n).map_or("?", |i| i.op);
             let (kind, f) = cause_parts(c);
-            let mut why = f.map_or_else(
-                || kind.to_owned(),
-                |f| format!("{kind} {}", field_name(v, f)),
-            );
+            let mut why = match c {
+                // (whose output: a picture child's, a finisher's, ...)
+                phitex_defuse::Cause::Output { of } => {
+                    format!("{kind} {}", eng.node_info(*of).map_or("?", |i| i.op))
+                }
+                _ => f.map_or_else(
+                    || kind.to_owned(),
+                    |f| format!("{kind} {}", field_name(v, f)),
+                ),
+            };
             if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
                 why = format!("{why} #r{}", self.rounds);
             }

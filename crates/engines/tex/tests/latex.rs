@@ -1336,9 +1336,14 @@ fn latex_pictures_in_a_paragraph_are_children() {
 /// (each shows a `\ref` to a label at the document's end): its run takes
 /// all their new outputs in one run once their children have run, not
 /// one run per picture (lie-hasse's piece of diagrams ran once per
-/// picture moved, and again for its own guess). Counted against the
-/// same document whose pictures do not change; the PDF the same at -j1
-/// and -j8.
+/// picture moved, and again for its own guess). Counted as the
+/// paragraphs' runs the pictures' outputs asked for (`Output pic`): one
+/// at most, at -j1 and -j8. Not as all the paragraphs' runs against the
+/// same document whose pictures do not change: at -j8 both make some 40
+/// runs more than at -j1, each asked for by the preamble's definitions
+/// their pieces ran before (`\@nodocument`, `\hsize`, ...), a number the
+/// schedule moves by five either way (#33). At -j1, where there are none
+/// of those, the counts are equal; the PDF the same at -j1 and -j8.
 #[test]
 fn latex_pictures_that_all_change_take_one_run() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-change");
@@ -1352,6 +1357,14 @@ fn latex_pictures_that_all_change_take_one_run() {
         )
     };
     let runs = |b: &phitex_tex::Build| common::runs_of(b, "exec") + common::runs_of(b, "resume");
+    // (the paragraphs' runs a picture child's output asked for)
+    let by_pictures = |b: &phitex_tex::Build| {
+        b.stats
+            .reruns
+            .iter()
+            .filter(|(_, op, why)| (*op == "exec" || *op == "resume") && why == "Output pic")
+            .count()
+    };
     let mut out = Vec::new();
     for threads in [1, 8] {
         let opts = |name: &str| Options {
@@ -1366,15 +1379,25 @@ fn latex_pictures_that_all_change_take_one_run() {
         let b = common::build(opts("still"), Some(&prelude(true)), &still);
         let (ra, rb) = (runs(&a), runs(&b));
         eprintln!(
-            "-j{threads}: paragraph runs {ra} (pictures moved) vs {rb}; pic runs {} vs {}",
+            "-j{threads}: paragraph runs {ra} (pictures moved) vs {rb}, asked for by the pictures {} vs {}; pic runs {} vs {}",
+            by_pictures(&a),
+            by_pictures(&b),
             common::runs_of(&a, "pic"),
             common::runs_of(&b, "pic")
         );
         assert!(
-            ra <= rb + 1,
-            "-j{threads}: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
-            a.stats.runs_by_op
+            by_pictures(&a) <= 1,
+            "-j{threads}: the pictures that moved asked their paragraph {} times: {:?}",
+            by_pictures(&a),
+            a.stats.reruns
         );
+        if threads == 1 {
+            assert_eq!(
+                ra, rb,
+                "-j1: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
+                a.stats.runs_by_op
+            );
+        }
         out.push(a.output().0);
     }
     assert!(out[0] == out[1], "-j8's PDF is not -j1's");
