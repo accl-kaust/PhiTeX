@@ -3373,9 +3373,11 @@ function bindKeys(on, t) {
   const glide = new Glide({ scroll, zoom: (f) => t.zoomBy?.(f, true) });
   const by = (dx, dy) => reduced() ? (glide.stop(), void scroll(dx, dy)) : glide.by(dx, dy);
   const page = (n) => {
-    if (reduced() || !t.turnTop) return glide.stop(), t.turn(n);
+    if (!t.turnTop) return glide.stop(), t.turn(n);
     const from2 = t.scroller.scrollTop + glide.ahead()[1];
-    glide.by(0, t.turnTop(n, from2) - from2);
+    const to = t.turnTop(n, from2);
+    glide.stop();
+    scroll(0, to - t.scroller.scrollTop);
   };
   const jump = (f) => (glide.stop(), f());
   const line = (e, axis, dir, n) => {

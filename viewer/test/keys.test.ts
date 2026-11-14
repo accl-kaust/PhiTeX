@@ -28,7 +28,7 @@ function rig() {
     page: 3,
     goTo: (k) => went.push(k),
     turn: () => {},
-    scroller: { clientHeight: 800, scrollTop: 5000 } as unknown as HTMLElement,
+    scroller: { clientHeight: 800, get scrollTop() { return s.y; } } as unknown as HTMLElement,
     zoom: () => assert.fail("the gesture's, not zoom's"),
     fitWidth: () => {},
     fitPage: () => {},
@@ -125,14 +125,15 @@ test("counts, gg and G jump as before, and stop a glide under way", async () => 
   r.off();
 });
 
-test("page keys: eased, a press again on the way turns on from the page it was going to", async () => {
+test("page keys turn the page at once, with no glide: →, PageDown, ←", () => {
   reduce = false;
   const r = rig();
+  r.key("keydown", "ArrowRight", "ArrowRight");
+  assert.equal(r.s.y, 5000 + 1000);
   r.key("keydown", "PageDown", "PageDown");
-  await sleep(40);
-  r.key("keydown", "PageDown", "PageDown");
-  await sleep(600);
   assert.equal(r.s.y, 5000 + 2000);
+  r.key("keydown", "ArrowLeft", "ArrowLeft");
+  assert.equal(r.s.y, 5000 + 1000);
   r.off();
 });
 
