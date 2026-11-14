@@ -1934,8 +1934,15 @@ fn a_format_texts_edit_runs_the_runs_that_read_it() {
         comment, 1,
         "a comment's edit ran more than its line's reader"
     );
-    assert_eq!(
-        first, last,
-        "a word's edit ran more nodes in one part than in another"
+    // (the claim above: a word late in the text costs no more than one
+    // early in it, and neither runs the continuations cut before the edit
+    // again: 4 nodes in the first part, 3 in the last, where 70 ran)
+    assert!(
+        last <= first,
+        "a word's edit in the last part ran more nodes ({last}) than in the first ({first})"
+    );
+    assert!(
+        first <= 4,
+        "a word's edit in the first part ran {first} nodes (4 when this was written, mc 86655)"
     );
 }
