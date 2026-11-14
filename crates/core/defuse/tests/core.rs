@@ -586,49 +586,6 @@ fn the_environment_reaches_its_readers() {
     assert!(e.check_invariants().is_empty());
 }
 
-/// An environment miss is answered once: readers on every worker asking
-/// the same field while its provider runs wait for that answer, the
-/// provider not asked again beside it (a clean build's first paragraphs,
-/// one a worker, each built the format's hyphenation patterns at once).
-#[test]
-fn an_environment_miss_is_answered_once() {
-    let (e, o) = engine();
-    let v = e.values();
-    let en = v.field("slow");
-    let asked = Arc::new(AtomicUsize::new(0));
-    let k = Arc::clone(&asked);
-    e.set_env_provider(Box::new(move |v: &Values, f: Field| {
-        if v.as_str(f.0).as_deref() != Some("slow") {
-            return None;
-        }
-        k.fetch_add(1, Ordering::SeqCst);
-        // (long enough for the other workers to ask meanwhile)
-        spin(Duration::from_millis(50));
-        Some(Some(v.int(9)))
-    }));
-    // (each reader works a while before it reads, so that the workers
-    // start, and they all reach the read while its provider runs)
-    struct SlowGet;
-    impl Operation for SlowGet {
-        fn name(&self) -> &'static str {
-            "slow-get"
-        }
-        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-            spin(Duration::from_millis(5));
-            Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
-        }
-    }
-    let _ = o;
-    let get = e.register(Arc::new(SlowGet));
-    let u = e.new_unit();
-    let n = threads().clamp(2, 16);
-    let readers: Vec<NodeId> = (0..4 * n).map(|_| e.push(u, get, vec![en.0])).collect();
-    let r = e.evaluate(n).unwrap();
-    assert!(readers.iter().all(|&x| int(&e, x) == 9), "{r:?}");
-    assert_eq!(asked.load(Ordering::SeqCst), 1, "the provider asked once for one field");
-    assert!(e.check_invariants().is_empty());
-}
-
 #[test]
 fn claims_take_siblings() {
     let (e, o) = engine();

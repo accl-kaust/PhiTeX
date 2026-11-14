@@ -2424,6 +2424,57 @@ mod tests {
     use crate::node::ReadKind;
     use crate::values::{Field, ValueId};
 
+    /// An environment miss is answered once: threads asking the same
+    /// field while its provider runs wait for that answer, the provider not
+    /// asked again beside it (a clean build's first paragraphs, one a
+    /// worker, each built the format's hyphenation patterns at once), and
+    /// a provider that panics leaves the field to the next asker.
+    #[test]
+    fn an_environment_miss_is_answered_once() {
+        use std::sync::atomic::AtomicUsize;
+        let eng = Engine::new();
+        let f = eng.values().field("slow");
+        let g = eng.values().field("fails");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let k = Arc::clone(&asked);
+        let failed = Arc::new(AtomicBool::new(false));
+        let once = Arc::clone(&failed);
+        eng.set_env_provider(Box::new(move |v, x| {
+            if x == g {
+                assert!(once.swap(true, Ordering::SeqCst), "the first answer fails");
+                return Some(Some(v.int(3)));
+            }
+            k.fetch_add(1, Ordering::SeqCst);
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_millis(50) {
+                std::hint::spin_loop();
+            }
+            Some(Some(v.int(9)))
+        }));
+        let n = 8;
+        let go = std::sync::Barrier::new(n);
+        let got: Vec<Option<ValueId>> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..n)
+                .map(|_| {
+                    s.spawn(|| {
+                        go.wait();
+                        super::env_value(&eng, f)
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().expect("an asker")).collect()
+        });
+        assert!(got.iter().all(|&x| x == Some(eng.values().int(9))));
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the provider asked once for one field");
+        let first = std::thread::scope(|s| s.spawn(|| super::env_value(&eng, g)).join());
+        assert!(first.is_err(), "the first answer panicked");
+        assert_eq!(
+            super::env_value(&eng, g),
+            Some(eng.values().int(3)),
+            "the next asker answers"
+        );
+    }
+
     /// Nothing holds no key: `Has` on no value is false, as `Present`, so
     /// a client that noted a key missing from a list it looked at (`Ctx::
     /// note_path`, false) and the commit's check of that read (the field
