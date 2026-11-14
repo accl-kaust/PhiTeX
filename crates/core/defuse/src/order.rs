@@ -202,7 +202,7 @@ impl Order {
                 (segs[a..=b].iter().map(|x| x.1).collect::<Vec<SegId>>(), at_lo, at_hi)
             };
             let win: Vec<std::sync::Arc<crate::segment::Segment>> = ids.iter().map(|&x| eng.seg(x).clone()).collect();
-            let mut gs: Vec<crate::lock::WriteGuard<'_, crate::segment::Inner>> =
+            let mut gs: Vec<crate::lock::RWriteGuard<'_, crate::segment::Inner>> =
                 win.iter().map(|x| x.inner.write()).collect();
             let t_held = std::time::Instant::now();
             // (a split or an absorption among them meanwhile: the list again)
@@ -284,7 +284,7 @@ impl Order {
         &self,
         eng: &crate::engine::Engine,
         win: &[std::sync::Arc<crate::segment::Segment>],
-        gs: &mut [crate::lock::WriteGuard<'_, crate::segment::Inner>],
+        gs: &mut [crate::lock::RWriteGuard<'_, crate::segment::Inner>],
         n: u64,
         asking: usize,
         more: u64,
@@ -357,7 +357,7 @@ impl Order {
                 left = 0;
             }
         }
-        let counts = |gs: &[crate::lock::WriteGuard<'_, crate::segment::Inner>]| -> Vec<u64> {
+        let counts = |gs: &[crate::lock::RWriteGuard<'_, crate::segment::Inner>]| -> Vec<u64> {
             gs.iter().map(|g| g.nodes.len() as u64).collect()
         };
         // rightward: every prefix down to its share or below
