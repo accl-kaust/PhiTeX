@@ -4136,6 +4136,7 @@ fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
 /// at one and eight threads.
 #[test]
 fn a_csname_bound_globally_at_once_reads_nothing() {
+    use std::fmt::Write as _;
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/csname-dead");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -4145,10 +4146,11 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
             s.push_str("First \\expandafter\\gdef\\csname kl@a\\endcsname{set} and \\csname kl@a\\endcsname.\n\n");
         }
         for i in 0..8 {
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 "Paragraph {i} \\expandafter\\global\\expandafter\\let\\csname kl@a\\endcsname\\empty \
                  \\expandafter\\global\\expandafter\\let\\csname kl@b{i}\\endcsname\\relax words.\n\n"
-            ));
+            );
         }
         s.push_str(
             "Tested: \\expandafter\\ifx\\csname kl@u\\endcsname\\relax relax\\else other\\fi; \
@@ -4199,7 +4201,7 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
 /// moved runs on to "TeX capacity exceeded". Here 1500 calls, the
 /// argument 8 tokens longer a call: at least 8 * 1500 * 1499 / 2 tokens
 /// written, so at least that / 8192 ticks, where calls and commands
-/// alone make none. (Ctx::tick looks at a long run's reads at powers of
+/// alone make none. (`Ctx::tick` looks at a long run's reads at powers of
 /// two of its checks; counted in commands and calls only, Grail's
 /// recursion made too few to reach the next one.)
 #[test]
@@ -4232,6 +4234,57 @@ fn a_macro_call_counts_its_tokens_toward_the_runs_checks() {
         "1500 growing calls made {many} checks, one call {none}: at least {} more for {tokens} tokens",
         tokens / 8192
     );
+}
+
+/// A file whose last paragraph has no blank line after it, then an
+/// `\input` of a file that begins with a section: the paragraph reads on
+/// into the second file to its `\section`, so a run reads that file's
+/// first lines itself, numbered as a file's, and cuts the rest into
+/// pieces. Those pieces' lines are the file's, not a fold of the lines the
+/// nodes before them began, which missed the lines read with numbers
+/// (Grail's appendix at -j1: every line in the log two short). The log is
+/// the same at one and eight threads, and names the paragraph's lines.
+#[test]
+fn a_files_rest_read_on_into_keeps_its_line_numbers() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rest-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::write(
+        dir.join("prev.tex"),
+        "\\section{Prev}\n\nA paragraph of the previous file\nthat ends without a blank line.\n",
+    )
+    .expect("prev.tex");
+    std::fs::write(
+        dir.join("app.tex"),
+        "\\section{Next}\n\\label{sec:next}\n\nA first paragraph\nof two lines.\n\n\
+         The second paragraph aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+         goes on a line\nand another.\n\nLast.\n",
+    )
+    .expect("app.tex");
+    let doc = "\\documentclass{article}\n\\begin{document}\nSome text before.\n\n\
+               \\input{prev}\n\\input{app}\n\n\\end{document}\n";
+    let mut logs = Vec::new();
+    for threads in [1, 8] {
+        let b = common::build(
+            Options {
+                threads: Some(threads),
+                ..pdf_opts("restlines", &dir)
+            },
+            Some(&prelude(true)),
+            doc,
+        );
+        let log = b.output().1.clone();
+        let at: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("in paragraph at lines"))
+            .collect();
+        assert!(
+            at.len() == 1 && at[0].ends_with("in paragraph at lines 7--10"),
+            "-j{threads}: {at:?}"
+        );
+        logs.push(log);
+    }
+    assert_eq!(logs[0], logs[1]);
 }
 
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's

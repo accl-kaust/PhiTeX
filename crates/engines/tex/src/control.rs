@@ -3311,6 +3311,16 @@ impl Run<'_, '_> {
             ((Some(0), 0, None, None), Some(fire)) if self.file_line_here().is_none() => fire,
             _ => m,
         };
+        // (observe, `PHITEX_LINEMARK_TRACE`: each line a message names, as
+        // marked and how it is answered)
+        if crate::exec::obs_flag!("PHITEX_LINEMARK_TRACE") {
+            eprintln!(
+                "linemark: node {} op {:?} mark {m:?} here {:?}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                self.file_line_here().map(|x| format!("{x:?}"))
+            );
+        }
         if let (None, _, Some(_), Some(own)) = m {
             let f = crate::run::dline_field(self.v, own.0);
             let given = self.cx.env(f)?.is_some();

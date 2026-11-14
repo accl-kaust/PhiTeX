@@ -66,6 +66,9 @@ pub(crate) fn roots(o: &Ops, eng: &Engine, keep: &mut dyn FnMut(ValueId)) {
     for f in o.docs.locked().values() {
         f.locked().roots(keep);
     }
+    for &f in o.rest_lines.locked().keys() {
+        keep(f);
+    }
     if let Some(m) = o
         .fmt_made
         .read()

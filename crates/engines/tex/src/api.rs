@@ -3144,9 +3144,53 @@ impl DocFile {
 /// The lines given for the text of a piece of a cut file
 /// ([`DocFile::dlines`]).
 fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
+    // (observe, `PHITEX_DLINE_ENV`: each answer, by file)
+    if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+        for d in docs.locked().values() {
+            let d = d.locked();
+            if let Some(k) = d.dlines.get(&n) {
+                eprintln!(
+                    "dline-env: {n} in {} = {k} (of {} pieces)",
+                    d.path,
+                    d.dlines.len()
+                );
+            }
+        }
+    }
     docs.locked()
         .values()
         .find_map(|d| d.locked().dlines.get(&n).copied())
+}
+
+/// The lines before the pieces runs cut of the rest of a file they read
+/// the first lines of themselves ([`rest_lines`]), by the value of their
+/// frames, given as `dline:<frames>` as a cut file's pieces' are
+/// ([`DocFile::dlines`]): those lines, read by the run with numbers of
+/// their own, are in no fold of the lines the nodes before a piece began.
+/// (Keyed by the frames' value, kept alive by a collection, `crate::collect`.)
+pub(crate) type RestLines = Arc<std::sync::Mutex<FxHashMap<ValueId, i64>>>;
+
+/// The lines before the piece whose frames' value is `n`, where a run
+/// cut it of a file's rest ([`RestLines`]).
+fn rest_line(rest: &RestLines, n: u64) -> Option<i64> {
+    rest.locked()
+        .iter()
+        .find_map(|(f, &k)| (f.raw() == n).then_some(k))
+}
+
+/// [`RestLines`] for the pieces `(frames, byte)` cut of the rest of
+/// `text`: the lines of the text before each.
+pub(crate) fn rest_lines(rest: &RestLines, text: &str, pieces: &[(ValueId, usize)]) {
+    let starts = line_starts(text);
+    let mut m = rest.locked();
+    for &(n, s) in pieces {
+        let k = *m
+            .entry(n)
+            .or_insert_with(|| lines_before(&starts, text.len(), s));
+        if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+            eprintln!("rest-lines: {} at byte {s} = {k}", n.raw());
+        }
+    }
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -3439,6 +3483,7 @@ impl Graph {
             rec_ran: Arc::default(),
             pkg_loads: Arc::new(std::sync::RwLock::new(None)),
             docs: Arc::default(),
+            rest_lines: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
@@ -3628,6 +3673,7 @@ impl Graph {
         let cut_log = Arc::clone(&self.provided);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
         let docs = Arc::clone(&self.ops.docs);
+        let rest = Arc::clone(&self.ops.rest_lines);
         let finder_u = Arc::clone(&finder);
         let finder_t = Arc::clone(&finder);
         let tools = self.tool_finder.clone();
@@ -3690,7 +3736,8 @@ impl Graph {
             }
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
-                let k = doc_file_line(&docs, n.parse().ok()?);
+                let n = n.parse().ok()?;
+                let k = doc_file_line(&docs, n).or_else(|| rest_line(&rest, n));
                 return Some(k.map(|k| v.int(k)));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the
@@ -9038,6 +9085,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
+                    .or_else(|| rest_line(&self.g.ops.rest_lines, n))
             },
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
@@ -9141,6 +9189,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
+                    .or_else(|| rest_line(&self.g.ops.rest_lines, n))
             },
             &crate::log::TermParts {
                 head,
