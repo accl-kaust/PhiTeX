@@ -254,8 +254,9 @@ impl GlyphTap for Recorder {
 }
 
 /// The pages' glyphs by the value store and the page's identity in the
-/// link (`crate::pdfout::Linked::shown`).
-type GlyphMemo = Mutex<FxHashMap<(u64, u64), Arc<PageGlyphs>>>;
+/// link (`crate::pdfout::Linked::shown`), and whether the link's own
+/// writer showed them ([`keep_shipped`]).
+type GlyphMemo = Mutex<FxHashMap<(u64, u64), (Arc<PageGlyphs>, bool)>>;
 
 fn glyph_memo() -> &'static GlyphMemo {
     static M: OnceLock<GlyphMemo> = OnceLock::new();
@@ -285,15 +286,31 @@ pub(crate) fn keep_pieces(inst: u64, id: u64, pieces: &[i64]) {
     m.insert((inst, id), Arc::from(pieces));
 }
 
-/// Page `id`'s glyphs (value store `inst`), kept.
+/// Page `id`'s glyphs (value store `inst`), kept, as the writer the page
+/// was written apart on showed them: unless the link's own are kept.
 pub(crate) fn keep(inst: u64, id: u64, g: PageGlyphs) {
+    put(inst, id, g, false);
+}
+
+/// Page `id`'s glyphs (value store `inst`) as the link's writer showed
+/// them, where it shipped the page again: kept over the page's own
+/// (the forms and images the page draws are the link's, not known to
+/// the writer it was written apart on).
+pub(crate) fn keep_shipped(inst: u64, id: u64, g: PageGlyphs) {
+    put(inst, id, g, true);
+}
+
+fn put(inst: u64, id: u64, g: PageGlyphs, shipped: bool) {
     let mut m = glyph_memo().locked();
+    if !shipped && m.get(&(inst, id)).is_some_and(|e| e.1) {
+        return;
+    }
     // (the pages of builds gone: dropped wholesale past a bound, made
     // again where a page's writer runs)
     if m.len() > 1 << 16 {
         m.clear();
     }
-    m.insert((inst, id), Arc::new(g));
+    m.insert((inst, id), (Arc::new(g), shipped));
 }
 
 /// Page `id`'s glyphs (value store `inst`) dropped: its record is gone.
@@ -303,7 +320,7 @@ pub(crate) fn forget(inst: u64, id: u64) {
 
 /// Page `id`'s glyphs (value store `inst`), if kept.
 pub(crate) fn kept(inst: u64, id: u64) -> Option<Arc<PageGlyphs>> {
-    glyph_memo().locked().get(&(inst, id)).cloned()
+    glyph_memo().locked().get(&(inst, id)).map(|e| e.0.clone())
 }
 
 /// Whether page `id` (value store `inst`) has its glyphs kept.

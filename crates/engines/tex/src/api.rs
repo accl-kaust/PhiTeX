@@ -7964,11 +7964,26 @@ impl Build {
         let mut texts: FxHashMap<ValueId, Option<(String, Arc<str>)>> = FxHashMap::default();
         let s_tag = v.str("s");
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
-        let mut stack: Vec<(NodeId, i64, usize)> = self
+        // (a shift is of one file's places: the file of the piece the
+        // edit moved, its name's value; the nodes under it reading
+        // another file, an `\input` one, are where that file has them)
+        let first_name = |fs: ValueId| {
+            v.with_list(fs, |frames| {
+                frames.iter().find_map(|&f| {
+                    v.with_list(f, |xs| match xs {
+                        &[t, _, _, _, _, name, _] if t == s_tag => Some(name),
+                        _ => None,
+                    })
+                    .flatten()
+                })
+            })
+            .flatten()
+        };
+        let mut stack: Vec<(NodeId, Option<(ValueId, i64)>, usize)> = self
             .nodes
             .iter()
             .enumerate()
-            .map(|(k, (_, n, _))| (*n, 0, k))
+            .map(|(k, (_, n, _))| (*n, None, k))
             .collect();
         while let Some((x, sh, top)) = stack.pop() {
             if !seen.insert(x.raw()) {
@@ -7979,7 +7994,7 @@ impl Build {
                 continue;
             };
             let sh = match (shifts.get(&x.raw()), i.args.first()) {
-                (Some(&(fs, d)), Some(&a)) if fs == a => d,
+                (Some(&(fs, d)), Some(&a)) if fs == a => first_name(fs).map(|n| (n, d)),
                 _ => sh,
             };
             stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
@@ -7992,7 +8007,8 @@ impl Build {
                     let Some((name, s, e)) = v
                         .with_list(f, |xs| match xs {
                             &[t, seg, _, _, _, name, pos] if t == s_tag => {
-                                let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
+                                let d = sh.filter(|&(n, _)| n == name).map_or(0, |x| x.1);
+                                let s = usize::try_from(int_of(v, pos) + d).unwrap_or(0);
                                 Some((name, s, s + v.with_str(seg, str::len).unwrap_or(0) + 1))
                             }
                             _ => None,

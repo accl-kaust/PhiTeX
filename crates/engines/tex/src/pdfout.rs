@@ -3112,6 +3112,7 @@ pub(crate) fn page_alone(
         suppress_ptex_info: 0,
         ptex_use_underscore: 0,
         pk_resolution: params.pk_resolution,
+        origins: false,
     };
     let mut alone = Alone {
         base: &pc.base_in,
@@ -5267,6 +5268,9 @@ pub(crate) struct EndFields {
     /// `\pdfpkresolution`: what a font without a map entry's failure
     /// names ([`phitex_pdf::PdfError::Fail`]).
     pub pk_resolution: i32,
+    /// Glyph origins on: the pages the link ships again tell their
+    /// glyphs (`crate::origins::keep_shipped`).
+    pub origins: bool,
 }
 
 /// The records between two of the link's kept states ([`LinkMemo`]), at
@@ -5536,7 +5540,7 @@ fn line_cache(
 /// What a link's writer starts from ([`LinkMemo::head`]): the values'
 /// epoch, the glyph-to-unicode resource, the date, the jobname, the
 /// fonts loaded before the document.
-type LinkHead = (u64, u64, String, String, Vec<(FontId, String, i32)>);
+type LinkHead = (u64, u64, String, String, Vec<(FontId, String, i32)>, bool);
 
 /// The last link of the process: its records (by value), each record's
 /// chunks, the writer every [`LINK_SNAP`] records, and what it gave the
@@ -5920,6 +5924,9 @@ fn link(
         f.date.clone(),
         f.jobname.clone(),
         f.seed.clone(),
+        // (origins turned on: the pages the link ships again shipped
+        // again for their glyphs)
+        f.origins,
     );
     let mut chunks_of: Vec<Vec<phitex_pdf::Chunk>> = Vec::with_capacity(xpages.len());
     let mut snaps: Vec<LinkSnap> = Vec::new();
@@ -6197,7 +6204,7 @@ fn link(
                 // the writer the page was written apart on did not)
                 let gid = shown_id(x.raw(), Some(&h));
                 let inst = v.instance();
-                let out = crate::origins::has(inst, gid).then(|| {
+                let out = f.origins.then(|| {
                     let (r, out) = crate::origins::Recorder::new();
                     st.set_tap(Some(Box::new(r)));
                     out
@@ -6210,7 +6217,7 @@ fn link(
                 if let Some(out) = out {
                     drop(st.set_tap(None));
                     if let Some(g) = out.locked().take() {
-                        crate::origins::keep(inst, gid, g);
+                        crate::origins::keep_shipped(inst, gid, g);
                     }
                 }
                 shipped += 1;
