@@ -8,6 +8,31 @@ run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.0 name
 milestones, not versions.
 
+## 1.0.2 (2026-11-14)
+
+A big one :) Lots of speed, and a nicer preview to read your paper in!
+
+- **Edits feel instant.** Pressing `r` with nothing changed takes a
+  couple of milliseconds, big plain TeX files edit in a few ms instead
+  of fifty, and pages with figures aren't redrawn from scratch.
+- **TikZ-heavy papers build about a third faster** from clean. Each
+  picture is drawn just once now.
+- **Pages stream in as they're typeset,** after every edit too, not only
+  on the first build.
+- **Colour lines!** A reading aid that shades lines in alternating
+  colours, so your eyes don't lose their place. It has its own Settings
+  tab.
+- **Two-column papers behave.** Selecting text no longer grabs half the
+  page, and Colour lines keep the columns apart.
+- **Zoom into link previews** with Ctrl+scroll, a pinch, or the buttons.
+- **Quitting a watch always leaves the right PDF,** whether you press q,
+  hit Ctrl-C, or close the terminal. You can cancel the question now, or
+  switch it off with `phitex config watch-ask-write off`.
+- **`phitex upgrade` has a progress bar.** Small thing, very satisfying.
+- **Fonts are found the way xelatex finds them.**
+
+Thanks for all the feedback, keep it coming!
+
 ## 1.0.1 (2026-11-12)
 
 Fixes for the live preview, Compare that streams its pages, and
