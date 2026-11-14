@@ -1637,6 +1637,18 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Whether the node my `i`-th placement stands for is to run again
+    /// (asked again, not run since): its output is of what it read
+    /// before. Not recorded, a peek.
+    pub fn placed_pending(&mut self, i: usize) -> bool {
+        self.placed_node_id(i).is_some_and(|c| {
+            matches!(
+                self.eng.node(c).state(),
+                crate::node::State::Dirty | crate::node::State::Running | crate::node::State::RunningDirty
+            )
+        })
+    }
+
     /// Whether every read the last run of the node my `i`-th placement
     /// stands for made of field `f` gives what it gave with `f` defined
     /// as `x`: the walk my commit of that definition makes would re-ask

@@ -2499,6 +2499,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             reask_parent(eng, ww, parent, node.id, &mut st);
         }
         wake_waiting(eng, ww, parent, node.id, &mut st);
+        settle_owed(eng, ww, parent, node.id, &mut st);
     }
     if withdraws {
         let end = subtree_end(eng, node.id);
@@ -2559,12 +2560,24 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 .map(|(i, _)| i),
         );
     }
+    // (a guess of a placement this run waits for, `Ctx::placed_output_wait`:
+    // its child runs again on what this run gave it, and its commit asks
+    // this run again, `wake_waiting`; checked here against the output the
+    // child had made before, the run was asked again at once and took that
+    // stale output, then again once the child had run: lie-hasse's piece
+    // of diagrams, 30 s a run, twice per picture moved)
+    let waited: Vec<usize> = node.run_record().map(|r| r.waits.to_vec()).unwrap_or_default();
     let refuted = refuted.or_else(|| {
         let mut memo = read::FoldMemo::new();
         // (siblings read in turn, checked in one pass)
         let mut follow_at = None;
         unchecked.into_iter().find(|&i| {
             let r = &reads[i];
+            if let ReadKind::Placed { i: j, guess: true } = *r.kind()
+                && waited.contains(&j)
+            {
+                return false;
+            }
             // (a `next`'s answer moves when a node it stopped at commits
             // with nothing, which counts no change of its field)
             if !scope_moved
@@ -2923,6 +2936,7 @@ pub(crate) fn commit_stood(
     flush_unwalked(eng, ww, node, &mut st);
     if let Some(parent) = node.parent {
         wake_waiting(eng, ww, eng.node(parent), node.id, &mut st);
+        settle_owed(eng, ww, eng.node(parent), node.id, &mut st);
     }
     crate::sched::release_waiting(eng, ww, node.id);
     *w.log.lock().wasted_by_op.entry(node.op()).or_default() += 1;
@@ -3221,19 +3235,60 @@ fn wake_waiting(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
     let Some(r) = parent.run_record() else {
         return;
     };
-    if r.waits.iter().any(|&j| r.placed.get(j) == Some(&child))
-        && mark_stale(
-            eng,
-            w,
-            parent,
-            Wake {
-                by: Some(child),
-                cause: Cause::Output { of: child },
-                at_ns: eng.now_ns(),
-            },
-        )
-    {
+    if r.waits.iter().any(|&j| r.placed.get(j) == Some(&child)) {
+        ask_placer(eng, w, parent, child, st);
+    }
+}
+
+/// Whether a placement of `parent` other than `child` that its last run
+/// read or waits for is to run again (asked, not run since).
+fn placements_pending(eng: &Engine, parent: &Node, child: NodeId) -> bool {
+    let Some(r) = parent.run_record() else {
+        return false;
+    };
+    let pending = |j: usize| {
+        r.placed
+            .get(j)
+            .is_some_and(|&c| c != child && matches!(eng.node(c).state(), State::Dirty | State::RunningDirty))
+    };
+    r.waits.iter().any(|&j| pending(j))
+        || r.reads.of_no_field().any(|rd| match *rd.kind() {
+            ReadKind::Placed { i, .. } => pending(i),
+            _ => false,
+        })
+}
+
+/// Re-asks `parent` for its placement `child`'s commit: at once where
+/// no other placement it reads is to run again, else once the last of
+/// them commits (`Node::owed_ask`, [`settle_owed`]). Asked at each, a
+/// paragraph whose pictures all changed ran once per picture, each run
+/// taking one new output and the others' old ones (lie-hasse's piece of
+/// diagrams, 30 s a run).
+fn ask_placer(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeId, st: &mut CommitStats) {
+    if placements_pending(eng, parent, child) {
+        parent.owed_ask.store(true, Ordering::Release);
+        return;
+    }
+    parent.owed_ask.store(false, Ordering::Release);
+    if mark_stale(
+        eng,
+        w,
+        parent,
+        Wake {
+            by: Some(child),
+            cause: Cause::Output { of: child },
+            at_ns: eng.now_ns(),
+        },
+    ) {
         st.woken += 1;
+    }
+}
+
+/// A re-ask `parent` is owed ([`ask_placer`]), made once this commit of
+/// its placement `child` leaves none of the others it reads to run.
+fn settle_owed(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeId, st: &mut CommitStats) {
+    if parent.owed_ask.load(Ordering::Acquire) && !placements_pending(eng, parent, child) {
+        ask_placer(eng, w, parent, child, st);
     }
 }
 
@@ -3252,18 +3307,7 @@ fn reask_parent(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
             && !(guess && o.is_none())
             && read::apply_path(eng, o, rd.path()) != rd.seen()
         {
-            if mark_stale(
-                eng,
-                w,
-                parent,
-                Wake {
-                    by: Some(child),
-                    cause: Cause::Output { of: child },
-                    at_ns: eng.now_ns(),
-                },
-            ) {
-                st.woken += 1;
-            }
+            ask_placer(eng, w, parent, child, st);
             return;
         }
     }

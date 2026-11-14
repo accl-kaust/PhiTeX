@@ -1332,6 +1332,54 @@ fn latex_pictures_in_a_paragraph_are_children() {
     }
 }
 
+/// A paragraph of several pictures that all change in the second pass
+/// (each shows a `\ref` to a label at the document's end): its run takes
+/// all their new outputs in one run once their children have run, not
+/// one run per picture (lie-hasse's piece of diagrams ran once per
+/// picture moved, and again for its own guess). Counted against the
+/// same document whose pictures do not change; the PDF the same at -j1
+/// and -j8.
+#[test]
+fn latex_pictures_that_all_change_take_one_run() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-change");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |inside: &str| {
+        let pic = format!(
+            "\\begin{{tikzpicture}}\\foreach \\i in {{1,...,12}}{{\\draw (\\i*0.3,0) circle (0.1);}}\\node at (1,0.5) {{{inside}}};\\end{{tikzpicture}}"
+        );
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\begin{{document}}\nFirst words, a paragraph of its own.\n\nWords {pic} and {pic} then {pic} and {pic} end the paragraph.\n\nLast words.\\label{{last}}\n\\end{{document}}\n"
+        )
+    };
+    let runs = |b: &phitex_tex::Build| common::runs_of(b, "exec") + common::runs_of(b, "resume");
+    let mut out = Vec::new();
+    for threads in [1, 8] {
+        let opts = |name: &str| Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let moving = doc("see \\ref{last}");
+        let still = doc("see one");
+        std::fs::write(dir.join("moving.tex"), &moving).expect("write");
+        std::fs::write(dir.join("still.tex"), &still).expect("write");
+        let a = common::build(opts("moving"), Some(&prelude(true)), &moving);
+        let b = common::build(opts("still"), Some(&prelude(true)), &still);
+        let (ra, rb) = (runs(&a), runs(&b));
+        eprintln!(
+            "-j{threads}: paragraph runs {ra} (pictures moved) vs {rb}; pic runs {} vs {}",
+            common::runs_of(&a, "pic"),
+            common::runs_of(&b, "pic")
+        );
+        assert!(
+            ra <= rb + 1,
+            "-j{threads}: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
+            a.stats.runs_by_op
+        );
+        out.push(a.output().0);
+    }
+    assert!(out[0] == out[1], "-j8's PDF is not -j1's");
+}
+
 /// A picture asked again for a read late in its run (the definition of
 /// `\mymark` before it deleted: the picture, in a figure of its own
 /// file, defines it at its end now, as a first use does; put back; its

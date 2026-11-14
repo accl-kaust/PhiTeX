@@ -581,7 +581,12 @@ impl Run<'_, '_> {
         // differs: the pictures it moves are few, and read inline each ran
         // twice, here and in its child, Grail's deleted figure 8.0 -> 13.3 s)
         if self.cx.ran_this_evaluation() {
-            let holds = view_held || self.cx.placed_reads_hold(i, field, locals);
+            // (the view held: the child's last run read this one. My
+            // last run defining the same, the child asked again on it and
+            // not run since, its output is of the view before: taken, the
+            // run went again once the child had run)
+            let holds = (view_held && !self.cx.placed_pending(i))
+                || self.cx.placed_reads_hold(i, field, locals);
             if !holds && (self.pic_many || many(hash)) {
                 // (a run of many pictures: inline, as above)
                 self.pic_many = true;

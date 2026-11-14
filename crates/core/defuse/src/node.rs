@@ -89,6 +89,10 @@ pub(crate) struct Node {
     /// set to the commit: what the commit does not check of itself, the
     /// filed reads, it checks when this says one may have moved.
     pub(crate) asked: AtomicBool,
+    /// A placement's commit owed it a re-ask while another placement it
+    /// reads was still to run (`commit::ask_placer`): asked once the last
+    /// of them commits, so it takes all their outputs in one run.
+    pub(crate) owed_ask: AtomicBool,
     /// Its wake is more than one: a re-ask came while it was queued (or a
     /// re-ask kept for a run's check while one was) and only one cause is
     /// told ([`crate::sched`]'s `merge_woke`, `note_stale`). The next run
@@ -411,6 +415,7 @@ impl Node {
             stale_wake: Mx::new(None),
             filed_floor: AtomicU32::new(0),
             asked: AtomicBool::new(false),
+            owed_ask: AtomicBool::new(false),
             woke_merged: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
