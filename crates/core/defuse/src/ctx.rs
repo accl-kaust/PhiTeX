@@ -60,6 +60,8 @@ pub struct Ctx<'a> {
     /// The node whose commit the run stopped to wait for (`Ctx::read`
     /// on its prediction at depth 0).
     pub(crate) wait_on: Option<NodeId>,
+    /// Which rule set `wait_on`, for the run log (`PHITEX_RUN_LOG`).
+    pub(crate) wait_why: &'static str,
     /// The stop for `wait_on` is a wait, the run having done nothing
     /// ([`Ctx::wait_for_definer`]).
     pub(crate) waits_only: bool,
@@ -163,6 +165,7 @@ impl<'a> Ctx<'a> {
             last: me.run_record(),
             stuck: None,
             wait_on: None,
+            wait_why: "",
             waits_only: false,
             wait_frontier: false,
             ahead_noted: false,
@@ -549,6 +552,7 @@ impl<'a> Ctx<'a> {
                 .map_or_else(|| read::unit_start(eng, self.me), |b| b.pos_hint());
         if let Some(x) = read::on_one_layout(eng, || read::settling_hole_between(eng, self.me, lo)) {
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_routine";
             return Err(stop());
         }
         Ok(())
@@ -583,6 +587,7 @@ impl<'a> Ctx<'a> {
             && x.pos_hint() < self.me.pos_hint()
         {
             self.wait_on = Some(by);
+            self.wait_why = "wait_for_settling";
             return Err(stop());
         }
         if !r.provisional {
@@ -603,6 +608,7 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         self.wait_on = Some(by);
+        self.wait_why = "wait_for_settling";
         Err(stop())
     }
 
@@ -1902,6 +1908,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
             self.wait_on = Some(x);
+            self.wait_why = "wait_text_before";
             return Err(stop());
         }
         Ok(())
@@ -1923,6 +1930,7 @@ impl<'a> Ctx<'a> {
         };
         if let Some(x) = crate::sched::starved_by(self.eng, w, self.me) {
             self.wait_on = Some(x);
+            self.wait_why = "yield_to_prefix";
             return Err(stop());
         }
         Ok(())
@@ -1951,6 +1959,7 @@ impl<'a> Ctx<'a> {
     /// into the text after it, run before the text before it.
     pub fn wait_for_hole(&mut self, h: NodeId, nothing_done: bool) -> Stop {
         self.wait_on = Some(h);
+        self.wait_why = "wait_for_hole";
         self.waits_only = nothing_done;
         stop()
     }
@@ -1966,6 +1975,7 @@ impl<'a> Ctx<'a> {
         let (h, _) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
         if let Some(x) = h {
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_definer";
             self.waits_only = nothing_done;
             return Err(stop());
         }
@@ -2012,6 +2022,7 @@ impl<'a> Ctx<'a> {
         if let Some(&(x, _)) = hit {
             eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_first_definer";
             self.waits_only = true;
             return Err(stop());
         }
@@ -2040,6 +2051,7 @@ impl<'a> Ctx<'a> {
         if let Some(x) = read::on_one_layout(eng, || read::hole_with_pending_brackets(eng, me)) {
             eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_scope_opener";
             self.waits_only = true;
             return Err(stop());
         }
@@ -2083,6 +2095,7 @@ impl<'a> Ctx<'a> {
         let eng = self.eng;
         if let Some(x) = read::on_one_layout(eng, || read::unsettled_before(eng, self.me)) {
             self.wait_on = Some(x);
+            self.wait_why = "wait_settled";
             return Err(stop());
         }
         if crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire)) {
@@ -2427,6 +2440,7 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::placer_settled`] false): queued then, or at the quiet point.
     pub fn wait_for_placer(&mut self) -> Stop {
         self.wait_on = self.me.parent;
+        self.wait_why = "wait_for_placer";
         stop()
     }
 

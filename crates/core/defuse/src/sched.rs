@@ -2782,7 +2782,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Ok(Ok(_)) => "ok".to_owned(),
             Ok(Err(_)) if cx.wait_frontier => "held at the frontier".to_owned(),
             Ok(Err(_)) => match cx.wait_on {
-                Some(on) => format!("waits for {}", on.raw()),
+                Some(on) => format!("waits for {} ({})", on.raw(), cx.wait_why),
                 None => "stopped".to_owned(),
             },
             Err(_) => "panicked".to_owned(),
