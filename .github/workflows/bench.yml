@@ -1,0 +1,180 @@
+# The proof page's benchmark (phitex.org/measured, bench.json), made for
+# every release (docs/ci.md): the release's own Linux x86_64 binary, as
+# users download it, against TeX Live's engines in the CI image, back to
+# back on each runner (scripts/ci/bench.py; on accl the same runs are
+# scripts/accl/bench.sbatch). Cold builds of the research templates and
+# TeX Live's manuals, sharded; the edit matrix on its public documents
+# (Grail, a private paper, only in accl's runs). The shards' results
+# merged by `bench.py json` into bench.json, attached to the release as
+# an asset (https://github.com/accl-kaust/PhiTeX/releases/latest/download/bench.json),
+# and PhiTeX-frontends told (repository_dispatch `bench-updated`) so
+# phitex.org's site is built again with it.
+#
+# GitHub's hosted runners are shared machines: each document's two
+# builds alternate on one runner, so its ratio holds, and bench.json says
+# which machine (`--machine`, the runner's lscpu) and that it is a CI run.
+name: bench
+# (started by release.yml once the release is made, and by hand for any
+# release: a release made with GITHUB_TOKEN starts no `release` event's
+# workflow)
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The release to measure (default: the latest)"
+        required: false
+permissions:
+  contents: write
+  packages: read
+concurrency:
+  group: bench
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/accl-kaust/phitex-ci:2026-09-25
+  # (the edit matrix's public documents: accl's list without Grail)
+  EDIT_DOCS: amsldoc:tikzcd:beamer:biblatex:para4000:pgfplots:circuitikz
+  SHARDS: 40
+jobs:
+  which:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+      sha: ${{ steps.t.outputs.sha }}
+    steps:
+      - id: t
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          tag=${TAG:-$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name)}
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" -q .sha)
+          echo "release $tag at $sha"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+  cold:
+    needs: which
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        # (research: 69 templates in 2 shards; manuals: 1173 in SHARDS, each
+        # shard every SHARDS-th of the list ordered by the oracle's wall)
+        include:
+          - { corpus: research, shard: 0, of: 2 }
+          - { corpus: research, shard: 1, of: 2 }
+          - { corpus: manuals, shard: 0, of: 40 }
+          - { corpus: manuals, shard: 1, of: 40 }
+          - { corpus: manuals, shard: 2, of: 40 }
+          - { corpus: manuals, shard: 3, of: 40 }
+          - { corpus: manuals, shard: 4, of: 40 }
+          - { corpus: manuals, shard: 5, of: 40 }
+          - { corpus: manuals, shard: 6, of: 40 }
+          - { corpus: manuals, shard: 7, of: 40 }
+          - { corpus: manuals, shard: 8, of: 40 }
+          - { corpus: manuals, shard: 9, of: 40 }
+          - { corpus: manuals, shard: 10, of: 40 }
+          - { corpus: manuals, shard: 11, of: 40 }
+          - { corpus: manuals, shard: 12, of: 40 }
+          - { corpus: manuals, shard: 13, of: 40 }
+          - { corpus: manuals, shard: 14, of: 40 }
+          - { corpus: manuals, shard: 15, of: 40 }
+          - { corpus: manuals, shard: 16, of: 40 }
+          - { corpus: manuals, shard: 17, of: 40 }
+          - { corpus: manuals, shard: 18, of: 40 }
+          - { corpus: manuals, shard: 19, of: 40 }
+          - { corpus: manuals, shard: 20, of: 40 }
+          - { corpus: manuals, shard: 21, of: 40 }
+          - { corpus: manuals, shard: 22, of: 40 }
+          - { corpus: manuals, shard: 23, of: 40 }
+          - { corpus: manuals, shard: 24, of: 40 }
+          - { corpus: manuals, shard: 25, of: 40 }
+          - { corpus: manuals, shard: 26, of: 40 }
+          - { corpus: manuals, shard: 27, of: 40 }
+          - { corpus: manuals, shard: 28, of: 40 }
+          - { corpus: manuals, shard: 29, of: 40 }
+          - { corpus: manuals, shard: 30, of: 40 }
+          - { corpus: manuals, shard: 31, of: 40 }
+          - { corpus: manuals, shard: 32, of: 40 }
+          - { corpus: manuals, shard: 33, of: 40 }
+          - { corpus: manuals, shard: 34, of: 40 }
+          - { corpus: manuals, shard: 35, of: 40 }
+          - { corpus: manuals, shard: 36, of: 40 }
+          - { corpus: manuals, shard: 37, of: 40 }
+          - { corpus: manuals, shard: 38, of: 40 }
+          - { corpus: manuals, shard: 39, of: 40 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.which.outputs.sha }}
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE-doc"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/bench-gh.sh bin "${{ needs.which.outputs.tag }}"
+      - run: scripts/ci/bench-gh.sh cold ${{ matrix.corpus }} ${{ matrix.shard }} ${{ matrix.of }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.corpus }}-${{ matrix.shard }}
+          path: out/bench
+          retention-days: 30
+  edits:
+    needs: which
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.which.outputs.sha }}
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE-doc"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/bench-gh.sh bin "${{ needs.which.outputs.tag }}"
+      - run: scripts/ci/bench-gh.sh edits "$EDIT_DOCS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-edits
+          path: out/bench
+          retention-days: 30
+  publish:
+    needs: [which, cold, edits]
+    if: always() && needs.which.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.which.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: parts
+      - name: bench.json from the shards
+        run: |
+          set -euo pipefail
+          cold=$(ls -d parts/bench-research-* parts/bench-manuals-* 2>/dev/null | sort)
+          edits=$(find parts/bench-edits -mindepth 1 -maxdepth 2 -type d -path '*/edits/*' 2>/dev/null | sort || true)
+          machine=$(ls parts/*/machine-*.json 2>/dev/null | head -1 || true)
+          python3 -I scripts/ci/bench.py json --repo . --cold $cold ${edits:+--edits $edits} \
+            --out bench.json --commit "${{ needs.which.outputs.sha }}" --release "${{ needs.which.outputs.tag }}" ${machine:+--machine "$machine"} \
+            --note "PhiTeX ${{ needs.which.outputs.tag }}, measured by its release's CI (bench.yml) on GitHub's hosted runners"
+          python3 -I -c 'import json; d = json.load(open("bench.json")); print({k: d[k] for k in ("release", "commit", "date", "complete")})'
+      - name: attached to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.which.outputs.tag }}" bench.json --clobber --repo "$GITHUB_REPOSITORY"
+      - name: the site told
+        env:
+          GH_TOKEN: ${{ secrets.FRONTENDS_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "no FRONTENDS_DISPATCH_TOKEN: the site takes bench.json at its next build"; exit 0; fi
+          gh api repos/accl-kaust/PhiTeX-frontends/dispatches -f event_type=bench-updated \
+            -F "client_payload[tag]=${{ needs.which.outputs.tag }}" \
+            -F "client_payload[url]=https://github.com/${{ github.repository }}/releases/download/${{ needs.which.outputs.tag }}/bench.json"
