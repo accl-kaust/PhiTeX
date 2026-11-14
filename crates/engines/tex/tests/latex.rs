@@ -2426,6 +2426,84 @@ fn latex_glyph_origins() {
     assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
 }
 
+/// Glyph origins of a document whose chapters are `\\input` files (one
+/// inside another): every glyph from a chapter maps to that chapter's
+/// file and bytes, not to the `\\input` command that read it; every page's
+/// codes have one each, the same at -j1 and -j8; after a word's edit in a
+/// chapter, a cold build's answers.
+#[test]
+fn latex_glyph_origins_of_input_files() {
+    let dir = common::scratch("origins-input");
+    let para = |k: usize, what: &str| {
+        format!(
+            "Paragraph {k} of the {what} speaks of rivers and gardens, of letters written \\emph{{slowly}} and pages turned, of a window open on the morning.\n\n"
+        )
+    };
+    let mut chap = String::from("\\section{The chapter}\n");
+    let mut inner = String::from("\\subsection{Inside}\n");
+    for k in 0..6 {
+        chap.push_str(&para(k, "chapter"));
+        inner.push_str(&para(k, "inner part"));
+    }
+    chap.push_str("\\input{inner}\n");
+    let main = format!(
+        "\\documentclass{{article}}\n\\begin{{document}}\n{}\\input{{chapter}}\n{}\\end{{document}}\n",
+        para(0, "main text"),
+        para(1, "main text")
+    );
+    std::fs::write(dir.join("main.tex"), &main).expect("main.tex");
+    std::fs::write(dir.join("chapter.tex"), &chap).expect("chapter.tex");
+    std::fs::write(dir.join("inner.tex"), &inner).expect("inner.tex");
+    let build = |text: &str, threads: usize| {
+        let opts = Options {
+            threads: Some(threads),
+            origins: true,
+            ..pdf_opts("main", &dir)
+        };
+        common::build(opts, Some(&prelude(true)), text)
+    };
+    let check = |b: &phitex_tex::Build, chap: &str, inner: &str, when: &str| {
+        let pdf = b.output_bytes();
+        let mut fails = Vec::new();
+        for (file, text) in [
+            ("main.tex", main.as_str()),
+            ("chapter.tex", chap),
+            ("inner.tex", inner),
+        ] {
+            fails.extend(
+                common::origin_failures_in(b, &pdf, text, file, true, true)
+                    .into_iter()
+                    .map(|f| format!("{file}: {f}")),
+            );
+        }
+        assert!(fails.is_empty(), "{when}: origins:\n{}", fails.join("\n"));
+    };
+    let mut b = build(&main, 1);
+    check(&b, &chap, &inner, "-j1");
+    let b8 = build(&main, 8);
+    check(&b8, &chap, &inner, "-j8");
+    assert_eq!(
+        b8.all_page_origins(),
+        b.all_page_origins(),
+        "-j8's origins are -j1's"
+    );
+    let chap2 = chap.replacen(
+        "Paragraph 3 of the chapter",
+        "Paragraph 3 of the chapters",
+        1,
+    );
+    std::fs::write(dir.join("chapter.tex"), &chap2).expect("chapter.tex");
+    b.stage_file("chapter.tex", Some(chap2.as_bytes()));
+    b.edit(&main);
+    check(&b, &chap2, &inner, "after the edit");
+    let cold = build(&main, 1);
+    assert_eq!(
+        b.all_page_origins(),
+        cold.all_page_origins(),
+        "the edit's origins are a cold build's"
+    );
+}
+
 /// A two-section article with its `.aux` on disk from a pdflatex run,
 /// built outside a fixpoint (`--compat=pdflatex`): the file the job
 /// writes reads as absent, so the build is the one without the file.

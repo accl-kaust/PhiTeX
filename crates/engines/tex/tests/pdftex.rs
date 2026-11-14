@@ -716,6 +716,65 @@ fn right_to_left_glyph_origins_are_their_own_occurrence() {
             at("one", 1),
         ]
     );
+
+/// [`origins_doc`] with forms and included pages drawn among its
+/// paragraphs: a `\pdfxform` of words, a form in a form, and a page of
+/// `hello.pdf` (its words), each drawn on several pages.
+fn origins_forms_doc() -> String {
+    let body = origins_doc();
+    let head = "\\setbox0\\hbox{Form words here}\\pdfxform0 \\edef\\fa{\\the\\pdflastxform}\n\\setbox0\\hbox{Outer \\pdfrefxform\\fa\\ words}\\pdfxform0 \\edef\\fb{\\the\\pdflastxform}\n\\pdfximage{hello.pdf}\\edef\\im{\\the\\pdflastximage}\n";
+    let mut s = String::new();
+    let mut k = 0;
+    for (i, par) in body.split("\n\n").enumerate() {
+        if i == 0 {
+            s.push_str(&par.replacen("\\medskip\n", &format!("\\medskip\n{head}"), 1));
+        } else {
+            s.push_str(par);
+        }
+        s.push_str("\n\n");
+        if i > 0 && i % 3 == 0 && !par.contains("\\bye") {
+            s.push_str(match k % 3 {
+                0 => "\\noindent Before the form \\pdfrefxform\\fa\\ after the form.\n\n",
+                1 => "\\noindent Before the nested \\pdfrefxform\\fb\\ after the nested.\n\n",
+                _ => "\\noindent Before the page \\pdfrefximage\\im\\ after the page.\n\n",
+            });
+            k += 1;
+        }
+    }
+    s.trim_end().to_owned() + "\n"
+}
+
+/// Glyph origins of pages that draw forms and included pages: every
+/// page's codes have one each (a form's and an included page's codes
+/// counted where they are drawn), the same at -j1 and -j8; after a word's
+/// edit the answers are a cold build's.
+#[test]
+fn glyph_origins_forms_and_pages() {
+    let src = origins_forms_doc();
+    let b = origins_build(&src, 1, true);
+    assert!(b.pages().len() >= 3, "pages: {}", b.pages().len());
+    let f = common::origin_failures(&b, &src, "orig.tex");
+    assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
+    let b8 = origins_build(&src, 8, true);
+    assert_eq!(
+        b8.all_page_origins(),
+        b.all_page_origins(),
+        "-j8's origins are -j1's"
+    );
+    let mut b = b;
+    let at = src
+        .find("Ligatures like office")
+        .expect("the ligature line");
+    let new1 = format!("{}Lagatures{}", &src[..at], &src[at + "Ligatures".len()..]);
+    b.edit(&new1);
+    let cold = origins_build(&new1, 1, true);
+    assert_eq!(
+        b.all_page_origins(),
+        cold.all_page_origins(),
+        "the edit's origins are a cold build's"
+    );
+    let f = common::origin_failures(&b, &new1, "orig.tex");
+    assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
 }
 
 /// `\pdffilemoddate` of a file the job opened with `\openout` before
