@@ -995,14 +995,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (each build's record made on a thread of its own, in order: the
     // files followed read and diffed against the accepted text, 5 ms of
     // each Grail keystroke on this loop, ahead of the next one)
-    let (hub_tx, hub_rx) = std::sync::mpsc::channel::<crate::review::BuildFacts>();
+    let (hub_tx, hub_rx) =
+        std::sync::mpsc::channel::<Box<dyn FnOnce() -> crate::review::BuildFacts + Send>>();
     {
         let hub = hub.clone();
         let _ = std::thread::Builder::new()
             .name("review".into())
             .spawn(move || {
                 for f in hub_rx {
-                    hub.built(f);
+                    hub.built(f());
                 }
             });
     }
@@ -1843,43 +1844,49 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             // `wait` answered by it, the notes moved)
             let w = s.watched();
             phitex_tex::timeline::lap("watch: the files the build read");
-            let found: HashSet<String> = w
-                .paths
-                .iter()
-                .map(|p| p.to_string_lossy().trim_start_matches("./").to_owned())
-                .collect();
-            let missing = w
-                .names
-                .iter()
-                .filter(|n| {
-                    let n = n.trim_start_matches("./");
-                    !found.contains(n) && !found.contains(&format!("{n}.tex"))
-                })
-                .flat_map(|n| {
-                    let n = n.trim_start_matches("./").to_owned();
-                    let tex = (Path::new(&n).extension().is_none()).then(|| format!("{n}.tex"));
-                    std::iter::once(n).chain(tex)
-                })
-                .collect();
-            phitex_tex::timeline::lap("watch: the files the review is told of");
-            let _ = hub_tx.send(crate::review::BuildFacts {
-                n: builds,
-                ok: !failed,
-                pages: r.pages(),
-                ms: r.wall.as_secs_f64() * 1e3,
-                errors: r.out.errors.clone(),
-                main: (main_rel.clone(), s.source(&main_rel)),
-                paths: w
+            // (the record's lists made on the review's thread)
+            let (n, ok, pages, ms) = (builds, !failed, r.pages(), r.wall.as_secs_f64() * 1e3);
+            let (errors, diags) = (r.out.errors.clone(), b.diagnostics.clone());
+            let main = (main_rel.clone(), s.source(&main_rel));
+            let pdf = written.as_ref().map(|p| p.display().to_string());
+            let _ = hub_tx.send(Box::new(move || {
+                let found: HashSet<String> = w
                     .paths
                     .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect(),
-                missing,
-                diags_pending: pending,
-                // (pending: its errors at once, the last warnings with them)
-                diags: b.diagnostics.clone(),
-                pdf: written.as_ref().map(|p| p.display().to_string()),
-            });
+                    .map(|p| p.to_string_lossy().trim_start_matches("./").to_owned())
+                    .collect();
+                let missing = w
+                    .names
+                    .iter()
+                    .filter(|n| {
+                        let n = n.trim_start_matches("./");
+                        !found.contains(n) && !found.contains(&format!("{n}.tex"))
+                    })
+                    .flat_map(|n| {
+                        let n = n.trim_start_matches("./").to_owned();
+                        let tex = (Path::new(&n).extension().is_none()).then(|| format!("{n}.tex"));
+                        std::iter::once(n).chain(tex)
+                    })
+                    .collect();
+                crate::review::BuildFacts {
+                    n,
+                    ok,
+                    pages,
+                    ms,
+                    errors,
+                    main,
+                    paths: w
+                        .paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    missing,
+                    diags_pending: pending,
+                    // (pending: its errors at once, the last warnings with them)
+                    diags,
+                    pdf,
+                }
+            }));
             status.set("");
             phitex_tex::timeline::lap("watch: the review given the build");
         }
