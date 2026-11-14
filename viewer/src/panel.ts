@@ -2520,7 +2520,11 @@ export class Panel {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        // (the element the key went to, inside the panel's shadow root: a window's
+        // listener sees `e.target` retargeted to the shadow host, so a "/" typed
+        // in a note's text box opened the search)
+        const into = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+        const typing = !!into && into !== q && (into.isContentEditable || !!into.closest?.("input, textarea, select, [contenteditable=true], [contenteditable=\"\"]"));
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);

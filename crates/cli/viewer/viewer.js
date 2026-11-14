@@ -7889,7 +7889,8 @@ var Panel = class {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing2 = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        const into = e.composedPath()[0] ?? e.target;
+        const typing2 = !!into && into !== q && (into.isContentEditable || !!into.closest?.('input, textarea, select, [contenteditable=true], [contenteditable=""]'));
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);
