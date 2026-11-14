@@ -62,6 +62,10 @@ pub struct Ctx<'a> {
     pub(crate) wait_on: Option<NodeId>,
     /// Which rule set `wait_on`, for the run log (`PHITEX_RUN_LOG`).
     pub(crate) wait_why: &'static str,
+    /// The stop for `wait_on` gives my worker to that node
+    /// (`Ctx::yield_to_prefix`): I am queued again once it is taken to
+    /// run (`sched::park_yielder`).
+    pub(crate) yielded: bool,
     /// The stop for `wait_on` is a wait, the run having done nothing
     /// ([`Ctx::wait_for_definer`]).
     pub(crate) waits_only: bool,
@@ -166,6 +170,7 @@ impl<'a> Ctx<'a> {
             stuck: None,
             wait_on: None,
             wait_why: "",
+            yielded: false,
             waits_only: false,
             wait_frontier: false,
             ahead_noted: false,
@@ -224,6 +229,7 @@ impl<'a> Ctx<'a> {
         self.placed_keys = None;
         self.stuck = None;
         self.wait_on = None;
+        self.yielded = false;
         self.waits_only = false;
         self.wait_frontier = false;
         self.goes_on = false;
@@ -1562,6 +1568,7 @@ impl<'a> Ctx<'a> {
     /// must not (the client noted why, and the run again takes the other).
     pub fn run_again(&mut self) -> Stop {
         self.wait_on = None;
+        self.yielded = false;
         stop()
     }
 
@@ -1931,6 +1938,7 @@ impl<'a> Ctx<'a> {
         if let Some(x) = crate::sched::starved_by(self.eng, w, self.me) {
             self.wait_on = Some(x);
             self.wait_why = "yield_to_prefix";
+            self.yielded = true;
             return Err(stop());
         }
         Ok(())

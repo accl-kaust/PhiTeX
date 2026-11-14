@@ -140,6 +140,11 @@ pub(crate) struct Node {
     /// it by the commit that releases them; a commit that finds it unset
     /// takes no lock (`sched::release_waiting`).
     pub(crate) awaited: AtomicBool,
+    /// A run gave its worker to this node (`Ctx::yield_to_prefix`) and
+    /// waits in `Shared::yielders` under its id: queued again once this
+    /// node is taken to run (`sched::release_yielders`), not only at its
+    /// commit. Set under that lock by the run that yields.
+    pub(crate) yielded_to: AtomicBool,
     /// The node whose claim took it (raw id + 1; 0: none), set and
     /// cleared under its segment's write lock (`commit::apply_claim`): a
     /// claim passes over a sibling another claimer holds, and gives back
@@ -362,6 +367,7 @@ impl Node {
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             awaited: AtomicBool::new(false),
+            yielded_to: AtomicBool::new(false),
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
