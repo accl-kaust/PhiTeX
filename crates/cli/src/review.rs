@@ -473,6 +473,11 @@ struct Tracked {
     #[allow(clippy::option_option, reason = "not read yet, and read: no such file")]
     base: Option<Option<String>>,
     hunks: Vec<HunkNow>,
+    /// The accepted text `hunks` were made from, with `text`: both the
+    /// same, the same hunks (a build reads every file followed; one
+    /// unchanged is not diffed again: Grail's 19, 5 ms a keystroke).
+    #[allow(clippy::option_option, reason = "as `base`")]
+    hunks_base: Option<Option<String>>,
 }
 
 /// The editors' side, given by the language server ([`Hub::on_editors`]):
@@ -1749,17 +1754,24 @@ fn refresh(st: &mut State, name: &str, text: Option<String>) {
         settle_anchors(st, name, n);
     }
     let base = base_of(st, name);
-    let hs = make_hunks(name, base.as_deref(), text.as_deref());
     let t = st.files.entry(name.to_owned()).or_default();
-    t.hash = text.as_ref().map(|x| hash(x.as_bytes()));
+    if old != text || t.hunks_base.as_ref() != Some(&base) {
+        t.hunks = make_hunks(name, base.as_deref(), text.as_deref());
+        t.hunks_base = Some(base);
+    }
+    if old != text || t.hash.is_none() {
+        t.hash = text.as_ref().map(|x| hash(x.as_bytes()));
+    }
     t.text = text;
-    t.hunks = hs;
     let waiting = !t.hunks.is_empty();
     // (the baseline as found, written once a change waits: it outlives the watch)
     if waiting
         && let Some(Baseline::Dir(d)) = &st.baseline
         && !d.join(name).exists()
-        && let Some(b) = base
+        && let Some(b) = st
+            .files
+            .get(name)
+            .and_then(|t| t.hunks_base.clone().flatten())
     {
         let _ = st.baseline.as_ref().map(|bl| bl.write(name, Some(&b)));
     }

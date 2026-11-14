@@ -4199,6 +4199,11 @@ impl<V> Shards<V> {
         self.0[i % SHARDS].locked()
     }
 
+    /// How many entries it holds.
+    fn len(&self) -> usize {
+        self.0.iter().map(|s| s.locked().len()).sum()
+    }
+
     /// Only the entries `keep` holds.
     fn retain(&self, keep: impl Fn(u64) -> bool) {
         for s in &*self.0 {
@@ -4271,6 +4276,15 @@ struct Prepared {
 /// from 120 to 900 s).
 pub(crate) fn prune(reg: &Registry, live: &phitex_defuse::FxHashSet<u64>) {
     reg.hints.retain(|k| live.contains(&k));
+}
+
+/// The nodes' hints kept ([`Registry::hints`]): pruned ([`prune`]) only
+/// once they are twice the live nodes and more, so that an edit, which
+/// leaves a few behind, does not go over every node to find them (a
+/// hint is a function of its node's arguments: one kept past its node
+/// is the hint of another with those arguments).
+pub(crate) fn hint_count(reg: &Registry) -> usize {
+    reg.hints.len()
 }
 
 /// Registers a text's analysis under `name` (a string value) in the

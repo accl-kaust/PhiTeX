@@ -686,9 +686,12 @@ fn watch_word_edit_ms() -> f64 {
 /// problems then due, the watch's idle work) and one made when idle each
 /// begin their build at once: the wait before each, by what the watch did
 /// meanwhile (the build event's `waited`, the viewer's "before the
-/// build"), within 50 ms in a release build. Every page's origins made
-/// first held a save 5.2 s behind them in Grail.
+/// build"), within 50 ms in a release build, and none of it behind the
+/// viewer's reads, which are answered off the watch's loop: also with every
+/// core kept busy, where a read on the loop held a save 220 ms (mc 86542).
+/// Every page's origins made first held a save 5.2 s behind them in Grail.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn watch_save_starts_at_once() {
     let _one = one();
     let text = big();
@@ -729,12 +732,37 @@ fn watch_save_starts_at_once() {
     std::thread::sleep(Duration::from_millis(500));
     let bound = if cfg!(debug_assertions) { 500.0 } else { 50.0 };
     let mut id = 100;
-    for (b, w, asks, pause) in [
-        (2, "thy", true, 0),
-        (3, "our", true, 0),
-        (4, "his", false, 0),
-        (5, "her", false, 600),
+    // (the machine loaded: a thread spinning on every core while the
+    // last saves are made; a read on the watch's loop that took 220 ms of
+    // a loaded node's time held the save behind it, mc 86542)
+    let spin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let spinners: Vec<_> = (0..cores)
+        .map(|_| {
+            let on = spin.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !on.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                    if std::sync::Arc::strong_count(&on) == 1 {
+                        return;
+                    }
+                }
+                while on.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+                }
+            })
+        })
+        .collect();
+    for (b, w, asks, pause, load) in [
+        (2, "thy", true, 0, false),
+        (3, "our", true, 0, false),
+        (4, "his", false, 0, false),
+        (5, "her", false, 600, false),
+        (6, "its", true, 300, true),
+        (7, "one", true, 0, true),
     ] {
+        spin.store(load, std::sync::atomic::Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(pause));
         if asks {
             // (every page's origins, twice over, not waited for)
@@ -754,15 +782,127 @@ fn watch_save_starts_at_once() {
         let waited = ev["waited"].as_array().expect("the wait's parts");
         let ms: f64 = waited.iter().filter_map(|p| p[1].as_f64()).sum();
         eprintln!("watch: build {b}'s save waited {ms:.3} ms: {waited:?}");
+        // (loaded, the watch itself is late to run: what it did before the
+        // build, never a read, is what is bounded)
+        let reads: f64 = waited
+            .iter()
+            .filter(|p| p[0] == "the viewer's asks")
+            .filter_map(|p| p[1].as_f64())
+            .sum();
         assert!(
-            ms <= bound,
-            "build {b}'s save waited {ms:.3} ms before its build: {ev}"
+            reads == 0.0 && (load || ms <= bound),
+            "build {b}'s save waited {ms:.3} ms before its build ({reads:.3} ms behind the viewer's reads): {ev}"
         );
+    }
+    spin.store(false, std::sync::atomic::Ordering::Relaxed);
+    drop(spin);
+    for t in spinners {
+        let _ = t.join();
     }
     let _ = stdin.write_all(b"q\n");
     drop(stdin);
     lines.for_each(drop);
     let _ = child.wait();
+}
+
+/// `phitex watch`, headless: an edit whose node makes what it made before
+/// (a comment's words changed, spaces after a control word added) runs
+/// that node and nothing after it, no reader asked again, no page folded
+/// or written, no link (one run in all); the PDF the watch leaves is a
+/// clean build's of the edited text. pdfLaTeX and XeLaTeX, -j1 and -j8.
+#[test]
+fn watch_an_edit_that_makes_what_it_made_runs_its_node_alone() {
+    let _one = one();
+    let mut base = String::from("\\documentclass{article}\n\\begin{document}\n");
+    for k in 0..40 {
+        if k == 20 {
+            base.push_str("% a note on the paragraphs\n% and a second one, its words\n");
+        }
+        let _ = write!(
+            base,
+            "\\section{{Part {k}}}\nParagraph {k} has a few words in it, and \\emph{{some}} more words after them, to fill a line or two of the page.\n\n"
+        );
+    }
+    base.push_str("\\end{document}\n");
+    let edits = [
+        (
+            "a comment's words",
+            base.replace("% and a second one, its words", "% and another one, its words"),
+        ),
+        (
+            "spaces after a control word",
+            base.replacen("\\emph{some} more words after them, to fill a line or two of the page.\n\n\\section{Part 31}", "\\emph   {some} more words after them, to fill a line or two of the page.\n\n\\section{Part 31}", 1),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for engine in ["pdflatex", "xelatex"] {
+        for (what, edited) in &edits {
+            assert_ne!(edited, &base, "{what}: an edit");
+            let clean = {
+                let dir = scratch("watch-same-clean");
+                std::fs::write(dir.join("doc.tex"), edited).expect("the document");
+                let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args(["build", "--no-synctex", "--engine", engine, "doc.tex"])
+                    .output()
+                    .expect("phitex build runs");
+                assert!(
+                    out.status.success(),
+                    "{engine}: the clean build failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                std::fs::read(dir.join("doc.pdf")).expect("the clean build's PDF")
+            };
+            for threads in ["1", "8"] {
+                let dir = scratch("watch-same");
+                std::fs::write(dir.join("doc.tex"), &base).expect("the document");
+                let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args([
+                        "watch",
+                        "--write",
+                        "--json",
+                        "--no-view",
+                        "--no-synctex",
+                        "--engine",
+                        engine,
+                        "-j",
+                        threads,
+                        "doc.tex",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("phitex watch runs");
+                let mut stdin = child.stdin.take().expect("its input");
+                let stdout = child.stdout.take().expect("its output");
+                let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+                let mut seen = Vec::new();
+                let cold = until(&mut lines, "build", &1.into(), &mut seen);
+                assert_eq!(cold["ok"], true, "{engine}: {cold}");
+                std::fs::write(dir.join("doc.tex"), edited).expect("the edit");
+                let ev = until(&mut lines, "build", &2.into(), &mut seen);
+                let _ = stdin.write_all(b"q\n");
+                drop(stdin);
+                lines.for_each(drop);
+                let _ = child.wait();
+                let runs = ev["runs"].as_u64().unwrap_or(u64::MAX);
+                if runs > 1 {
+                    wrong.push(format!(
+                        "{engine} -j{threads}, {what}: {runs} runs, not the edited node's alone: {}",
+                        ev["notes"]
+                    ));
+                }
+                let pdf = std::fs::read(dir.join("doc.pdf")).expect("the watch's PDF");
+                if pdf != clean {
+                    wrong.push(format!(
+                        "{engine} -j{threads}, {what}: the PDF is not the clean build's ({})",
+                        first_difference(&pdf, &clean)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// `phitex watch`, headless, with nothing changed: `r` (twice) and a

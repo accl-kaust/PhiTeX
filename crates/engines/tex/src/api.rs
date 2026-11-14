@@ -2059,9 +2059,6 @@ pub struct Stats {
     pub refuted_by_field: Vec<(String, u64)>,
     /// The refuted predictions by field, with counts, most first.
     pub predictions_refuted_by_field: Vec<(String, u64)>,
-    /// The relations the live nodes' last runs filed, by operation and
-    /// field, counted ([`crate::run::NodeAudit`]).
-    pub relations: Vec<(&'static str, String, u64)>,
     /// The readers re-asked by field, by the reader's operation: `(op,
     /// field, count)` over the build ([`Stats::refuted_by_op`]).
     pub refuted_by_op_field: Vec<(&'static str, String, u64)>,
@@ -2672,17 +2669,6 @@ impl Stats {
         if op == "pages" { self.units_folded } else { 0 }
     }
 
-    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
-    /// operation `op` filed at their last runs (tests/state.rs).
-    #[must_use]
-    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
-        self.relations
-            .iter()
-            .filter(|r| r.0 == op && r.1 == field)
-            .map(|r| r.2)
-            .sum()
-    }
-
     /// The readers of operation `op` re-asked through field `name`, or a
     /// field of its family (`name:…`), over the build.
     #[must_use]
@@ -2972,6 +2958,12 @@ struct Graph {
     /// ([`Graph::push_env`], spec-final §4.5).
     env_pushed: Vec<(Field, ValueId)>,
     absent_pushed: Vec<Field>,
+    /// The comments `env_pushed` holds, by id ([`Marks::ids`]): a change
+    /// of the comments alone pushed as theirs ([`Graph::push_marks`]).
+    marks_pushed: FxHashMap<u64, Arc<str>>,
+    /// The PDF line (`crate::pdfout::XPAGES`) the last evaluation's
+    /// pruning kept the commands and pages of.
+    xpages_pruned: Option<ValueId>,
     pub(crate) env_calls: u64,
     /// The job's bindings (the format's state, the job's names and
     /// dates: [`job_env`]), pushed with the environment.
@@ -3456,6 +3448,8 @@ impl Graph {
             link,
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
+            marks_pushed: FxHashMap::default(),
+            xpages_pruned: None,
             env_calls: 0,
             job: Vec::new(),
             files_op,
@@ -3906,12 +3900,60 @@ impl Graph {
             self.env_calls += 1;
             self.env_pushed = env;
         }
+        self.marks_pushed = self.marks.ids();
         if absent != self.absent_pushed {
             let gone: Vec<(Field, Option<ValueId>)> = absent.iter().map(|&f| (f, None)).collect();
             self.eng.update_environment(&gone);
             self.env_calls += 1;
             self.absent_pushed = absent;
         }
+    }
+
+    /// The comments' entries pushed where they changed since the last
+    /// push ([`Graph::marks_pushed`]), the rest of the environment as it
+    /// is: an edit that changed the comments or moved their lines (and
+    /// nothing the provider gives) neither makes nor compares the whole
+    /// environment again. False where none was pushed yet.
+    fn push_marks(&mut self) -> bool {
+        if self.env_pushed.is_empty() {
+            return false;
+        }
+        let new = self.marks.ids();
+        let v = self.eng.values();
+        let field = |id: u64| v.field(&format!("{DOC_MARKS}{id:016x}"));
+        let mut cs: Vec<(Field, Option<ValueId>)> = new
+            .iter()
+            .filter(|(id, t)| self.marks_pushed.get(id) != Some(t))
+            .map(|(&id, t)| (field(id), Some(v.str(t))))
+            .collect();
+        cs.extend(
+            self.marks_pushed
+                .keys()
+                .filter(|id| !new.contains_key(id))
+                .map(|&id| (field(id), None)),
+        );
+        crate::timeline::lap("env: the comments' changes");
+        if !cs.is_empty() {
+            self.eng.update_environment(&cs);
+            self.env_calls += 1;
+            for &(f, x) in &cs {
+                match (
+                    self.env_pushed
+                        .binary_search_by_key(&f.0.raw(), |e| e.0.0.raw()),
+                    x,
+                ) {
+                    (Ok(i), Some(x)) => self.env_pushed[i].1 = x,
+                    (Ok(i), None) => {
+                        self.env_pushed.remove(i);
+                    }
+                    (Err(i), Some(x)) => self.env_pushed.insert(i, (f, x)),
+                    (Err(_), None) => {}
+                }
+            }
+        }
+        self.marks_pushed = new;
+        crate::timeline::lap("env: the comments' entries pushed");
+        true
     }
 
     /// The commands' results of the last evaluation ([`crate::shell::OUTS`],
@@ -4090,7 +4132,7 @@ impl Graph {
             self.provide(finder);
             t_prov += tp.elapsed();
             // (the comments of a text applied before this evaluation)
-            if self.marks.dirty() {
+            if self.marks.dirty() && !self.push_marks() {
                 let env = self.environment(fixpoint);
                 env_trace(&self.eng, &env);
                 self.push_env(env);
@@ -4121,6 +4163,7 @@ impl Graph {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = held;
             }
+            crate::timeline::lap("engine: the finishers' table, the roots held");
             let t0 = std::time::Instant::now();
             // (every evaluation on the pool: it starts no thread for a
             // few nodes (`sched`: workers start when a deque holds more
@@ -4163,25 +4206,37 @@ impl Graph {
                 done.store(true, std::sync::atomic::Ordering::Relaxed);
                 r
             });
+            crate::timeline::lap("engine: the evaluation proper");
             {
                 // (the PDF commands no record names any more: dropped now,
                 // with no run in work)
                 let v = self.eng.values();
-                if let Some(line) = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES)) {
+                // (the line the last pruning kept: the same value, the
+                // same records named, nothing to drop that it did not)
+                let now = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES));
+                if let Some(line) = now.filter(|_| now != self.xpages_pruned) {
+                    self.xpages_pruned = now;
                     let line: Vec<ValueId> = crate::val::CatMemo::default().walk(v, line, Some);
                     crate::pdfout::prune_cmds(v, &line, &self.ops.pdf_cmds);
                     crate::pdfout::prune_pieces(v, &line);
                 }
+                crate::timeline::lap("engine: the PDF commands pruned");
                 // (the hints of nodes gone, by their arguments: a
-                // continuation run again is another node's arguments)
-                let live: phitex_defuse::FxHashSet<u64> = self
-                    .eng
-                    .order(unit)
-                    .into_iter()
-                    .filter_map(|n| self.eng.node_info(n))
-                    .map(|i| crate::hints::args_key(&i.args))
-                    .collect();
-                crate::hints::prune(&self.ops.hints, &live);
+                // continuation run again is another node's arguments;
+                // once they are as many as the live nodes, so that an
+                // edit's few go with the next pruning, not with a pass
+                // over every node, `hints::hint_count`)
+                if crate::hints::hint_count(&self.ops.hints) > 2 * self.eng.live_nodes() + 64 {
+                    let live: phitex_defuse::FxHashSet<u64> = self
+                        .eng
+                        .order(unit)
+                        .into_iter()
+                        .filter_map(|n| self.eng.node_info(n))
+                        .map(|i| crate::hints::args_key(&i.args))
+                        .collect();
+                    crate::hints::prune(&self.ops.hints, &live);
+                }
+                crate::timeline::lap("engine: the hints pruned");
             }
             if let (Ok(r), Some(path)) = (&res, crate::exec::env_str!("PHITEX_CHAIN_TSV")) {
                 dump_chain(&self.eng, r, path);
@@ -5013,7 +5068,7 @@ pub(crate) const DOC_MARKS: &str = "doc:mark:";
 /// the text is a NUL and the comment's id ([`mark_id`], 16 hex digits),
 /// so a run reads its comment by the id in its own line, not by where
 /// the line is in the file.
-pub(crate) type CommentMark = (u32, u64, String);
+pub(crate) type CommentMark = (u32, u64, Arc<str>);
 
 /// The hash of a comment line's text before its `%`.
 fn prefix_hash(prefix: &str) -> u64 {
@@ -5041,7 +5096,7 @@ fn collisions<'a>(
     let mut out = phitex_defuse::FxHashSet::default();
     for (_, h, c) in marks {
         match first.get(h) {
-            Some(&c0) if c0 != c.as_str() => {
+            Some(&c0) if c0 != &**c => {
                 out.insert(*h);
             }
             Some(_) => {}
@@ -5126,6 +5181,17 @@ impl Marks {
             .collect()
     }
 
+    /// Each comment's id and text ([`Marks::entries`] without a field
+    /// or a value made); the environment holds them from here.
+    fn ids(&self) -> FxHashMap<u64, Arc<str>> {
+        let mut m = self.0.locked();
+        m.1 = false;
+        let collide = collisions(&m.0);
+        m.0.iter()
+            .map(|(_, h, c)| (mark_id(*h, c, collide.contains(h)), c.clone()))
+            .collect()
+    }
+
     /// Whether marks changed since the environment was set.
     fn dirty(&self) -> bool {
         self.0.locked().1
@@ -5163,7 +5229,7 @@ fn ids_hold(marks: &[CommentMark]) -> bool {
     let mut by: FxHashMap<u64, &str> = FxHashMap::default();
     marks
         .iter()
-        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == c.as_str())
+        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == &**c)
 }
 
 /// Whether `text` has what [`canonical_text`] cannot stand for (a NUL,
@@ -5564,8 +5630,9 @@ mod culprit_tests {
 /// canonical form is its own; the marks after them renumbered). The new
 /// marks, and the range of `canon` replaced, `(start, old end, new end)`;
 /// `None` (`canon` untouched) where a comment's line made again or gone
-/// has the text before its `%` of another one's, whose id may change
-/// with it ([`mark_id`]): the whole text is made again.
+/// has the text before its `%` of a line kept, and that text now names
+/// one comment where it named more, or more where it named one: the
+/// kept line's id changes ([`mark_id`]), the whole text is made again.
 fn canonical_splice(
     old: &str,
     canon: &mut String,
@@ -5679,26 +5746,9 @@ fn canonical_lines_splice(
     for m in &mut mid {
         m.0 = m.0.saturating_add(lift);
     }
-    // (the marks of the lines kept, and of those made again or gone: a
-    // line text before a `%` they share takes the whole text again)
+    // (the marks of the lines kept, and of those made again or gone)
     let lo = u32::try_from(first).unwrap_or(u32::MAX);
     let hi = u32::try_from(first + old_lines).unwrap_or(u32::MAX);
-    let kept: phitex_defuse::FxHashSet<u64> = marks
-        .iter()
-        .filter(|m| m.0 <= lo || m.0 > hi)
-        .map(|m| m.1)
-        .collect();
-    if marks
-        .iter()
-        .filter(|m| m.0 > lo && m.0 <= hi)
-        .chain(&mid)
-        .any(|m| kept.contains(&m.1))
-    {
-        return None;
-    }
-    fill_ids(&mut out, &at, &mid, &collisions(&mid));
-    canon.replace_range(cs..ce, &out);
-    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     // (the marks: before the lines, theirs made again, after them moved)
     let new_lines = newlines(&n[ls..le]);
     let shift = |l: u32| -> u32 {
@@ -5707,16 +5757,45 @@ fn canonical_lines_splice(
         u32::try_from(l).unwrap_or(u32::MAX)
     };
     let mut ms: Vec<CommentMark> = marks.iter().filter(|m| m.0 <= lo).cloned().collect();
-    ms.extend(mid);
+    ms.extend(mid.iter().cloned());
     ms.extend(
         marks
             .iter()
             .filter(|m| m.0 > hi && le_old < o.len())
             .map(|(l, h, c)| (shift(*l), *h, c.clone())),
     );
+    // (a line kept whose text before its `%` is that of a comment made
+    // again or gone keeps its id while that text names more than one
+    // comment before and after, or one alone both times ([`mark_id`]);
+    // where that changed, the whole text again)
+    let kept: phitex_defuse::FxHashSet<u64> = marks
+        .iter()
+        .filter(|m| m.0 <= lo || m.0 > hi)
+        .map(|m| m.1)
+        .collect();
+    let shared: Vec<u64> = marks
+        .iter()
+        .filter(|m| m.0 > lo && m.0 <= hi)
+        .chain(&mid)
+        .map(|m| m.1)
+        .filter(|h| kept.contains(h))
+        .collect();
+    let collide = collisions(&ms);
+    if !shared.is_empty() {
+        let before = collisions(marks);
+        if shared
+            .iter()
+            .any(|h| before.contains(h) != collide.contains(h))
+        {
+            return None;
+        }
+    }
     if !ids_hold(&ms) {
         return None;
     }
+    fill_ids(&mut out, &at, &mid, &collide);
+    canon.replace_range(cs..ce, &out);
+    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     Some((ms, (cs, ce, cs + out.len())))
 }
 
@@ -5801,7 +5880,7 @@ fn canonical_line(
             marks.push((
                 u32::try_from(n + 1).unwrap_or(u32::MAX),
                 prefix_hash(&body[..k]),
-                c.to_owned(),
+                Arc::from(c),
             ));
         }
         // (TeX reads the line without its blanks at the end: a trailing
@@ -6579,6 +6658,17 @@ pub struct Build {
     /// Glyph origins' memos ([`Build::page_origins`]), shared with the
     /// captures of them ([`Build::origins_capture`]).
     origins: Arc<crate::origins::State>,
+    /// Files staged ([`Build::stage_file`]), for [`Build::origins_key`].
+    stages: u64,
+    /// The text nodes' spans ([`Build::spans_named`]) by the
+    /// [`Build::origins_key`] they were made at.
+    #[allow(clippy::type_complexity)]
+    spans_memo: Mutex<
+        Option<(
+            u64,
+            Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
+        )>,
+    >,
 }
 
 impl Drop for Build {
@@ -6843,6 +6933,8 @@ impl Build {
             staged: false,
             evaluated: false,
             origins: Arc::default(),
+            stages: 0,
+            spans_memo: Mutex::new(None),
         };
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -7064,7 +7156,6 @@ impl Build {
             version: last.version.max(v),
             live: last.live,
             threads: last.threads,
-            relations: last.relations,
             ..Stats::default()
         };
         self.loads_ran = false;
@@ -7176,14 +7267,17 @@ impl Build {
         crate::timeline::lap("engine: package load stats");
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
-        stats.relations = self.relations_now();
+        self.audit_live();
+        crate::timeline::lap("engine: the gone nodes' audits dropped");
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
         }
         self.dump_claims();
         self.dump_readers();
+        crate::timeline::lap("engine: the edit's phases noted");
         self.tell_settled_pages();
+        crate::timeline::lap("engine: the pages settled told");
         // (a debug or observe build stops on a defect of the settled
         // line, not on a run's it does not keep: `Run::order_after_pages`)
         if cfg!(any(debug_assertions, feature = "observe"))
@@ -7264,6 +7358,7 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
+        self.stages += 1;
         // (what the provider answered in the last evaluation joins the
         // supplied files first, as `push_staged` joins it: the file is
         // looked up among all the build holds)
@@ -7776,10 +7871,24 @@ impl Build {
             .into_iter()
             .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
             .collect();
+        let key = self.origins_key();
+        let spans = {
+            let mut m = self.spans_memo.locked();
+            if let Some(x) = m.as_ref().filter(|x| x.0 == key) {
+                x.1.clone()
+            } else {
+                let t0 = std::time::Instant::now();
+                let sp: Arc<[_]> = Arc::from(self.spans_named());
+                crate::timeline::note("origins: the nodes' spans made", t0.elapsed());
+                *m = Some((key, sp.clone()));
+                sp
+            }
+        };
         crate::origins::Input {
+            key,
             inst: v.instance(),
             shown,
-            spans: self.spans_named(),
+            spans,
             doc_name: self.opts.name.trim_start_matches("./").to_owned(),
             doc_text: &self.text,
             doc_raw: if self.canon {
@@ -7789,6 +7898,23 @@ impl Build {
             },
             glyphs: None,
         }
+    }
+
+    /// Which state of the Build glyph origins are made of
+    /// ([`crate::origins::Input::key`]): its evaluations settled and the
+    /// files staged since, the text's length (the nodes, their texts and
+    /// places change with these alone).
+    fn origins_key(&self) -> u64 {
+        phitex_defuse::hash_words(
+            0x6f6b_6579,
+            &[
+                self.serial,
+                self.settles,
+                self.stages,
+                self.text.len() as u64,
+            ],
+        )
+        .max(1)
     }
 
     /// Glyph origins' memos.
@@ -7834,7 +7960,9 @@ impl Build {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
+        // (each file's name and text by its name's value, made once)
+        let mut texts: FxHashMap<ValueId, Option<(String, Arc<str>)>> = FxHashMap::default();
+        let s_tag = v.str("s");
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
         let mut stack: Vec<(NodeId, i64, usize)> = self
             .nodes
@@ -7856,30 +7984,54 @@ impl Build {
             };
             stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
             let Some(&fs) = i.args.first() else { continue };
-            let mut span: Option<(String, usize, usize)> = None;
-            for f in list_of(v, fs) {
-                let xs = list_of(v, f);
-                let Some(&t) = xs.first() else { continue };
-                let (name, s, e) = match (str_of(v, t).as_str(), &xs[..]) {
-                    ("s", &[_, seg, _, _, _, name, pos]) => {
-                        let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
-                        (str_of(v, name), s, s + str_of(v, seg).len() + 1)
+            // (the frames read in place: no string made of a line's text
+            // or a frame's name, a name compared by its value)
+            let mut span: Option<(ValueId, usize, usize)> = None;
+            v.with_list(fs, |frames| {
+                for (k, &f) in frames.iter().enumerate() {
+                    let Some((name, s, e)) = v
+                        .with_list(f, |xs| match xs {
+                            &[t, seg, _, _, _, name, pos] if t == s_tag => {
+                                let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
+                                Some((name, s, s + v.with_str(seg, str::len).unwrap_or(0) + 1))
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    // (the span is of the first frame's file: one that is
+                    // no file's text, the document's own lines, has none,
+                    // and the rest of its frames are not read)
+                    if k == 0
+                        && texts
+                            .entry(name)
+                            .or_insert_with(|| {
+                                let n = str_of(v, name);
+                                self.g.file_text(&n).map(|t| (n, t))
+                            })
+                            .is_none()
+                    {
+                        break;
                     }
-                    _ => continue,
-                };
-                span = Some(match span {
-                    Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
-                    Some(sp) => sp,
-                    None => (name, s, e),
-                });
-            }
+                    span = Some(match span {
+                        Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
+                        Some(sp) => sp,
+                        None => (name, s, e),
+                    });
+                }
+            });
             let Some((name, s, e)) = span else { continue };
             let text = texts
-                .entry(name.clone())
-                .or_insert_with(|| self.g.file_text(&name))
+                .entry(name)
+                .or_insert_with(|| {
+                    let n = str_of(v, name);
+                    self.g.file_text(&n).map(|t| (n, t))
+                })
                 .clone();
-            if let Some(t) = text {
-                out.push((x.raw(), Some((name, t)), s, e, top));
+            if let Some((n, t)) = text {
+                out.push((x.raw(), Some((n, t)), s, e, top));
             }
         }
         out
@@ -8377,6 +8529,31 @@ impl Build {
     /// for a later session of the same document.
     #[must_use]
     pub fn export_made(&self) -> Vec<u8> {
+        made_bytes(self.g.eng.values(), &self.made_values())
+    }
+
+    /// What [`Build::export_made`] is made from: each file a tool may
+    /// make of the files written, and the definitions of it filed
+    /// ([`phitex_defuse::Engine::defs_digest`]): the same, the same bytes
+    /// (a value is never changed in place), found without a pass over
+    /// every node's record per name.
+    #[must_use]
+    pub fn made_source(&self) -> u64 {
+        let v = self.g.eng.values();
+        let mut h = 0x6d61_6465;
+        for (input, _) in self.files_shared().iter() {
+            for o in crate::tools::made_names(input) {
+                h = phitex_defuse::hash_words(
+                    phitex_defuse::hash_bytes(h, o.as_bytes()),
+                    &[self.g.eng.defs_digest(crate::tools::made_field(v, &o))],
+                );
+            }
+        }
+        h
+    }
+
+    /// The files the tools made, by name: their values as defined.
+    fn made_values(&self) -> Vec<(String, ValueId)> {
         let v = self.g.eng.values();
         let mut made: Vec<(String, ValueId)> = Vec::new();
         for (input, _) in self.files_shared().iter() {
@@ -8393,7 +8570,7 @@ impl Build {
                 }
             }
         }
-        made_bytes(v, &made)
+        made
     }
 
     /// The key sets of the read-back files that only define,
@@ -10025,27 +10202,30 @@ impl Build {
         out
     }
 
-    /// The relations the live nodes' last runs filed, by operation and
-    /// field ([`Stats::relations_by_op`]).
-    fn relations_now(&self) -> Vec<(&'static str, String, u64)> {
-        let v = self.g.eng.values();
-        let mut a = self.g.ops.audit.locked();
-        // (the nodes gone since: their runs' records dropped)
-        a.retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
-        let mut out: Vec<(&'static str, String, u64)> = Vec::new();
-        for x in a.values() {
-            for &(f, rel) in &x.defs {
-                if !rel {
-                    continue;
-                }
-                let name = field_name(v, f);
-                match out.iter_mut().find(|r| r.0 == x.op && r.1 == name) {
-                    Some(r) => r.2 += 1,
-                    None => out.push((x.op, name, 1)),
-                }
-            }
-        }
-        out
+    /// The gone nodes' runs' records ([`crate::run::NodeAudit`])
+    /// dropped.
+    fn audit_live(&self) {
+        self.g
+            .ops
+            .audit
+            .locked()
+            .retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
+    }
+
+    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
+    /// operation `op` filed at their last runs (tests/state.rs), counted
+    /// when asked, not after every evaluation.
+    #[must_use]
+    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
+        let f = self.g.eng.values().field(field);
+        self.g
+            .ops
+            .audit
+            .locked()
+            .iter()
+            .filter(|(n, x)| x.op == op && self.g.eng.is_live(NodeId::from_raw(**n)))
+            .map(|(_, x)| x.defs.iter().filter(|d| d.0 == f && d.1).count() as u64)
+            .sum()
     }
 
     /// The reads of fields whose name starts with `prefix` the live
@@ -11004,19 +11184,19 @@ mod canonical_tests {
         let k = prefix_hash("x ");
         let met = mark_id(k, "b", true);
         let marks: Vec<CommentMark> = vec![
-            (1, met, "a".to_owned()),
-            (2, k, "b".to_owned()),
-            (3, k, "c".to_owned()),
+            (1, met, Arc::from("a")),
+            (2, k, Arc::from("b")),
+            (3, k, Arc::from("c")),
         ];
         assert!(!ids_hold(&marks));
         let apart: Vec<CommentMark> = vec![
-            (1, met ^ 1, "a".to_owned()),
-            (2, k, "b".to_owned()),
-            (3, k, "c".to_owned()),
+            (1, met ^ 1, Arc::from("a")),
+            (2, k, Arc::from("b")),
+            (3, k, Arc::from("c")),
         ];
         assert!(ids_hold(&apart));
         // (one comment twice under one id: the same text, one mark)
-        assert!(ids_hold(&[(1, k, "a".to_owned()), (2, k, "a".to_owned())]));
+        assert!(ids_hold(&[(1, k, Arc::from("a")), (2, k, Arc::from("a"))]));
     }
 
     /// The marking line by line, as it was before the copy between
