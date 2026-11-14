@@ -23,6 +23,7 @@ mod park;
 mod park_review;
 mod placed_edit;
 mod placed_guess;
+mod placed_wait;
 mod predict;
 mod ranked;
 mod relocate;
