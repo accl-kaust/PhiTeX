@@ -41,13 +41,16 @@ pub(crate) struct Order {
     id: u64,
 }
 
+/// A thread's copy of an order's list: (order, its count, the list).
+type SegsCopy = (u64, u64, Rc<[(Pos, SegId)]>);
+
 thread_local! {
     /// This thread's copy of an order's list: (order, its `changes` when
     /// copied, the list). A lookup takes no lock and writes no line another
     /// thread reads: every read of the list by every worker took its lock,
     /// and the lock's count bounced between the cores (amsldoc at -j8: 8x
     /// the cycles of -j1 in the lock alone).
-    static SEGS: RefCell<(u64, u64, Rc<[(Pos, SegId)]>)> = RefCell::new((0, 0, Rc::from(Vec::new())));
+    static SEGS: RefCell<SegsCopy> = RefCell::new((0, 0, Rc::from(Vec::new())));
 }
 
 static ORDERS: AtomicU64 = AtomicU64::new(1);

@@ -176,14 +176,21 @@ pub(crate) enum Met {
     Contributors(Field, Pos, Pos, u64),
 }
 
+/// A thread's copy of the environment's values: (values instance, count,
+/// values).
+type EnvCopy = (u64, u64, FxHashMap<Field, Option<ValueId>>);
+/// A thread's copies of scope chains: (values instance, scope count, by
+/// segment).
+type ChainsCopy = (u64, u64, FxHashMap<SegId, Arc<[u64]>>);
+
 thread_local! {
     /// This thread's copy of the environment's values: (values instance,
     /// `Env::changes` when read, the values read) ([`env_value`]).
-    static ENV: std::cell::RefCell<(u64, u64, FxHashMap<Field, Option<ValueId>>)> =
+    static ENV: std::cell::RefCell<EnvCopy> =
         std::cell::RefCell::new((0, 0, FxHashMap::default()));
     /// This thread's copies of the segments' scope chains at their starts:
     /// (values instance, `Engine::scope_gen`, by segment) ([`chain_start`]).
-    static CHAINS: std::cell::RefCell<(u64, u64, FxHashMap<SegId, Arc<[u64]>>)> =
+    static CHAINS: std::cell::RefCell<ChainsCopy> =
         std::cell::RefCell::new((0, 0, FxHashMap::default()));
     /// What the reads on one layout running on this thread met, innermost
     /// last ([`on_one_layout`]).
