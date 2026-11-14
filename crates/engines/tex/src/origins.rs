@@ -1743,7 +1743,7 @@ pub(crate) struct Input<'a> {
     /// The text nodes: raw id, file (none: the document) and its text,
     /// byte range, the document node it is under.
     #[allow(clippy::type_complexity)]
-    pub spans: Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
+    pub spans: Arc<[SpanRow]>,
     /// The document's name and the text its nodes hold (its canonical
     /// text where `doc_raw` is the text given).
     pub doc_name: String,
@@ -1761,6 +1761,9 @@ pub(crate) struct Input<'a> {
 /// A text node as placed: its file (index into the files) and start.
 #[derive(Clone, Copy)]
 struct Span {
+    /// The node whose text it is (a file a node read inline: that
+    /// node's, the span's own id another).
+    of: u64,
     file: u32,
     s: u32,
     len: u32,
@@ -1769,6 +1772,12 @@ struct Span {
     /// The hash of its text.
     hash: u64,
 }
+
+/// A text node's span ([`crate::Build::spans_named`]): its raw id, its
+/// file's name and text (`None`: the document's own), its bytes there,
+/// the index of the document node it is under, and the node whose text
+/// it is.
+pub(crate) type SpanRow = (u64, Option<(String, Arc<str>)>, usize, usize, usize, u64);
 
 /// What an answer is made with: the index, the spans by raw id, each
 /// file's text (as held, and how offsets in it become the file's bytes).
@@ -1914,7 +1923,7 @@ impl State {
             if n % 256 == 255 && stop(false) {
                 return None;
             }
-            let (raw, f, s, e, _) = &inp.spans[i];
+            let (raw, f, s, e, _, of) = &inp.spans[i];
             let name = f.as_ref().map(|x| x.0.clone());
             if let Some((n, end)) = &reach
                 && *n == name
@@ -1951,6 +1960,7 @@ impl State {
             spans.insert(
                 *raw,
                 Span {
+                    of: *of,
                     file: fi,
                     s: u32::try_from(*s).unwrap_or(u32::MAX),
                     len: u32::try_from(t.len()).unwrap_or(u32::MAX),
@@ -2340,7 +2350,7 @@ fn pages_of(st: &State, cx: &Ctx<'_>, file: &str, at: u32) -> Vec<usize> {
                 && cx.place(sp.file, sp.doc, sp.s) <= at
                 && at < cx.place(sp.file, sp.doc, sp.s + sp.len).max(1)
         })
-        .map(|(&raw, _)| raw.cast_signed())
+        .map(|(_, sp)| sp.of.cast_signed())
         .collect();
     if raws.is_empty() {
         return Vec::new();
@@ -2689,7 +2699,7 @@ pub struct OriginsCapture {
     inst: u64,
     shown: Vec<u64>,
     #[allow(clippy::type_complexity)]
-    spans: Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
+    spans: Arc<[SpanRow]>,
     doc_name: String,
     doc_text: Arc<str>,
     doc_raw: Option<Arc<str>>,

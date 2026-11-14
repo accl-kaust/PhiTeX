@@ -6663,12 +6663,7 @@ pub struct Build {
     /// The text nodes' spans ([`Build::spans_named`]) by the
     /// [`Build::origins_key`] they were made at.
     #[allow(clippy::type_complexity)]
-    spans_memo: Mutex<
-        Option<(
-            u64,
-            Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
-        )>,
-    >,
+    spans_memo: Mutex<Option<(u64, Arc<[crate::origins::SpanRow]>)>>,
 }
 
 impl Drop for Build {
@@ -7854,7 +7849,7 @@ impl Build {
     pub fn node_spans(&self) -> Vec<(u64, Option<Arc<str>>, usize, usize)> {
         self.spans_named()
             .into_iter()
-            .map(|(n, f, s, e, _)| (n, f.map(|f| f.1), s, e))
+            .map(|(n, f, s, e, ..)| (n, f.map(|f| f.1), s, e))
             .collect()
     }
 
@@ -7929,18 +7924,17 @@ impl Build {
 
     /// [`Build::node_spans`] with each file's name, and the index of the
     /// document node each node is under (its place in the document).
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn spans_named(
-        &self,
-    ) -> Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> {
-        let mut out: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> = self
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn spans_named(&self) -> Vec<crate::origins::SpanRow> {
+        let mut out: Vec<crate::origins::SpanRow> = self
             .nodes
             .iter()
             .enumerate()
             .map(|(i, (_, n, src))| match src {
-                &Src::Doc(s, e) => (n.raw(), None, s, e, i),
+                &Src::Doc(s, e) => (n.raw(), None, s, e, i, n.raw()),
             })
             .collect();
+        let mut readers: Vec<(NodeId, usize)> = Vec::new();
         // (the nodes a run made of a file's slices, under the document's
         // nodes: each in its file's text, at the slice's place, moved as
         // far as an edit of its file moved the piece it is under,
@@ -7989,6 +7983,7 @@ impl Build {
             if !seen.insert(x.raw()) {
                 continue;
             }
+            readers.push((x, top));
             let Some(i) = self.g.eng.node_info(x) else {
                 stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
                 continue;
@@ -8047,10 +8042,96 @@ impl Build {
                 })
                 .clone();
             if let Some((n, t)) = text {
-                out.push((x.raw(), Some((n, t)), s, e, top));
+                out.push((x.raw(), Some((n, t)), s, e, top, x.raw()));
             }
         }
+        self.spans_read_inline(&mut out, &readers);
         out
+    }
+
+    /// The document files a run read inline ([`Run::load_written`]: an
+    /// `\input` inside a paragraph goes on into the file, and no node
+    /// of its own holds that text): the parts of each that no span holds,
+    /// as spans of the first node that read it (its `fread`), under that
+    /// node's document node. A glyph of such a file has its own file and
+    /// bytes, not the `\input` that read it.
+    fn spans_read_inline(
+        &self,
+        out: &mut Vec<crate::origins::SpanRow>,
+        readers: &[(NodeId, usize)],
+    ) {
+        let v = self.g.eng.values();
+        let docs: Vec<(String, String, Arc<str>)> = self
+            .g
+            .ops
+            .docs
+            .locked()
+            .iter()
+            .map(|(k, d)| {
+                let d = d.locked();
+                (k.clone(), d.path.clone(), Arc::from(d.text.as_str()))
+            })
+            .collect();
+        if docs.is_empty() {
+            return;
+        }
+        let fread = v.field("fread");
+        let bare = |n: &str| n.trim_start_matches("./").to_owned();
+        let which = |n: &str| {
+            let n = bare(n);
+            docs.iter()
+                .position(|(k, p, _)| bare(k) == n || bare(p) == n)
+        };
+        // (each file's places the spans hold)
+        let mut held: Vec<Vec<(usize, usize)>> = vec![Vec::new(); docs.len()];
+        for (_, f, s, e, ..) in out.iter() {
+            if let Some((n, _)) = f
+                && let Some(d) = which(n)
+            {
+                held[d].push((*s, *e));
+            }
+        }
+        let mut done = vec![false; docs.len()];
+        for &(x, top) in readers {
+            for (f, val) in self.g.eng.contribs_of(x) {
+                if f != fread {
+                    continue;
+                }
+                for e in v.seq_to_vec(val) {
+                    let Some(&n) = list_of(v, e).first() else {
+                        continue;
+                    };
+                    let Some(d) = which(&str_of(v, n)) else {
+                        continue;
+                    };
+                    if std::mem::replace(&mut done[d], true) {
+                        continue;
+                    }
+                    let (_, path, text) = &docs[d];
+                    let h = &mut held[d];
+                    h.sort_unstable();
+                    let mut at = 0;
+                    let mut gaps = Vec::new();
+                    for &(s, e) in h.iter() {
+                        if s > at {
+                            gaps.push((at, s));
+                        }
+                        at = at.max(e);
+                    }
+                    if at < text.len() {
+                        gaps.push((at, text.len()));
+                    }
+                    for (s, e) in gaps {
+                        if text.get(s..e).is_none_or(|t| t.trim().is_empty()) {
+                            continue;
+                        }
+                        let raw =
+                            phitex_defuse::hash_words(0x696e_6c69, &[x.raw(), d as u64, s as u64]);
+                        out.push((raw, Some((path.clone(), text.clone())), s, e, top, x.raw()));
+                    }
+                }
+            }
+        }
     }
 
     /// The files the job writes and reads back, with their text.
