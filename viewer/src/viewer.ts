@@ -54,6 +54,13 @@ export interface ViewerHost {
   cites?(k: number, x: number, y: number): Promise<CiteAnswer[] | null>;
   /** A page box's CSS size at `cssWidth` (on whole device pixels). */
   box(d: { w: number; h: number }, cssWidth: number): [number, number];
+  /**
+   * Part of page `k` drawn at `scale` (device pixels a point) around
+   * `view` (fractions of the page: left, top, right, bottom), for a link's
+   * window zoomed in past the pages' own drawing; null: none (the window
+   * shows the pages' bitmaps enlarged).
+   */
+  zoomed?(k: number, scale: number, view: [number, number, number, number]): Promise<PageImage | null>;
 }
 
 /** A bibliography entry, as the host reads it (the project's .bib): a link's window shows it as a card. */
@@ -126,6 +133,21 @@ function inkSpan(c: HTMLCanvasElement): [number, number] {
   spans.set(c, out);
   return out;
 }
+
+/**
+ * A drawn page's bitmaps (strips.ts's page: its whole page's, and a zoom's
+ * sharper part over it), each with where it is on the page, as fractions.
+ */
+function bitmaps(el: HTMLElement): { c: HTMLCanvasElement; l: number; t: number; w: number; h: number; whole: boolean }[] {
+  const all = el instanceof HTMLCanvasElement ? [el] : [...el.querySelectorAll("canvas")];
+  const f = (v: string) => (parseFloat(v) || 0) / 100;
+  return all
+    .filter((c) => c.width > 0)
+    .map((c) => (c.classList.contains("phx-tile") ? { c, l: f(c.style.left), t: f(c.style.top), w: f(c.style.width), h: f(c.style.height), whole: false } : { c, l: 0, t: 0, w: 1, h: 1, whole: true }));
+}
+
+/** The magnifier of a link's window's zoom buttons (its lens and handle; each button adds its − or +). */
+const MAG = `<svg viewBox="0 0 16 16" aria-hidden="true" fill="none"><circle cx="6.5" cy="6.5" r="4.6" stroke="currentColor" stroke-width="1.4"/><path d="m10 10 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>`;
 
 /** A US Letter page, in PDF points, until a page says otherwise. */
 const LETTER = { w: 612, h: 792 };
@@ -418,6 +440,9 @@ export class Viewer {
   private peekShow(at: { link: Link; k: number }): void {
     clearTimeout(this.peekHiding);
     const el = this.peekEl ?? this.peekMake();
+    // (another link: shown whole again, its width the window's)
+    const again = this.peekLink === at.link && !el.hidden;
+    if (!again) (this.peekZ.delete(el), this.peekSharp.delete(el));
     this.peekLink = at.link;
     this.peekFrom = at.k;
     const to = at.link[4];
@@ -440,7 +465,8 @@ export class Viewer {
       const list = said?.length ? said : this.host.cited ? this.host.cited(mid, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
       el.classList.toggle("cite", !!list?.length);
       if (list?.length) this.peekCard(list, at.link);
-      else this.peekDraw();
+      // (the same link's page drawn again (a build, a zoom of the pages): where it was scrolled, at its zoom)
+      else this.peekDraw(el, at.link, again);
     }
     this.peekPlace(at);
   }
@@ -451,7 +477,7 @@ export class Viewer {
     el.className = "peek";
     el.setAttribute("role", "tooltip");
     el.hidden = true;
-    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><button type="button" class="go" data-jump>Go there</button><button type="button" class="pin" data-pin title="Keep it open (a window of its own, moved by its bar)" aria-label="Keep it open"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.6 14.4 6.2l-1.1 1.1-1-.3-2.6 2.6.2 2.6-1.1 1.1-2.6-2.6-3.2 3.2-.7-.7 3.2-3.2-2.6-2.6L4 6.4l2.6.2 2.6-2.6-.3-1z" fill="currentColor"/></svg></button></div>`;
+    el.innerHTML = `<div class="pv"><canvas></canvas><div class="pz"></div><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><span class="zm"><button type="button" data-zoom="-1" title="Zoom out (Ctrl+scroll, or pinch)" aria-label="Zoom out">${MAG}<path d="M4.5 6.5h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button><button type="button" class="zl" data-zoom="0" title="Back to the page's width" aria-label="Back to the page's width">100%</button><button type="button" data-zoom="1" title="Zoom in (Ctrl+scroll, or pinch)" aria-label="Zoom in">${MAG}<path d="M4.5 6.5h4M6.5 4.5v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button></span><button type="button" class="go" data-jump>Go there</button><button type="button" class="pin" data-pin title="Keep it open (a window of its own, moved by its bar)" aria-label="Keep it open"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.6 14.4 6.2l-1.1 1.1-1-.3-2.6 2.6.2 2.6-1.1 1.1-2.6-2.6-3.2 3.2-.7-.7 3.2-3.2-2.6-2.6L4 6.4l2.6.2 2.6-2.6-.3-1z" fill="currentColor"/></svg></button></div>`;
     // (the hover window's timers: a pinned one stays, whatever the pointer does)
     el.addEventListener("mouseenter", () => el === this.peekEl && clearTimeout(this.peekHiding));
     // (out of the window: gone, after a moment to land back on its link)
@@ -459,8 +485,68 @@ export class Viewer {
     // (a click in it: nothing, but on its buttons: the footer's Go there (Open for an address),
     // a card's Go to it, DOI, Copy BibTeX; the pin. The window is read, scrolled, moved, resized:
     // never a link itself)
+    // (zoomed: Ctrl+scroll and a trackpad's pinch (Ctrl+wheel to the page), at the pointer; never the pages' zoom nor the browser's)
+    el.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey || el.classList.contains("cite") || el.classList.contains("url")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
+        const f = notch ? (e.deltaY < 0 ? 1.25 : 1 / 1.25) : Math.exp(-e.deltaY / 100);
+        const r = pv.getBoundingClientRect();
+        this.peekZoom(el, (this.peekZ.get(el) ?? 1) * f, e.clientX - r.left, e.clientY - r.top);
+      },
+      { passive: false },
+    );
+    // (and two fingers on a touch screen, about their middle)
+    const pv = el.querySelector<HTMLElement>(".pv")!, touches = new Map<number, [number, number]>();
+    let pinch: { d: number; z: number } | null = null;
+    const spread = () => {
+      const [a, b] = [...touches.values()];
+      return { d: Math.hypot(a[0] - b[0], a[1] - b[1]), x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 };
+    };
+    // (zoomed in, dragged by the mouse: moved like a sheet under a hand)
+    pv.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "mouse" || e.button !== 0 || !el.classList.contains("zoomed")) return;
+      e.preventDefault();
+      pv.setPointerCapture(e.pointerId);
+      pv.classList.add("grabbing");
+      const [x0, y0, l0, t0] = [e.clientX, e.clientY, pv.scrollLeft, pv.scrollTop];
+      const move = (m: PointerEvent) => ((pv.scrollLeft = l0 - (m.clientX - x0)), (pv.scrollTop = t0 - (m.clientY - y0)));
+      const up = () => (pv.classList.remove("grabbing"), pv.removeEventListener("pointermove", move), pv.removeEventListener("pointerup", up), pv.removeEventListener("pointercancel", up));
+      pv.addEventListener("pointermove", move);
+      pv.addEventListener("pointerup", up);
+      pv.addEventListener("pointercancel", up);
+    });
+    pv.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return;
+      touches.set(e.pointerId, [e.clientX, e.clientY]);
+      if (touches.size === 2) pinch = { d: spread().d, z: this.peekZ.get(el) ?? 1 };
+    });
+    pv.addEventListener("pointermove", (e) => {
+      if (!touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, [e.clientX, e.clientY]);
+      if (!pinch || touches.size !== 2) return;
+      const { d, x, y } = spread(), r = pv.getBoundingClientRect();
+      if (pinch.d > 0) this.peekZoom(el, (pinch.z * d) / pinch.d, x - r.left, y - r.top);
+    });
+    const lift = (e: PointerEvent) => {
+      touches.delete(e.pointerId);
+      if (touches.size < 2) pinch = null;
+    };
+    pv.addEventListener("pointerup", lift);
+    pv.addEventListener("pointercancel", lift);
+    // (only the part in view is drawn: drawn again as it scrolls, and sharp once it rests)
+    pv.addEventListener("scroll", () => this.peekPaintSoon(el), { passive: true });
     el.addEventListener("click", (e) => {
       if ((e.target as Element).closest("[data-pin]")) return void this.peekPin();
+      // (the magnifiers: a step in or out, the middle kept; the level between them: the page's width again)
+      const zb = (e.target as Element).closest<HTMLElement>("[data-zoom]");
+      if (zb) {
+        const z = this.peekZ.get(el) ?? 1, step = Number(zb.dataset.zoom);
+        return void this.peekZoom(el, step ? z * 1.25 ** step : 1);
+      }
       // (a pinned window's bar: moved by, closed by, never a link)
       if ((e.target as Element).closest(".ph")) return;
       const st = this.stateOf(el);
@@ -502,6 +588,8 @@ export class Viewer {
     // (out of the scroller, into its frame: where it is on screen, kept there, at
     // the size it has, inside the frame, its corner in reach to resize it by)
     const box = (this.scroller.parentElement ?? this.scroller), b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    // (moved, an element's scroll is lost: where its page view was scrolled, kept)
+    const pv = el.querySelector<HTMLElement>(".pv")!, kept = [pv.scrollLeft, pv.scrollTop];
     box.append(el);
     const h = Math.min(r.height, b.height - 16), t = Math.max(0, Math.min(r.top - b.top, b.height - h - 8));
     Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${t}px`, width: `${r.width}px`, height: `${h}px` });
@@ -513,6 +601,8 @@ export class Viewer {
     bar.innerHTML = `<span class="t"></span><button type="button" class="x" aria-label="Close" title="Close">×</button>`;
     bar.querySelector(".t")!.textContent = what;
     el.prepend(bar);
+    [pv.scrollLeft, pv.scrollTop] = kept;
+    this.peekPaint(el);
     bar.querySelector(".x")!.addEventListener("click", (e) => (e.stopPropagation(), el.remove()));
     // (moved by its bar: kept inside the frame)
     bar.addEventListener("pointerdown", (e) => {
@@ -533,7 +623,9 @@ export class Viewer {
     if (!el.classList.contains("cite") && !el.classList.contains("url")) {
       let t: ReturnType<typeof setTimeout> | undefined, w = el.offsetWidth;
       new ResizeObserver(() => {
-        if (!el.isConnected || el.offsetWidth === w) return;
+        if (!el.isConnected) return;
+        // (taller or shorter: only more or less of the page in view, drawn)
+        if (el.offsetWidth === w) return this.peekPaintSoon(el);
         w = el.offsetWidth;
         clearTimeout(t);
         t = setTimeout(() => this.peekDraw(el, this.pinned.get(el)?.link ?? undefined, true), 120);
@@ -634,9 +726,9 @@ export class Viewer {
   private peekDraw(el = this.peekEl, link = this.peekLink ?? this.peekAt?.link, keep = false): void {
     if (!el || !link || typeof link[4] !== "number") return;
     // (a pinned window resized: drawn again at its new width, scrolled to the same place)
-    const pvKeep = el.querySelector<HTMLElement>(".pv")!, was = keep && pvKeep.scrollHeight ? pvKeep.scrollTop / pvKeep.scrollHeight : -1;
+    const pv = el.querySelector<HTMLElement>(".pv")!;
+    const was = keep && pv.scrollHeight ? [pv.scrollLeft / pv.scrollWidth, pv.scrollTop / pv.scrollHeight] : null;
     const k = link[4], top = link[5] ?? 0, s = this.slots[k];
-    const pv = el.querySelector<HTMLElement>(".pv")!, c = pv.querySelector("canvas")!;
     el.classList.toggle("wait", !s?.img);
     if (!s?.img) {
       el.querySelector(".where")!.textContent = `Page ${k + 1} · drawing…`;
@@ -645,34 +737,115 @@ export class Viewer {
     }
     el.querySelector(".where")!.textContent = `Page ${k + 1}`;
     Object.assign(el.querySelector<HTMLElement>(".go")!, { hidden: false, textContent: "Go there" });
-    const img = s.img, W = pv.clientWidth || 420, dpr = window.devicePixelRatio || 1;
-    const all = img.canvas instanceof HTMLCanvasElement ? [img.canvas] : [...img.canvas.querySelectorAll("canvas")];
+    const img = s.img;
     // (the page's printed width, its margins left out, at the window's: the
     // text at a size to read, not the whole sheet's width shrunk)
-    const base = all.find((b) => !b.classList.contains("phx-tile") && b.width);
+    const base = bitmaps(img.canvas).find((b) => b.whole)?.c;
     const [il, ir] = base ? inkSpan(base) : [0, 1];
-    const pad = 10 / img.w, l = Math.max(0, il - pad), r = Math.min(1, ir + pad);
-    const PW = W / (r - l), H = Math.round((PW * img.h) / img.w), X = -l * PW;
-    c.style.width = `${W}px`;
-    c.style.height = `${H}px`;
-    c.width = Math.round(W * dpr);
-    c.height = Math.round(H * dpr);
-    const g = c.getContext("2d")!;
-    g.fillStyle = "#fff";
-    g.fillRect(0, 0, c.width, c.height);
-    g.setTransform(dpr, 0, 0, dpr, X * dpr, 0);
-    g.imageSmoothingQuality = "high";
-    // (the page's own bitmaps: the whole page, and a zoom's sharper part over it where there is one)
-    for (const b of all) {
-      if (!b.width) continue;
-      const tile = b.classList.contains("phx-tile");
-      const f = (v: string) => (parseFloat(v) || 0) / 100;
-      const [bl, bt, bw, bh] = tile ? [f(b.style.left), f(b.style.top), f(b.style.width), f(b.style.height)] : [0, 0, 1, 1];
-      g.drawImage(b, bl * PW, bt * H, bw * PW, bh * H);
+    const pad = 10 / img.w;
+    this.peekGeo.set(el, { k, hash: s.hash ?? null, img, l: Math.max(0, il - pad), r: Math.min(1, ir + pad), top });
+    this.peekLay(el);
+    if (was) [pv.scrollLeft, pv.scrollTop] = [was[0] * pv.scrollWidth, was[1] * pv.scrollHeight];
+    else pv.scrollTop = Math.max(0, (top / img.h) * pv.scrollHeight - 28);
+    this.peekPaint(el);
+  }
+
+  /** What a link's window shows of its page: the page, the part across (`l` to `r`, fractions of its width) the window's width shows at zoom 1, the place's height. */
+  private peekGeo = new WeakMap<HTMLElement, { k: number; hash: string | null; img: PageImage; l: number; r: number; top: number }>();
+  /** A window's zoom (1: the printed width across the window; absent, 1). */
+  private peekZ = new WeakMap<HTMLElement, number>();
+  /** A window's sharper drawing of its page, asked at its zoom (`zoomed`): its scale, the page's hash it is of. */
+  private peekSharp = new WeakMap<HTMLElement, { k: number; hash: string | null; img: PageImage }>();
+
+  /** A window's page laid out at its zoom: its scroll box the page's size at it, the place's mark; scrolled so (`at`) a point stays where it was. */
+  private peekLay(el: HTMLElement, at?: { x: number; y: number; z0: number } | null): void {
+    const g = this.peekGeo.get(el);
+    if (!g) return;
+    const pv = el.querySelector<HTMLElement>(".pv")!, z = this.peekZ.get(el) ?? 1;
+    const W = pv.clientWidth || 420, PW = (W / (g.r - g.l)) * z, H = Math.round((PW * g.img.h) / g.img.w);
+    const pz = pv.querySelector<HTMLElement>(".pz")!;
+    pz.style.width = `${Math.round(W * z)}px`;
+    pz.style.height = `${H}px`;
+    pv.querySelector<HTMLElement>(".at")!.style.top = `${(g.top / g.img.h) * H}px`;
+    el.querySelector<HTMLElement>(".zl")!.textContent = `${Math.round(z * 100)}%`;
+    el.classList.toggle("zoomed", z > 1.001);
+    if (at) {
+      const f = z / at.z0;
+      pv.scrollLeft = (pv.scrollLeft + at.x) * f - at.x;
+      pv.scrollTop = (pv.scrollTop + at.y) * f - at.y;
     }
-    const y = (top / img.h) * H;
-    pv.querySelector<HTMLElement>(".at")!.style.top = `${y}px`;
-    pv.scrollTop = was >= 0 ? was * pv.scrollHeight : Math.max(0, y - 28);
+  }
+
+  /** A window's zoom set to `z` (1 to 8), the point (`x`, `y`, in its page view) staying put; the middle, none given. */
+  private peekZoom(el: HTMLElement, z: number, x?: number, y?: number): void {
+    const pv = el.querySelector<HTMLElement>(".pv")!, z0 = this.peekZ.get(el) ?? 1;
+    const z1 = Math.min(8, Math.max(1, z));
+    if (Math.abs(z1 - z0) < 1e-3 || !this.peekGeo.get(el)) return;
+    this.peekZ.set(el, z1);
+    // (scrolled after the scroll box grew: a scroll past its old size was cut short)
+    const at = { x: x ?? pv.clientWidth / 2, y: y ?? pv.clientHeight / 2, z0 };
+    this.peekLay(el, at);
+    this.peekPaint(el);
+  }
+
+  /** A window's page drawn again at the next frame (a scroll of it), sharp once it rests. */
+  private peekPaintSoon(el: HTMLElement): void {
+    if (this.peekFrame.has(el)) return;
+    this.peekFrame.add(el);
+    requestAnimationFrame(() => (this.peekFrame.delete(el), this.peekPaint(el)));
+  }
+  private peekFrame = new WeakSet<HTMLElement>();
+  private peekRest = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>();
+
+  /**
+   * The part of a window's page in view drawn on its canvas (the canvas
+   * the view's size, where it scrolled to: a page zoomed 8 times is no
+   * canvas of its size): the page's own bitmaps, the window's sharper
+   * one over them; once it rests, a sharper one asked where these are
+   * coarser than the zoom shows them.
+   */
+  private peekPaint(el: HTMLElement): void {
+    const g = this.peekGeo.get(el);
+    if (!g || !el.isConnected) return;
+    const s = this.slots[g.k];
+    // (the page drawn again since: its own newest bitmap; a sharper one of another build, dropped)
+    const img = s?.img ?? g.img, sharp = this.peekSharp.get(el);
+    if (sharp && (sharp.k !== g.k || sharp.hash !== (s?.hash ?? null))) this.peekSharp.delete(el);
+    const pv = el.querySelector<HTMLElement>(".pv")!, c = pv.querySelector("canvas")!, dpr = window.devicePixelRatio || 1;
+    const z = this.peekZ.get(el) ?? 1, W = pv.clientWidth || 420, PW = (W / (g.r - g.l)) * z, H = Math.round((PW * g.img.h) / g.img.w), X = -g.l * PW;
+    const vw = pv.clientWidth, vh = pv.clientHeight, sx = pv.scrollLeft, sy = pv.scrollTop;
+    Object.assign(c.style, { left: `${sx}px`, top: `${sy}px`, width: `${vw}px`, height: `${vh}px` });
+    const cw = Math.max(1, Math.round(vw * dpr)), ch = Math.max(1, Math.round(vh * dpr));
+    if (c.width !== cw) c.width = cw;
+    if (c.height !== ch) c.height = ch;
+    const x = c.getContext("2d")!;
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.fillStyle = "#fff";
+    x.fillRect(0, 0, cw, ch);
+    x.setTransform(dpr, 0, 0, dpr, (X - sx) * dpr, -sy * dpr);
+    x.imageSmoothingQuality = "high";
+    // (the coarsest first, the sharpest over it)
+    const all = [...bitmaps(img.canvas), ...(this.peekSharp.get(el) ? bitmaps(this.peekSharp.get(el)!.img.canvas) : [])].map((b) => ({ ...b, d: b.c.width / (b.w * img.w) }));
+    all.sort((a, b) => a.d - b.d);
+    for (const b of all) x.drawImage(b.c, b.l * PW, b.t * H, b.w * PW, b.h * H);
+    // (sharp enough where it shows? asked once the zoom and the scroll rest)
+    clearTimeout(this.peekRest.get(el));
+    const want = (PW / img.w) * dpr;
+    const view: [number, number, number, number] = [Math.max(0, (sx - X) / PW), Math.max(0, sy / H), Math.min(1, (sx - X + vw) / PW), Math.min(1, (sy + vh) / H)];
+    const covers = all.some((b) => b.d >= want * 0.9 && b.l <= view[0] + 1e-3 && b.t <= view[1] + 1e-3 && b.l + b.w >= view[2] - 1e-3 && b.t + b.h >= view[3] - 1e-3);
+    if (covers || !this.host.zoomed) return;
+    this.peekRest.set(
+      el,
+      setTimeout(() => {
+        const k = g.k, hash = this.slots[k]?.hash ?? null;
+        void this.host.zoomed!(k, want, view).then((got) => {
+          // (still this window's page, at this build: kept, and drawn)
+          if (!got || !el.isConnected || this.peekGeo.get(el)?.k !== k || (this.slots[k]?.hash ?? null) !== hash) return;
+          this.peekSharp.set(el, { k, hash, img: got });
+          this.peekPaint(el);
+        });
+      }, 200),
+    );
   }
 
   /** The window gone `ms` on, unless the pointer comes back to it or its link (one timer: a later leave restarts it, never a second). */
