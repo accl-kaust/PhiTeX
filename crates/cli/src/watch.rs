@@ -992,6 +992,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the review's hub: notes, changes, `phitex session`; before the
     // first build, which it records)
     let hub = crate::review::hub().clone();
+    // (each build's record made on a thread of its own, in order: the
+    // files followed read and diffed against the accepted text, 5 ms of
+    // each Grail keystroke on this loop, ahead of the next one)
+    let (hub_tx, hub_rx) = std::sync::mpsc::channel::<crate::review::BuildFacts>();
+    {
+        let hub = hub.clone();
+        let _ = std::thread::Builder::new()
+            .name("review".into())
+            .spawn(move || {
+                for f in hub_rx {
+                    hub.built(f);
+                }
+            });
+    }
     hub.start(
         &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         job.path.to_string_lossy().trim_start_matches("./"),
@@ -1847,7 +1861,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 })
                 .collect();
             phitex_tex::timeline::lap("watch: the files the review is told of");
-            hub.built(crate::review::BuildFacts {
+            let _ = hub_tx.send(crate::review::BuildFacts {
                 n: builds,
                 ok: !failed,
                 pages: r.pages(),
@@ -1866,7 +1880,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 pdf: written.as_ref().map(|p| p.display().to_string()),
             });
             status.set("");
-            phitex_tex::timeline::lap("watch: the review told");
+            phitex_tex::timeline::lap("watch: the review given the build");
         }
         spin.done();
         building.store(false, Ordering::Relaxed);
