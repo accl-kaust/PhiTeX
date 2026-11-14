@@ -1507,31 +1507,7 @@ impl Hub {
                 .and_then(|x| usize::try_from(x).ok())
                 .unwrap_or(0)
         };
-        let (mut file, mut s, mut e) = (file, n("start"), n("end"));
-        // TEMPORARY, remove with its cause: the glyph origins give an
-        // \input file's text the bytes of the \input command in the file
-        // that inputs it (an engine bug, its root fix in the origins'
-        // rework). Until then, where the origins name a place that does not
-        // show the words seen on the page, they are found by their letters
-        // in the files the build reads.
-        let seen = req["seen"].as_str().unwrap_or("");
-        let body0 = current_text(&mut st, &file).unwrap_or_default();
-        let quote0 = body0
-            .get(rt::floor(&body0, s)..rt::floor(&body0, e.max(s)))
-            .unwrap_or("");
-        if !seen.is_empty() && !rt::shows(quote0, seen) {
-            let mut names: Vec<String> = st.files.keys().cloned().collect();
-            names.sort_by_key(|n| (n != &file, n.clone()));
-            for name in names {
-                let Some(t) = current_text(&mut st, &name) else {
-                    continue;
-                };
-                if let Some((a0, b0)) = rt::find_seen(&t, seen, if name == file { s } else { 0 }) {
-                    (file, s, e) = (name, a0, b0);
-                    break;
-                }
-            }
-        }
+        let (s, e) = (n("start"), n("end"));
         let body = current_text(&mut st, &file).unwrap_or_default();
         let s = rt::floor(&body, s);
         let e = rt::floor(&body, e.max(s));

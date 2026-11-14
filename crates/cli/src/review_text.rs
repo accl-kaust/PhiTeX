@@ -370,61 +370,6 @@ pub fn find_quote(
     best.map(|(_, _, at)| (at, at + quote.len()))
 }
 
-/// The letters and digits of `s`, lowercased, each with its byte in `s`
-/// (a page's ligatures as their letters): text compared as a reader sees
-/// it, whatever the markup, spaces and punctuation around it.
-pub fn letters(s: &str) -> Vec<(char, usize)> {
-    let mut out = Vec::new();
-    for (i, c) in s.char_indices() {
-        let lig = match c {
-            '\u{fb00}' => "ff",
-            '\u{fb01}' => "fi",
-            '\u{fb02}' => "fl",
-            '\u{fb03}' => "ffi",
-            '\u{fb04}' => "ffl",
-            _ => "",
-        };
-        if !lig.is_empty() {
-            out.extend(lig.chars().map(|l| (l, i)));
-        } else if c.is_alphanumeric() {
-            out.extend(c.to_lowercase().map(|l| (l, i)));
-        }
-    }
-    out
-}
-
-/// Where the words `seen` on a page are in source `text`, by their letters
-/// ([`letters`]), the match nearest `near`: from the first letter's byte to
-/// the end of the last's character. None: nowhere, or fewer than four letters.
-pub fn find_seen(text: &str, seen: &str, near: usize) -> Option<(usize, usize)> {
-    let want: Vec<char> = letters(seen).into_iter().map(|x| x.0).collect();
-    if want.len() < 4 {
-        return None;
-    }
-    let have = letters(text);
-    let chars: Vec<char> = have.iter().map(|x| x.0).collect();
-    let mut best: Option<(usize, usize, usize)> = None;
-    for i in 0..chars.len().saturating_sub(want.len() - 1) {
-        if chars[i..i + want.len()] == want[..] {
-            let s = have[i].1;
-            let last = have[i + want.len() - 1].1;
-            let e = last + text[last..].chars().next().map_or(1, char::len_utf8);
-            let d = s.abs_diff(near);
-            if best.is_none_or(|b| d < b.2) {
-                best = Some((s, e, d));
-            }
-        }
-    }
-    best.map(|(s, e, _)| (s, e))
-}
-
-/// Whether the source `quote` shows the words `seen` (their letters in it).
-pub fn shows(quote: &str, seen: &str) -> bool {
-    let q: String = letters(quote).into_iter().map(|x| x.0).collect();
-    let w: String = letters(seen).into_iter().map(|x| x.0).collect();
-    w.is_empty() || q.contains(&w)
-}
-
 /// The line (from 1) of byte `x` of `text`.
 #[allow(
     clippy::naive_bytecount,
@@ -592,16 +537,6 @@ mod tests {
         let b = "Alpha beta NEW gamma delta epsilon.";
         let r = map_range(&changes(a, b), note).unwrap();
         assert_eq!(&b[r.0..r.1], "gamma delta");
-    }
-
-    #[test]
-    fn words_seen_on_a_page_are_found_in_the_source() {
-        let t = "x \\emph{Chapter} one\ntext, with a \\textbf{ﬁne} line.";
-        let r = find_seen(t, "Chapter one text", 0).unwrap();
-        assert_eq!(&t[r.0..r.1], "Chapter} one\ntext");
-        assert!(find_seen(t, "fine line", 0).is_some());
-        assert!(shows("The quick brown", "quick  brown"));
-        assert!(!shows("\\input{ch1}", "Chapter one"));
     }
 
     #[test]

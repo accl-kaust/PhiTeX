@@ -5891,7 +5891,7 @@ var Review = class {
     const [file, a, b] = n ? [n.anchor.file, n.anchor.start, n.anchor.end] : h ? [h.file, h.now[0], h.now[1]] : ["", 0, 0];
     if (!file) return;
     if (n && !n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) return void this.p.viewer.scrollToPlace(n.anchor.page, n.anchor.point[1]);
-    const at = await this.host.boxes(file, a, Math.max(b, a + 1), n?.anchor.quote ?? h?.new);
+    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
     if (at.length) this.p.viewer.scrollToPlace(at[0].k, at[0].boxes[0][1]);
     else this.p.msg("Not on the pages (none of its text is typeset)");
   }
@@ -5919,14 +5919,14 @@ var Review = class {
         out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id, pin, title });
         continue;
       }
-      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1), n.anchor.quote);
+      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1));
       if (turn !== this.drawn) return;
       at.forEach((p, j) => out.push({ ...p, cls: cls(n), id: n.id, ...j === 0 && pin !== "" ? { pin, title } : {} }));
     }
     for (const h of this.s.hunks) {
       if (h.whole === "deleted") continue;
       const empty = h.now[1] <= h.now[0];
-      const at = await this.host.boxes(h.file, h.now[0], empty ? h.now[0] + 1 : h.now[1], empty ? void 0 : h.new);
+      const at = await this.host.boxes(h.file, h.now[0], empty ? h.now[0] + 1 : h.now[1]);
       if (turn !== this.drawn) return;
       at.forEach((p) => out.push({ k: p.k, boxes: empty ? p.boxes.slice(0, 1).map(([x, y, , bh]) => [x, y, 2, bh]) : p.boxes, cls: empty ? "h-del" : "h-add", id: h.id }));
     }
@@ -6038,11 +6038,11 @@ var Review = class {
     const seen = sel?.toString() ?? "";
     if (kind === "highlight") {
       this.closePop();
-      const r = await this.req("review_note", { kind, anchor, seen });
+      const r = await this.req("review_note", { kind, anchor });
       if (r) this.clearSelection(), this.p.msg("Highlighted");
       return;
     }
-    this.openCompose(end.left, end.bottom + 6, { kind, anchor, seen }, seen);
+    this.openCompose(end.left, end.bottom + 6, { kind, anchor }, seen);
   }
   /** The box to write a note in, at (x, y). */
   openCompose(x, y, note, quote) {
@@ -11366,18 +11366,7 @@ var review = {
     sock.onEvent((e) => e.event === "review" && cb(e));
     sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json)));
   },
-  // TEMPORARY, remove with its cause: the glyph origins give an \input
-  // file's text the bytes of the \input command (an engine bug, its root
-  // fix in the origins' rework). Until then, where no glyph's origin names
-  // the range, its words are found in the pages' text.
-  async boxes(file, start, end, quote) {
-    const at = await session.boxesOf(file, start, end);
-    if (at.length || !quote) return at;
-    const q = words(quote);
-    if (!q) return [];
-    const hits = await pages.find(q).catch(() => []);
-    return hits.slice(0, 1).map((h) => ({ k: h.k, boxes: h.boxes }));
-  },
+  boxes: (file, start, end) => session.boxesOf(file, start, end),
   source: (sel) => session.sourceOf(sel),
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),

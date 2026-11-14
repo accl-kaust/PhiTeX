@@ -97,8 +97,8 @@ export interface ReviewHost {
   request(op: string, params?: object): Promise<{ ok: boolean; json?: any; error?: string }>;
   /** The state, whenever it changes (the `review` event). */
   onState(cb: (s: ReviewState) => void): void;
-  /** Where bytes [start, end) of `file` are on the pages; `quote`, its text, looked for on the pages where no glyph names them (TEMPORARY: an \input file's glyphs name the \input command until the origins' fix). */
-  boxes(file: string, start: number, end: number, quote?: string): Promise<{ k: number; boxes: Box[] }[]>;
+  /** Where bytes [start, end) of `file` are on the pages: the glyphs that came from them. */
+  boxes(file: string, start: number, end: number): Promise<{ k: number; boxes: Box[] }[]>;
   /** The source of text selected on the pages. */
   source(sel: { k: number; rects: Box[] }[]): Promise<{ file: string; start: number; end: number } | null>;
   /** The source place nearest a point of a page. */
@@ -689,7 +689,7 @@ export class Review {
     const [file, a, b] = n ? [n.anchor.file, n.anchor.start, n.anchor.end] : h ? [h.file, h.now[0], h.now[1]] : ["", 0, 0];
     if (!file) return;
     if (n && !n.anchor.quote && n.anchor.point && n.anchor.page !== undefined) return void this.p.viewer.scrollToPlace(n.anchor.page, n.anchor.point[1]);
-    const at = await this.host.boxes(file, a, Math.max(b, a + 1), n?.anchor.quote ?? h?.new);
+    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
     if (at.length) this.p.viewer.scrollToPlace(at[0].k, at[0].boxes[0][1]);
     else this.p.msg("Not on the pages (none of its text is typeset)");
   }
@@ -721,14 +721,14 @@ export class Review {
         out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id, pin, title });
         continue;
       }
-      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1), n.anchor.quote);
+      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1));
       if (turn !== this.drawn) return;
       at.forEach((p, j) => out.push({ ...p, cls: cls(n), id: n.id, ...(j === 0 && pin !== "" ? { pin, title } : {}) }));
     }
     for (const h of this.s.hunks) {
       if (h.whole === "deleted") continue;
       const empty = h.now[1] <= h.now[0];
-      const at = await this.host.boxes(h.file, h.now[0], empty ? h.now[0] + 1 : h.now[1], empty ? undefined : h.new);
+      const at = await this.host.boxes(h.file, h.now[0], empty ? h.now[0] + 1 : h.now[1]);
       if (turn !== this.drawn) return;
       at.forEach((p) => out.push({ k: p.k, boxes: empty ? p.boxes.slice(0, 1).map(([x, y, , bh]) => [x, y, 2, bh] as Box) : p.boxes, cls: empty ? "h-del" : "h-add", id: h.id }));
     }
@@ -853,15 +853,15 @@ export class Review {
     const seen = sel?.toString() ?? "";
     if (kind === "highlight") {
       this.closePop();
-      const r = await this.req("review_note", { kind, anchor, seen });
+      const r = await this.req("review_note", { kind, anchor });
       if (r) (this.clearSelection(), this.p.msg("Highlighted"));
       return;
     }
-    this.openCompose(end.left, end.bottom + 6, { kind, anchor, seen }, seen);
+    this.openCompose(end.left, end.bottom + 6, { kind, anchor }, seen);
   }
 
   /** The box to write a note in, at (x, y). */
-  private openCompose(x: number, y: number, note: { kind: ReviewNote["kind"]; anchor: object; seen?: string }, quote: string): void {
+  private openCompose(x: number, y: number, note: { kind: ReviewNote["kind"]; anchor: object }, quote: string): void {
     this.closePop();
     const c = html`<div class="rv-compose" role="dialog" aria-label="${note.kind === "comment" ? "Comment for your agent" : "Note"}"><div class="q">${note.kind === "comment" ? "Comment for your agent on" : "Note on"} “${oneLine(quote, 120)}”</div><textarea placeholder="${note.kind === "comment" ? "What should your agent do here?" : "Your note…"}" aria-label="Its text" rows="3"></textarea><div class="act"><span class="hint">Ctrl+Enter saves</span><button type="button" class="btn" data-x>Cancel</button><button type="button" class="btn primary" data-save>${note.kind === "comment" ? "Comment" : "Save note"}</button></div></div>`.firstElementChild as HTMLElement;
     const ta = c.querySelector("textarea")!;

@@ -1053,7 +1053,7 @@ Review = {id, verdict: "approve" | "request_changes" | "reject" | "comment", sum
 | op | params | answer |
 |---|---|---|
 | `review_state` | none | `{notes, hunks, reviews, git, baseline}` |
-| `review_note` | `{kind, anchor, text?, seen?}` (anchor without `quote`: the watch fills it from the file; `seen`, the words the viewer showed, is TEMPORARY: while an `\input` file's glyph origins name the `\input` command, the watch finds the note's place by these words in its file; it goes when the origins name the glyph's own file) | `Note` |
+| `review_note` | `{kind, anchor, text?}` (anchor without `quote`: the watch fills it from the file) | `Note` |
 | `review_reply`, `review_resolve`, `review_reopen`, `review_delete` | `{id, text?}` | `Note` |
 | `review_clear` | none | `{removed}` (the resolved notes) |
 | `review_accept`, `review_reject` | `{ids: [hunk id] \| "all", file?}` | `{done, refused?: why}` |

@@ -357,18 +357,7 @@ const review: ReviewHost = {
     // the watch restarted)
     sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState)));
   },
-  // TEMPORARY, remove with its cause: the glyph origins give an \input
-  // file's text the bytes of the \input command (an engine bug, its root
-  // fix in the origins' rework). Until then, where no glyph's origin names
-  // the range, its words are found in the pages' text.
-  async boxes(file, start, end, quote) {
-    const at = await session.boxesOf(file, start, end);
-    if (at.length || !quote) return at;
-    const q = words(quote);
-    if (!q) return [];
-    const hits = await pages.find(q).catch(() => []);
-    return hits.slice(0, 1).map((h) => ({ k: h.k, boxes: h.boxes }));
-  },
+  boxes: (file, start, end) => session.boxesOf(file, start, end),
   source: (sel) => session.sourceOf(sel),
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),
