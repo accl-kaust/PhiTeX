@@ -47,7 +47,9 @@ impl Operation for Gate {
     }
 
     fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        eprintln!("yr: gate runs");
         hold_until(|| GATE.load(Ordering::SeqCst));
+        eprintln!("yr: gate goes");
         Ok(ValueId::UNIT)
     }
 }
@@ -62,7 +64,9 @@ impl Operation for Settled {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        eprintln!("yr: settled {} runs", cx.node().raw());
         if let Err(s) = cx.wait_settled() {
+            eprintln!("yr: settled {} waits", cx.node().raw());
             if !GATE.load(Ordering::SeqCst) {
                 PARKED.fetch_add(1, Ordering::SeqCst);
             }
@@ -85,6 +89,7 @@ impl Operation for Yielder {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        eprintln!("yr: yielder runs");
         if YIELDER_GAVE.load(Ordering::SeqCst) {
             YIELDER_AGAIN.store(true, Ordering::SeqCst);
             return Ok(ValueId::UNIT);
