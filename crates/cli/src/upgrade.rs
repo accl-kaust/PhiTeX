@@ -176,16 +176,56 @@ fn affects(range: &str, v: &str) -> bool {
 }
 
 fn get(url: &str) -> Result<Vec<u8>, String> {
+    get_with(url, |_, _| ())
+}
+
+/// `url`'s body, `seen(bytes so far, the whole if the server said)` told
+/// as it comes (the binary's download: a bar on the terminal).
+fn get_with(url: &str, mut seen: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
+    use std::io::Read;
     let mut r = crate::shelf::agent()
         .get(url)
         .header("User-Agent", format!("phitex/{}", crate::version()))
         .call()
         .map_err(|e| format!("{url}: {e}"))?;
-    r.body_mut()
-        .with_config()
-        .limit(1 << 30)
-        .read_to_vec()
-        .map_err(|e| format!("{url}: {e}"))
+    let total = r
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let mut body = r.body_mut().with_config().limit(1 << 30).reader();
+    let mut out = Vec::with_capacity(total.unwrap_or(0).min(1 << 30) as usize);
+    let mut buf = vec![0u8; 64 << 10];
+    loop {
+        let n = body.read(&mut buf).map_err(|e| format!("{url}: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+        seen(out.len() as u64, total);
+    }
+    Ok(out)
+}
+
+/// A download's line: "  41% [########............] 12.3 of 30.0 MB" (no
+/// whole known: the bytes alone).
+fn bar_line(done: u64, total: Option<u64>) -> String {
+    let mb = |b: u64| b as f64 / 1e6;
+    match total {
+        Some(t) if t > 0 => {
+            let f = (done as f64 / t as f64).clamp(0.0, 1.0);
+            let w = 24;
+            let full = (f * w as f64).round() as usize;
+            format!(
+                "{:>3}% [{}{}] {:.1} of {:.1} MB",
+                (f * 100.0).floor() as u32,
+                "#".repeat(full),
+                ".".repeat(w - full),
+                mb(done),
+                mb(t)
+            )
+        }
+        _ => format!("{:.1} MB", mb(done)),
+    }
 }
 
 /// A release to upgrade to: its version, its tag, and the key its
@@ -290,7 +330,7 @@ fn untar<'a>(tar: &'a [u8], name: &str) -> Option<&'a [u8]> {
 
 /// Release `r`'s binary for this machine, verified: `SHA256SUMS` signed
 /// by its channel's key built in, the tarball's hash in it.
-fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
+fn fetch(r: &Release, asset: &str, seen: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
     let base = TEST_BASE.map_or_else(
         || format!("https://github.com/{REPO}/releases/download/{}", r.tag),
         |b| format!("{b}/download/{}", r.tag),
@@ -310,7 +350,7 @@ fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
             (f.trim().trim_start_matches('*') == asset).then(|| h.to_owned())
         })
         .ok_or_else(|| format!("SHA256SUMS does not list {asset}"))?;
-    let tgz = get(&format!("{base}/{asset}"))?;
+    let tgz = get_with(&format!("{base}/{asset}"), seen)?;
     if phitex_shelf::sha256_hex(&tgz) != want {
         return Err(format!(
             "{asset} does not match SHA256SUMS: nothing installed"
@@ -430,7 +470,19 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
         }
     }
     ui.line(&format!("downloading phitex {v} ({asset})"));
-    match fetch(&r, &asset).and_then(|b| replace(&exe, &b)) {
+    // (the download's bar on the status line, drawn at most ten times a second)
+    let mut drawn: Option<std::time::Instant> = None;
+    let got = fetch(&r, &asset, |done, total| {
+        if drawn.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(100))
+            && Some(done) != total
+        {
+            return;
+        }
+        drawn = Some(std::time::Instant::now());
+        ui.status(Some(&bar_line(done, total)), None);
+    });
+    ui.status(None, None);
+    match got.and_then(|b| replace(&exe, &b)) {
         Ok(()) => {
             ui.line(&format!(
                 "phitex {v} installed in {} (signature verified)",
