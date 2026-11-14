@@ -3170,6 +3170,14 @@ fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
 /// (Keyed by the frames' value, kept alive by a collection, `crate::collect`.)
 pub(crate) type RestLines = Arc<std::sync::Mutex<FxHashMap<ValueId, i64>>>;
 
+/// The lines before the piece whose frames' value is `n`, where a run
+/// cut it of a file's rest ([`RestLines`]).
+fn rest_line(rest: &RestLines, n: u64) -> Option<i64> {
+    rest.locked()
+        .iter()
+        .find_map(|(f, &k)| (f.raw() == n).then_some(k))
+}
+
 /// [`RestLines`] for the pieces `(frames, byte)` cut of the rest of
 /// `text`: the lines of the text before each.
 pub(crate) fn rest_lines(rest: &RestLines, text: &str, pieces: &[(ValueId, usize)]) {
@@ -3729,11 +3737,7 @@ impl Graph {
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
                 let n = n.parse().ok()?;
-                let k = doc_file_line(&docs, n).or_else(|| {
-                    rest.locked()
-                        .iter()
-                        .find_map(|(f, &k)| (f.raw() == n).then_some(k))
-                });
+                let k = doc_file_line(&docs, n).or_else(|| rest_line(&rest, n));
                 return Some(k.map(|k| v.int(k)));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the
@@ -9081,6 +9085,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
+                    .or_else(|| rest_line(&self.g.ops.rest_lines, n))
             },
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
@@ -9184,6 +9189,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
+                    .or_else(|| rest_line(&self.g.ops.rest_lines, n))
             },
             &crate::log::TermParts {
                 head,
