@@ -401,8 +401,8 @@ struct ReadsWorker {
     /// Whether the last build ended, and whether a read was asked since
     /// it began: what it ended with is taken only then, on the asking
     /// path, never on every build's ([`ReadsWorker::wants`]).
-    ended: std::cell::Cell<bool>,
-    asked: std::cell::Cell<bool>,
+    ended: AtomicBool,
+    asked: AtomicBool,
 }
 
 impl ReadsWorker {
@@ -495,8 +495,8 @@ impl ReadsWorker {
         ReadsWorker {
             tx,
             now,
-            ended: std::cell::Cell::new(false),
-            asked: std::cell::Cell::new(false),
+            ended: AtomicBool::new(false),
+            asked: AtomicBool::new(false),
         }
     }
 
@@ -506,15 +506,15 @@ impl ReadsWorker {
             return false;
         }
         let _ = self.tx.send(a.clone());
-        self.asked.set(true);
+        self.asked.store(true, Ordering::Relaxed);
         true
     }
 
     /// Whether what the last build ended with is to be taken now: it
     /// ended, a read of it was asked, and nothing was taken yet.
     fn wants(&self) -> bool {
-        self.ended.get()
-            && self.asked.get()
+        self.ended.load(Ordering::Relaxed)
+            && self.asked.load(Ordering::Relaxed)
             && self
                 .now
                 .0
@@ -529,13 +529,13 @@ impl ReadsWorker {
         let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
         g.0 += 1;
         g.1 = None;
-        self.ended.set(false);
-        self.asked.set(false);
+        self.ended.store(false, Ordering::Relaxed);
+        self.asked.store(false, Ordering::Relaxed);
     }
 
     /// The build ended (what it ended with taken when a read is asked).
     fn ended(&self) {
-        self.ended.set(true);
+        self.ended.store(true, Ordering::Relaxed);
     }
 
     /// What the build ended with (none: no build to read, the reads
