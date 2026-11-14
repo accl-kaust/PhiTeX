@@ -86,7 +86,23 @@ impl Run<'_, '_> {
             // (the command loop's one check of the token path's halt)
             self.ck()?;
             if !got {
-                return Ok(());
+                return self.csname_force();
+            }
+            // (a `\\csname` look-up put off waits for this command alone,
+            // an assignment that may bind its name globally,
+            // [`Run::csname_defer`])
+            if self.csname_defer.is_some()
+                && !matches!(
+                    self.cur.cmd,
+                    cmd::PREFIX
+                        | cmd::LET
+                        | cmd::DEF
+                        | cmd::SHORTHAND_DEF
+                        | cmd::DEF_FONT
+                        | cmd::READ_TO_CS
+                )
+            {
+                self.csname_force()?;
             }
             if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
                 self.cmd_trace();
@@ -101,7 +117,7 @@ impl Run<'_, '_> {
                     && self.cur.cmd != cmd::DONT_EXPAND
                     && self.cur.cmd != cmd::SYM
                 {
-                    return Ok(());
+                    return self.csname_force();
                 }
                 self.command_call = self.cur.cmd == cmd::CALL;
                 self.expand();
@@ -110,9 +126,34 @@ impl Run<'_, '_> {
                     self.pdf_cmd = 0;
                     continue;
                 }
+                // (a `\\csname` look-up put off stays for the command the
+                // run's loop begins next, [`Run::run_all`])
                 return Ok(());
             }
+            // (observe, `PHITEX_SLOW_CMD=<ms>`: a command that took longer,
+            // with the run's node and op and where the input stands)
+            let slow =
+                crate::exec::obs_str!("PHITEX_SLOW_CMD").and_then(|x| x.parse::<u128>().ok());
+            let t0 = slow.map(|_| (std::time::Instant::now(), self.cur.tok, self.cmds));
+            let pending = self.csname_defer;
             self.dispatch()?;
+            if let (Some(ms), Some((t, tok, n))) = (slow, t0)
+                && t.elapsed().as_millis() >= ms
+            {
+                eprintln!(
+                    "slow-cmd: node {} op {:?} cmd #{n} {tok:?} took {:?}; now {}",
+                    self.cx.node().raw(),
+                    self.cx.op(),
+                    t.elapsed(),
+                    self.trace_context().chars().take(400).collect::<String>()
+                );
+            }
+            // (a look-up put off before this command and not bound by it,
+            // made; one put off inside it, by the main loop's look ahead
+            // past characters (§1038), waits for the command it backed up)
+            if pending.is_some() && self.csname_defer == pending {
+                self.csname_force()?;
+            }
             return self.ck();
         }
     }

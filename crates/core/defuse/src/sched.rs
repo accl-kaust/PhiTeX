@@ -285,6 +285,8 @@ pub(crate) struct Worker {
     /// Runs stopped at a check because a read moved while they ran
     /// (`Ctx::tick`).
     pub(crate) stopped_stale: AtomicU64,
+    /// Its runs' checks (`Ctx::tick`, `Report::ticks`).
+    pub(crate) ticks: AtomicU64,
     pub(crate) op_ns: AtomicU64,
     pub(crate) wasted_ns: AtomicU64,
     pub(crate) commit_ns: AtomicU64,
@@ -828,6 +830,7 @@ impl Pool {
                 parks: AtomicU64::new(0),
                 waits: AtomicU64::new(0),
                 stopped_stale: AtomicU64::new(0),
+                ticks: AtomicU64::new(0),
                 stale_panics: AtomicU64::new(0),
                 op_ns: AtomicU64::new(0),
                 wasted_ns: AtomicU64::new(0),

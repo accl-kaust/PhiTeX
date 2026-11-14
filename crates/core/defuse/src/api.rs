@@ -595,6 +595,8 @@ pub struct Report {
     /// Runs stopped at a check (`Ctx::tick`) because a read moved while
     /// they ran: run again on what it moved to.
     pub stopped_stale: u64,
+    /// The runs' periodic checks (`Ctx::tick`), each counted once.
+    pub ticks: u64,
     /// Runs that panicked on inputs that moved while they ran, run again
     /// (a panic on inputs that still hold is `EvalError::OpPanicked`).
     pub stale_panics: u64,

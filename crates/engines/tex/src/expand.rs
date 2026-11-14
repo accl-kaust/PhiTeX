@@ -272,6 +272,66 @@ impl Run<'_, '_> {
     /// §372's end: control sequence `t` made `\relax` where undefined,
     /// and put back.
     fn cs_name_end(&mut self, t: Tok) -> R<()> {
+        self.csname_force()?;
+        if let Some(l) = self.csname_deferrable(t)? {
+            self.csname_defer = Some((l, t));
+            self.back_input(t);
+            return Ok(());
+        }
+        self.csname_relax(t)?;
+        self.back_input(t);
+        Ok(())
+    }
+
+    /// Whether the look-up of `\\csname`'s `t` (§372) may wait for the
+    /// command after it ([`Run::csname_defer`]): its location, where the
+    /// run has not touched it and holds no pending append (a read-back's
+    /// key is defined first where it is touched or bound, as any other
+    /// touch, [`Run::rb_check`]), and no `\\tracingassigns` or `\\tracingrestores` would
+    /// show the `\\relax` §372 makes (a global binding after it: the
+    /// value it changes, the entry its group's end retains).
+    fn csname_deferrable(&mut self, t: Tok) -> R<Option<crate::state::Loc>> {
+        let Some(l) = self.mean_loc(t) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l)
+            || self.interp.is_some()
+            || self.rec_load
+            || self.appending.iter().any(|x| x.0 == l)
+            || self.appending_vals.iter().any(|x| x.0 == l)
+            || self.lazy_pre(l)
+        {
+            return Ok(None);
+        }
+        if self.param("tracingassigns")? > 0 || self.param("tracingrestores")? > 0 {
+            return Ok(None);
+        }
+        Ok(Some(l))
+    }
+
+    /// The look-up [`Run::cs_name_end`] put off, made now
+    /// ([`Run::csname_defer`]).
+    pub(crate) fn csname_force(&mut self) -> R<()> {
+        match self.csname_defer.take() {
+            Some((_, t)) => {
+                // (observe, `PHITEX_CSNAME_TRACE`: where a put-off look-up
+                // was made after all)
+                if crate::exec::obs_flag!("PHITEX_CSNAME_TRACE") {
+                    eprintln!(
+                        "csname-trace: node {} {t:?} made at {:?}: {}",
+                        self.cx.node().raw(),
+                        self.cur.tok,
+                        self.trace_context().chars().take(1500).collect::<String>()
+                    );
+                }
+                self.csname_relax(t)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// §372: `t` made `\\relax` where undefined.
+    fn csname_relax(&mut self, t: Tok) -> R<()> {
         // (§372: of the name's meaning only whether it is defined)
         let undefined = match self.defined_lookup(t)? {
             Some(d) => !d,
@@ -282,7 +342,6 @@ impl Run<'_, '_> {
             let f = t.field_name().unwrap_or_default();
             self.set(&f, relax, false);
         }
-        self.back_input(t);
         Ok(())
     }
 
@@ -384,6 +443,11 @@ impl Run<'_, '_> {
     /// in one pass (the body with the argument ranges copied in) and
     /// pushed as the macro's level. No list per argument, no buffer of
     /// the run's own. A halt is raised, never returned.
+    /// Tokens written by macro calls a tick counts for
+    /// ([`Run::tok_work`]): about the time of 4096 commands (8192 tokens
+    /// took 1.8 ms in Grail's runaway resume, acclnode11).
+    const TOK_WORK_TICK: u64 = 1 << 13;
+
     pub(crate) fn macro_call(&mut self) {
         let command = std::mem::take(&mut self.command_call);
         // (the engine bounds a run on a guess by its work: an expansion
@@ -465,6 +529,18 @@ impl Run<'_, '_> {
             self.input.pop_spent();
             let range = self.input.arena.expand_body(&m.body, &m.segs, base);
             self.push_range(range, crate::input::ty::MACRO);
+            // (the engine bounds a run on a guess by its work: the tokens
+            // written count too, [`Run::tok_work`])
+            // (one a `TOK_WORK_TICK` written, the rest carried: a call
+            // that writes more makes as many)
+            self.tok_work += u64::from(range.end - range.start);
+            while self.tok_work >= Self::TOK_WORK_TICK {
+                self.tok_work -= Self::TOK_WORK_TICK;
+                if let Err(s) = self.cx.tick(Self::TOK_WORK_TICK) {
+                    self.input.arena.scratch_end(base);
+                    return self.raise(crate::run::Halt::Stop(s));
+                }
+            }
         }
         self.input.arena.scratch_end(base);
     }

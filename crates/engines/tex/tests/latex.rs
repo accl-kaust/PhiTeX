@@ -4126,6 +4126,114 @@ fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
     }
 }
 
+/// A `\csname` whose control sequence the next command assigns globally
+/// (pgf's `\pgfsys@invalidate@currentid`: `\expandafter\global\expandafter
+/// \let\csname pgf@sys@id@keylist@<ref>\endcsname\pgfutil@empty`) reads
+/// nothing of it: whatever §372 found, the binding after the `\let` is the
+/// same global one. A paragraph put first that defines the name globally
+/// runs no later paragraph again; a `\csname` met otherwise (tested, shown,
+/// let locally) reads as before. Every edited PDF equals a cold build's,
+/// at one and eight threads.
+#[test]
+fn a_csname_bound_globally_at_once_reads_nothing() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/csname-dead");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |first: bool| {
+        let mut s = String::from("\\documentclass{article}\n\\begin{document}\n");
+        if first {
+            s.push_str("First \\expandafter\\gdef\\csname kl@a\\endcsname{set} and \\csname kl@a\\endcsname.\n\n");
+        }
+        for i in 0..8 {
+            s.push_str(&format!(
+                "Paragraph {i} \\expandafter\\global\\expandafter\\let\\csname kl@a\\endcsname\\empty \
+                 \\expandafter\\global\\expandafter\\let\\csname kl@b{i}\\endcsname\\relax words.\n\n"
+            ));
+        }
+        s.push_str(
+            "Tested: \\expandafter\\ifx\\csname kl@u\\endcsname\\relax relax\\else other\\fi; \
+             {\\expandafter\\let\\csname kl@l\\endcsname\\empty local}\\expandafter\\meaning\\csname kl@l\\endcsname; \
+             \\expandafter\\gdef\\csname kl@g\\endcsname{g}\\meaning\\kl@g; \\meaning\\kl@a.\n\n\\end{document}\n",
+        );
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("csdead", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for first in [true, false] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            // (by the cause, not the node's text, which names it too)
+            let on: Vec<&String> = r.iter().filter(|x| x.contains(" cs:kl@a [")).collect();
+            assert!(
+                on.is_empty(),
+                "-j{threads} first {first}: ran again on kl@a: {on:?}"
+            );
+        }
+    }
+}
+
+/// A macro call with arguments counts the tokens it writes toward its
+/// run's work ticks, one a 8192 (`Run::tok_work`): a recursion whose
+/// argument grows (Grail's resumes on a moved `\Sectionformat`) copies
+/// millions of tokens in a few thousand calls and commands, and its run
+/// must be checked as often as that work says, or one on a read that
+/// moved runs on to "TeX capacity exceeded". Here 1500 calls, the
+/// argument 8 tokens longer a call: at least 8 * 1500 * 1499 / 2 tokens
+/// written, so at least that / 8192 ticks, where calls and commands
+/// alone make none. (Ctx::tick looks at a long run's reads at powers of
+/// two of its checks; counted in commands and calls only, Grail's
+/// recursion made too few to reach the next one.)
+#[test]
+fn a_macro_call_counts_its_tokens_toward_the_runs_checks() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/tok-ticks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |calls: u32| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\
+             \\def\\r#1{{\\advance\\count255 1 \\ifnum\\count255<{calls} \\expandafter\\r\\else\\expandafter\\@gobble\\fi{{#1aaaaaaaa}}}}\n\
+             \\makeatother\n\\begin{{document}}\n\\count255=0 \\r{{}}Done: \\the\\count255.\n\\end{{document}}\n"
+        )
+    };
+    let ticks = |calls: u32| {
+        let b = common::build(
+            Options {
+                threads: Some(1),
+                ..pdf_opts("tokticks", &dir)
+            },
+            Some(&prelude(true)),
+            &doc(calls),
+        );
+        b.stats.ticks
+    };
+    let (none, many) = (ticks(1), ticks(1500));
+    let tokens = 8 * 1500 * 1499 / 2;
+    assert!(
+        many >= none + tokens / 8192,
+        "1500 growing calls made {many} checks, one call {none}: at least {} more for {tokens} tokens",
+        tokens / 8192
+    );
+}
+
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
 /// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
 /// (microtype's font expansion). A reader cares which ratios are there,

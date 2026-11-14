@@ -2491,6 +2491,7 @@ impl<'a> Ctx<'a> {
         // (what waits behind a run gone long)
         if let Some(w) = self.worker {
             w.offer();
+            Worker::add(&w.ticks, 1);
         }
         self.ticks += 1;
         if self.ticks >= LONG_RUN_TICKS

@@ -724,6 +724,13 @@ pub(crate) struct Run<'c, 'a> {
     /// Macro expansions so far: told the engine every 4096 as its work
     /// (`Ctx::tick`), as the commands are.
     pub exps: u64,
+    /// Tokens the macro calls with arguments wrote since the last tick
+    /// that counted them ([`Run::macro_call`]): an expansion whose
+    /// arguments grow as it recurses (acmart's `\\Sectionformat` let to
+    /// itself on a state that moved, `{\\ACM@sect@format{...}}` one token
+    /// longer a level) copies tokens by the million in a few thousand
+    /// calls and commands, which the engine's bound by work never saw.
+    pub tok_work: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
     /// Set while the command loop fetches its next token
@@ -912,6 +919,14 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::append_def`]). The run's first other touch of the location
     /// reads that value and makes the definition ([`Run::append_force`]).
     pub appending: Vec<(Loc, Vec<Tok>)>,
+    /// A `\\csname` whose name the run had not touched, its §372 look-up
+    /// put off ([`Run::csname_force`]): the location and the token. The
+    /// command after it dispatched alone may assign it globally, which
+    /// leaves the same binding whatever the look-up found, and drops it
+    /// unread (`\\global\\let\\csname pgf@sys@id@keylist@…\\endcsname`);
+    /// any other touch of the location, or the end of that command,
+    /// makes the look-up then.
+    pub csname_defer: Option<(Loc, Tok)>,
     /// The classes this run read guarded by a list's names
     /// ([`Run::class_lookup`] with a member): by location and list field,
     /// for its later guarded lookups of the same list only.
@@ -1379,6 +1394,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mode_zero: false,
             cmds: 0,
             exps: 0,
+            tok_work: 0,
             command_call: false,
             cmd_fetch: false,
             skel: None,
@@ -1436,6 +1452,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_hit: None,
             rb: None,
             appending: Vec::new(),
+            csname_defer: None,
             class_member: crate::FxHashMap::default(),
             appending_vals: Vec::new(),
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
@@ -1981,6 +1998,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
+        if self.csname_defer.is_some_and(|d| d.0 == loc) {
+            self.csname_force()?;
+            if self.st.load_state(loc) != 0 {
+                return Ok(());
+            }
+        }
         if !self.appending_vals.is_empty() {
             self.vals_force(loc)?;
             if self.st.load_state(loc) != 0 {
@@ -2321,6 +2344,15 @@ impl<'c, 'a> Run<'c, 'a> {
             if global || self.innermost_group().is_none() {
                 self.appending.retain(|x| x.0 != loc);
             } else if let Err(h) = self.append_force(loc) {
+                self.raise(h);
+            }
+        }
+        // (a `\\csname` look-up put off: a global binding replaces what
+        // it would have made, unread; a local one is made on it)
+        if self.csname_defer.is_some_and(|d| d.0 == loc) {
+            if global {
+                self.csname_defer = None;
+            } else if let Err(h) = self.csname_force() {
                 self.raise(h);
             }
         }
@@ -4113,6 +4145,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// pending append made ([`Run::append_force`]), a read-back key
     /// defined ([`Run::rb_check`]).
     fn touch(&mut self, loc: Loc) -> R<()> {
+        if self.csname_defer.is_some_and(|d| d.0 == loc) {
+            self.csname_force()?;
+        }
         if !self.appending.is_empty() {
             self.append_force(loc)?;
         }
@@ -5894,6 +5929,11 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (a `\\csname` look-up put off, its name met: made first,
+        // [`Run::csname_defer`])
+        if self.csname_defer.is_some_and(|d| d.1 == tok) {
+            self.csname_force()?;
+        }
         // (a deferred read's symbol: its meaning is its name's,
         // `crate::defer`, nothing read)
         if crate::defer::is_sym(tok) {
@@ -6185,7 +6225,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether `l` is a finisher's field given where the routine reads
     /// it ([`crate::state::State::lazy`]): the run's own, read in full.
-    fn lazy_pre(&self, l: Loc) -> bool {
+    pub(crate) fn lazy_pre(&self, l: Loc) -> bool {
         self.st.lazy(l).is_some() || self.fin_scope_closer.is_some()
     }
 
@@ -6847,6 +6887,9 @@ impl<'c, 'a> Run<'c, 'a> {
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {
+                    // (a `\\csname` look-up put off, the command after it
+                    // not this run's: made, [`Run::csname_defer`])
+                    self.csname_force()?;
                     if self.can_leave_scope() {
                         self.leave_scope()?;
                     } else if crate::boxscope::on() && self.can_leave_lists() {
@@ -6878,9 +6921,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.command()?;
                 self.mark.active = false;
                 if self.claim_rest || self.closed_scope() {
+                    self.csname_force()?;
                     return self.end_at_close();
                 }
             }
+            self.csname_force()?;
             // (a picture child's text ran to its end, `crate::pic`)
             if self.pic_child.is_some() {
                 return Ok(());
