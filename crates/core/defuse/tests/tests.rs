@@ -15,7 +15,6 @@ mod core;
 mod derived;
 mod filed_reads;
 mod final_only;
-mod first_run_recheck;
 mod fixes;
 mod keep_longest;
 mod loopback;

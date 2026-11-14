@@ -4199,7 +4199,9 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
 /// moved runs on to "TeX capacity exceeded". Here 1500 calls, the
 /// argument 8 tokens longer a call: at least 8 * 1500 * 1499 / 2 tokens
 /// written, so at least that / 8192 ticks, where calls and commands
-/// alone make none.
+/// alone make none. (Ctx::tick looks at a long run's reads at powers of
+/// two of its checks; counted in commands and calls only, Grail's
+/// recursion made too few to reach the next one.)
 #[test]
 fn a_macro_call_counts_its_tokens_toward_the_runs_checks() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/tok-ticks");
