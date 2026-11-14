@@ -6879,6 +6879,9 @@ impl<'c, 'a> Run<'c, 'a> {
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {
+                    // (a `\\csname` look-up put off, the command after it
+                    // not this run's: made, [`Run::csname_defer`])
+                    self.csname_force()?;
                     if self.can_leave_scope() {
                         self.leave_scope()?;
                     } else if crate::boxscope::on() && self.can_leave_lists() {
@@ -6910,9 +6913,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.command()?;
                 self.mark.active = false;
                 if self.claim_rest || self.closed_scope() {
+                    self.csname_force()?;
                     return self.end_at_close();
                 }
             }
+            self.csname_force()?;
             // (a picture child's text ran to its end, `crate::pic`)
             if self.pic_child.is_some() {
                 return Ok(());

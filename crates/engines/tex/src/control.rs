@@ -126,9 +126,27 @@ impl Run<'_, '_> {
                     self.pdf_cmd = 0;
                     continue;
                 }
-                return self.csname_force();
+                // (a `\\csname` look-up put off stays for the command the
+                // run's loop begins next, [`Run::run_all`])
+                return Ok(());
             }
+            // (observe, `PHITEX_SLOW_CMD=<ms>`: a command that took longer,
+            // with the run's node and op and where the input stands)
+            let slow =
+                crate::exec::obs_str!("PHITEX_SLOW_CMD").and_then(|x| x.parse::<u128>().ok());
+            let t0 = slow.map(|_| (std::time::Instant::now(), self.cur.tok, self.cmds));
             self.dispatch()?;
+            if let (Some(ms), Some((t, tok, n))) = (slow, t0)
+                && t.elapsed().as_millis() >= ms
+            {
+                eprintln!(
+                    "slow-cmd: node {} op {:?} cmd #{n} {tok:?} took {:?}; now {}",
+                    self.cx.node().raw(),
+                    self.cx.op(),
+                    t.elapsed(),
+                    self.trace_context().chars().take(400).collect::<String>()
+                );
+            }
             self.csname_force()?;
             return self.ck();
         }
