@@ -78,9 +78,11 @@ mod tests {
     use super::*;
 
     fn text(n: usize) -> String {
-        (0..n)
-            .map(|k| format!("\\def\\m{k}{{line {k} of the format}}%\n"))
-            .collect()
+        use std::fmt::Write as _;
+        (0..n).fold(String::new(), |mut s, k| {
+            let _ = writeln!(s, "\\def\\m{k}{{line {k} of the format}}%");
+            s
+        })
     }
 
     #[test]
@@ -99,7 +101,7 @@ mod tests {
             line += c.lines;
         }
         assert_eq!(at, t.len());
-        assert!(chunks_of("").is_empty());
+        assert_eq!(chunks_of("").len(), 0);
         assert_eq!(chunks_of("no newline").len(), 1);
     }
 
