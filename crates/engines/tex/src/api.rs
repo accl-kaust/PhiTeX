@@ -2960,7 +2960,7 @@ struct Graph {
     absent_pushed: Vec<Field>,
     /// The comments `env_pushed` holds, by id ([`Marks::ids`]): a change
     /// of the comments alone pushed as theirs ([`Graph::push_marks`]).
-    marks_pushed: FxHashMap<u64, String>,
+    marks_pushed: FxHashMap<u64, Arc<str>>,
     pub(crate) env_calls: u64,
     /// The job's bindings (the format's state, the job's names and
     /// dates: [`job_env`]), pushed with the environment.
@@ -4213,15 +4213,20 @@ impl Graph {
                 }
                 crate::timeline::lap("engine: the PDF commands pruned");
                 // (the hints of nodes gone, by their arguments: a
-                // continuation run again is another node's arguments)
-                let live: phitex_defuse::FxHashSet<u64> = self
-                    .eng
-                    .order(unit)
-                    .into_iter()
-                    .filter_map(|n| self.eng.node_info(n))
-                    .map(|i| crate::hints::args_key(&i.args))
-                    .collect();
-                crate::hints::prune(&self.ops.hints, &live);
+                // continuation run again is another node's arguments;
+                // once they are as many as the live nodes, so that an
+                // edit's few go with the next pruning, not with a pass
+                // over every node, `hints::hint_count`)
+                if crate::hints::hint_count(&self.ops.hints) > 2 * self.eng.live_nodes() + 64 {
+                    let live: phitex_defuse::FxHashSet<u64> = self
+                        .eng
+                        .order(unit)
+                        .into_iter()
+                        .filter_map(|n| self.eng.node_info(n))
+                        .map(|i| crate::hints::args_key(&i.args))
+                        .collect();
+                    crate::hints::prune(&self.ops.hints, &live);
+                }
                 crate::timeline::lap("engine: the hints pruned");
             }
             if let (Ok(r), Some(path)) = (&res, crate::exec::env_str!("PHITEX_CHAIN_TSV")) {
@@ -5054,7 +5059,7 @@ pub(crate) const DOC_MARKS: &str = "doc:mark:";
 /// the text is a NUL and the comment's id ([`mark_id`], 16 hex digits),
 /// so a run reads its comment by the id in its own line, not by where
 /// the line is in the file.
-pub(crate) type CommentMark = (u32, u64, String);
+pub(crate) type CommentMark = (u32, u64, Arc<str>);
 
 /// The hash of a comment line's text before its `%`.
 fn prefix_hash(prefix: &str) -> u64 {
@@ -5082,7 +5087,7 @@ fn collisions<'a>(
     let mut out = phitex_defuse::FxHashSet::default();
     for (_, h, c) in marks {
         match first.get(h) {
-            Some(&c0) if c0 != c.as_str() => {
+            Some(&c0) if c0 != &**c => {
                 out.insert(*h);
             }
             Some(_) => {}
@@ -5169,7 +5174,7 @@ impl Marks {
 
     /// Each comment's id and text ([`Marks::entries`] without a field
     /// or a value made); the environment holds them from here.
-    fn ids(&self) -> FxHashMap<u64, String> {
+    fn ids(&self) -> FxHashMap<u64, Arc<str>> {
         let mut m = self.0.locked();
         m.1 = false;
         let collide = collisions(&m.0);
@@ -5215,7 +5220,7 @@ fn ids_hold(marks: &[CommentMark]) -> bool {
     let mut by: FxHashMap<u64, &str> = FxHashMap::default();
     marks
         .iter()
-        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == c.as_str())
+        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == &**c)
 }
 
 /// Whether `text` has what [`canonical_text`] cannot stand for (a NUL,
@@ -5825,7 +5830,7 @@ fn canonical_line(
             marks.push((
                 u32::try_from(n + 1).unwrap_or(u32::MAX),
                 prefix_hash(&body[..k]),
-                c.to_owned(),
+                Arc::from(c),
             ));
         }
         // (TeX reads the line without its blanks at the end: a trailing
