@@ -166,3 +166,60 @@ export function search(pages: TextLine[][], q: string, max = 1000): Hit[] {
   }
   return out;
 }
+
+/** A place in a page's text: line `i` (of the lines given), before its unit `off`. */
+export interface Caret {
+  i: number;
+  off: number;
+}
+
+/**
+ * Where a drag over the pages puts its end, from a point on a page (PDF
+ * points from its top left), in its lines; `from`, the line the drag began
+ * on (on this page), keeps it in that line's column. Over a line's text: the
+ * character there. Beside a line, in its row (a short last line's white
+ * space, a column's gap): the end of the line nearest it in the column the
+ * drag began in, not a line of the next column. Between rows: the nearest
+ * row in that column. The browser's own hit test over empty SVG gave a far
+ * text element there, and a drag a little past a line's end selected half
+ * the page (two columns: the rest of one, the top of the next).
+ */
+export function caretAt(lines: TextLine[], x: number, y: number, from?: TextLine): Caret | null {
+  if (!lines.length) return null;
+  const top = (l: TextLine) => l.y - l.size * 0.8, bottom = (l: TextLine) => l.y + l.size * 0.25;
+  const dx = (l: TextLine) => (x < l.x ? l.x - x : x > l.x + l.w ? x - (l.x + l.w) : 0);
+  const dy = (l: TextLine) => (y < top(l) ? top(l) - y : y > bottom(l) ? y - bottom(l) : 0);
+  // (a column: the lines whose span across the page meets the line the drag began on's)
+  const inColumn = (l: TextLine) => !from || (l.x < from.x + from.w && from.x < l.x + l.w);
+  const idx = lines.map((_, i) => i);
+  const best = (cands: number[], key: (l: TextLine) => number) => cands.reduce((a, b) => (key(lines[b]) < key(lines[a]) ? b : a));
+  const row = idx.filter((i) => dy(lines[i]) === 0);
+  let i: number;
+  // (a row of the drag's column: the next column's rows stand at their own
+  // heights, its baselines not the drag's column's)
+  const over = row.filter((i) => dx(lines[i]) === 0);
+  const rowCol = row.filter((i) => inColumn(lines[i]));
+  if (over.length) i = over[0];
+  else if (rowCol.length) i = best(rowCol, dx);
+  else {
+    // (between rows, or above or below every line: the nearest row, in the column if any)
+    const col = idx.filter((i) => inColumn(lines[i]) && dx(lines[i]) === 0);
+    const near = col.length ? col : idx.filter((i) => inColumn(lines[i]));
+    i = best(near.length ? near : idx, (l) => dy(l) * 4 + dx(l));
+  }
+  const l = lines[i];
+  let off = 0;
+  if (x >= l.x + l.w) off = l.text.length;
+  else if (x > l.x) {
+    const n = l.text.length;
+    off = n;
+    for (let j = 0; j < n; j++) {
+      const a = l.xs?.[j] ?? l.x + (l.w * j) / n, b = l.rs?.[j] ?? l.x + (l.w * (j + 1)) / n;
+      if (x < (a + b) / 2) {
+        off = j;
+        break;
+      }
+    }
+  }
+  return { i, off };
+}
