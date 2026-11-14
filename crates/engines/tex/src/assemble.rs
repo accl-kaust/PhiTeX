@@ -1149,6 +1149,7 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
             .read(o.fields.param(v, "pdfpkresolution"))?
             .and_then(|x| i32::try_from(int_of(v, x)).ok())
             .unwrap_or(0),
+        pngs: Some(o.stream_objs.locked().memo()),
     };
     let t_seed = t0.elapsed();
     let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, changed.as_ref(), &o.pdf_cmds);

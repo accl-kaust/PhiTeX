@@ -186,6 +186,29 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
     h.windows(n.len()).position(|w| w == n)
 }
 
+/// Pages showing forms and images TeX made before them (`xobjpages`,
+/// pdfTeX's PDF its oracle, [`pdf_documents`]): the link places each as
+/// its own writer wrote it, the forms' and images' operators made where
+/// it places them (`PdfState::replay_page`), an image not written yet
+/// written there, but for a page showing a form not written yet, whose
+/// walk writes it: the first page (`\\f`) and the first showing `\\v`.
+#[test]
+fn pages_showing_forms_and_images_are_placed() {
+    let dir = common::fixtures().join("pdf");
+    let src = common::read(&dir.join("xobjpages.tex"));
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        ..common::options("./xobjpages.tex", "xobjpages", "", &dir)
+    };
+    let b = common::build(opts, None, &src);
+    let (placed, shipped) = b.link_pages();
+    assert!(placed > 2, "{placed} pages placed");
+    assert_eq!(
+        shipped, 2,
+        "only the pages writing a form shipped again ({placed} placed)"
+    );
+}
+
 /// The documents that do not pass yet: un-ignored as they are fixed.
 const PENDING: &[&str] = &[];
 
@@ -309,6 +332,13 @@ fn pdf_edits() {
         ),
         ("linkbreak", &[("several", "sevral"), ("Then", "Thn")]),
         ("png", &[("{png-gray.png}", "{png-rgba.png}")]),
+        (
+            "xobjpages",
+            &[
+                ("Line \\the", "Lines \\the"),
+                ("\\count1>20", "\\count1>25"),
+            ],
+        ),
     ];
     let only = std::env::var("PHITEX_GATE").ok();
     let mut failed = Vec::new();

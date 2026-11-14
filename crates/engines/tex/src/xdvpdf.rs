@@ -2113,6 +2113,8 @@ fn xdv_alone(
     // (each font with every glyph the pages' files so far used: its
     // subset the same from page to page, compressed once)
     s.widen_used(&mut seen.locked());
+    // (the glyph list read once for the build's pages' files)
+    start.locked().adopt_memos(&s);
     let (tail, _) = s.finish_recorded().ok()?;
     let l = layout(&[chunk], &tail, &s)?;
     l.exact().ok().map(|b| b.as_ref().clone())
