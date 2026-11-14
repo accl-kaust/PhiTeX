@@ -592,7 +592,13 @@ struct State {
     /// The first build is in: a file the baseline folder has not seen
     /// is one the agent made (an added file), not the project's as found.
     seen_first: bool,
+    /// Reviewing the agent's edits ([`Hub::set_changes`]): off, the files
+    /// are followed for the notes' anchors alone.
+    changes: bool,
 }
+
+/// Said where reviewing the agent's edits is asked for while it is off.
+pub const CHANGES_OFF: &str = "reviewing your edits is off (an experimental feature): the user turns it on in the viewer's Settings, Experimental, or with `phitex config experimental-review on`";
 
 /// Status codes `phitex session` exits with (§9.1).
 pub const EXIT_TIMEOUT: i32 = 2;
@@ -677,7 +683,7 @@ impl Hub {
         let mut st = lock(&self.st);
         if st.root != root {
             st.store = Store::load(root).unwrap_or_default();
-            st.baseline = Some(Baseline::of(root));
+            st.baseline = None;
             st.files.clear();
             st.seen_first = false;
         }
@@ -687,6 +693,46 @@ impl Hub {
         st.accept_disk = accept_disk;
         st.started = true;
         st.ended = false;
+    }
+
+    /// Reviewing the agent's edits on or off (`experimental-review`, off
+    /// by default; the viewer's Settings, Experimental). Off, nothing of
+    /// it is done: no baseline read, no hunks, nothing written; turned on,
+    /// the files' texts as they are now are the accepted ones where there
+    /// is no git (git's index is, where there is).
+    pub fn set_changes(&self, on: bool) {
+        let mut st = lock(&self.st);
+        if st.changes == on {
+            return;
+        }
+        st.changes = on;
+        if on {
+            let root = st.root.clone();
+            st.baseline = Some(Baseline::of(&root));
+            let names: Vec<String> = st.files.keys().cloned().collect();
+            for n in names {
+                let text = st.files.get(&n).and_then(|t| t.text.clone());
+                if let Some(Baseline::Dir(d)) = &st.baseline
+                    && !d.join(&n).exists()
+                    && let Some(t) = &text
+                {
+                    st.files.entry(n.clone()).or_default().base = Some(Some(t.clone()));
+                } else if let Some(t) = st.files.get_mut(&n) {
+                    t.base = None;
+                }
+                refresh(&mut st, &n, text);
+            }
+        } else {
+            st.baseline = None;
+            st.base_dirty.clear();
+            for t in st.files.values_mut() {
+                t.hunks.clear();
+                t.base = None;
+            }
+        }
+        drop(st);
+        self.cv.notify_all();
+        self.tell();
     }
 
     /// The engine and the output folder the watch runs, each with how it
@@ -883,7 +929,9 @@ impl Hub {
             refresh(&mut st, &file, Some(after));
             return;
         }
-        accept_typed(&mut st, &file, &before, &after);
+        if st.changes {
+            accept_typed(&mut st, &file, &before, &after);
+        }
         refresh(&mut st, &file, Some(after));
     }
 
@@ -957,6 +1005,7 @@ impl Hub {
             "engine_why": st.about["engine_why"],
             "out_dir": st.about["out_dir"],
             "out_dir_why": st.about["out_dir_why"],
+            "changes": st.changes,
             "problems": problems,
             "diagnostics_pending": b.is_some_and(|b| b.diags_pending),
             "written": b.is_some_and(|b| st.written >= b.n),
@@ -1374,6 +1423,10 @@ impl Hub {
     /// comments on changes, the reviews.
     fn changes(&self) -> Value {
         let mut st = lock(&self.st);
+        if !st.changes {
+            return json!({"off": true, "pending": [], "verdicts": [], "comments": [], "reviews": [],
+                          "how": CHANGES_OFF});
+        }
         let pending: Vec<Value> = hunks_out(&st);
         let verdicts: Vec<Value> = st
             .store
@@ -1412,10 +1465,19 @@ impl Hub {
             "review_reopen" => self.post(req, "you", Some(false)),
             "review_delete" => self.delete(req),
             "review_clear" => self.clear(),
+            "review_accept" | "review_reject" | "review_comment" | "review_submit"
+                if !lock(&self.st).changes =>
+            {
+                Err(refused(CHANGES_OFF))
+            }
             "review_accept" => self.verdict(req, true, None),
             "review_reject" => self.verdict(req, false, None),
             "review_comment" => self.comment(req),
             "review_submit" => self.submit(req),
+            "review_changes" => {
+                self.set_changes(req["on"] == true);
+                Ok(json!({"changes": lock(&self.st).changes}))
+            }
             _ => return Err(format!("no op {op:?} here")),
         };
         r.map_err(|f| f.message)
@@ -1910,6 +1972,23 @@ fn refresh(st: &mut State, name: &str, text: Option<String>) {
     // began: its text as found is the baseline, kept here; written into
     // the folder only once a change of it waits for review: a watch with
     // nothing to review writes nothing into the project)
+    if !st.changes {
+        // (the notes' anchors moved; nothing else of the review)
+        if let (Some(o), Some(n)) = (&old, &text)
+            && o != n
+        {
+            move_anchors(st, name, o, n);
+        } else if old.is_none()
+            && let Some(n) = &text
+        {
+            settle_anchors(st, name, n);
+        }
+        let t = st.files.entry(name.to_owned()).or_default();
+        t.hash = text.as_ref().map(|x| hash(x.as_bytes()));
+        t.text = text;
+        t.hunks.clear();
+        return;
+    }
     if let Some(Baseline::Dir(d)) = &st.baseline
         && let Some(t) = &text
         && !st.seen_first
@@ -2377,6 +2456,7 @@ fn state_json(st: &State) -> Value {
         "reviews": st.store.reviews,
         "verdicts": st.store.verdicts.iter().rev().take(50).collect::<Vec<_>>(),
         "git": st.baseline.as_ref().is_some_and(Baseline::git),
+        "changes": st.changes,
     })
 }
 
@@ -2433,6 +2513,7 @@ mod tests {
     fn hub_on(dir: &Path, files: &[&str]) -> Hub {
         let h = Hub::default();
         h.start(dir, "main.tex", true, false);
+        h.set_changes(true);
         for f in files {
             let b = std::fs::read(dir.join(f)).expect("there");
             lock(&h.st).fed.insert((*f).to_owned(), hash(&b));
@@ -2596,6 +2677,55 @@ mod tests {
         let p = pending(&h);
         assert_eq!(p.len(), 1);
         assert_eq!(p[0]["note"], id.as_str());
+    }
+
+    #[test]
+    fn with_reviewing_off_nothing_of_it_is_done() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = Hub::default();
+        h.start(&d, "main.tex", true, false);
+        lock(&h.st)
+            .fed
+            .insert("main.tex".into(), hash(DOC.as_bytes()));
+        h.built(facts(1, &["main.tex"]));
+        std::fs::write(d.join("main.tex"), DOC.replace("quick", "QUICK")).expect("edited");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        assert_eq!(pending(&h), Vec::<Value>::new());
+        assert!(lock(&h.st).baseline.is_none(), "no baseline read");
+        assert!(!d.join(".phitex").exists(), "nothing written");
+        let c = h.changes();
+        assert_eq!(c["off"], true);
+        assert!(c["how"].as_str().unwrap().contains("experimental-review"));
+        let e = h
+            .viewer("review_accept", &json!({"ids": "all"}))
+            .unwrap_err();
+        assert!(e.contains("experimental"), "{e}");
+        // (notes still follow their text)
+        let s0 = DOC.find("lazy").unwrap();
+        h.viewer("review_note", &json!({"kind": "note", "anchor": {"file": "main.tex", "start": s0, "end": s0 + 4}, "text": "x"})).unwrap();
+        std::fs::write(
+            d.join("main.tex"),
+            DOC.replace("quick", "QUICK")
+                .replace("The QUICK", "So the QUICK"),
+        )
+        .expect("edited");
+        rebuilt(&h, &d, 3, &["main.tex"]);
+        assert_eq!(
+            h.viewer("review_state", &json!({})).unwrap()["notes"][0]["anchor"]["quote"],
+            "lazy"
+        );
+        // (turned on: the text as it is now is the accepted one, then edits wait)
+        h.set_changes(true);
+        assert_eq!(pending(&h), Vec::<Value>::new());
+        std::fs::write(
+            d.join("main.tex"),
+            DOC.replace("quick", "QUICK")
+                .replace("The QUICK", "So the QUICK")
+                .replace("dog", "cat"),
+        )
+        .expect("edited");
+        rebuilt(&h, &d, 4, &["main.tex"]);
+        assert_eq!(pending(&h).len(), 1);
     }
 
     #[test]

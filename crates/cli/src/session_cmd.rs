@@ -993,6 +993,13 @@ fn print_review(r: &Value, st: Style) {
 }
 
 fn print_changes(v: &Value, st: Style) {
+    if v["off"] == true {
+        println!(
+            "{}",
+            v["how"].as_str().unwrap_or("reviewing your edits is off")
+        );
+        return;
+    }
     let pending = v["pending"].as_array().cloned().unwrap_or_default();
     if pending.is_empty() {
         println!("no changes waiting for the user");

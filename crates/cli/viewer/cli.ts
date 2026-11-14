@@ -1070,6 +1070,23 @@ async function watchSettings(): Promise<SettingsGroup[]> {
         },
       ],
     },
+    {
+      title: "Experimental",
+      rows: [
+        {
+          id: "experimental-review",
+          label: "Review your agent's edits",
+          help: "Its edits to your files shown here change by change, to accept, reject or comment on (the Changes tab beside the pages). Off: nothing of it is shown or kept. For this watch now, and from the next on.",
+          kind: "toggle",
+          value: !!p["experimental-review"],
+          set: async (v) => {
+            const r = await sock.request({ op: "review_changes", on: !!v });
+            if (!r.ok) return r.error ?? "not changed";
+            return (await setPref("experimental-review", !!v)) ?? undefined;
+          },
+        },
+      ],
+    },
     { title: "Updates and tips", rows: [toggle("update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal.")] },
     { title: "Where", rows: [{ id: "w-file", label: "Your settings", help: "Every document and port: `phitex config` lists them all", kind: "info", value: file }] },
   ];

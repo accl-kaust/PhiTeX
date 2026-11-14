@@ -5627,6 +5627,9 @@ var Review = class {
     const focused = this.p.root.activeElement;
     const focusKey = focused && this.body.contains(focused) ? focused.dataset.focus ?? null : null;
     const top = this.body.scrollTop;
+    const changesOn = this.s.changes !== false;
+    this.side.querySelector('[data-tab="changes"]').hidden = !changesOn;
+    if (!changesOn && this.tab === "changes") this.tab = "notes";
     this.body.replaceChildren(this.tab === "notes" ? this.notesView() : this.changesView());
     for (const ta of this.body.querySelectorAll("textarea[data-reply], textarea[data-comment]"))
       ta.value = this.drafts.get(ta.dataset.reply ?? `h:${ta.dataset.comment}`) ?? "";
@@ -11979,6 +11982,23 @@ async function watchSettings() {
           options: [["500MB", "500 MB"], ["1GB", "1 GB"], ["4GB", "4 GB"], ["16GB", "16 GB"]],
           value: { 5e8: "500MB", 1e9: "1GB", 4e9: "4GB", 16e9: "16GB" }[Number(p["cache-limit"] ?? 4e9)] ?? "",
           set: (v) => setPref("cache-limit", v)
+        }
+      ]
+    },
+    {
+      title: "Experimental",
+      rows: [
+        {
+          id: "experimental-review",
+          label: "Review your agent's edits",
+          help: "Its edits to your files shown here change by change, to accept, reject or comment on (the Changes tab beside the pages). Off: nothing of it is shown or kept. For this watch now, and from the next on.",
+          kind: "toggle",
+          value: !!p["experimental-review"],
+          set: async (v) => {
+            const r2 = await sock.request({ op: "review_changes", on: !!v });
+            if (!r2.ok) return r2.error ?? "not changed";
+            return await setPref("experimental-review", !!v) ?? void 0;
+          }
         }
       ]
     },

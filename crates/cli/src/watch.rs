@@ -1237,6 +1237,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         writing,
         t.review_accept_disk,
     );
+    hub.set_changes(t.experimental_review);
     hub.about(serde_json::json!({
         "engine": job.engine.name,
         "engine_why": t.engine_why,

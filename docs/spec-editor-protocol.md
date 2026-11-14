@@ -954,6 +954,18 @@ Those ranges move with later edits as anchors do.
 
 ### 9.4 Changes: the agent's edits, reviewed as hunks
 
+**Opt-in.** Reviewing the agent's edits is experimental and off by
+default: `experimental-review` (the user's setting, `phitex config
+experimental-review on`, or the viewer's Settings, Experimental, which
+turns it on for the running watch too). Off, nothing of it is done: no
+baseline is read or written, no hunks are made, the viewer has no
+Changes tab and no marks of edits, and `session changes` says it is off
+and how to turn it on (`{off: true, how}`); the `review_accept`,
+`review_reject`, `review_comment` and `review_submit` ops are refused.
+Notes are not part of it. Turned on in a running watch, the files' texts
+as they are then are the accepted ones (git's index, where there is git);
+the viewer's op `review_changes` `{on}` turns it on or off.
+
 **Baseline.** In a git repository, git's index (`git diff`'s left side):
 accepting a hunk stages it (the index's text with that hunk applied
 written as a blob and staged, as `git apply --cached` would); rejecting

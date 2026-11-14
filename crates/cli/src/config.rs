@@ -72,6 +72,9 @@ pub struct Config {
     /// attached editor) as accepted, rather than pending review
     /// (docs/spec-editor-protocol.md §9.4).
     pub review_accept_disk: Option<bool>,
+    /// Reviewing an agent's edits in the viewer (docs/spec-editor-protocol.md
+    /// §9.4): experimental, off by default; yours only.
+    pub experimental_review: Option<bool>,
     /// The viewer's feature tips seen (yours only, set by the viewer).
     pub tips_seen: Option<Vec<String>>,
     /// The engine's threads (yours only: a machine's, not a document's; 0:
@@ -127,6 +130,7 @@ const KEYS: &[&str] = &[
     "watch-write",
     "watch-ask-write",
     "review-accept-disk",
+    "experimental-review",
     "tips-seen",
     "threads",
     "follow",
@@ -533,6 +537,7 @@ const RETIRED: &[&str] = &["problems-hidden"];
 /// `viewer` are the terminal's to set, as are `shell-escape` and
 /// `update-channel`). Its others: [`CHOICES`], `threads`, `cache-limit`.
 pub const SWITCHES: &[&str] = &[
+    "experimental-review",
     "watch-write",
     "watch-ask-write",
     "synctex",
@@ -619,6 +624,7 @@ pub fn prefs(
         "watch-write": c.watch_write.unwrap_or(false),
         "watch-ask-write": c.watch_ask_write.unwrap_or(true),
         "review-accept-disk": c.review_accept_disk.unwrap_or(false),
+        "experimental-review": c.experimental_review.unwrap_or(false),
         "synctex": c.synctex,
         "update-check": c.update_check.unwrap_or(false),
         "underline": c.underline.unwrap_or(true),
@@ -725,6 +731,11 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "phitex watch asks at quit whether to write the PDF, when nothing was written (off: never asks, writes nothing)",
     ),
     (
+        "experimental-review",
+        "off",
+        "experimental: your agent's edits reviewed in the viewer, change by change (accept, reject, comment) (yours only)",
+    ),
+    (
         "review-accept-disk",
         "off",
         "changes that appear on disk, not typed in an attached editor, count as accepted (else they wait for review in the viewer)",
@@ -785,6 +796,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("watch-write", "false"),
     ("watch-ask-write", "true"),
     ("review-accept-disk", "false"),
+    ("experimental-review", "false"),
     ("threads", "0"),
     ("follow", "\"cursor\""),
     ("dark-pdf", "\"off\""),
@@ -1104,6 +1116,7 @@ const USERS_ALONE: &[&str] = &[
     "dark-pdf",
     "opening",
     "underline",
+    "experimental-review",
 ];
 /// Keys a project may set: what its build is, none naming anything to run
 /// (`engine` is one of PhiTeX's own, `tex::engine`, nothing started; the
@@ -1318,6 +1331,7 @@ impl Config {
             watch_write: self.watch_write.or(under.watch_write),
             watch_ask_write: self.watch_ask_write.or(under.watch_ask_write),
             review_accept_disk: self.review_accept_disk.or(under.review_accept_disk),
+            experimental_review: self.experimental_review.or(under.experimental_review),
             tips_seen: self.tips_seen.or(under.tips_seen),
             threads: self.threads.or(under.threads),
             follow: self.follow.or(under.follow),
@@ -1671,6 +1685,7 @@ mod tests {
                 watch_write: None,
                 watch_ask_write: None,
                 review_accept_disk: None,
+                experimental_review: None,
                 tips_seen: None,
                 threads: None,
                 follow: None,

@@ -718,6 +718,8 @@ pub struct Target {
     pub watch_write: bool,
     /// watch: changes on disk count as accepted (`review-accept-disk`).
     pub review_accept_disk: bool,
+    /// Reviewing an agent's edits (`experimental-review`, off by default).
+    pub experimental_review: bool,
     /// watch: asked at quit whether to write the PDF (`watch-ask-write`, on by default).
     pub watch_ask_write: bool,
     /// `\write18` runs commands.
@@ -1079,6 +1081,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         synctex_said: o.synctex.or(rc_synctex).or(cfg.synctex).is_some(),
         watch_write: cfg.watch_write.unwrap_or(false),
         review_accept_disk: cfg.review_accept_disk.unwrap_or(false),
+        experimental_review: cfg.experimental_review.unwrap_or(false),
         watch_ask_write: cfg.watch_ask_write.unwrap_or(true),
         shell_escape: o.shell_escape || rc_shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
