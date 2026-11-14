@@ -391,6 +391,11 @@ pub(crate) struct Line {
     /// it decoded to (`pages::piece::line_frame`), not a copy of its
     /// text. Not part of the line's meaning.
     pub src: Option<phitex_defuse::ValueId>,
+    /// A line of a format's text read from its chunks ([`Seg::Chunk`]):
+    /// the chunk's name and the line's place in it. A continuation names
+    /// the text from it on by these, not by the text
+    /// (docs/spec-ini-chunks.md §2.2). Not part of the line's meaning.
+    pub chunk: Option<(u64, u32)>,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -428,6 +433,7 @@ impl Line {
             lineno: 0,
             owner: None,
             src: None,
+            chunk: None,
             rescanned,
             chars: false,
         }
@@ -441,6 +447,12 @@ pub(crate) enum Seg {
     Line(Line),
     Toks(Vec<Tok>),
     File(crate::run::FileRest),
+    /// A format's text from line `.1` of the chunk named `.0` on, through
+    /// the chunks after it (docs/spec-ini-chunks.md): its lines not read
+    /// yet, that line there when the segment was made. The run reads the
+    /// line in its place before it reaches it (`Run::read_chunk`): the
+    /// input never reaches one.
+    Chunk(u64, u32),
 }
 
 /// The input stack.
@@ -798,8 +810,16 @@ impl Input {
             Seg::File(f) => {
                 self.push_file(f);
             }
+            Seg::Chunk(..) => debug_assert!(false, "a chunk reached before its lines were read"),
         }
         true
+    }
+
+    /// Whether the text's next segment is a chunk's, not read yet
+    /// ([`Seg::Chunk`]).
+    #[inline]
+    pub(crate) fn chunk_due(&self) -> bool {
+        matches!(self.text.get(self.text_at), Some(Seg::Chunk(..)))
     }
 
     /// The segments of the text not reached yet.

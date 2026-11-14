@@ -507,6 +507,9 @@ struct Absorb<'a> {
     /// The lines before each node's text as the environment has them
     /// ([`dlines_of`]), moved with each text applied.
     dlines: &'a mut FxHashMap<u64, i64>,
+    /// A format's text's chunks as the environment has them
+    /// ([`Graph::ini`]), cut again with each text applied.
+    ini: &'a mut crate::chunks::Chunks,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
@@ -627,6 +630,33 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.loads,
         );
         self.applied += n;
+        // (a format's text: its chunks cut again where it changed, the
+        // fields of those that changed or moved pushed; the node's
+        // arguments name its first chunk only)
+        let mut moved = false;
+        if self.incr.is_none() {
+            let (old, new) = (as_file(&old_text), as_file(self.text));
+            let cs = crate::chunks::rechunk(self.ini, &old, &new);
+            if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
+                assert!(
+                    cs.cs
+                        .iter()
+                        .map(|c| (c.start, c.end, c.h))
+                        .eq(crate::chunks::chunks_of(&new)
+                            .cs
+                            .iter()
+                            .map(|c| (c.start, c.end, c.h))),
+                    "the chunks cut again differ from the text's"
+                );
+            }
+            let changes = crate::chunks::changes(eng.values(), self.ini, &cs, &new);
+            *self.ini = cs;
+            crate::timeline::lap("engine: the format's chunks cut again");
+            if !changes.is_empty() {
+                eng.update_environment(&changes);
+                moved = true;
+            }
+        }
         // (the lines before each node's text, where the text moved them:
         // a run that reads a line of one reads them, `dline:<node>`)
         if self.incr.is_some() {
@@ -648,7 +678,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
                 eng.update_environment(&changes);
             }
         }
-        if n > 0 {
+        if n > 0 || moved {
             self.unchanged = None;
             Some(version)
         } else {
@@ -687,10 +717,12 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
 /// Whether node `old` (cut from `texts.0`) is slice `new` of `texts.1`:
 /// the same key, and the same text (the key is its hash).
 fn slice_same(old: &(u64, NodeId, Src), new: &(u64, DocNode), texts: (&str, &str)) -> bool {
-    old.0 == new.0 && {
-        let DocNode::Doc(s, e) = new.1;
-        old.2.text(texts.0) == texts.1.get(s..e).unwrap_or("")
-    }
+    old.0 == new.0
+        && match new.1 {
+            DocNode::Doc(s, e) => old.2.text(texts.0) == texts.1.get(s..e).unwrap_or(""),
+            // (a format's text: its first chunk, which its arguments name)
+            DocNode::Ini(_) => !texts.0.is_empty(),
+        }
 }
 
 fn common_ends(
@@ -728,8 +760,7 @@ fn slice_keys(
             }
             doc_nodes(text, inc)
         }
-        None if text.is_empty() => Vec::new(),
-        None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
+        None => ini_node(text).into_iter().collect(),
     }
 }
 
@@ -894,8 +925,14 @@ fn apply_slices(
     let old = &*nodes_now;
     let same = |i: usize, j: usize| slice_same(&old[i], &new[j], texts);
     if old.len() == new.len() && (0..old.len()).all(|i| same(i, i)) {
+        // (a format's text's node: the same node, its text the text now,
+        // which an edit made longer or shorter)
+        let prefix = old.len();
+        if let ([(_, _, src)], [(_, n @ DocNode::Ini(_))]) = (nodes_now.as_mut_slice(), new) {
+            *src = Src::of(n);
+        }
         return Some(Applied {
-            prefix: old.len(),
+            prefix,
             ..Applied::default()
         });
     }
@@ -2961,6 +2998,9 @@ struct Graph {
     /// The comments `env_pushed` holds, by id ([`Marks::ids`]): a change
     /// of the comments alone pushed as theirs ([`Graph::push_marks`]).
     marks_pushed: FxHashMap<u64, Arc<str>>,
+    /// A format's text's chunks as [`Graph::push_text`] pushed them
+    /// (the build keeps them, [`Build::ini`]).
+    ini: crate::chunks::Chunks,
     /// The PDF line (`crate::pdfout::XPAGES`) the last evaluation's
     /// pruning kept the commands and pages of.
     xpages_pruned: Option<ValueId>,
@@ -3086,7 +3126,7 @@ impl DocFile {
             let a = a.get_or_insert_with(|| {
                 node_args(v, &self.text, Some(&self.incr), n, loads, Some(name))
             });
-            let DocNode::Doc(s, _) = *n;
+            let s = n.start();
             now.entry(a[0].raw())
                 .and_modify(|k| *k = None)
                 .or_insert(Some(lines_before(&starts, len, s)));
@@ -3449,6 +3489,7 @@ impl Graph {
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
             marks_pushed: FxHashMap::default(),
+            ini: crate::chunks::Chunks::default(),
             xpages_pruned: None,
             env_calls: 0,
             job: Vec::new(),
@@ -4643,6 +4684,13 @@ impl Graph {
             None,
         );
         let incr = incr.as_deref();
+        // (a format's text: its chunks, which its node reads, in the
+        // environment)
+        if incr.is_none() {
+            self.ini = crate::chunks::chunks_of(text);
+            let env = crate::chunks::fields(self.eng.values(), &self.ini, text);
+            self.eng.set_environment(env);
+        }
         let t1 = t0.elapsed();
         crate::timeline::lap("push: the nodes' slices and keys");
         // (the nodes' arguments made on the pool: values are named by
@@ -4882,9 +4930,29 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
     }
 }
 
-/// A document node's text: a slice of the document (its bytes).
+/// A document node's text: a slice of the document (its bytes); or a
+/// format's whole text (its length), read from its chunks
+/// (`crate::chunks`).
 enum DocNode {
     Doc(usize, usize),
+    Ini(usize),
+}
+
+impl DocNode {
+    /// Its text's first byte.
+    fn start(&self) -> usize {
+        match *self {
+            DocNode::Doc(s, _) => s,
+            DocNode::Ini(_) => 0,
+        }
+    }
+}
+
+/// A format's text as its node (`crate::chunks`): its arguments name its
+/// first line, whatever the text, which the run reads from the chunks'
+/// fields (`crate::chunks::fields`); none for an empty text.
+fn ini_node(text: &str) -> Option<(u64, DocNode)> {
+    (!text.is_empty()).then(|| (key("", true), DocNode::Ini(text.len())))
 }
 
 /// The document's slices and their keys as [`doc_nodes`] made them
@@ -5027,6 +5095,15 @@ fn node_args(
             a.push(v.str(FORMAT_HINT));
             a
         }
+        // (a format's text: its first chunk named, from its first line;
+        // the run reads the chunks' fields, `crate::chunks`)
+        (&DocNode::Ini(_), _) => {
+            vec![
+                v.list(vec![crate::chunks::frame(v, crate::chunks::FIRST, 0)]),
+                v.int(1),
+                v.str(FORMAT_HINT),
+            ]
+        }
     }
 }
 
@@ -5039,8 +5116,9 @@ enum Src {
 
 impl Src {
     fn of(n: &DocNode) -> Src {
-        match n {
-            &DocNode::Doc(s, e) => Src::Doc(s, e),
+        match *n {
+            DocNode::Doc(s, e) => Src::Doc(s, e),
+            DocNode::Ini(n) => Src::Doc(0, n),
         }
     }
 
@@ -6402,8 +6480,28 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
             .map(|&n| str_of(v, n));
         // (the file's characters are its bytes; the prelude's own text
         // is its characters)
+        // (a line of the prelude's text read from its chunks: its byte by
+        // its chunk and line in it, `crate::chunks`)
+        let chunked = name
+            .as_deref()
+            .filter(|&n| n == crate::chunks::PLACE)
+            .and_then(|_| {
+                crate::chunks::line_start(
+                    &g.ini,
+                    text,
+                    u64::from_ne_bytes(int(7).to_ne_bytes()),
+                    u32::try_from(int(3)).unwrap_or(u32::MAX),
+                )
+            });
         let (file, chars, at): (String, Vec<char>, usize) = match name {
-            Some(n) if n != DOC_NAME && int(3) >= 0 => {
+            _ if let Some(b) = chunked => {
+                let at = text
+                    .get(..b.min(text.len()))
+                    .map_or(0, |t| t.chars().count())
+                    + width(text, b);
+                (PRELUDE_NAME.to_owned(), text.chars().collect(), at)
+            }
+            Some(n) if n != DOC_NAME && n != crate::chunks::PLACE && int(3) >= 0 => {
                 let bytes = finder(n.trim_start_matches("./"))
                     .map(|(_, b)| b)
                     .unwrap_or_default();
@@ -6617,6 +6715,9 @@ pub struct Build {
     opts: Options,
     /// The nodes of the text, with their keys.
     nodes: Vec<(u64, NodeId, Src)>,
+    /// A format's text's chunks as the environment has them
+    /// (`crate::chunks`): its node reads its lines from them.
+    ini: crate::chunks::Chunks,
     /// The lines of the text before each node's, as the environment
     /// gives them (`dline:<node>`, [`dlines_of`]).
     dlines: FxHashMap<u64, i64>,
@@ -6916,11 +7017,13 @@ impl Build {
         }
         crate::timeline::lap("engine: the format's check taken");
         let edits = opts.edits.clone().unwrap_or_default();
+        let ini = std::mem::take(&mut g.ini);
         let mut b = Build {
             g,
             unit,
             opts,
             nodes,
+            ini,
             dlines,
             dvi,
             end,
@@ -7236,6 +7339,7 @@ impl Build {
             loads: loads.as_deref(),
             applied: 0,
             dlines: &mut self.dlines,
+            ini: &mut self.ini,
         };
         let t_before = t_all.elapsed();
         crate::timeline::lap("engine: the edit's inputs");
@@ -7549,7 +7653,10 @@ impl Build {
                             self.g.eng.values(),
                             &text,
                             incr,
-                            &DocNode::Doc(s, e),
+                            &match incr {
+                                Some(_) => DocNode::Doc(s, e),
+                                None => ini_node(&text)?.1,
+                            },
                             Some(&l),
                             None,
                         ),
@@ -9357,9 +9464,25 @@ impl Build {
                 let at = column_in(doc, start, &units, xe);
                 node_from = spans.get(i).copied();
                 (docname.clone(), doc, at)
+            } else if xs
+                .get(2)
+                .is_some_and(|&n| v.with_str(n, |t| t == crate::chunks::PLACE) == Some(true))
+                && let Some(start) = crate::chunks::line_start(
+                    &self.ini,
+                    doc,
+                    u64::from_ne_bytes(int(7).to_ne_bytes()),
+                    u32::try_from(int(3)).unwrap_or(u32::MAX),
+                )
+            {
+                // a line of a format's text read from its chunks: placed
+                // by its chunk and its line in it, as the chunks are now
+                let at = column_in(doc, start, &units, xe);
+                node_from = Some(0);
+                (docname.clone(), doc, at)
             } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
                 && n != ValueId::UNIT
+                && v.with_str(n, |t| t == crate::chunks::PLACE) != Some(true)
             {
                 // a line of an `\input` file: its characters are bytes
                 let name = str_of(v, n);

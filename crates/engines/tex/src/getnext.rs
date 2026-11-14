@@ -770,6 +770,12 @@ impl Run<'_, '_> {
     fn next_tok_slow(&mut self) -> R<Option<Tok>> {
         loop {
             let Some(&top) = self.input.top() else {
+                // (a format's text read from its chunks where it is
+                // reached, `crate::chunks`; out of line, as this frame is
+                // on every nested expansion's path)
+                if self.input.chunk_due() {
+                    self.read_chunks_due()?;
+                }
                 if self.input.reach_text() {
                     if self.pull_at.last() == Some(&Some(self.input.text_at - 1)) {
                         self.pull_lev = Some(self.input.levels.len() - 1);
@@ -1455,6 +1461,9 @@ impl Run<'_, '_> {
             let more = match s {
                 Seg::Toks(t) => !t.is_empty(),
                 Seg::Line(l) => l.has_more(),
+                // (a chunk's line: one there when the segment was made,
+                // `Run::read_chunk`)
+                Seg::Chunk(..) => true,
                 Seg::File(f) => {
                     if !f.has_lines() {
                         continue;
@@ -1499,7 +1508,15 @@ impl Run<'_, '_> {
                 }
             }
         }
-        for sg in self.input.text_rest() {
+        // (a format's text read from chunks: its lines looked at one by
+        // one below, each chunk read where it is reached, not all of
+        // the text's at once)
+        let mut chunked = None;
+        for (k, sg) in self.input.text_rest().iter().enumerate() {
+            if crate::chunks::from_chunk(sg) {
+                chunked = Some(self.input.text_at + k);
+                break;
+            }
             match sg {
                 Seg::Toks(t) => {
                     if !t.is_empty() {
@@ -1515,45 +1532,85 @@ impl Run<'_, '_> {
                         return Ok(false);
                     }
                 }
+                Seg::Chunk(..) => {}
             }
         }
         for (chars, state, end) in lines {
-            let mut state = state;
-            let mut cut = false;
-            for c in chars {
-                match self.cat(c)? {
-                    9 => {}
-                    10 => {
-                        if state == MID_LINE {
-                            state = SKIP_BLANKS;
-                        }
-                    }
-                    14 => {
-                        cut = true;
-                        break;
-                    }
-                    _ => return Ok(false),
-                }
+            if !self.line_blank(&chars, state, end)? {
+                return Ok(false);
             }
-            let Some(_) = end.filter(|_| !cut) else {
-                continue;
-            };
-            let e = self.endlinechar()?;
-            let Ok(e) = u32::try_from(e) else { continue };
-            if e > 255 {
-                continue;
-            }
-            match self.cat(e)? {
-                9 | 10 => {}
-                5 if state != NEW_LINE => {}
-                5 => {
-                    let m = self.mean_of(crate::expand::par_tok())?;
-                    if m.cmd_chr().0 != cmd::PAR_END {
+        }
+        let Some(mut i) = chunked else {
+            return Ok(true);
+        };
+        loop {
+            match self.input.text.get(i) {
+                None => return Ok(true),
+                Some(Seg::Chunk(..)) => self.read_chunk(i)?,
+                Some(Seg::Line(ln)) => {
+                    let end = (ln.ends && ln.endch < -1).then_some(ln.endch);
+                    let (chars, state) = (ln.buf[ln.loc.min(ln.buf.len())..].to_vec(), ln.state);
+                    if !self.line_blank(&chars, state, end)? {
                         return Ok(false);
                     }
+                    i += 1;
+                }
+                Some(Seg::Toks(t)) => {
+                    if !t.is_empty() {
+                        return Ok(false);
+                    }
+                    i += 1;
+                }
+                Some(Seg::File(f)) => {
+                    if f.has_lines() {
+                        return Ok(false);
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// [`Run::rest_blank`] of one line left: its characters, its state
+    /// and its end where it is still due.
+    fn line_blank(&mut self, chars: &[u32], state: u8, end: Option<i64>) -> R<bool> {
+        let mut state = state;
+        let mut cut = false;
+        for &c in chars {
+            match self.cat(c)? {
+                9 => {}
+                10 => {
+                    if state == MID_LINE {
+                        state = SKIP_BLANKS;
+                    }
+                }
+                14 => {
+                    cut = true;
+                    break;
                 }
                 _ => return Ok(false),
             }
+        }
+        let Some(_) = end.filter(|_| !cut) else {
+            return Ok(true);
+        };
+        let e = self.endlinechar()?;
+        let Ok(e) = u32::try_from(e) else {
+            return Ok(true);
+        };
+        if e > 255 {
+            return Ok(true);
+        }
+        match self.cat(e)? {
+            9 | 10 => {}
+            5 if state != NEW_LINE => {}
+            5 => {
+                let m = self.mean_of(crate::expand::par_tok())?;
+                if m.cmd_chr().0 != cmd::PAR_END {
+                    return Ok(false);
+                }
+            }
+            _ => return Ok(false),
         }
         Ok(true)
     }
@@ -1596,6 +1653,7 @@ impl Run<'_, '_> {
                 Seg::Toks(t) if !t.is_empty() => return false,
                 Seg::Line(l) if l.has_more() => return false,
                 Seg::File(f) if f.has_lines() => return self.doc_file(f),
+                Seg::Chunk(..) => return false,
                 _ => {}
             }
         }
@@ -2161,7 +2219,7 @@ impl Run<'_, '_> {
                     }
                     seen_line = true;
                 }
-                Seg::File(_) => {
+                Seg::File(_) | Seg::Chunk(..) => {
                     if seen_line {
                         self.input.text.remove(i);
                         continue;
