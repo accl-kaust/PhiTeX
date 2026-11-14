@@ -6,14 +6,14 @@
 //! child yielding to such a node, 3 s idle).
 //!
 //! The order is forced by the test's own operations, with no timing:
-//! two workers; `Gate` holds until the test lets it go; `Wait1` and
-//! `Wait2` wait for the settled prefix (parked on the gate); `Yielder`,
-//! the furthest ahead, checks for starved work at every step. Once it
-//! runs, the gate goes: its commit queues both waiters on its worker,
-//! which takes `Wait1` (held until the end), leaving `Wait2` queued while
-//! both workers are at work. The yielder gives its worker to `Wait2`,
-//! which waits again at once, for `Wait1`. The yielder must run again
-//! before `Wait1` lets go.
+//! two workers; `Gate` holds until both waiters have parked on it;
+//! `Wait1` and `Wait2` wait for the settled prefix; `Yielder`, the
+//! furthest ahead, checks for starved work at every step. A waiter queued
+//! while both workers are at work (before it first ran, or once the gate's
+//! commit queued both on its worker, which takes `Wait1` and holds it until
+//! the end) gets the yielder's worker, and waits again at once, for the
+//! gate or for `Wait1`. The yielder must run again before `Wait1` lets go,
+//! which it does only once the yielder has.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -75,8 +75,7 @@ impl Operation for Settled {
     }
 }
 
-/// Once both waiters have parked on the gate, lets the gate go and
-/// steps until the test ends, giving its worker away where earlier work
+/// Steps until the test ends, giving its worker away where earlier work
 /// waits for one.
 struct Yielder;
 
@@ -90,11 +89,6 @@ impl Operation for Yielder {
             YIELDER_AGAIN.store(true, Ordering::SeqCst);
             return Ok(ValueId::UNIT);
         }
-        // (the two waiters parked on the gate first: run again until then)
-        if PARKED.load(Ordering::SeqCst) < 2 {
-            return Err(cx.run_again());
-        }
-        GATE.store(true, Ordering::SeqCst);
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(20) {
             if let Err(s) = cx.yield_to_prefix() {
@@ -120,8 +114,14 @@ fn a_run_that_gave_its_worker_runs_again_once_that_node_is_taken() {
     e.push(u, settled, vec![v.int(0)]);
     let y = e.push(u, yielder, vec![]);
     let watch = std::thread::spawn(|| {
-        // (the yielder's second run, while `Wait1` still holds)
-        let again = hold_until(|| YIELDER_AGAIN.load(Ordering::SeqCst));
+        // (the gate let go once both waiters have parked on it; then the
+        // yielder's second run, while `Wait1` still holds)
+        let again = hold_until(|| {
+            if PARKED.load(Ordering::SeqCst) >= 2 {
+                GATE.store(true, Ordering::SeqCst);
+            }
+            YIELDER_AGAIN.load(Ordering::SeqCst)
+        });
         END.store(true, Ordering::SeqCst);
         again
     });
