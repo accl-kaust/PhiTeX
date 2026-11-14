@@ -109,3 +109,27 @@ replaced by empty ones):
 | `session pdf`, watch with a viewer and no `--write` | `…/paper.pdf` only (no .aux, no .synctex.gz), 10 ms; `cmp` with `phitex build`'s: identical (23654 bytes, SOURCE_DATE_EPOCH set) |
 | `session pdf -o ../elsewhere.pdf --synctex` | the PDF there, identical, and `elsewhere.synctex.gz` beside it |
 | `session pdf` of a `--write` watch | waits for the idle write (300 ms), identical |
+
+## Propose mode, the review card, notes edited (passes p7-p9)
+
+Built: proposals (`phitex session propose`, the workspace `.phitex/work/`,
+revisions, partial accepts, conflicts), the card for a proposal or the
+direct batch (Accept all, Reject all, Request changes, Comment, Show
+diff, Words/Lines, a/r/n/p/c), notes edited, re-anchored by their
+handles, deleted with Undo, marks beside the scrollbar; reviewing the
+agent's edits made opt-in (`experimental-review`, merged alone as
+e40f75be8). Spec §9.3, §9.5, §9.6.
+
+| pass | what it did | found, fixed |
+|---|---|---|
+| p7 | drive5: propose as the agent (workspace, propose, revise) and as the user (card, Lines, Show diff, keys, comment, request changes, Accept all); direct batch by keys; notes from the pin, Enter edits, kind changed, end dragged, Delete, Undo; 33 notes' scrollbar marks; reload; Settings | after `a` the focus was lost (the state came after the op: the next change focused when drawn); the revision's "updated" diff compared with the last revision's text (now: what this revision proposes that the last did not); a handle's drag ended in a click that deselected the note (a handle is not a page mark); dragged ends cut words (snapped to the word); the reply box shown while editing; **every review op naming a note by `id` never got its answer** (the request's own `id` overwritten by the note's: replies, resolves and deletes were applied but their promises never settled, so Delete's Undo never appeared; the note now goes as `target`, and the socket's id always wins); the scrollbar marks sat at the window's edge, not the pages' scrollbar |
+| p7h | drive5 again | nothing |
+| p8 | drive6: review off by default, then on from Settings | `.phitex/` checked too broadly (the session log is the session's); nothing else |
+| p9 | drive2 and drive3 again on this build | drive3's selectors for the batch card; nothing else |
+| p10 | on dev 59bfd9565 (no text search): everything2 (notes on `\input{chapters/intro}`, `\include{ch2}`, `\input ch3`), drive5, drive6 | nothing (drive6 needs `experimental-review` off at its start: drive5 leaves it on in the play home) |
+
+"Highlights like everything" (the user's report) was traced to the
+engine's glyph origins for `\input` files (chapters' glyphs labelled
+main.tex at their own offsets, or another chapter's name): the origins
+agent (noop2) fixed it on dev at 8fae8fb59 (repros: target/play/spans_v.mjs),
+and the review's TEMPORARY text-search fallback went in 59bfd9565.

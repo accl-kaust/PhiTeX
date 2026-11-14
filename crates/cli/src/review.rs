@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::proposal as prop;
 use crate::review_text as rt;
 use crate::view::Ask;
 
@@ -123,9 +124,17 @@ pub struct Post {
     pub at: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edited: Vec<Edited>,
-    /// A commented hunk's diff after the agent changed it ("updated").
+    /// A commented hunk's diff after the agent changed it ("updated");
+    /// on a proposal's thread, the hunk a comment is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<HunkRef>,
+    /// A proposal's revision: what changed since the last (each hunk from
+    /// the last revision's proposed text to this one's).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<HunkRef>,
+    /// When its author last edited it (§9.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -172,6 +181,42 @@ pub struct Verdict {
     pub seen: bool,
 }
 
+/// A proposal's hunk decided (§9.6).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Decided {
+    pub hunk: HunkRef,
+    pub verdict: String,
+    pub at: String,
+    /// Shown to the agent (`session changes`) already.
+    #[serde(default)]
+    pub seen: bool,
+}
+
+/// A proposal (§9.6): the agent's change kept apart from the files until
+/// accepted (`propose` mode), or, in `direct` mode, the title and the why
+/// of the agent's changes waiting since (its files are the live hunks).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Proposal {
+    pub id: String,
+    pub title: String,
+    pub why: String,
+    /// `open`, `changes_requested`, `accepted`, `rejected`, `partial`
+    /// (some hunks of each), `done` (a direct batch whose hunks are all
+    /// decided).
+    pub status: String,
+    /// `propose` (its files kept in `.phitex/proposals/`) or `direct`.
+    pub mode: String,
+    pub created: String,
+    pub updated: String,
+    pub revision: u32,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub decided: Vec<Decided>,
+    #[serde(default)]
+    pub thread: Vec<Post>,
+}
+
 /// `.phitex/notes.json`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Store {
@@ -183,6 +228,8 @@ pub struct Store {
     pub reviews: Vec<ReviewRec>,
     #[serde(default)]
     pub verdicts: Vec<Verdict>,
+    #[serde(default)]
+    pub proposals: Vec<Proposal>,
 }
 
 impl Default for Store {
@@ -193,6 +240,7 @@ impl Default for Store {
             notes: Vec::new(),
             reviews: Vec::new(),
             verdicts: Vec::new(),
+            proposals: Vec::new(),
         }
     }
 }
@@ -595,6 +643,12 @@ struct State {
     /// Reviewing the agent's edits ([`Hub::set_changes`]): off, the files
     /// are followed for the notes' anchors alone.
     changes: bool,
+    /// `direct` (the agent edits the files, its changes reviewed as
+    /// hunks) or `propose` (its changes kept as proposals until accepted):
+    /// empty is direct.
+    mode: String,
+    /// The proposals' files, by id, as last loaded (their revision's).
+    props: HashMap<String, (u32, Vec<prop::PropFile>)>,
 }
 
 /// Said where reviewing the agent's edits is asked for while it is off.
@@ -775,8 +829,8 @@ impl Hub {
     /// The review's state to every viewer (the lock let go).
     fn tell(&self) {
         let v = {
-            let st = lock(&self.st);
-            state_json(&st)
+            let mut st = lock(&self.st);
+            state_json(&mut st)
         };
         let e = lock(&self.emit).clone();
         if let Some(e) = e {
@@ -953,6 +1007,14 @@ impl Hub {
             "phitex/session/rebuild" => self.rebuild(p),
             "phitex/session/log" => self.log(p),
             "phitex/session/pdf" => self.pdf(p),
+            "phitex/review/mode" | "phitex/review/workspace" | "phitex/propose"
+                if !lock(&self.st).changes =>
+            {
+                Err(refused(CHANGES_OFF))
+            }
+            "phitex/review/mode" => self.mode(p),
+            "phitex/review/workspace" => self.workspace(true).map(|w| json!({"workspace": w})),
+            "phitex/propose" => self.propose(p),
             "phitex/session/stop" => {
                 let q = lock(&self.quit).clone();
                 if let Some(q) = q {
@@ -1006,6 +1068,8 @@ impl Hub {
             "out_dir": st.about["out_dir"],
             "out_dir_why": st.about["out_dir_why"],
             "changes": st.changes,
+            "review": mode_of(st),
+            "workspace": (mode_of(st) == "propose").then(|| prop::workspace(&st.root).0.display().to_string()),
             "problems": problems,
             "diagnostics_pending": b.is_some_and(|b| b.diags_pending),
             "written": b.is_some_and(|b| st.written >= b.n),
@@ -1167,7 +1231,21 @@ impl Hub {
                     .filter_map(|id| st.store.reviews.iter().find(|r| &r.id == id))
                     .map(|r| json!(r))
                     .collect();
-                return Ok(json!({"notes": notes, "reviews": reviews}));
+                // (a proposal decided or commented on: as `changes` has it)
+                let props: Vec<String> = ids
+                    .iter()
+                    .filter(|id| st.store.proposals.iter().any(|x| &x.id == *id))
+                    .cloned()
+                    .collect();
+                let proposals: Vec<Value> = if props.is_empty() {
+                    Vec::new()
+                } else {
+                    proposals_out(&mut st, false)
+                        .into_iter()
+                        .filter(|v| props.iter().any(|p| v["id"] == p.as_str()))
+                        .collect()
+                };
+                return Ok(json!({"notes": notes, "reviews": reviews, "proposals": proposals}));
             }
             st = match until {
                 None => self.cv.wait(st).unwrap_or_else(PoisonError::into_inner),
@@ -1394,6 +1472,8 @@ impl Hub {
                 at: at.clone(),
                 edited,
                 diff: None,
+                changes: Vec::new(),
+                edited_at: None,
             });
         }
         if let Some(r) = resolve {
@@ -1417,6 +1497,627 @@ impl Hub {
 
     fn resolve(&self, p: &Value, by: &str) -> Result<Value, Fail> {
         self.post(p, by, Some(true))
+    }
+
+    // ---- proposals (§9.6) ----
+
+    /// The review mode: `{mode?}` sets it (`direct`, `propose`); its
+    /// state either way. Turned to `propose`, the workspace is made.
+    fn mode(&self, p: &Value) -> Result<Value, Fail> {
+        if let Some(m) = p["mode"].as_str() {
+            if !matches!(m, "direct" | "propose") {
+                return Err(refused(format!("no review mode {m:?}: direct or propose")));
+            }
+            self.set_mode(m);
+            if m == "propose" {
+                self.workspace(false)?;
+            }
+            self.tell();
+        }
+        let st = lock(&self.st);
+        Ok(json!({"mode": mode_of(&st),
+                  "workspace": (mode_of(&st) == "propose").then(|| prop::workspace(&st.root).0.display().to_string())}))
+    }
+
+    /// The review mode set (the watch's start: `review-mode`).
+    pub fn set_mode(&self, m: &str) {
+        m.clone_into(&mut lock(&self.st).mode);
+    }
+
+    /// The workspace made (again, with `reset`; else only when missing)
+    /// from the project's text files as they are now: its path.
+    fn workspace(&self, reset: bool) -> Result<String, Fail> {
+        let editors = self.editors();
+        let mut st = lock(&self.st);
+        let (work, _) = prop::workspace(&st.root);
+        if work.is_dir() && !reset {
+            return Ok(work.display().to_string());
+        }
+        let mut names: Vec<String> = st
+            .builds
+            .back()
+            .map(|b| b.read.keys().filter(|n| reviewed(n)).cloned().collect())
+            .unwrap_or_default();
+        if reviewed(&st.main) && !names.contains(&st.main) {
+            names.push(st.main.clone());
+        }
+        names.sort();
+        let files: Vec<(String, String)> = names
+            .into_iter()
+            .filter_map(|n| {
+                let t = editors
+                    .as_ref()
+                    .and_then(|e| (e.buffer)(&n))
+                    .or_else(|| current_text(&mut st, &n))?;
+                Some((n, t))
+            })
+            .collect();
+        if let Some(said) = make_dir(&st.root).map_err(refused)? {
+            eprintln!("phitex: {said}");
+        }
+        let w = prop::reset_workspace(&st.root, &files).map_err(refused)?;
+        Ok(w.display().to_string())
+    }
+
+    /// `phitex session propose` (§9.6): the agent's change made a proposal
+    /// (`{title?, why, revise?}`). In `propose` mode, from the workspace
+    /// where the agent wrote it, else from the files it edited (put back
+    /// to their accepted text: the proposal holds the change); in `direct`
+    /// mode, the title and why of the changes waiting.
+    fn propose(&self, p: &Value) -> Result<Value, Fail> {
+        let why = p["why"].as_str().unwrap_or("").trim().to_owned();
+        let title = p["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
+        let revise = p["revise"].as_str().map(str::to_owned);
+        let editors = self.editors();
+        let mut st = lock(&self.st);
+        let at = now();
+        let direct = mode_of(&st) == "direct";
+        if direct {
+            let pending: Vec<String> = st
+                .files
+                .values()
+                .flat_map(|t| t.hunks.iter().map(|h| h.file.clone()))
+                .collect();
+            if pending.is_empty() {
+                return Err(refused(
+                    "no changes of yours wait for review: edit the files first",
+                ));
+            }
+            let mut files = pending;
+            files.sort();
+            files.dedup();
+            let found = st
+                .store
+                .proposals
+                .iter()
+                .rev()
+                .find(|x| x.mode == "direct" && x.status != "done")
+                .map(|x| x.id.clone());
+            let id = if let Some(id) = found {
+                id
+            } else {
+                {
+                    let id = st.store.id("p");
+                    st.store.proposals.push(Proposal {
+                        id: id.clone(),
+                        mode: "direct".into(),
+                        status: "open".into(),
+                        created: at.clone(),
+                        revision: 0,
+                        ..Proposal::default()
+                    });
+                    id
+                }
+            };
+            let x = st
+                .store
+                .proposals
+                .iter_mut()
+                .find(|x| x.id == id)
+                .expect("there");
+            x.title = title.unwrap_or_else(|| first_line(&why));
+            x.why = why;
+            x.files = files;
+            x.revision += 1;
+            x.updated = at;
+            if x.status == "changes_requested" {
+                x.status = "open".into();
+            }
+            if let Some(said) = make_dir(&st.root).map_err(refused)? {
+                eprintln!("phitex: {said}");
+            }
+            save(&st);
+            let out = proposals_out(&mut st, false)
+                .into_iter()
+                .find(|v| v["id"] == id);
+            drop(st);
+            self.cv.notify_all();
+            self.tell();
+            return Ok(out.unwrap_or(Value::Null));
+        }
+        // (propose: the workspace's changes, else the files')
+        let mut files = prop::workspace_changes(&st.root, &reviewed);
+        let from_work = !files.is_empty();
+        if !from_work {
+            let mut names: Vec<String> = st
+                .files
+                .iter()
+                .filter(|(_, t)| !t.hunks.is_empty())
+                .map(|(n, _)| n.clone())
+                .collect();
+            names.sort();
+            for n in names {
+                let base = base_of(&mut st, &n);
+                let cur = st.files.get(&n).and_then(|t| t.text.clone());
+                files.push(prop::PropFile {
+                    file: n,
+                    base,
+                    new: cur,
+                });
+            }
+        }
+        if files.is_empty() {
+            return Err(refused(format!(
+                "nothing to propose: write the change in the workspace ({}), then propose it",
+                prop::workspace(&st.root).0.display()
+            )));
+        }
+        // (the files put back, before anything is stored: an editor's
+        // unsaved text is never overwritten)
+        if !from_work {
+            for f in &files {
+                if let Some(buf) = editors.as_ref().and_then(|e| (e.buffer)(&f.file))
+                    && Some(buf) != f.new
+                {
+                    return Err(refused(format!(
+                        "{} has unsaved changes in your editor: save them there, then propose again",
+                        f.file
+                    )));
+                }
+            }
+        }
+        if let Some(said) = make_dir(&st.root).map_err(refused)? {
+            eprintln!("phitex: {said}");
+        }
+        let (id, rev) = match &revise {
+            Some(r) => {
+                let Some(x) = st
+                    .store
+                    .proposals
+                    .iter()
+                    .find(|x| &x.id == r && x.mode == "propose")
+                else {
+                    return Err(refused(format!("no proposal {r:?}")));
+                };
+                (x.id.clone(), x.revision + 1)
+            }
+            None => (st.store.id("p"), 1),
+        };
+        // (a revision: what it proposes that the last did not, said on
+        // its thread)
+        let changed: Vec<HunkRef> = if rev > 1 {
+            let last: Vec<(String, String, String)> = prop_hunks(&prop_files(&mut st, &id))
+                .into_iter()
+                .map(|h| (h.file, h.old, h.new))
+                .collect();
+            prop_hunks(&files)
+                .into_iter()
+                .filter(|h| {
+                    !last
+                        .iter()
+                        .any(|(f, o, n)| *f == h.file && *o == h.old && *n == h.new)
+                })
+                .map(|h| h.as_ref())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        prop::store(&st.root, &id, rev, &files).map_err(refused)?;
+        st.props.insert(id.clone(), (rev, files.clone()));
+        let names: Vec<String> = files.iter().map(|f| f.file.clone()).collect();
+        match revise {
+            Some(_) => {
+                let x = st
+                    .store
+                    .proposals
+                    .iter_mut()
+                    .find(|x| x.id == id)
+                    .expect("there");
+                x.revision = rev;
+                x.files = names;
+                x.updated.clone_from(&at);
+                x.status = "open".into();
+                x.decided.clear();
+                if let Some(t) = title {
+                    x.title = t;
+                }
+                x.thread.push(Post {
+                    by: "agent".into(),
+                    text: if why.is_empty() {
+                        format!("Revision {rev}.")
+                    } else {
+                        why.clone()
+                    },
+                    at: at.clone(),
+                    edited: Vec::new(),
+                    diff: None,
+                    changes: changed,
+                    edited_at: None,
+                });
+            }
+            None => st.store.proposals.push(Proposal {
+                id: id.clone(),
+                title: title.unwrap_or_else(|| first_line(&why)),
+                why,
+                status: "open".into(),
+                mode: "propose".into(),
+                created: at.clone(),
+                updated: at.clone(),
+                revision: 1,
+                files: names,
+                decided: Vec::new(),
+                thread: Vec::new(),
+            }),
+        }
+        // (the files the agent edited put back to their accepted text:
+        // the proposal holds the change)
+        if !from_work {
+            for f in &files {
+                let path = st.root.join(&f.file);
+                match &f.base {
+                    Some(b) => {
+                        std::fs::write(&path, b)
+                            .map_err(|e| refused(format!("{}: {e}", f.file)))?;
+                    }
+                    None => std::fs::remove_file(&path)
+                        .map_err(|e| refused(format!("{}: {e}", f.file)))?,
+                }
+                if let Some(e) = &editors
+                    && (e.buffer)(&f.file).is_some()
+                {
+                    (e.replace)(&f.file, f.base.as_deref().unwrap_or(""));
+                }
+                st.buffers.remove(&f.file);
+                refresh(&mut st, &f.file, f.base.clone());
+            }
+        }
+        save(&st);
+        let out = proposals_out(&mut st, false)
+            .into_iter()
+            .find(|v| v["id"] == id);
+        drop(st);
+        // (the workspace ready for the next: the files as they are now)
+        let w = self.workspace(true)?;
+        self.cv.notify_all();
+        self.tell();
+        let mut out = out.unwrap_or(Value::Null);
+        out["workspace"] = json!(w);
+        out["from"] = json!(if from_work { "workspace" } else { "files" });
+        Ok(out)
+    }
+
+    /// A proposal's hunks accepted or rejected by the user (`{id, hunks:
+    /// "all" | [ids]}`); a direct batch's are its live hunks' verdicts.
+    /// Accepting applies them to the files as they are now (an editor's
+    /// buffer through the editor), each where its text is found; one the
+    /// user changed since conflicts, and nothing is applied.
+    fn decide(&self, req: &Value, yes: bool) -> Result<Value, Fail> {
+        let id = req["id"].as_str().unwrap_or("").to_owned();
+        let editors = self.editors();
+        let mut st = lock(&self.st);
+        let Some(x) = st.store.proposals.iter().find(|x| x.id == id).cloned() else {
+            return Err(refused(format!("no proposal {id:?}")));
+        };
+        if x.mode == "direct" {
+            drop(st);
+            let mut r = req.clone();
+            r["ids"] = req["hunks"].clone();
+            let out = self.verdict(&r, yes, None)?;
+            let mut st = lock(&self.st);
+            settle_direct(&mut st);
+            save(&st);
+            drop(st);
+            self.tell();
+            return Ok(out);
+        }
+        let files = prop_files(&mut st, &id);
+        let open: Vec<HunkNow> = prop_hunks(&files)
+            .into_iter()
+            .filter(|h| !x.decided.iter().any(|d| d.hunk.id == h.id))
+            .collect();
+        let chosen: Vec<HunkNow> = if req["hunks"] == "all" {
+            open
+        } else {
+            let ids: Vec<&str> = req["hunks"]
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            open.into_iter()
+                .filter(|h| ids.contains(&h.id.as_str()))
+                .collect()
+        };
+        if chosen.is_empty() {
+            return Err(refused("no open change of this proposal by that name"));
+        }
+        if yes {
+            let mut names: Vec<String> = chosen.iter().map(|h| h.file.clone()).collect();
+            names.sort();
+            names.dedup();
+            // (every file's new text made first: a conflict anywhere
+            // applies nothing)
+            let mut writes: Vec<(String, Option<String>, bool)> = Vec::new();
+            for n in &names {
+                let f = files.iter().find(|f| &f.file == n).expect("its file");
+                let hs: Vec<&HunkNow> = chosen.iter().filter(|h| &h.file == n).collect();
+                let disk = std::fs::read(st.root.join(n))
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned());
+                let buf = editors.as_ref().and_then(|e| (e.buffer)(n));
+                let cur = buf.clone().or(disk.clone());
+                let out = match (hs.first().and_then(|h| h.whole), &f.base, &cur) {
+                    (Some("added"), _, None) => Some(f.new.clone().unwrap_or_default()),
+                    (Some("added"), _, Some(c)) if Some(c) == f.new.as_ref() => Some(c.clone()),
+                    (Some("deleted"), Some(b), Some(c)) if b == c => None,
+                    (Some(_), ..) => {
+                        return Err(refused(format!(
+                            "{n} changed since the agent proposed this: ask it to propose it again"
+                        )));
+                    }
+                    (None, Some(b), Some(c)) => {
+                        let list: Vec<((usize, usize), &str, &str)> = hs
+                            .iter()
+                            .map(|h| (h.base, h.old.as_str(), h.new.as_str()))
+                            .collect();
+                        match prop::apply(b, c, &list) {
+                            Ok(t) => Some(t),
+                            Err(bad) => {
+                                let line = rt::line_of(b, bad[0].0);
+                                return Err(refused(format!(
+                                    "{n}:{line} changed since the agent proposed this (in your {}): the change was not applied; edit it by hand, or ask the agent to propose it again",
+                                    if buf.is_some() && buf != disk {
+                                        "editor's unsaved text"
+                                    } else {
+                                        "file"
+                                    }
+                                )));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(refused(format!("{n} is not there any more")));
+                    }
+                };
+                writes.push((n.clone(), out, buf.is_some()));
+            }
+            for (n, out, open_in_editor) in writes {
+                let path = st.root.join(&n);
+                let disk_clean = {
+                    let disk = std::fs::read(&path)
+                        .ok()
+                        .map(|b| String::from_utf8_lossy(&b).into_owned());
+                    let buf = editors.as_ref().and_then(|e| (e.buffer)(&n));
+                    buf.is_none() || buf == disk
+                };
+                if let Some(t) = &out {
+                    if disk_clean {
+                        if let Some(d) = path.parent() {
+                            let _ = std::fs::create_dir_all(d);
+                        }
+                        std::fs::write(&path, t).map_err(|e| refused(format!("{n}: {e}")))?;
+                    }
+                    if open_in_editor && let Some(e) = &editors {
+                        (e.replace)(&n, t);
+                    }
+                } else {
+                    let aside = st.root.join(".phitex").join("rejected").join(&n);
+                    if let Some(d) = aside.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    std::fs::rename(&path, &aside).map_err(|e| refused(format!("{n}: {e}")))?;
+                }
+                // (the accepted text is the user's: the baseline takes the
+                // same hunks, where they are found in it)
+                let base = base_of(&mut st, &n);
+                let f = files.iter().find(|f| f.file == n).expect("its file");
+                let hs: Vec<((usize, usize), &str, &str)> = chosen
+                    .iter()
+                    .filter(|h| h.file == n && h.whole.is_none())
+                    .map(|h| (h.base, h.old.as_str(), h.new.as_str()))
+                    .collect();
+                let new_base = match (&f.base, &base) {
+                    (Some(fb), Some(b)) if !hs.is_empty() => prop::apply(fb, b, &hs).ok().map(Some),
+                    _ => Some(out.clone()),
+                };
+                if let Some(nb) = new_base {
+                    let _ = st.baseline.as_ref().map(|b| b.write(&n, nb.as_deref()));
+                    st.files.entry(n.clone()).or_default().base = Some(nb);
+                }
+                if disk_clean {
+                    st.buffers.remove(&n);
+                } else if let Some(t) = &out {
+                    st.buffers.insert(n.clone(), t.clone());
+                }
+                refresh(&mut st, &n, out);
+            }
+        }
+        let at = now();
+        let x = st
+            .store
+            .proposals
+            .iter_mut()
+            .find(|x| x.id == id)
+            .expect("there");
+        for h in &chosen {
+            x.decided.push(Decided {
+                hunk: h.as_ref(),
+                verdict: if yes { "accepted" } else { "rejected" }.into(),
+                at: at.clone(),
+                seen: false,
+            });
+        }
+        let total = prop_hunks(&files).len();
+        if x.decided.len() >= total {
+            let acc = x.decided.iter().filter(|d| d.verdict == "accepted").count();
+            x.status = if acc == total {
+                "accepted"
+            } else if acc == 0 {
+                "rejected"
+            } else {
+                "partial"
+            }
+            .into();
+        }
+        x.updated = at;
+        bump(&mut st, &id);
+        save(&st);
+        drop(st);
+        self.cv.notify_all();
+        self.tell();
+        Ok(json!({"done": chosen.len()}))
+    }
+
+    /// A comment on a proposal (`{id, text, hunk?, verdict?}`: a hunk's
+    /// id to comment on it; `request_changes` asks the agent to revise).
+    fn prop_comment(&self, req: &Value) -> Result<Value, Fail> {
+        let id = req["id"].as_str().unwrap_or("").to_owned();
+        let text = req["text"].as_str().unwrap_or("").trim().to_owned();
+        let changes = req["verdict"] == "request_changes";
+        if text.is_empty() && !changes {
+            return Err(refused("a comment needs its words"));
+        }
+        let mut st = lock(&self.st);
+        if !st.store.proposals.iter().any(|x| x.id == id) {
+            // (the direct batch not named yet: named now)
+            if id.is_empty() && mode_of(&st) == "direct" {
+                let at = now();
+                let nid = st.store.id("p");
+                let mut files: Vec<String> = st
+                    .files
+                    .values()
+                    .flat_map(|t| t.hunks.iter().map(|h| h.file.clone()))
+                    .collect();
+                files.sort();
+                files.dedup();
+                st.store.proposals.push(Proposal {
+                    id: nid.clone(),
+                    title: "The agent's changes".into(),
+                    status: "open".into(),
+                    mode: "direct".into(),
+                    created: at.clone(),
+                    updated: at,
+                    revision: 1,
+                    files,
+                    ..Proposal::default()
+                });
+                drop(st);
+                let mut r = req.clone();
+                r["id"] = json!(nid);
+                return self.prop_comment(&r);
+            }
+            return Err(refused(format!("no proposal {id:?}")));
+        }
+        let hunk = req["hunk"].as_str().and_then(|h| {
+            let files = prop_files(&mut st, &id);
+            prop_hunks(&files)
+                .into_iter()
+                .chain(st.files.values().flat_map(|t| t.hunks.clone()))
+                .find(|x| x.id == h)
+                .map(|x| x.as_ref())
+        });
+        let at = now();
+        let x = st
+            .store
+            .proposals
+            .iter_mut()
+            .find(|x| x.id == id)
+            .expect("there");
+        x.thread.push(Post {
+            by: "you".into(),
+            text: if text.is_empty() {
+                "Changes requested.".into()
+            } else {
+                text
+            },
+            at: at.clone(),
+            edited: Vec::new(),
+            diff: hunk,
+            changes: Vec::new(),
+            edited_at: None,
+        });
+        if changes {
+            x.status = "changes_requested".into();
+        }
+        x.updated = at;
+        bump(&mut st, &id);
+        save(&st);
+        drop(st);
+        self.cv.notify_all();
+        self.tell();
+        Ok(json!({"id": id}))
+    }
+
+    /// The proposals as Compare's versions (§9.6 "Show diff"): `now` the
+    /// files as they are, `proposal:ID` them with its open hunks applied.
+    pub fn versions(&self) -> ProposalVersions {
+        let mut st = lock(&self.st);
+        let ids: Vec<String> = st
+            .store
+            .proposals
+            .iter()
+            .filter(|x| x.mode == "propose")
+            .map(|x| x.id.clone())
+            .collect();
+        let mut out = HashMap::new();
+        for id in ids {
+            let x = st
+                .store
+                .proposals
+                .iter()
+                .find(|x| x.id == id)
+                .cloned()
+                .unwrap_or_default();
+            let files = prop_files(&mut st, &id);
+            let mut over: HashMap<String, Option<String>> = HashMap::new();
+            for f in &files {
+                let hs: Vec<HunkNow> = prop_hunks(std::slice::from_ref(f))
+                    .into_iter()
+                    .filter(|h| !x.decided.iter().any(|d| d.hunk.id == h.id))
+                    .collect();
+                let cur = st.buffers.get(&f.file).cloned().or_else(|| {
+                    std::fs::read(st.root.join(&f.file))
+                        .ok()
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                });
+                let t = match (&f.base, &cur, hs.first().and_then(|h| h.whole)) {
+                    (_, _, Some(_)) => f.new.clone(),
+                    (Some(b), Some(c), None) => {
+                        let list: Vec<((usize, usize), &str, &str)> = hs
+                            .iter()
+                            .map(|h| (h.base, h.old.as_str(), h.new.as_str()))
+                            .collect();
+                        // (the hunks that conflict left out: the others shown)
+                        let ok: Vec<((usize, usize), &str, &str)> = list
+                            .iter()
+                            .copied()
+                            .filter(|l| prop::apply(b, c, std::slice::from_ref(l)).is_ok())
+                            .collect();
+                        prop::apply(b, c, &ok).ok()
+                    }
+                    _ => cur,
+                };
+                over.insert(f.file.clone(), t);
+            }
+            out.insert(format!("proposal:{id}"), over);
+        }
+        ProposalVersions {
+            root: st.root.clone(),
+            buffers: st.buffers.clone(),
+            props: out,
+        }
     }
 
     /// `changes` (§9.4): pending hunks, the verdicts not yet seen, the
@@ -1446,26 +2147,55 @@ impl Hub {
             .filter_map(|n| note_out(&st, &n.id))
             .collect();
         let reviews: Vec<Value> = st.store.reviews.iter().map(|r| json!(r)).collect();
+        let proposals = proposals_out(&mut st, true);
+        for p in &mut st.store.proposals {
+            for d in &mut p.decided {
+                d.seen = true;
+            }
+        }
         save(&st);
-        json!({"pending": pending, "verdicts": verdicts, "comments": comments, "reviews": reviews, "git": st.baseline.as_ref().is_some_and(Baseline::git)})
+        json!({"pending": pending, "verdicts": verdicts, "comments": comments, "reviews": reviews,
+               "proposals": proposals, "mode": mode_of(&st),
+               "git": st.baseline.as_ref().is_some_and(Baseline::git)})
     }
 
     // ---- the viewer's ops (§9.5) ----
 
     /// A `review_*` op of the viewer.
     pub fn viewer(&self, op: &str, req: &Value) -> Result<Value, String> {
+        // (the note or proposal an op is on: `target`, the request's `id`
+        // being the request's own)
+        let named;
+        let req = if req.get("target").is_some() {
+            let mut r = req.clone();
+            r["id"] = req["target"].clone();
+            named = r;
+            &named
+        } else {
+            req
+        };
         let r = match op {
             "review_state" => {
-                let st = lock(&self.st);
-                Ok(state_json(&st))
+                let mut st = lock(&self.st);
+                Ok(state_json(&mut st))
             }
             "review_note" => self.add_note(req),
             "review_reply" => self.reply(req, "you"),
             "review_resolve" => self.resolve(req, "you"),
             "review_reopen" => self.post(req, "you", Some(false)),
             "review_delete" => self.delete(req),
+            "review_edit" => self.edit_note(req),
+            "review_anchor" => self.anchor_note(req),
+            "review_restore" => self.restore(req),
             "review_clear" => self.clear(),
-            "review_accept" | "review_reject" | "review_comment" | "review_submit"
+            "review_accept"
+            | "review_reject"
+            | "review_comment"
+            | "review_submit"
+            | "review_mode"
+            | "review_proposal_accept"
+            | "review_proposal_reject"
+            | "review_proposal_comment"
                 if !lock(&self.st).changes =>
             {
                 Err(refused(CHANGES_OFF))
@@ -1478,6 +2208,10 @@ impl Hub {
                 self.set_changes(req["on"] == true);
                 Ok(json!({"changes": lock(&self.st).changes}))
             }
+            "review_mode" => self.mode(req),
+            "review_proposal_accept" => self.decide(req, true),
+            "review_proposal_reject" => self.decide(req, false),
+            "review_proposal_comment" => self.prop_comment(req),
             _ => return Err(format!("no op {op:?} here")),
         };
         r.map_err(|f| f.message)
@@ -1507,31 +2241,7 @@ impl Hub {
                 .and_then(|x| usize::try_from(x).ok())
                 .unwrap_or(0)
         };
-        let (mut file, mut s, mut e) = (file, n("start"), n("end"));
-        // TEMPORARY, remove with its cause: the glyph origins give an
-        // \input file's text the bytes of the \input command in the file
-        // that inputs it (an engine bug, its root fix in the origins'
-        // rework). Until then, where the origins name a place that does not
-        // show the words seen on the page, they are found by their letters
-        // in the files the build reads.
-        let seen = req["seen"].as_str().unwrap_or("");
-        let body0 = current_text(&mut st, &file).unwrap_or_default();
-        let quote0 = body0
-            .get(rt::floor(&body0, s)..rt::floor(&body0, e.max(s)))
-            .unwrap_or("");
-        if !seen.is_empty() && !rt::shows(quote0, seen) {
-            let mut names: Vec<String> = st.files.keys().cloned().collect();
-            names.sort_by_key(|n| (n != &file, n.clone()));
-            for name in names {
-                let Some(t) = current_text(&mut st, &name) else {
-                    continue;
-                };
-                if let Some((a0, b0)) = rt::find_seen(&t, seen, if name == file { s } else { 0 }) {
-                    (file, s, e) = (name, a0, b0);
-                    break;
-                }
-            }
-        }
+        let (s, e) = (n("start"), n("end"));
         let body = current_text(&mut st, &file).unwrap_or_default();
         let s = rt::floor(&body, s);
         let e = rt::floor(&body, e.max(s));
@@ -1560,6 +2270,8 @@ impl Hub {
                 at: at.clone(),
                 edited: Vec::new(),
                 diff: None,
+                changes: Vec::new(),
+                edited_at: None,
             }]
         };
         st.store.notes.push(Note {
@@ -1585,18 +2297,180 @@ impl Hub {
         Ok(out)
     }
 
+    /// A note deleted (`{id}`), or one post of its thread (`{id, post}`,
+    /// the user's own); what was deleted given back, for an undo
+    /// (`review_restore`).
     fn delete(&self, req: &Value) -> Result<Value, Fail> {
         let id = req["id"].as_str().unwrap_or("");
         let mut st = lock(&self.st);
-        let before = st.store.notes.len();
-        st.store.notes.retain(|n| n.id != id);
-        if st.store.notes.len() == before {
+        let Some(k) = st.store.notes.iter().position(|n| n.id == id) else {
             return Err(refused(format!("no note {id:?}")));
+        };
+        let gone = if let Some(i) = req["post"].as_u64().and_then(|i| usize::try_from(i).ok()) {
+            let n = &mut st.store.notes[k];
+            if i == 0 || i >= n.thread.len() || n.thread[i].by != "you" {
+                return Err(refused(
+                    "only your own replies can be deleted (delete the note for its first)",
+                ));
+            }
+            let p = n.thread.remove(i);
+            n.updated = now();
+            json!({"post": p, "at": i})
+        } else {
+            json!({"note": st.store.notes.remove(k), "at": k})
+        };
+        bump(&mut st, id);
+        save(&st);
+        drop(st);
+        self.cv.notify_all();
+        self.tell();
+        Ok(json!({"removed": 1, "gone": gone}))
+    }
+
+    /// A deletion undone (`{id, gone}` as `review_delete` gave it).
+    fn restore(&self, req: &Value) -> Result<Value, Fail> {
+        let gone = &req["gone"];
+        let at = gone["at"]
+            .as_u64()
+            .and_then(|i| usize::try_from(i).ok())
+            .unwrap_or(usize::MAX);
+        let mut st = lock(&self.st);
+        if gone["note"].is_object() {
+            let n: Note =
+                serde_json::from_value(gone["note"].clone()).map_err(|e| refused(e.to_string()))?;
+            if st.store.note(&n.id).is_some() {
+                return Err(refused(format!("{} is there", n.id)));
+            }
+            let id = n.id.clone();
+            let k = at.min(st.store.notes.len());
+            st.store.notes.insert(k, n);
+            bump(&mut st, &id);
+        } else {
+            let id = req["id"].as_str().unwrap_or("").to_owned();
+            let p: Post =
+                serde_json::from_value(gone["post"].clone()).map_err(|e| refused(e.to_string()))?;
+            let Some(n) = st.store.note_mut(&id) else {
+                return Err(refused(format!("no note {id:?}")));
+            };
+            let k = at.min(n.thread.len());
+            n.thread.insert(k, p);
+            bump(&mut st, &id);
         }
         save(&st);
         drop(st);
+        self.cv.notify_all();
         self.tell();
-        Ok(json!({"removed": 1}))
+        Ok(json!({"restored": 1}))
+    }
+
+    /// A note edited by the user (`{id, text?, kind?, post?}`): its text
+    /// (its first post's, or post `post`'s, the user's own), its kind
+    /// (highlight, note, comment). The agent is woken (`wait --notes`):
+    /// it may need to read it again.
+    fn edit_note(&self, req: &Value) -> Result<Value, Fail> {
+        let id = req["id"].as_str().unwrap_or("").to_owned();
+        let at = now();
+        let mut st = lock(&self.st);
+        let Some(n) = st.store.note_mut(&id) else {
+            return Err(refused(format!("no note {id:?}")));
+        };
+        if let Some(k) = req["kind"].as_str() {
+            if !matches!(k, "highlight" | "note" | "comment") || n.hunk.is_some() {
+                return Err(refused(format!(
+                    "a note's kind is highlight, note or comment, not {k:?}"
+                )));
+            }
+            k.clone_into(&mut n.kind);
+        }
+        if let Some(t) = req["text"].as_str() {
+            let t = t.trim().to_owned();
+            let i = req["post"]
+                .as_u64()
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(0);
+            match n.thread.get_mut(i) {
+                Some(p) if p.by == "you" => {
+                    if t.is_empty() && i > 0 {
+                        return Err(refused("a reply needs its words (delete it instead)"));
+                    }
+                    p.text = t;
+                    p.edited_at = Some(at.clone());
+                }
+                Some(_) => return Err(refused("only your own words can be edited")),
+                // (a highlight with no words yet: its first)
+                None if i == 0 && !t.is_empty() => n.thread.push(Post {
+                    by: "you".into(),
+                    text: t,
+                    at: at.clone(),
+                    edited: Vec::new(),
+                    diff: None,
+                    changes: Vec::new(),
+                    edited_at: None,
+                }),
+                None => {}
+            }
+        }
+        n.updated = at;
+        bump(&mut st, &id);
+        save(&st);
+        let out = note_out(&st, &id).unwrap_or(Value::Null);
+        drop(st);
+        self.cv.notify_all();
+        self.tell();
+        Ok(out)
+    }
+
+    /// A note's range moved or widened (`{id, start?, end?}`, bytes of its
+    /// file): its quote and context made again (a highlight's ends dragged).
+    fn anchor_note(&self, req: &Value) -> Result<Value, Fail> {
+        let id = req["id"].as_str().unwrap_or("").to_owned();
+        let mut st = lock(&self.st);
+        let Some(a) = st.store.note(&id).map(|n| n.anchor.clone()) else {
+            return Err(refused(format!("no note {id:?}")));
+        };
+        let body = current_text(&mut st, &a.file).unwrap_or_default();
+        let get = |k: &str, d: usize| {
+            req[k]
+                .as_u64()
+                .and_then(|x| usize::try_from(x).ok())
+                .unwrap_or(d)
+        };
+        let (mut s0, mut e0) = (get("start", a.start), get("end", a.end));
+        if s0 > e0 {
+            std::mem::swap(&mut s0, &mut e0);
+        }
+        let mut s0 = rt::floor(&body, s0.min(body.len()));
+        let mut e0 = rt::floor(&body, e0.min(body.len()).max(s0));
+        // (`snap`: a dragged end to its word's edge, as a selection ends)
+        if req["snap"] == true {
+            let word = |c: char| c.is_alphanumeric() || c == '\'' || c == '-';
+            while let Some(c) = body[e0..].chars().next().filter(|&c| word(c)) {
+                e0 += c.len_utf8();
+            }
+            while let Some(c) = body[..s0].chars().next_back().filter(|&c| word(c)) {
+                s0 -= c.len_utf8();
+            }
+        }
+        if s0 == e0 {
+            return Err(refused("a note's range needs at least a character"));
+        }
+        let (before, after) = rt::context(&body, (s0, e0));
+        let n = st.store.note_mut(&id).expect("there");
+        n.anchor.start = s0;
+        n.anchor.end = e0;
+        body[s0..e0].clone_into(&mut n.anchor.quote);
+        n.anchor.before = before;
+        n.anchor.after = after;
+        n.anchor.line = rt::line_of(&body, s0);
+        n.detached = false;
+        n.updated = now();
+        bump(&mut st, &id);
+        save(&st);
+        let out = note_out(&st, &id).unwrap_or(Value::Null);
+        drop(st);
+        self.cv.notify_all();
+        self.tell();
+        Ok(out)
     }
 
     #[allow(clippy::unnecessary_wraps, reason = "one signature for the ops")]
@@ -1813,6 +2687,8 @@ impl Hub {
                 at,
                 edited: Vec::new(),
                 diff: None,
+                changes: Vec::new(),
+                edited_at: None,
             }],
             hunk: Some(h.as_ref()),
             draft,
@@ -1933,6 +2809,7 @@ fn save(st: &State) {
     if s.notes.is_empty()
         && s.reviews.is_empty()
         && s.verdicts.is_empty()
+        && s.proposals.is_empty()
         && !Store::path(&st.root).exists()
     {
         return;
@@ -2340,6 +3217,8 @@ fn update_comments(st: &mut State, name: &str) {
                     at: at.clone(),
                     edited: Vec::new(),
                     diff: Some(h.as_ref()),
+                    changes: Vec::new(),
+                    edited_at: None,
                 });
                 n.updated.clone_from(&at);
             }
@@ -2382,6 +3261,39 @@ fn answered(n: &Note, h: &HunkNow) -> bool {
         .any(|e| e.file == h.file && e.start <= h.now.1 && h.now.0 <= e.end.max(e.start))
 }
 
+/// Hunk `h`'s JSON (§9.4), its context from `text` (where `h.now` is).
+fn hunk_json(h: &HunkNow, text: &str) -> Value {
+    let (s0, s1) = (h.now.0.min(text.len()), h.now.1.min(text.len()));
+    // (a line of context each side, cut at 48 characters)
+    let ls = text[..s0].rfind('\n').map_or(0, |i| i + 1);
+    let le = text[s1..].find('\n').map_or(text.len(), |i| s1 + i);
+    let clip = |s: &str, tail: bool| -> String {
+        let n = s.chars().count();
+        if n <= 48 {
+            return s.to_owned();
+        }
+        if tail {
+            format!("…{}", s.chars().skip(n - 47).collect::<String>())
+        } else {
+            format!("{}…", s.chars().take(47).collect::<String>())
+        }
+    };
+    json!({
+        "id": h.id,
+        "file": h.file,
+        "line": h.line,
+        "end_line": h.end_line,
+        "base": [h.base.0, h.base.1],
+        "now": [h.now.0, h.now.1],
+        "parts": h.parts.iter().map(|(k, t)| json!([k, t])).collect::<Vec<_>>(),
+        "before": clip(&text[ls..s0], true),
+        "after": clip(&text[s1..le], false),
+        "old": h.old,
+        "new": h.new,
+        "whole": h.whole,
+    })
+}
+
 fn hunks_out(st: &State) -> Vec<Value> {
     let mut all: Vec<&HunkNow> = st.files.values().flat_map(|t| t.hunks.iter()).collect();
     all.sort_by(|a, b| (a.file.as_str(), a.now.0).cmp(&(b.file.as_str(), b.now.0)));
@@ -2405,44 +3317,214 @@ fn hunks_out(st: &State) -> Vec<Value> {
                 .get(&h.file)
                 .and_then(|t| t.text.as_deref())
                 .unwrap_or("");
-            // (a line of context each side, cut at 48 characters)
-            let ls = text[..h.now.0].rfind('\n').map_or(0, |i| i + 1);
-            let le = text[h.now.1..]
-                .find('\n')
-                .map_or(text.len(), |i| h.now.1 + i);
-            let clip = |s: &str, tail: bool| -> String {
-                let n = s.chars().count();
-                if n <= 48 {
-                    return s.to_owned();
-                }
-                if tail {
-                    format!("…{}", s.chars().skip(n - 47).collect::<String>())
-                } else {
-                    format!("{}…", s.chars().take(47).collect::<String>())
-                }
-            };
-            json!({
-                "id": h.id,
-                "file": h.file,
-                "line": h.line,
-                "end_line": h.end_line,
-                "base": [h.base.0, h.base.1],
-                "now": [h.now.0, h.now.1],
-                "parts": h.parts.iter().map(|(k, t)| json!([k, t])).collect::<Vec<_>>(),
-                "before": clip(&text[ls..h.now.0], true),
-                "after": clip(&text[h.now.1..le], false),
-                "old": h.old,
-                "new": h.new,
-                "whole": h.whole,
-                "note": note,
-                "comments": comments,
-            })
+            let mut j = hunk_json(h, text);
+            j["note"] = json!(note);
+            j["comments"] = json!(comments);
+            j
         })
         .collect()
 }
 
+/// The review mode: `direct` unless set to `propose`.
+fn mode_of(st: &State) -> &str {
+    if st.mode == "propose" {
+        "propose"
+    } else {
+        "direct"
+    }
+}
+
+/// A title from the why: its first line, cut at 72 characters.
+fn first_line(why: &str) -> String {
+    let l = why.lines().next().unwrap_or("").trim();
+    if l.is_empty() {
+        return "The agent's changes".into();
+    }
+    if l.chars().count() <= 72 {
+        l.to_owned()
+    } else {
+        format!("{}…", l.chars().take(71).collect::<String>())
+    }
+}
+
+/// Proposal `id`'s files (its revision's), loaded once.
+fn prop_files(st: &mut State, id: &str) -> Vec<prop::PropFile> {
+    let rev = st
+        .store
+        .proposals
+        .iter()
+        .find(|x| x.id == id)
+        .map_or(0, |x| x.revision);
+    if let Some((r, f)) = st.props.get(id)
+        && *r == rev
+    {
+        return f.clone();
+    }
+    let f = prop::load(&st.root, id, rev).unwrap_or_default();
+    st.props.insert(id.to_owned(), (rev, f.clone()));
+    f
+}
+
+/// A proposal's hunks: each file's, from its base to its new text.
+fn prop_hunks(files: &[prop::PropFile]) -> Vec<HunkNow> {
+    files
+        .iter()
+        .flat_map(|f| make_hunks(&f.file, f.base.as_deref(), f.new.as_deref()))
+        .collect()
+}
+
+/// A direct batch with no hunk left waiting: done.
+fn settle_direct(st: &mut State) {
+    let pending = st.files.values().any(|t| !t.hunks.is_empty());
+    if !pending {
+        for x in &mut st.store.proposals {
+            if x.mode == "direct" && x.status != "done" {
+                x.status = "done".into();
+            }
+        }
+    }
+}
+
+/// The proposals (§9.6), newest first: each with its hunks, their state
+/// (`open`, `accepted`, `rejected`, `conflict`), and its thread; a direct
+/// batch's hunks are the live ones. `unseen`: only the decisions the
+/// agent has not seen yet in `decided`.
+fn proposals_out(st: &mut State, unseen: bool) -> Vec<Value> {
+    if !st.changes {
+        return Vec::new();
+    }
+    settle_direct(st);
+    let list: Vec<Proposal> = st
+        .store
+        .proposals
+        .iter()
+        .rev()
+        .filter(|x| x.status != "done" || x.mode == "propose")
+        .take(20)
+        .cloned()
+        .collect();
+    let live: Vec<Value> = hunks_out(st);
+    list.into_iter()
+        .map(|x| {
+            let mut v = json!(x);
+            if unseen {
+                v["decided"] = json!(x.decided.iter().filter(|d| !d.seen).collect::<Vec<_>>());
+            }
+            if x.mode == "direct" {
+                v["hunks"] = json!(live);
+                return v;
+            }
+            let files = prop_files(st, &x.id);
+            let hunks: Vec<Value> = files
+                .iter()
+                .flat_map(|f| {
+                    let text = f.new.clone().unwrap_or_default();
+                    let cur = st.buffers.get(&f.file).cloned().or_else(|| {
+                        st.files
+                            .get(&f.file)
+                            .and_then(|t| t.text.clone())
+                            .or_else(|| {
+                                std::fs::read(st.root.join(&f.file))
+                                    .ok()
+                                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            })
+                    });
+                    prop_hunks(std::slice::from_ref(f))
+                        .into_iter()
+                        .map(|h| {
+                            let mut j = hunk_json(&h, &text);
+                            let decided = x.decided.iter().rev().find(|d| d.hunk.id == h.id);
+                            let state = if let Some(d) = decided {
+                                d.verdict.clone()
+                            } else {
+                                {
+                                    let ok = match (h.whole, &f.base, &cur) {
+                                        (Some("added"), _, c) => c.is_none() || c == &f.new,
+                                        (Some(_), Some(b), Some(c)) => b == c,
+                                        (None, Some(b), Some(c)) => prop::apply(
+                                            b,
+                                            c,
+                                            &[(h.base, h.old.as_str(), h.new.as_str())],
+                                        )
+                                        .is_ok(),
+                                        _ => false,
+                                    };
+                                    if ok { "open" } else { "conflict" }.to_owned()
+                                }
+                            };
+                            j["state"] = json!(state);
+                            j["proposal"] = json!(x.id);
+                            j["note"] = Value::Null;
+                            j["comments"] = json!([]);
+                            j
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            v["hunks"] = json!(hunks);
+            v
+        })
+        .collect()
+}
+
+/// The proposals as Compare's versions ([`Hub::versions`]).
+pub struct ProposalVersions {
+    root: PathBuf,
+    buffers: HashMap<String, String>,
+    props: HashMap<String, HashMap<String, Option<String>>>,
+}
+
+struct Over {
+    root: PathBuf,
+    buffers: HashMap<String, String>,
+    over: HashMap<String, Option<String>>,
+}
+
+impl phitex_diff::Files for Over {
+    fn read(&self, path: &str) -> Option<String> {
+        if let Some(t) = self.over.get(path) {
+            return t.clone();
+        }
+        self.buffers.get(path).cloned().or_else(|| {
+            std::fs::read(self.root.join(path))
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+        })
+    }
+}
+
+impl crate::compare::Versions for ProposalVersions {
+    fn files(&self, rev: &str) -> Result<Box<dyn phitex_diff::Files>, String> {
+        let over = if rev == "now" {
+            HashMap::new()
+        } else {
+            self.props
+                .get(rev)
+                .cloned()
+                .ok_or_else(|| format!("no {rev}"))?
+        };
+        Ok(Box::new(Over {
+            root: self.root.clone(),
+            buffers: self.buffers.clone(),
+            over,
+        }))
+    }
+
+    fn log(&self, _skip: usize, _limit: usize) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+}
+
 /// The `review` event's state (§9.5).
-fn state_json(st: &State) -> Value {
+fn state_json(st: &mut State) -> Value {
+    let proposals = proposals_out(st, false);
+    let mut v = state_json_of(st);
+    v["proposals"] = json!(proposals);
+    v["mode"] = json!(mode_of(st));
+    v
+}
+
+fn state_json_of(st: &State) -> Value {
     let notes: Vec<Value> = st
         .store
         .notes
@@ -2677,6 +3759,327 @@ mod tests {
         let p = pending(&h);
         assert_eq!(p.len(), 1);
         assert_eq!(p[0]["note"], id.as_str());
+    }
+
+    fn req(h: &Hub, method: &str, p: Value) -> Result<Value, Fail> {
+        h.request(method, &p).expect("a method of the hub")
+    }
+
+    #[test]
+    fn a_proposal_from_the_workspace_leaves_the_files_until_accepted() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let m = req(&h, "phitex/review/mode", json!({"mode": "propose"})).expect("propose mode");
+        let work = PathBuf::from(m["workspace"].as_str().expect("its workspace"));
+        assert_eq!(std::fs::read_to_string(work.join("main.tex")).unwrap(), DOC);
+        assert_eq!(h.status(false)["review"], "propose");
+        // (the agent writes in the workspace: the files untouched)
+        let t = DOC.replace("quick", "swift").replace("second", "final");
+        std::fs::write(work.join("main.tex"), &t).expect("written");
+        let p = req(
+            &h,
+            "phitex/propose",
+            json!({"why": "Sharper words.\nThe fox is swift.", "title": "Words"}),
+        )
+        .expect("proposed");
+        assert_eq!(
+            (p["id"].as_str(), p["revision"].as_u64(), p["from"].as_str()),
+            (Some("p1"), Some(1), Some("workspace"))
+        );
+        assert_eq!(p["hunks"].as_array().unwrap().len(), 2, "{p}");
+        assert_eq!(
+            std::fs::read_to_string(d.join("main.tex")).unwrap(),
+            DOC,
+            "the file untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work.join("main.tex")).unwrap(),
+            DOC,
+            "the workspace as the files are"
+        );
+        // (the user types elsewhere in the file meanwhile)
+        let mine = DOC.replace(
+            "A second paragraph, with words.",
+            "A second paragraph, with words.\n\nMy own line.",
+        );
+        h.user_edit("main.tex", None, DOC, true);
+        h.user_edit("main.tex", None, &mine, false);
+        std::fs::write(d.join("main.tex"), &mine).expect("the user's, saved");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        h.user_closed("main.tex");
+        assert_eq!(
+            pending(&h),
+            Vec::<Value>::new(),
+            "the user's typing is theirs"
+        );
+        // (one hunk accepted: applied where it is now, the user's line kept, nothing pending)
+        let hs = p["hunks"].as_array().unwrap().clone();
+        h.viewer(
+            "review_proposal_accept",
+            &json!({"id": "p1", "hunks": [hs[0]["id"]]}),
+        )
+        .expect("accepted");
+        let disk = std::fs::read_to_string(d.join("main.tex")).unwrap();
+        assert!(
+            disk.contains("swift") && disk.contains("second") && disk.contains("My own line."),
+            "{disk}"
+        );
+        rebuilt(&h, &d, 3, &["main.tex"]);
+        assert_eq!(
+            pending(&h),
+            Vec::<Value>::new(),
+            "an accepted proposal is not the agent's pending change"
+        );
+        // (the other rejected: the file keeps its word; the proposal partly accepted)
+        h.viewer(
+            "review_proposal_reject",
+            &json!({"id": "p1", "hunks": [hs[1]["id"]]}),
+        )
+        .expect("rejected");
+        assert!(
+            std::fs::read_to_string(d.join("main.tex"))
+                .unwrap()
+                .contains("second")
+        );
+        let c = h.changes();
+        let x = &c["proposals"][0];
+        assert_eq!(x["status"], "partial");
+        assert_eq!(x["decided"].as_array().unwrap().len(), 2, "{x}");
+        assert_eq!(
+            h.changes()["proposals"][0]["decided"],
+            json!([]),
+            "told once"
+        );
+        // (a stale or decided hunk refused)
+        let e = h
+            .viewer(
+                "review_proposal_accept",
+                &json!({"id": "p1", "hunks": [hs[1]["id"]]}),
+            )
+            .unwrap_err();
+        assert!(e.contains("no open change"), "{e}");
+    }
+
+    #[test]
+    fn a_proposal_conflicts_where_the_user_changed_its_words_and_is_revised() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let m = req(&h, "phitex/review/mode", json!({"mode": "propose"})).expect("propose mode");
+        let work = PathBuf::from(m["workspace"].as_str().unwrap());
+        std::fs::write(work.join("main.tex"), DOC.replace("lazy dog", "sleepy dog"))
+            .expect("written");
+        let p = req(&h, "phitex/propose", json!({"why": "A sleepier dog."})).expect("proposed");
+        assert_eq!(p["title"], "A sleepier dog.");
+        let hid = p["hunks"][0]["id"].clone();
+        // (the user changes the same words: a conflict, nothing applied)
+        let mine = DOC.replace("lazy dog", "tired dog");
+        std::fs::write(d.join("main.tex"), &mine).expect("the user's");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let st = h.viewer("review_state", &json!({})).unwrap();
+        assert_eq!(st["proposals"][0]["hunks"][0]["state"], "conflict", "{st}");
+        let e = h
+            .viewer(
+                "review_proposal_accept",
+                &json!({"id": "p1", "hunks": "all"}),
+            )
+            .unwrap_err();
+        assert!(e.contains("changed since the agent proposed"), "{e}");
+        assert_eq!(std::fs::read_to_string(d.join("main.tex")).unwrap(), mine);
+        // (the user asks for changes; the agent is woken and revises)
+        let w = std::thread::scope(|sc| {
+            let waiter = sc.spawn(|| h.wait_notes(Some(Instant::now() + Duration::from_secs(5))));
+            std::thread::sleep(Duration::from_millis(50));
+            h.viewer("review_proposal_comment", &json!({"id": "p1", "text": "Keep my word, change the fox.", "verdict": "request_changes", "hunk": hid}))
+                .expect("asked");
+            waiter.join().unwrap()
+        })
+        .expect("woken");
+        assert_eq!(w["proposals"][0]["status"], "changes_requested", "{w}");
+        assert_eq!(w["proposals"][0]["thread"][0]["diff"]["new"], "sleepy");
+        // (the workspace is the files as they are now: the agent revises there)
+        let work_now = std::fs::read_to_string(work.join("main.tex")).unwrap();
+        assert_eq!(work_now, DOC, "the workspace was made when proposed");
+        req(&h, "phitex/review/workspace", json!({})).expect("made again");
+        assert_eq!(
+            std::fs::read_to_string(work.join("main.tex")).unwrap(),
+            mine
+        );
+        std::fs::write(work.join("main.tex"), mine.replace("brown fox", "red fox"))
+            .expect("revised");
+        let r = req(
+            &h,
+            "phitex/propose",
+            json!({"why": "The fox, not the dog.", "revise": "p1"}),
+        )
+        .expect("revised");
+        assert_eq!(
+            (
+                r["id"].as_str(),
+                r["revision"].as_u64(),
+                r["status"].as_str()
+            ),
+            (Some("p1"), Some(2), Some("open"))
+        );
+        let post = r["thread"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(post["by"], "agent");
+        assert!(
+            post["changes"].as_array().is_some_and(|c| !c.is_empty()),
+            "the revision's diff: {post}"
+        );
+        h.viewer(
+            "review_proposal_accept",
+            &json!({"id": "p1", "hunks": "all"}),
+        )
+        .expect("accepted");
+        let disk = std::fs::read_to_string(d.join("main.tex")).unwrap();
+        assert!(
+            disk.contains("red fox") && disk.contains("tired dog"),
+            "{disk}"
+        );
+        assert_eq!(h.changes()["proposals"][0]["status"], "accepted");
+    }
+
+    #[test]
+    fn in_propose_mode_files_the_agent_edited_become_a_proposal_and_go_back() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        req(&h, "phitex/review/mode", json!({"mode": "propose"})).expect("propose mode");
+        let t = DOC.replace("quick", "QUICK");
+        std::fs::write(d.join("main.tex"), &t).expect("the agent's edit");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        assert_eq!(pending(&h).len(), 1);
+        let p = req(&h, "phitex/propose", json!({"why": "Louder."})).expect("proposed");
+        assert_eq!(p["from"], "files");
+        assert_eq!(
+            std::fs::read_to_string(d.join("main.tex")).unwrap(),
+            DOC,
+            "put back"
+        );
+        assert_eq!(pending(&h), Vec::<Value>::new());
+        // (Show diff: the proposal over the files as they are)
+        let v = h.versions();
+        let now = crate::compare::Versions::files(&v, "now").unwrap();
+        let theirs = crate::compare::Versions::files(&v, "proposal:p1").unwrap();
+        assert_eq!(now.read("main.tex").as_deref(), Some(DOC));
+        assert_eq!(theirs.read("main.tex").as_deref(), Some(t.as_str()));
+        h.viewer(
+            "review_proposal_accept",
+            &json!({"id": "p1", "hunks": "all"}),
+        )
+        .expect("accepted");
+        assert_eq!(std::fs::read_to_string(d.join("main.tex")).unwrap(), t);
+        rebuilt(&h, &d, 3, &["main.tex"]);
+        assert_eq!(pending(&h), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn in_direct_mode_propose_names_the_changes_waiting() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let e = req(&h, "phitex/propose", json!({"why": "Nothing yet."})).unwrap_err();
+        assert!(e.message.contains("no changes"), "{}", e.message);
+        std::fs::write(
+            d.join("main.tex"),
+            DOC.replace("quick", "QUICK").replace("second", "SECOND"),
+        )
+        .expect("edited");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let p = req(
+            &h,
+            "phitex/propose",
+            json!({"why": "Louder words.", "title": "Shout"}),
+        )
+        .expect("named");
+        assert_eq!(
+            (p["mode"].as_str(), p["title"].as_str()),
+            (Some("direct"), Some("Shout"))
+        );
+        assert_eq!(p["hunks"].as_array().unwrap().len(), 2);
+        let id = p["hunks"][0]["id"].clone();
+        h.viewer(
+            "review_proposal_accept",
+            &json!({"id": "p1", "hunks": [id]}),
+        )
+        .expect("accepted");
+        assert_eq!(pending(&h).len(), 1);
+        h.viewer(
+            "review_proposal_reject",
+            &json!({"id": "p1", "hunks": "all"}),
+        )
+        .expect("rejected");
+        assert_eq!(pending(&h), Vec::<Value>::new());
+        let c = h.changes();
+        assert_eq!(c["proposals"], json!([]), "a batch decided is done: {c}");
+        assert_eq!(c["verdicts"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_note_edited_moved_deleted_and_restored() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let s = DOC.find("quick").unwrap();
+        let n = h
+            .viewer("review_note", &json!({"kind": "highlight", "anchor": {"file": "main.tex", "start": s, "end": s + 5}}))
+            .unwrap();
+        let id = n["id"].as_str().unwrap().to_owned();
+        // (its kind and words changed: the agent woken, told when)
+        let w = std::thread::scope(|sc| {
+            let waiter = sc.spawn(|| h.wait_notes(Some(Instant::now() + Duration::from_secs(5))));
+            std::thread::sleep(Duration::from_millis(50));
+            h.viewer(
+                "review_edit",
+                &json!({"id": id, "kind": "comment", "text": "Say fast."}),
+            )
+            .unwrap();
+            waiter.join().unwrap()
+        })
+        .unwrap();
+        assert_eq!(w["notes"][0]["kind"], "comment");
+        assert_eq!(w["notes"][0]["thread"][0]["text"], "Say fast.");
+        h.viewer("review_edit", &json!({"id": id, "text": "Say swift."}))
+            .unwrap();
+        let n = h.viewer("review_state", &json!({})).unwrap()["notes"][0].clone();
+        assert_eq!(n["thread"][0]["text"], "Say swift.");
+        assert!(n["thread"][0]["edited_at"].is_string(), "{n}");
+        // (its range widened to "quick brown")
+        let n = h
+            .viewer("review_anchor", &json!({"id": id, "end": s + 11}))
+            .unwrap();
+        assert_eq!(n["anchor"]["quote"], "quick brown");
+        // (the agent's reply can't be edited; the user's reply can, and goes alone)
+        req(&h, "phitex/notes/reply", json!({"id": id, "text": "Done."})).unwrap();
+        h.viewer("review_reply", &json!({"id": id, "text": "Thanks"}))
+            .unwrap();
+        let e = h
+            .viewer("review_edit", &json!({"id": id, "post": 1, "text": "x"}))
+            .unwrap_err();
+        assert!(e.contains("own words"), "{e}");
+        h.viewer(
+            "review_edit",
+            &json!({"id": id, "post": 2, "text": "Thanks!"}),
+        )
+        .unwrap();
+        let g = h
+            .viewer("review_delete", &json!({"id": id, "post": 2}))
+            .unwrap();
+        assert_eq!(g["gone"]["post"]["text"], "Thanks!");
+        h.viewer("review_restore", &json!({"id": id, "gone": g["gone"]}))
+            .unwrap();
+        assert_eq!(
+            h.viewer("review_state", &json!({})).unwrap()["notes"][0]["thread"][2]["text"],
+            "Thanks!"
+        );
+        // (the note deleted: gone for the agent; undone: back, the same)
+        let g = h.viewer("review_delete", &json!({"id": id})).unwrap();
+        assert_eq!(
+            req(&h, "phitex/notes/list", json!({"all": true})).unwrap()["notes"],
+            json!([])
+        );
+        h.viewer("review_restore", &json!({"gone": g["gone"]}))
+            .unwrap();
+        let back = req(&h, "phitex/notes/list", json!({"all": true})).unwrap();
+        assert_eq!(back["notes"][0]["id"], id.as_str());
+        assert_eq!(back["notes"][0]["thread"].as_array().unwrap().len(), 3);
     }
 
     #[test]

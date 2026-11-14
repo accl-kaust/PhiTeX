@@ -405,6 +405,8 @@ header:active { cursor: grabbing; }
 .smarks i:hover { transform: scale(1.5, 2); }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
+.smarks i.rv-highlight { background: #c9a800; } .smarks i.rv-note { background: #2f6fd1; } .smarks i.rv-comment { background: #e08a1e; }
+.smarks i.rv-change { background: #1a7f37; } .smarks i.rv-dim { opacity: .4; }
 .phx-card[data-key] { cursor: pointer; }
 /* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
    amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */

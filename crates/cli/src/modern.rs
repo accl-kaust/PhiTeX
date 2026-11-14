@@ -722,6 +722,8 @@ pub struct Target {
     pub experimental_review: bool,
     /// watch: asked at quit whether to write the PDF (`watch-ask-write`, on by default).
     pub watch_ask_write: bool,
+    /// The review mode a watch starts in (`review-mode`: direct, propose).
+    pub review_mode: Option<String>,
     /// `\write18` runs commands.
     pub shell_escape: bool,
     /// watch: the editor a double-click opens (`--editor`, `phitex.toml`).
@@ -1083,6 +1085,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         review_accept_disk: cfg.review_accept_disk.unwrap_or(false),
         experimental_review: cfg.experimental_review.unwrap_or(false),
         watch_ask_write: cfg.watch_ask_write.unwrap_or(true),
+        review_mode: cfg.review_mode.clone(),
         shell_escape: o.shell_escape || rc_shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,

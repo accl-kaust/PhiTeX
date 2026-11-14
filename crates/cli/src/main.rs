@@ -43,6 +43,7 @@ mod mkfont;
 mod modern;
 mod news;
 mod problems;
+mod proposal;
 mod report;
 mod review;
 mod review_text;
