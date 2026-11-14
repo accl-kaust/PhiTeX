@@ -7167,6 +7167,29 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a command node's, empty too: what its text declares,
         // `Exec::static_contribs`)
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
+            // (observe, `PHITEX_DOCLINES_TRACE`: the lines a run began, by
+            // file, with its text's start)
+            if crate::exec::obs_flag!("PHITEX_DOCLINES_TRACE") {
+                let v = self.v;
+                let by: Vec<String> = self
+                    .doc_lines
+                    .iter()
+                    .map(|(n, k)| format!("{}:{k}", v.render(*n)))
+                    .collect();
+                let text: String = self
+                    .text_arg()
+                    .map(|x| v.render(x))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(80)
+                    .collect();
+                eprintln!(
+                    "doclines: node {} op {:?} pulled {} began {by:?} text {text}",
+                    self.cx.node().raw(),
+                    self.cx.op(),
+                    self.pulled
+                );
+            }
             let m = lines_value(self.v, &self.doc_lines);
             let f = self
                 .ops
