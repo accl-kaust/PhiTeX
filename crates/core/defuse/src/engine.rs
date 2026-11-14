@@ -51,7 +51,7 @@ pub(crate) struct Env {
     /// The changes of `values` that replaced a value so far, counted under
     /// its write lock before it is let go: the threads' copies of the
     /// values are of one count (`read::env_value`).
-    pub(crate) gen: AtomicU64,
+    pub(crate) changes: AtomicU64,
 }
 
 pub(crate) struct Paths {
@@ -513,7 +513,7 @@ impl Engine {
                 values: Lock::new(FxHashMap::default()),
                 provider: Lock::new(None),
                 asking: Mx::new(FxHashMap::default()),
-                gen: AtomicU64::new(0),
+                changes: AtomicU64::new(0),
             },
             paths,
             projections,
@@ -1484,7 +1484,7 @@ impl Engine {
             vals.insert(f, Some(x));
             self.bump(f);
         }
-        self.env.gen.fetch_add(1, Ordering::AcqRel);
+        self.env.changes.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Changes environment values; readers of each changed field whose
@@ -1496,7 +1496,7 @@ impl Engine {
                 vals.insert(*f, *x);
                 self.bump(*f);
             }
-            self.env.gen.fetch_add(1, Ordering::AcqRel);
+            self.env.changes.fetch_add(1, Ordering::AcqRel);
         }
         let mut st = CommitStats::default();
         for (f, _) in changes {

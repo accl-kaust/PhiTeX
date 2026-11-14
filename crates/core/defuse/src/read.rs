@@ -59,7 +59,7 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
     // (this thread's copy first, of the count now: no lock, no line
     // written that another thread reads. Every environment read of every
     // worker took the map's read lock, its count bouncing between cores)
-    let g = eng.env.gen.load(Ordering::Acquire);
+    let g = eng.env.changes.load(Ordering::Acquire);
     if let Some(x) = ENV.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&f).copied()).flatten()) {
         return x;
     }
@@ -84,7 +84,7 @@ fn env_value_shared(eng: &Engine, f: Field) -> (u64, Option<ValueId>) {
         let vals = eng.env.values.read();
         // (stable under the read lock: a replacement counts under the
         // write lock)
-        let g = eng.env.gen.load(Ordering::Acquire);
+        let g = eng.env.changes.load(Ordering::Acquire);
         if let Some(x) = vals.get(&f) {
             return keep(g, *x);
         }
@@ -113,7 +113,7 @@ fn env_value_shared(eng: &Engine, f: Field) -> (u64, Option<ValueId>) {
     // (what the map holds now, with its count: the answer, or a value set
     // meanwhile)
     let vals = eng.env.values.read();
-    let g = eng.env.gen.load(Ordering::Acquire);
+    let g = eng.env.changes.load(Ordering::Acquire);
     match vals.get(&f) {
         Some(&y) => keep(g, y),
         None => (g, x),
@@ -178,7 +178,7 @@ pub(crate) enum Met {
 
 thread_local! {
     /// This thread's copy of the environment's values: (values instance,
-    /// `Env::gen` when read, the values read) ([`env_value`]).
+    /// `Env::changes` when read, the values read) ([`env_value`]).
     static ENV: std::cell::RefCell<(u64, u64, FxHashMap<Field, Option<ValueId>>)> =
         std::cell::RefCell::new((0, 0, FxHashMap::default()));
     /// This thread's copies of the segments' scope chains at their starts:
@@ -1924,9 +1924,8 @@ fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
     // kept on it, with no lock taken and no count shared with another
     // thread. Every scoped read of every worker took the segment's lock and
     // cloned its chain: amsldoc at -j8, 14x the cycles of -j1 there)
-    let mine = |t: &Segment| {
-        CHAINS.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&t.id).cloned()).flatten())
-    };
+    let mine =
+        |t: &Segment| CHAINS.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&t.id).cloned()).flatten());
     let keep = |t: &Segment, c: &[u64]| {
         CHAINS.with_borrow_mut(|m| {
             if m.0 != inst || m.1 != g {
