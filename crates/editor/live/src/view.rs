@@ -849,6 +849,10 @@ impl Viewer {
     /// is given them with the pages ([`Viewer::diff_shown`]'s `settled`).
     pub fn diff_stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
         let mut d = lock(&self.diff);
+        // (a page the diff's build in already has: as `stream_page`)
+        if d.hashes.get(k) == Some(&hash) {
+            return;
+        }
         let told = d.streamed.put(k, hash, pdf, pages, exact);
         let shown = d.shown;
         drop(d);
@@ -1025,6 +1029,13 @@ impl Viewer {
     /// pages are the ones shown, not the diff's ([`Viewer::diff_shown`]
     /// gives them to the viewer when they are again).
     pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
+        // (a page the build in already has, as it is: its file made beside
+        // the evaluation came after the build was in. Kept, it took the
+        // build's page over, the viewer drew it again from a file of its
+        // own, blank meanwhile, as a view scrolled over it)
+        if lock(&self.pages).hashes.get(k) == Some(&hash) {
+            return;
+        }
         let told = lock(&self.streamed).put(k, hash, pdf, pages, exact);
         if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
             self.emit(&e);
@@ -1791,6 +1802,47 @@ mod tests {
         assert_eq!(pages(&v), json!([named(9)]));
         v.stream_page(1, 10, vec![4; 10], 2, true);
         assert_eq!(take().last().unwrap()["event"], "page");
+    }
+
+    #[test]
+    fn a_page_streamed_after_its_build_is_in_takes_nothing_over() {
+        let v = Viewer::default();
+        let got: Arc<Mutex<Vec<Value>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| {
+                lock(&got).push(serde_json::from_str(t).unwrap());
+            }));
+        }
+        let take = || std::mem::take(&mut *lock(&got));
+        let pages = |v: &Viewer| -> Value {
+            serde_json::from_str::<Value>(&v.answer(&json!({"id": 1, "op": "pages"}))).unwrap()
+                ["json"]["pages"]
+                .clone()
+        };
+        v.built(&Built {
+            pdf: None,
+            hashes: vec![0x21, 0x22],
+            history: 0,
+            ms: 0.0,
+            diagnostics: Some(Vec::new()),
+            since_ms: None,
+            origins: None,
+            changed: None,
+            parts: serde_json::Map::new(),
+        });
+        take();
+        // (page 2's file, made beside the evaluation, after its build came
+        // in, as the build has it: nothing told, the build's page kept)
+        v.stream_page(1, 0x22, vec![5; 10], 2, true);
+        assert_eq!(take(), Vec::<Value>::new());
+        assert_eq!(pages(&v), json!(["0000000000000021", "0000000000000022"]));
+        assert_eq!(v.streamed_hashes(), Vec::<Option<u64>>::new());
+        // (a page the next build changes: streamed as before)
+        v.stream_page(1, 0x23, vec![6; 10], 2, true);
+        let e = take();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0]["event"], "page");
     }
 
     #[test]
