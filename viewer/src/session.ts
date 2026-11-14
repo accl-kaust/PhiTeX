@@ -1245,7 +1245,24 @@ export class PreviewSession {
    * came from, from its first glyph's start to its last's end).
    */
   async selectPage(sel: { k: number; rects: [number, number, number, number][] }[]): Promise<void> {
-    if (!this.opened || !sel.length) return;
+    const best = await this.sourceOf(sel);
+    if (!best) return;
+    const { file, start: lo, end: hi } = best;
+    // (the host has the files: it selects them, as it opens a double-click's)
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
+    const t = this.files[file];
+    if (t === undefined) return;
+    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+  }
+
+  /**
+   * The source of text selected on the pages ([x, y top, w, h] boxes in PDF
+   * points, by page): the file most of its glyphs came from, from its first
+   * glyph's start to its last's end, in bytes (the glyph origins'); null
+   * where none of it came from a file.
+   */
+  async sourceOf(sel: { k: number; rects: [number, number, number, number][] }[]): Promise<{ file: string; start: number; end: number } | null> {
+    if (!this.opened || !sel.length) return null;
     const by = new Map<string, { lo: number; hi: number; n: number }>();
     for (const { k, rects } of sel) {
       for (const g of this.cached(k) ?? (await this.glyphsOf(k))) {
@@ -1259,13 +1276,16 @@ export class PreviewSession {
     }
     const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
     this.tr("select→source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return;
+    if (!best) return null;
     const [file, { lo, hi }] = best;
-    // (the host has the files: it selects them, as it opens a double-click's)
-    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
-    const t = this.files[file];
-    if (t === undefined) return;
-    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+    return { file, start: lo, end: hi };
+  }
+
+  /** The source place nearest (x, y) on page `k` (PDF points from its top left): a spot with no text of its own, a figure's. */
+  async spotOf(k: number, x: number, y: number): Promise<{ file: string; start: number } | null> {
+    if (!this.opened) return null;
+    const g = nearest(this.cached(k) ?? (await this.glyphsOf(k)), x, y);
+    return g?.file ? { file: g.file, start: g.start } : null;
   }
 
   /**

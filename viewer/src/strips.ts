@@ -29,6 +29,8 @@ export type Frame = {
   /** The part of the page drawn, in pixels (left, top, width, height): a window's (`frame`'s `win`), else the whole page. */
   win?: [number, number, number, number];
   us: { open: number; probe: number; draw: number; all: number };
+  /** The page's identity in the file it was drawn from (a core that says it): a frame asked as a build came in may be the last build's. */
+  hash?: string | null;
 };
 
 /**
@@ -97,7 +99,7 @@ export class Strips {
    * `data-ph` the whole page's pixels at the scale its sharpest part is
    * drawn at (the box that shows them one to one).
    */
-  async page(k: number, scale: number, view?: Win | null): Promise<{ el: HTMLElement; w: number; h: number; links: Link[] } | null> {
+  async page(k: number, scale: number, view?: Win | null): Promise<{ el: HTMLElement; w: number; h: number; links: Link[]; hash?: string | null } | null> {
     // (a page not seen yet: its size from another page's, else asked small)
     const size = this.sizes.get(k) ?? this.sizes.values().next().value;
     if (view && !size) await this.frame(k, Math.min(scale, 1));
@@ -111,7 +113,7 @@ export class Strips {
       el.className = "phx-page";
       Object.assign(el.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
       el.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
-      return { el, w: f.w, h: f.h, links: f.links };
+      return { el, w: f.w, h: f.h, links: f.links, hash: f.hash };
     }
     // (the part in view and half as much again each side, at most
     // BUDGET pixels: cut around its middle)
@@ -139,7 +141,8 @@ export class Strips {
       height: `${(h / part.ph) * 100}%`,
     });
     el.append(this.canvas(base), tile, textLayer(base.text.map(composeLine), base.w, base.h));
-    return { el, w: base.w, h: base.h, links: base.links };
+    // (its two frames of two builds: of neither, drawn again)
+    return { el, w: base.w, h: base.h, links: base.links, hash: base.hash === part.hash ? base.hash : base.hash === undefined ? undefined : "" };
   }
 
   /** Page `k`'s frame at `scale` (only `win` of it, if given), its strips fetched and kept. */

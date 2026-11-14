@@ -24,6 +24,7 @@ import { Strips, type Frame, type StripSource } from "../../../viewer/src/strips
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook, SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
+import type { ReviewHost, ReviewState } from "../../../viewer/src/review.ts";
 
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
@@ -224,7 +225,7 @@ class Pages implements CoreTransport {
       const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
       this.painted();
-      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
+      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links, ...(p.hash !== undefined && p.hash !== null ? { json: { hash: p.hash } } : {}) };
     }
     return this.sock.request(op);
   }
@@ -317,6 +318,43 @@ async function clearCache(): Promise<void> {
 
 const source = (file: string, line: number, col = 1) => void sock.request({ op: "source", file, line, col });
 
+/**
+ * Notes and changes (review.ts, docs/spec-editor-protocol.md §9): kept by
+ * the watch (`.phitex/notes.json`, the baseline), its `review_*` ops and
+ * its `review` event; the pages' places from the session's glyphs.
+ */
+const review: ReviewHost = {
+  request: (op, params) => sock.request({ op, ...params }),
+  onState(cb) {
+    sock.onEvent((e: any) => e.event === "review" && cb(e as ReviewState));
+    // (joined again after the watch restarted: the state asked anew)
+    const was = sock.onOpen;
+    sock.onOpen = () => {
+      was();
+      void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState));
+    };
+  },
+  // TEMPORARY, remove with its cause: the glyph origins give an \input
+  // file's text the bytes of the \input command (an engine bug, its root
+  // fix in the origins' rework). Until then, where no glyph's origin names
+  // the range, its words are found in the pages' text.
+  async boxes(file, start, end, quote) {
+    const at = await session.boxesOf(file, start, end);
+    if (at.length || !quote) return at;
+    const q = words(quote);
+    if (!q) return [];
+    const hits = await pages.find(q).catch(() => []);
+    return hits.slice(0, 1).map((h) => ({ k: h.k, boxes: h.boxes }));
+  },
+  source: (sel) => session.sourceOf(sel),
+  spot: (k, x, y) => session.spotOf(k, x, y),
+  goto: (file, line) => source(file, line),
+  showChanges(on, git) {
+    if (!on) return controls.stop();
+    void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
+  },
+};
+
 const panel = new Panel(
   {
     onPage: () => {},
@@ -393,6 +431,7 @@ const panel = new Panel(
   {
     host: "watch",
     outline: true,
+    review,
     keys: true,
     header: true,
     footer: false,
@@ -994,3 +1033,5 @@ const prefs = async () => {
 const opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();
+
+
