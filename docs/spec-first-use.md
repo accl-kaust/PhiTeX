@@ -287,21 +287,28 @@ off inside a command (the main loop's look ahead past characters,
 §1038) waits for the command that look ahead backed up. Test
 `latex::a_csname_bound_globally_at_once_reads_nothing`.
 
-**What Grail's chain held at -j8 instead** (found while measuring): three
-resume runs of 1.1-1.3 s each, one after another, thrown away. Each
-read a continuation's state that its placer replaced 9 ms later (acmart's
-`\Sectionformat` let to `\ACM@NR@adjustedSectionformat` and not back),
-so `\realSectionformat` called itself with an argument one token longer
-a level, until "TeX capacity exceeded [main memory size=5000000]": 5
-million tokens copied in about 10 000 commands and calls. A run's first
-reads are filed nowhere a walk can re-ask, so only `Ctx::recheck` could
-stop it, and the run's work ticks counted commands and calls, not
-tokens. Now the tokens a macro call with arguments writes count too
-(`Run::tok_work`, a tick every 8192), and the recheck stops such a run
-once its read moved.
+**What Grail's chain held at -j8 on dev 9150034b9** (found while
+measuring): three resume runs of 1.1-1.3 s each, one after another,
+thrown away. Each read a continuation's state that its placer replaced
+9 ms later (acmart's `\Sectionformat` let to
+`\ACM@NR@adjustedSectionformat` and not back), so `\realSectionformat`
+called itself with an argument one token longer a level, until "TeX
+capacity exceeded [main memory size=5000000]": 5 million tokens copied
+in about 10 000 commands and calls. A first run's reads are filed
+nowhere a walk can re-ask, so only `Ctx::recheck` could stop it, at
+powers of two of its work ticks, and the ticks counted commands and
+calls, not tokens.
 
-Measured on acclnode11 (Shelf's files, release, warm format, base dev
-9150034b9 and new interleaved, median of 3): Grail -j1 12.24 / 12.47 s,
--j8 13.60 / 11.84 s, -j16 15.90 / 11.48 s; amsldoc -j1 1.78 / 1.76 s,
--j8 1.97 / 2.00 s (5 each), -j16 2.36 / 2.31 s. The PDF and log md5s
-are the same base and new at each -j.
+Counting the tokens a macro call with arguments writes (a tick every
+8192) took Grail -j8 from 13.60 to 11.84 s and -j16 from 15.90 to
+11.48 s on that dev (acclnode11, Shelf's files, release, median of 3,
+md5s equal). On dev 9dec6b725 (j8-step2 reverted) the same change
+measured no gain (Grail -j8 11.38-12.0 s both), and a deterministic
+test was not found: the recheck at powers of two catches the moved read
+or not by when the definer commits (8 of 20 runs of a candidate test
+failed with the change, 15 of 15 without it). Looking at a run's reads
+more often cost more than it saved: every `reads / 1024` checks, Grail
+-j8 11.4 -> 20.6 s; in first runs only, 16.3 s. So the token count is
+not merged; branch firstuse2 holds it (3c2feeeec) and the test.
+
+Measured, §2.1 alone, on dev 9dec6b725: see the merge's message.
