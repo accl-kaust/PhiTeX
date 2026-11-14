@@ -58,14 +58,27 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
     if let Some(x) = eng.env.values.read().get(&f) {
         return *x;
     }
-    let x = eng
-        .env
-        .provider
-        .read()
-        .as_ref()
-        .and_then(|p| p(eng.values(), f))
-        .flatten();
-    eng.env.values.write().entry(f).or_insert(x);
+    // (asked once: a miss being answered is waited for, not answered
+    // again beside it. A clean build's first paragraphs, one a worker, all
+    // asked the format's hyphenation patterns at once and each built the
+    // whole value, its every list interned on the same shards: amsldoc at
+    // -j8, 8 runs of 300 ms on the CPU for 45 ms of work at -j1)
+    let cell = Arc::clone(eng.env.asking.lock().entry(f).or_default());
+    let x = *cell.get_or_init(|| {
+        if let Some(x) = eng.env.values.read().get(&f) {
+            return *x;
+        }
+        let x = eng
+            .env
+            .provider
+            .read()
+            .as_ref()
+            .and_then(|p| p(eng.values(), f))
+            .flatten();
+        eng.env.values.write().entry(f).or_insert(x);
+        x
+    });
+    eng.env.asking.lock().remove(&f);
     x
 }
 

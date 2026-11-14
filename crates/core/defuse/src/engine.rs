@@ -44,6 +44,10 @@ pub(crate) struct EnvReader {
 pub(crate) struct Env {
     pub(crate) values: Lock<FxHashMap<Field, Option<ValueId>>>,
     pub(crate) provider: Lock<Option<Box<EnvProvider>>>,
+    /// The misses being answered by the provider now, by field: the first
+    /// asker computes, those asking meanwhile wait for its answer
+    /// (`read::env_value`).
+    pub(crate) asking: Mx<FxHashMap<Field, Arc<std::sync::OnceLock<Option<ValueId>>>>>,
 }
 
 pub(crate) struct Paths {
@@ -504,6 +508,7 @@ impl Engine {
             env: Env {
                 values: Lock::new(FxHashMap::default()),
                 provider: Lock::new(None),
+                asking: Mx::new(FxHashMap::default()),
             },
             paths,
             projections,
