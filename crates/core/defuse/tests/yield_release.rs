@@ -23,8 +23,9 @@ use phitex_defuse::{Ctx, Engine, Operation, Stop, ValueId};
 
 static GATE: AtomicBool = AtomicBool::new(false);
 static END: AtomicBool = AtomicBool::new(false);
-static YIELDER_RUNS: AtomicU32 = AtomicU32::new(0);
+static PARKED: AtomicU32 = AtomicU32::new(0);
 static YIELDER_GAVE: AtomicBool = AtomicBool::new(false);
+static YIELDER_AGAIN: AtomicBool = AtomicBool::new(false);
 
 fn hold_until(mut what: impl FnMut() -> bool) -> bool {
     let t = Instant::now();
@@ -61,7 +62,12 @@ impl Operation for Settled {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        cx.wait_settled()?;
+        if let Err(s) = cx.wait_settled() {
+            if !GATE.load(Ordering::SeqCst) {
+                PARKED.fetch_add(1, Ordering::SeqCst);
+            }
+            return Err(s);
+        }
         if cx.values().as_int(cx.args()[0]) == Some(1) {
             hold_until(|| END.load(Ordering::SeqCst));
         }
@@ -69,7 +75,8 @@ impl Operation for Settled {
     }
 }
 
-/// Steps until the test ends, giving its worker away where earlier work
+/// Once both waiters have parked on the gate, lets the gate go and
+/// steps until the test ends, giving its worker away where earlier work
 /// waits for one.
 struct Yielder;
 
@@ -79,8 +86,13 @@ impl Operation for Yielder {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        if YIELDER_RUNS.fetch_add(1, Ordering::SeqCst) > 0 && YIELDER_GAVE.load(Ordering::SeqCst) {
+        if YIELDER_GAVE.load(Ordering::SeqCst) {
+            YIELDER_AGAIN.store(true, Ordering::SeqCst);
             return Ok(ValueId::UNIT);
+        }
+        // (the two waiters parked on the gate first: run again until then)
+        if PARKED.load(Ordering::SeqCst) < 2 {
+            return Err(cx.run_again());
         }
         GATE.store(true, Ordering::SeqCst);
         let t = Instant::now();
@@ -109,7 +121,7 @@ fn a_run_that_gave_its_worker_runs_again_once_that_node_is_taken() {
     let y = e.push(u, yielder, vec![]);
     let watch = std::thread::spawn(|| {
         // (the yielder's second run, while `Wait1` still holds)
-        let again = hold_until(|| YIELDER_RUNS.load(Ordering::SeqCst) >= 2);
+        let again = hold_until(|| YIELDER_AGAIN.load(Ordering::SeqCst));
         END.store(true, Ordering::SeqCst);
         again
     });
