@@ -53,6 +53,16 @@ pub trait GlyphTap: Send + Sync {
         let _ = (font, text, size);
         self.none(glyphs.len());
     }
+    /// The codes from here on are at reversal level `level` (TeX--XeT's
+    /// segments, as the bidi algorithm's embedding levels: 0 outside
+    /// them, odd in right-to-left text, the next even in left-to-right
+    /// text inside it): the writer shows a reversed segment's codes in
+    /// the page's order, right to left in the reading. A level that
+    /// goes back to 0 ends a context (a line, a box of lines) whose
+    /// codes are read again in their order on their own.
+    fn level(&mut self, level: u8) {
+        let _ = level;
+    }
 }
 
 /// The writer's tap and the character node being written: outside the
@@ -64,6 +74,8 @@ pub(crate) struct Tap {
     lig: Vec<u16>,
     /// No code told for `node` yet.
     first: bool,
+    /// The reversal level last told ([`GlyphTap::level`]).
+    pub(crate) level: u8,
 }
 
 impl Clone for Tap {
@@ -84,6 +96,18 @@ impl Tap {
         self.sink.is_some()
     }
 
+    /// The reversal level is `l` from here on, told the sink when it
+    /// changes ([`GlyphTap::level`]); nothing without a sink.
+    #[inline]
+    pub(crate) fn set_level(&mut self, l: u8) {
+        if let Some(s) = self.sink.as_mut()
+            && self.level != l
+        {
+            self.level = l;
+            s.level(l);
+        }
+    }
+
     /// The character node whose codes follow (`None`: none).
     pub(crate) fn node(&mut self, n: Option<(FontId, u16)>, lig: &[u16]) {
         self.node = n;
@@ -98,6 +122,7 @@ impl PdfState {
     /// gives back the one set before.
     pub fn set_tap(&mut self, t: Option<Box<dyn GlyphTap>>) -> Option<Box<dyn GlyphTap>> {
         self.tap.node(None, &[]);
+        self.tap.level = 0;
         std::mem::replace(&mut self.tap.sink, t)
     }
 

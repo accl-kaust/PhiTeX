@@ -3354,6 +3354,7 @@ impl Graph {
             stream: stream_on.clone(),
             watch: watch.clone(),
             xe: xe.clone(),
+            start: Arc::default(),
         }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
@@ -5338,6 +5339,14 @@ fn culprit(
         {
             return Some((ls + s, ls + e));
         }
+        // (on a line read before it: a command that looked ahead for an
+        // optional argument, fontspec's `\newfontfamily\x{IPAexMincho}`,
+        // fails with TeX reading the next line; the argument is the last
+        // one read that holds the key)
+        let read = &text[from.min(ls)..ls];
+        if let Some((s, e)) = key_argument(read, key) {
+            return Some((from.min(ls) + s, from.min(ls) + e));
+        }
     }
     if let Some(cs) = named_cs(message)
         && let Some(k) = last_cs_token(&text[from..b], &cs)
@@ -5354,12 +5363,22 @@ fn culprit(
     None
 }
 
-/// The first text `m` quotes TeX's way (`` `x' ``).
+/// The first text `m` quotes TeX's way (`` `x' ``), else in double
+/// quotes (`LaTeX3`'s messages, fontspec's `The font "x" cannot be found`).
 fn quoted(m: &str) -> Option<&str> {
-    let i = m.find('`')?;
-    let r = &m[i + 1..];
-    let k = &r[..r.find('\'')?];
-    (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+    let tex = || {
+        let i = m.find('`')?;
+        let r = &m[i + 1..];
+        let k = &r[..r.find('\'')?];
+        (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+    };
+    let double = || {
+        let i = m.find('"')?;
+        let r = &m[i + 1..];
+        let k = &r[..r.find('"')?];
+        (!k.is_empty() && !k.contains('\n')).then_some(k)
+    };
+    tex().or_else(double)
 }
 
 /// Bytes of `before` of the command whose argument holds `key` (`{key}`,
@@ -6255,11 +6274,71 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> (Arc<Cached>, Option<Fo
 /// `\\input`s carry their files' names).
 pub const PRELUDE_NAME: &str = "(format)";
 
+/// Where in `text` (a file's text as a `Build` holds it: one character a
+/// byte of the file) the units `units` of a line TeX read from byte
+/// `from` end: as many of its characters as the units were read from
+/// ([`crate::xetex::source_width`]: XeTeX's units are the bytes decoded,
+/// `xe`). A diagnostic's column counts units; past a byte above 127 on
+/// its line, XeTeX's count is short of the file's, and the place it gave
+/// was early on the line or inside a character (the whole document's
+/// first line then).
+fn column_in(text: &str, from: usize, units: &[u32], xe: bool) -> usize {
+    let mut from = from.min(text.len());
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let rest = &text[from..];
+    let src: Vec<u32> = rest
+        .chars()
+        .take(4 * units.len() + 3)
+        .map(u32::from)
+        .collect();
+    let n = crate::xetex::source_width(&src, units, xe);
+    from + rest.chars().take(n).map(char::len_utf8).sum::<usize>()
+}
+
+/// The length (bytes) of the control sequence `t` begins with (`\\`
+/// and a name of letters, or one character).
+fn cs_len(t: &str) -> usize {
+    let name = t
+        .get(1..)
+        .map_or(0, |r| r.bytes().take_while(u8::is_ascii_alphabetic).count());
+    if name > 0 {
+        1 + name
+    } else {
+        t.chars().take(2).map(char::len_utf8).sum()
+    }
+}
+
+/// Bytes as a `Build`'s text holds them: one character a byte.
+fn tex_chars(b: &[u8]) -> String {
+    b.iter().map(|&c| char::from(c)).collect()
+}
+
+/// Part of a line of a `Build`'s text as TeX's context shows it: its
+/// bytes (one character each) read as UTF-8 where they are, so a
+/// context shows the line's characters, not one character a byte.
+fn shown(t: &str) -> std::borrow::Cow<'_, str> {
+    if t.is_ascii() || t.chars().any(|c| u32::from(c) > 0xFF) {
+        return t.into();
+    }
+    let b: Vec<u8> = t
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+        .collect();
+    match String::from_utf8(b) {
+        Ok(s) => s.into(),
+        Err(_) => t.into(),
+    }
+}
+
 /// TeX's errors in the prelude (`text`, its own text) at their places:
 /// the file and line, TeX's context (§318), as [`Build::diagnostics`]
 /// places a document's.
+#[allow(clippy::too_many_lines)]
 fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> Vec<Diagnostic> {
     let v = g.eng.values();
+    let xe = g.ops.xe.get().is_some();
     let entries = g
         .eng
         .acc_value(unit, v.field("diags"))
@@ -6275,6 +6354,20 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
         }
         let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
         let loc = usize::try_from(int(6)).unwrap_or(0);
+        // (the column a count of the line's units: as many of its
+        // characters as they were read from, [`column_in`])
+        let units: Vec<u32> = xs
+            .get(5)
+            .map(|&x| str_of(v, x))
+            .unwrap_or_default()
+            .chars()
+            .take(loc)
+            .map(u32::from)
+            .collect();
+        let width = |t: &str, b: usize| {
+            let e = column_in(t, b, &units, xe);
+            t.get(b.min(e)..e).map_or(loc, |r| r.chars().count())
+        };
         let name = xs
             .get(2)
             .filter(|&&n| n != ValueId::UNIT)
@@ -6291,7 +6384,7 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                 // its characters before it counted)
                 let t = latin1(&bytes);
                 let b = usize::try_from(int(3)).unwrap_or(0);
-                let at = t.get(..b.min(t.len())).map_or(0, |h| h.chars().count()) + loc;
+                let at = t.get(..b.min(t.len())).map_or(0, |h| h.chars().count()) + width(&t, b);
                 (n, t.chars().collect(), at)
             }
             _ => {
@@ -6300,7 +6393,7 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                     let b = usize::try_from(int(3)).unwrap_or(0);
                     text.get(..b.min(text.len()))
                         .map_or(0, |t| t.chars().count())
-                        + loc
+                        + width(text, b)
                 } else {
                     0
                 };
@@ -6323,12 +6416,26 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
             .collect::<String>()
             .trim_end_matches('\r')
             .to_owned();
-        let start = if message == "Undefined control sequence" {
-            before
+        // (the culprit: an undefined name the one just read; else the
+        // command whose argument holds the key the message names, on
+        // this line or one read before it, [`culprit`])
+        let (start, end) = if message == "Undefined control sequence" {
+            let s = before
                 .rfind('\\')
-                .map_or(ci, |k| ls + before[..k].chars().count())
+                .map_or(ci, |k| ls + before[..k].chars().count());
+            (s, ci)
         } else {
-            ci
+            let t: String = chars[..ci].iter().collect();
+            let at = |k: usize| chars[..k].iter().map(|c| c.len_utf8()).sum::<usize>();
+            culprit(&message, &t, at(ls), t.len(), 0, false).map_or((ci, ci), |(s, e)| {
+                (t[..s].chars().count(), t[..e].chars().count())
+            })
+        };
+        // (the diagnostic's line the culprit's; TeX's in the context)
+        let place_line = if start < ls {
+            chars[..start].iter().filter(|&&c| c == '\n').count() + 1
+        } else {
+            line
         };
         let lead = format!("l.{line} ");
         let context = format!(
@@ -6337,8 +6444,8 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
         );
         out.push(Diagnostic {
             file,
-            range: (start, ci),
-            line,
+            range: (start, end),
+            line: place_line,
             severity: Severity::Error,
             message,
             context,
@@ -8989,6 +9096,16 @@ impl Build {
             let end = r.get(l + 1).map_or(raw.len(), |&x| x.saturating_sub(1));
             (r.get(l).copied().unwrap_or(0) + col).min(end)
         };
+        // (a place in the raw text, or the document's own, as its file's
+        // byte: the text holds one character a byte of the file)
+        // (made at the first diagnostic in the document's text)
+        let doc_bytes = std::cell::OnceCell::new();
+        let doc_byte = |o: usize| {
+            let bs = doc_bytes.get_or_init(|| crate::origins::Bytes::of(raw.unwrap_or(doc)));
+            usize::try_from(bs.at(u32::try_from(o).unwrap_or(u32::MAX))).unwrap_or(o)
+        };
+        let mut file_bytes: FxHashMap<String, crate::origins::Bytes> = FxHashMap::default();
+        let xe = self.opts.xetex.is_some();
         // the node of the text a node is under, by its parents: the text's
         // nodes by id made only for a diagnostic placed by its node alone
         let mut top_map: Option<phitex_defuse::FxHashMap<u64, usize>> = None;
@@ -9066,7 +9183,7 @@ impl Build {
             let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
             let seg = xs.get(5).map(|&x| str_of(v, x)).unwrap_or_default();
             let loc = usize::try_from(int(6)).unwrap_or(0);
-            let before: String = seg.chars().take(loc).collect();
+            let units: Vec<u32> = seg.chars().take(loc).map(u32::from).collect();
             let in_doc = xs.get(2).is_some_and(|&n| str_of(v, n) == DOC_NAME);
             // (whose text the line is, [`crate::run::DiagPlace`]: a run
             // reads on into the next node's or piece's lines, which move
@@ -9109,8 +9226,10 @@ impl Build {
                         _ => 0,
                     }
                 });
-                let at = usize::try_from(int(3) + shift).unwrap_or(0)
-                    + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
+                // (the column a count of the line's units: XeTeX's are
+                // its bytes decoded, [`column_in`])
+                let start = usize::try_from(int(3) + shift).unwrap_or(0);
+                let at = column_in(doc, start, &units, xe);
                 node_from = spans.get(i).copied();
                 (docname.clone(), doc, at)
             } else if int(3) >= 0
@@ -9176,18 +9295,31 @@ impl Build {
                     None => piece_shift(&self.g.eng, &doc_shifts, node),
                 };
                 // (the line's place a byte of the file's text, one
-                // character per byte of the file: the column's characters
-                // as many of its bytes, [`crate::run::FileRest::line_at`])
-                let at = usize::try_from(int(3) + shift).unwrap_or(0) + before.len();
+                // character per byte of the file,
+                // [`crate::run::FileRest::line_at`]; the column a count of
+                // the line's units, [`column_in`])
+                let start = usize::try_from(int(3) + shift).unwrap_or(0);
+                let at = column_in(&file_text, start, &units, xe);
                 (name, &*file_text, at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
                 let i = top(node);
                 let from = spans.get(i).copied().unwrap_or(0);
+                // (the line as the text holds it: its characters, or, read
+                // by XeTeX, their UTF-8 bytes one character each)
+                let held: String = if xe {
+                    tex_chars(seg.as_bytes())
+                } else {
+                    seg.clone()
+                };
                 let at = doc
                     .get(from..)
-                    .and_then(|d| (!seg.is_empty()).then(|| d.find(&seg)).flatten())
-                    .map_or(from, |k| from + k + before.len());
+                    .and_then(|d| {
+                        (!seg.is_empty())
+                            .then(|| d.find(&seg).or_else(|| d.find(&held)))
+                            .flatten()
+                    })
+                    .map_or(from, |k| column_in(doc, from + k, &units, xe));
                 let at = if self.nodes.is_empty() { 0 } else { at };
                 (docname.clone(), doc, at)
             };
@@ -9262,27 +9394,58 @@ impl Build {
             // the message names, the control sequence it names, or the
             // last one read before a written warning ([`culprit`])
             let found = if undefined {
-                before.rfind('\\').map(|k| (ls + k, b))
+                // (the name alone: TeX reads on past it where it was in an
+                // argument, `\\textlang{arabic}{... \\foo ...}` read whole)
+                before
+                    .rfind('\\')
+                    .map(|k| (ls + k, ls + k + cs_len(&before[k..])))
             } else if kind == 1 || kind == 3 {
-                let from = node_from.map_or(ls, |f| f.min(ls));
+                // (from the node's start, and at least from the line
+                // with text before this one: a command that looked ahead
+                // for an optional argument, `\newfontfamily\x{F}`, fails
+                // with TeX on the next line, which may be the next node's)
+                let prev = {
+                    let mut p = ls;
+                    while p > 0 {
+                        let s = text[..p - 1].rfind('\n').map_or(0, |k| k + 1);
+                        p = s;
+                        // (blank lines and comments' lines read past)
+                        if text[s..ls]
+                            .lines()
+                            .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('%'))
+                        {
+                            break;
+                        }
+                    }
+                    p
+                };
+                let from = node_from.map_or(prev, |f| f.min(prev));
                 culprit(&message, text, ls, b, from, kind == 3)
             } else {
                 None
             };
-            // (in the file's units: the document's bytes, a file's
-            // characters)
-            let unit = |p: usize| {
+            // (places in `text`, made the file's bytes below)
+            let (start, end) = found.unwrap_or((b, b));
+            // (a culprit on a line read before TeX's: the diagnostic's
+            // line is the culprit's, TeX's stays in the context)
+            let place_line = if start < ls {
                 if file == docname {
-                    at - (b - p)
+                    doc_lines.partition_point(|&k| k <= start)
                 } else {
-                    at - text[p..b].chars().count()
+                    file_lines
+                        .get(&file)
+                        .map_or(line, |ls| ls.partition_point(|&k| k <= start))
                 }
+            } else {
+                line
             };
-            let (start, end) = found.map_or((at, at), |(s, e)| (unit(s), unit(e)));
+            // (the context as TeX shows the line: the file's bytes read as
+            // UTF-8 where they are, not one character a byte)
+            let (shown_before, shown_after) = (shown(&before), shown(&after));
             let lead = format!("l.{line} ");
             let context = format!(
-                "{lead}{before}\n{}{after}",
-                " ".repeat(lead.len() + before.chars().count())
+                "{lead}{shown_before}\n{}{shown_after}",
+                " ".repeat(lead.len() + shown_before.chars().count())
             );
             let help = if undefined {
                 let mut h = "The control sequence at the end of the top line\n\
@@ -9304,15 +9467,23 @@ impl Build {
             } else {
                 more
             };
+            // (the file's bytes: the text holds one character a byte of
+            // its file, [`crate::origins::Bytes`])
             let (start, end) = if file == docname {
-                (to_raw(start), to_raw(end))
+                (doc_byte(to_raw(start)), doc_byte(to_raw(end)))
             } else {
-                (start, end)
+                let bs = file_bytes
+                    .entry(file.clone())
+                    .or_insert_with(|| crate::origins::Bytes::of(text));
+                let at = |p: usize| {
+                    usize::try_from(bs.at(u32::try_from(p).unwrap_or(u32::MAX))).unwrap_or(p)
+                };
+                (at(start), at(end))
             };
             let d = Diagnostic {
                 file,
                 range: (start, end),
-                line,
+                line: place_line,
                 severity: match kind {
                     0 | 3 => Severity::Warning,
                     1 => Severity::Error,
@@ -9358,7 +9529,7 @@ impl Build {
                 _ => continue,
             };
             let end = doc.trim_end_matches(['\n', '\r']).len();
-            let at = to_raw(end);
+            let at = doc_byte(to_raw(end));
             out.push(Diagnostic {
                 file: docname.clone(),
                 range: (at, at),

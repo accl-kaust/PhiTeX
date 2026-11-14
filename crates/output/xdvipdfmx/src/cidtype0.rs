@@ -375,7 +375,7 @@ impl Dpx {
     }
 
     /// `write_fontfile` (static): the embedded `/FontFile3` (CIDFontType0C).
-    fn write_fontfile(&mut self, font_id: i32, cffont: &mut CffFont) -> Result<i32> {
+    fn write_fontfile(&mut self, font_id: i32, cffont: &mut CffFont) -> Result<Vec<u8>> {
         let mut work_buffer = vec![0u8; WORK_BUFFER_SIZE];
         let num_fds = cffont.num_fds as usize;
 
@@ -538,19 +538,24 @@ impl Dpx {
         }
         drop(topdict);
 
-        // FontFile
-        {
-            let descriptor = fnt(self, font_id).descriptor.expect("font descriptor");
-            let fontfile = self.o.new_stream(STREAM_COMPRESS);
-            let stream_dict = self.o.stream_dict(fontfile)?;
-            let r = self.o.ref_obj(fontfile)?;
-            self.o.put(descriptor, b"FontFile3", r)?;
-            self.o.put_name(stream_dict, b"Subtype", b"CIDFontType0C")?;
-            self.o.add_stream(fontfile, &dest[..offset])?;
-            self.o.release(fontfile)?;
-        }
+        let _ = destlen;
+        dest.truncate(offset);
+        self.put_fontfile(font_id, &dest)?;
+        Ok(dest)
+    }
 
-        Ok(destlen)
+    /// The font's program `cff` (its CFF, [`Self::write_fontfile`]'s) as
+    /// its descriptor's `/FontFile3`.
+    fn put_fontfile(&mut self, font_id: i32, cff: &[u8]) -> Result<()> {
+        let descriptor = fnt(self, font_id).descriptor.expect("font descriptor");
+        let fontfile = self.o.new_stream(STREAM_COMPRESS);
+        let stream_dict = self.o.stream_dict(fontfile)?;
+        let r = self.o.ref_obj(fontfile)?;
+        self.o.put(descriptor, b"FontFile3", r)?;
+        self.o.put_name(stream_dict, b"Subtype", b"CIDFontType0C")?;
+        self.o.add_stream(fontfile, cff)?;
+        self.o.release(fontfile)?;
+        Ok(())
     }
 
     /// `CIDFont_type0_add_CIDSet` (static): PDF/A `/CIDSet`. (Length of
@@ -611,6 +616,7 @@ impl Dpx {
             return Ok(-1);
         };
 
+        let file = fp.data.clone();
         let Some(mut sfont) = Sfnt::sfnt_open(fp)? else {
             warn!("Failed to read font file: {:?}", filename);
             return Ok(-1);
@@ -680,6 +686,34 @@ impl Dpx {
         }
 
         if embed == 0 {
+            return Ok(0);
+        }
+
+        // (the subset of these glyphs of this file's font made before, by
+        // this session or another: a page's file of its own, the build's
+        // file, `Files::kept`)
+        let what = {
+            let mut w = b"cidtype0 ".to_vec();
+            w.extend_from_slice(&index.to_le_bytes());
+            w
+        };
+        let variant = {
+            let fontname = fnt(self, font_id).fontname.clone().unwrap_or_default();
+            let used = used_chars_rc.to_vec();
+            let n = (usize::from(last_cid) / 8 + 1).min(used.len());
+            let mut v = Vec::with_capacity(fontname.len() + n + 8);
+            v.extend_from_slice(&u32::try_from(fontname.len()).unwrap_or(0).to_le_bytes());
+            v.extend_from_slice(&fontname);
+            v.extend_from_slice(&last_cid.to_le_bytes());
+            v.extend_from_slice(&used[..n]);
+            v
+        };
+        if let Some(cff) = self.files.0.kept(&file, &what, &variant) {
+            self.put_fontfile(font_id, &cff)?;
+            if self.o.check_version(2, 0) < 0 {
+                let used_chars = used_chars_rc.to_vec();
+                self.CIDFont_type0_add_CIDSet(font_id, &used_chars, last_cid)?;
+            }
             return Ok(0);
         }
 
@@ -804,7 +838,8 @@ impl Dpx {
             }
         }
 
-        let _destlen = self.write_fontfile(font_id, &mut cffont)?;
+        let cff = self.write_fontfile(font_id, &mut cffont)?;
+        self.files.0.keep(&file, &what, &variant, Arc::from(cff));
 
         cffont.cff_close();
         sfont.sfnt_close();

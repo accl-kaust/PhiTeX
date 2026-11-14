@@ -20,7 +20,7 @@
 // figures are under no band unless text of the body's size runs over
 // them.
 
-import { LAYER_LINES, type TextLine } from "./text.ts";
+import { LAYER_LINES, ensureText, type TextLine } from "./text.ts";
 
 /** The colours (Settings, Colour lines): a preset's or the user's two. */
 export type WaspColours = "classic" | "blues" | "gray" | "warm" | "custom";
@@ -203,6 +203,8 @@ export function waspOn(page: HTMLElement, all = false, length = 1): void {
   had?.remove();
   const text = page.querySelector<SVGElement>(":scope > .phx-text");
   if (!text) return;
+  // (its lines read: the layer filled now, not when the view rests)
+  ensureText(text);
   const lines = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l): l is TextLine => !!l);
   const svg = document.createElementNS(SVG, "svg");
   svg.setAttribute("class", "phx-wasp");

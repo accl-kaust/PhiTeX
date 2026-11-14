@@ -194,9 +194,6 @@ enum Sub {
         #[arg(long, value_name = "PID", global = true)]
         session: Option<u32>,
     },
-    /// The running watches (now `phitex session list`)
-    #[command(hide = true)]
-    Sessions,
     /// What is new in this version
     News,
     /// Shell completions: phitex completions bash > ~/.local/share/bash-completion/completions/phitex
@@ -441,7 +438,6 @@ pub enum Command {
     News,
     Upgrade,
     Config,
-    Sessions,
     Session,
 }
 
@@ -549,7 +545,6 @@ impl Cli {
                 o.output_dir = output_dir;
             }
             Some(Sub::News) => o.command = Some(Command::News),
-            Some(Sub::Sessions) => o.command = Some(Command::Sessions),
             Some(Sub::Session { verb, session }) => {
                 o.command = Some(Command::Session);
                 o.session = Some((verb, session));
@@ -689,6 +684,8 @@ pub struct Target {
     pub watch_write: bool,
     /// watch: changes on disk count as accepted (`review-accept-disk`).
     pub review_accept_disk: bool,
+    /// watch: asked at quit whether to write the PDF (`watch-ask-write`, on by default).
+    pub watch_ask_write: bool,
     /// `\write18` runs commands.
     pub shell_escape: bool,
     /// watch: the editor a double-click opens (`--editor`, `phitex.toml`).
@@ -1016,6 +1013,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         synctex_said: o.synctex.or(rc_synctex).or(cfg.synctex).is_some(),
         watch_write: cfg.watch_write.unwrap_or(false),
         review_accept_disk: cfg.review_accept_disk.unwrap_or(false),
+        watch_ask_write: cfg.watch_ask_write.unwrap_or(true),
         shell_escape: o.shell_escape || rc_shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
@@ -1583,9 +1581,6 @@ pub fn main(args: &[String]) -> ! {
         crate::news::print(o.json);
         std::process::exit(0);
     }
-    if command == Command::Sessions {
-        std::process::exit(crate::attach::sessions(&ui, o.json));
-    }
     if command == Command::Session
         && let Some((verb, pid)) = &o.session
     {
@@ -1728,11 +1723,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News
-        | Command::Upgrade
-        | Command::Config
-        | Command::Sessions
-        | Command::Session => unreachable!(),
+        Command::News | Command::Upgrade | Command::Config | Command::Session => unreachable!(),
     }
 }
 

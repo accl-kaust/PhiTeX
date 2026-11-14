@@ -1380,10 +1380,12 @@ fn latex_a_picture_asked_again_runs_again() {
 /// in a `\resizebox` argument of a figure in an `\input` file (a token
 /// list, Grail's drawn figures), one in a file `\input` inside a
 /// `\resizebox` (its generated ones), two in one figure, one in a
-/// paragraph. At -j1 five runs of `pic` and no picture read inline; at
-/// -j4 the PDF of -j1 and none read inline. Then an edit in the text
-/// before them runs none, and one in a picture's body runs that one
-/// again; each PDF a clean build's.
+/// paragraph. At -j1 five runs of `pic`, and the two in one figure read
+/// inline once: met while the first's output is to come, the run goes
+/// again and reads both inline, placing their children (a run of many
+/// pictures goes once more, not once a picture: lie-hasse); at -j4 the
+/// PDF of -j1. Then an edit in the text before them runs none, and one in
+/// a picture's body runs that one again; each PDF a clean build's.
 #[test]
 fn latex_each_picture_runs_once_on_a_clean_build() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-once");
@@ -1405,15 +1407,12 @@ fn latex_each_picture_runs_once_on_a_clean_build() {
     if children {
         assert_eq!(
             (common::runs_of(&one, "pic"), one.stats.pics_inline),
-            (5, 0),
+            (5, 2),
             "-j1: pictures run in children, read inline: {:?}",
             one.stats.runs_by_op
         );
     }
     let four = common::build(at(4), Some(&prelude(true)), src);
-    if children {
-        assert_eq!(four.stats.pics_inline, 0, "-j4: pictures read inline");
-    }
     if let Some(d) = common::first_difference(&four.output().0, &one.output().0) {
         panic!("-j4 differs from -j1: {d}");
     }
@@ -1694,6 +1693,55 @@ fn latexmk_cold(name: &str, threads: usize) {
         "{name} -j {threads}: {} rounds, latexmk ran pdflatex {runs} times",
         b.stats.loop_rounds
     );
+}
+
+/// The biber document edited (a citation taken out, then put back, then
+/// another taken out) as a watch edits it, each round's `.bbl` written
+/// and read back: each edit's PDF the PDF a cold build of its text makes.
+/// A written file's units are cut again from its last cut where the
+/// text changed (`ops::units_again`): the cuts decide how it is read
+/// back in pieces, never what is read.
+#[test]
+fn biber_edits_equal_cold_builds() {
+    let fx = common::fixtures().join("latexmk");
+    let src_dir = fx.join("biber");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join("biber-edits");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for e in std::fs::read_dir(&src_dir).expect("the sources").flatten() {
+        std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
+    }
+    let src = common::read(&dir.join("biber.tex"));
+    let opts = |threads: usize| Options {
+        fixpoint: true,
+        threads: Some(threads),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("biber", &dir)
+    };
+    let two = "described by Lamport~\\cite{lamport94}, ";
+    assert!(src.contains("~\\cite{mittelbach04}") && src.contains(two));
+    let texts = [
+        src.replace("~\\cite{mittelbach04}", ""),
+        src.clone(),
+        src.replace(two, "described by Lamport, "),
+        src.replace("~\\cite{mittelbach04}", "")
+            .replace(two, "described by Lamport, "),
+        src.clone(),
+    ];
+    for threads in [1, 8] {
+        let mut b = common::build(opts(threads), Some(&prelude(true)), &src);
+        let mut failed = Vec::new();
+        for (k, t) in texts.iter().enumerate() {
+            b.edit(t);
+            let cold = common::build(opts(threads), Some(&prelude(true)), t);
+            if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+                failed.push(format!("edit {k}: {d}"));
+            }
+        }
+        assert!(failed.is_empty(), "-j{threads}: {failed:?}");
+    }
 }
 
 macro_rules! latexmk_tests {

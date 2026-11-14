@@ -16,7 +16,7 @@
 //!   `initializationOptions.token` ([`first`]): within [`FIRST_WITHIN`]
 //!   and [`FIRST_MAX`] bytes, the token compared in constant time; else it
 //!   is closed unanswered. At most [`MAX_PENDING`] wait so at once.
-//! - `phitex sessions [--json]` lists the running watches.
+//! - `phitex session list [--json]` lists the running watches.
 
 use std::fmt::Write as _;
 use std::io::{BufReader, Read, Write as _};
@@ -409,7 +409,7 @@ pub fn live_in(d: &Path) -> Vec<Value> {
     found.into_iter().map(|(_, v)| v).collect()
 }
 
-/// `phitex sessions`: the running watches, a line each, or (`--json`)
+/// `phitex session list`: the running watches, a line each, or (`--json`)
 /// their discovery files as one JSON array on a line.
 pub fn sessions(ui: &crate::ui::Ui, as_json: bool) -> i32 {
     let d = match dir() {

@@ -232,6 +232,9 @@ enum Lr {
         dir: u8,
         width: Scaled,
         dist: Scaled,
+        /// Whether it begins a reversed segment (else it ends one): the
+        /// glyph origins' reading order, not the output's.
+        open: bool,
     },
     Fixed(GlueNode),
 }
@@ -321,11 +324,25 @@ pub struct DviWriter {
 /// The writer's tap (`phitex_pdf::GlyphTap`): outside the bytes, and
 /// not cloned (a clone tells none).
 #[derive(Default)]
-struct Tap(Option<Box<dyn GlyphTap>>);
+struct Tap(Option<Box<dyn GlyphTap>>, u8);
 
 impl Clone for Tap {
     fn clone(&self) -> Tap {
-        Tap(None)
+        Tap(None, 0)
+    }
+}
+
+impl Tap {
+    /// The reversal level is `l` from here on, told the tap when it
+    /// changes (`GlyphTap::level`); nothing without a tap.
+    #[inline]
+    fn set_level(&mut self, l: u8) {
+        if let Some(t) = self.0.as_mut()
+            && self.1 != l
+        {
+            self.1 = l;
+            t.level(l);
+        }
     }
 }
 
@@ -601,7 +618,7 @@ impl DviWriter {
             doing_leaders: false,
             cur_dir: 0,
             rec: None,
-            tap: Tap(None),
+            tap: Tap(None, 0),
         };
         // §617
         w.dvi_out(op::PRE);
@@ -621,6 +638,7 @@ impl DviWriter {
     /// none), as dvipdfmx's PDF shows them, and gives back the one set
     /// before. The bytes are the same either way.
     pub fn set_tap(&mut self, t: Option<Box<dyn GlyphTap>>) -> Option<Box<dyn GlyphTap>> {
+        self.tap.1 = 0;
         std::mem::replace(&mut self.tap.0, t)
     }
 
@@ -1181,6 +1199,9 @@ impl DviWriter {
         flatten_into(list, &mut q);
         // "Initialize the LR stack": `before`, never matched
         let mut lr: Vec<u8> = vec![0];
+        // (the glyph origins' reversal level, `GlyphTap::level`: a list
+        // reversed whole, outside reversed text, one level in)
+        let base = self.tap.1;
         if self.cur_dir == 1 {
             // "Reverse the complete hlist"
             let save_h = self.cur_h;
@@ -1189,14 +1210,29 @@ impl DviWriter {
             rev.push_front(Lr::N(Node::Kern(-self.cur_h, KernKind::Explicit)));
             q = rev;
             self.cur_h = save_h;
+            if base.is_multiple_of(2) {
+                self.tap.set_level(base + 1);
+            }
         }
+        let floor = self.tap.1;
         fr.left_edge = self.cur_h;
         while let Some(it) = q.pop_front() {
             match it {
-                Lr::Edge { dir, width, dist } => {
+                Lr::Edge {
+                    dir,
+                    width,
+                    dist,
+                    open,
+                } => {
                     self.cur_h += width;
                     fr.left_edge = self.cur_h + dist;
                     self.cur_dir = dir;
+                    let l = self.tap.1;
+                    if open {
+                        self.tap.set_level(l.saturating_add(1));
+                    } else if l > floor {
+                        self.tap.set_level(l - 1);
+                    }
                 }
                 Lr::Fixed(g) => {
                     let w = g.spec.width;
@@ -1222,6 +1258,7 @@ impl DviWriter {
                                 dir: 1 - dir,
                                 width: 0,
                                 dist: 0,
+                                open: false,
                             };
                             let mut rev = self.reverse(fr, &mut q, Some(tail), &mut lr, fonts);
                             let dist = self.cur_h;
@@ -1232,6 +1269,7 @@ impl DviWriter {
                                 dir,
                                 width: w,
                                 dist,
+                                open: true,
                             });
                             q = rev;
                             continue;
@@ -1242,6 +1280,7 @@ impl DviWriter {
                 Lr::N(n) => self.hlist_nodes(std::slice::from_ref(&n), fr, fonts, wh),
             }
         }
+        self.tap.set_level(base);
     }
 
     /// e-TeX's `reverse`: the nodes of `q` up to the end of the segment
@@ -1331,6 +1370,7 @@ impl DviWriter {
                                                 dir,
                                                 width: w,
                                                 dist: -cur_h - w,
+                                                open: false,
                                             });
                                         }
                                         return l;
@@ -1592,6 +1632,21 @@ impl DviWriter {
 
     /// `vlist_out` (§629).
     fn vlist_out(&mut self, b: &BoxNode, fonts: &dyn Fn(FontId) -> FontDef, wh: &mut Whatsits<'_>) {
+        // (a box of lines: its lines read on their own, each in its
+        // order, `GlyphTap::level`)
+        let level = self.tap.1;
+        self.tap.set_level(0);
+        self.vlist_body(b, fonts, wh);
+        self.tap.set_level(level);
+    }
+
+    /// [`Self::vlist_out`]'s output of the box.
+    fn vlist_body(
+        &mut self,
+        b: &BoxNode,
+        fonts: &dyn Fn(FontId) -> FontDef,
+        wh: &mut Whatsits<'_>,
+    ) {
         let save_loc = self.enter();
         let left_edge = self.cur_h;
         self.cur_v -= b.height;

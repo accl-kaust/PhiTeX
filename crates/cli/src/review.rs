@@ -1268,14 +1268,39 @@ impl Hub {
             return Err(refused("a note needs its words"));
         }
         let mut st = lock(&self.st);
-        let body = current_text(&mut st, &file).unwrap_or_default();
         let n = |k: &str| {
             a[k].as_u64()
                 .and_then(|x| usize::try_from(x).ok())
                 .unwrap_or(0)
         };
-        let s = rt::floor(&body, n("start"));
-        let e = rt::floor(&body, n("end").max(s));
+        let (mut file, mut s, mut e) = (file, n("start"), n("end"));
+        // TEMPORARY, remove with its cause: the glyph origins give an
+        // \input file's text the bytes of the \input command in the file
+        // that inputs it (an engine bug, its root fix in the origins'
+        // rework). Until then, where the origins name a place that does not
+        // show the words seen on the page, they are found by their letters
+        // in the files the build reads.
+        let seen = req["seen"].as_str().unwrap_or("");
+        let body0 = current_text(&mut st, &file).unwrap_or_default();
+        let quote0 = body0
+            .get(rt::floor(&body0, s)..rt::floor(&body0, e.max(s)))
+            .unwrap_or("");
+        if !seen.is_empty() && !rt::shows(quote0, seen) {
+            let mut names: Vec<String> = st.files.keys().cloned().collect();
+            names.sort_by_key(|n| (n != &file, n.clone()));
+            for name in names {
+                let Some(t) = current_text(&mut st, &name) else {
+                    continue;
+                };
+                if let Some((a0, b0)) = rt::find_seen(&t, seen, if name == file { s } else { 0 }) {
+                    (file, s, e) = (name, a0, b0);
+                    break;
+                }
+            }
+        }
+        let body = current_text(&mut st, &file).unwrap_or_default();
+        let s = rt::floor(&body, s);
+        let e = rt::floor(&body, e.max(s));
         let (before, after) = rt::context(&body, (s, e));
         let anchor = Anchor {
             file: file.clone(),
@@ -1477,6 +1502,11 @@ impl Hub {
             };
             refresh(&mut st, &f, text);
         }
+        // (the verdicts kept: the last 500)
+        let n = st.store.verdicts.len();
+        if n > 500 {
+            st.store.verdicts.drain(..n - 500);
+        }
         st.seq += 1;
         save(&st);
         drop(st);
@@ -1655,11 +1685,22 @@ fn bump(st: &mut State, id: &str) {
     }
 }
 
+/// The notes written, once there is something to keep (a note, a review,
+/// a verdict) or the file is there: a watch with none writes nothing
+/// into the project.
 fn save(st: &State) {
     if st.root.as_os_str().is_empty() {
         return;
     }
-    let _ = st.store.save(&st.root);
+    let s = &st.store;
+    if s.notes.is_empty()
+        && s.reviews.is_empty()
+        && s.verdicts.is_empty()
+        && !Store::path(&st.root).exists()
+    {
+        return;
+    }
+    let _ = s.save(&st.root);
 }
 
 /// File `name`'s text now (followed, else read).
@@ -1691,20 +1732,16 @@ fn base_of(st: &mut State, name: &str) -> Option<String> {
 fn refresh(st: &mut State, name: &str, text: Option<String>) {
     let old = st.files.get(name).and_then(|t| t.text.clone());
     // (a file the baseline folder has not seen, there when the watch
-    // began: its text as found is the baseline)
+    // began: its text as found is the baseline, kept here; written into
+    // the folder only once a change of it waits for review: a watch with
+    // nothing to review writes nothing into the project)
     if let Some(Baseline::Dir(d)) = &st.baseline
         && let Some(t) = &text
         && !st.seen_first
         && !d.join(name).exists()
+        && st.files.get(name).is_none_or(|tr| tr.base.is_none())
     {
-        let p = d.join(name);
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&p, t);
-        if let Some(tr) = st.files.get_mut(name) {
-            tr.base = None;
-        }
+        st.files.entry(name.to_owned()).or_default().base = Some(Some(t.clone()));
     }
     if let (Some(o), Some(n)) = (&old, &text)
         && o != n
@@ -1726,6 +1763,18 @@ fn refresh(st: &mut State, name: &str, text: Option<String>) {
         t.hash = text.as_ref().map(|x| hash(x.as_bytes()));
     }
     t.text = text;
+    let waiting = !t.hunks.is_empty();
+    // (the baseline as found, written once a change waits: it outlives the watch)
+    if waiting
+        && let Some(Baseline::Dir(d)) = &st.baseline
+        && !d.join(name).exists()
+        && let Some(b) = st
+            .files
+            .get(name)
+            .and_then(|t| t.hunks_base.clone().flatten())
+    {
+        let _ = st.baseline.as_ref().map(|bl| bl.write(name, Some(&b)));
+    }
     update_comments(st, name);
     if st.accept_disk && !st.buffers.contains_key(name) {
         // (`review-accept-disk`: every change on disk taken as accepted)
@@ -1841,7 +1890,12 @@ fn accept_typed(st: &mut State, name: &str, before: &str, after: &str) {
     }
     if moved {
         let git = st.baseline.as_ref().is_some_and(Baseline::git);
-        if !git && let Some(bl) = &st.baseline {
+        // (the folder's copy written where there is one: else the text
+        // as found is still in memory only, nothing to review yet)
+        if !git
+            && let Some(bl @ Baseline::Dir(d)) = &st.baseline
+            && d.join(name).exists()
+        {
             let _ = bl.write(name, Some(&b));
         }
         st.files.entry(name.to_owned()).or_default().base = Some(Some(b));
@@ -1895,8 +1949,17 @@ fn move_anchors(st: &mut State, name: &str, old: &str, new: &str) {
             } else {
                 rt::map_range(&cs, (a.start, a.end))
             };
-            let moved =
-                moved.or_else(|| rt::find_quote(new, &a.quote, &a.before, &a.after, a.start));
+            // (a comment on a change follows the change's place, never a
+            // quote found elsewhere: the same words changed alike elsewhere
+            // are another change)
+            let moved = moved.or_else(|| {
+                if n.hunk.is_some() {
+                    let x = rt::map_at(&cs, a.start);
+                    Some((x, x))
+                } else {
+                    rt::find_quote(new, &a.quote, &a.before, &a.after, a.start)
+                }
+            });
             match moved {
                 Some((s, e)) => {
                     let s = rt::floor(new, s);
@@ -1973,21 +2036,48 @@ fn update_comments(st: &mut State, name: &str) {
         .unwrap_or_default();
     let mut changed = false;
     let at = now();
+    // (a change accepted or rejected keeps its comments: a later change
+    // at its place is another, as a pull request's outdated thread)
+    let decided: HashSet<String> = st
+        .store
+        .verdicts
+        .iter()
+        .map(|v| v.hunk.id.clone())
+        .collect();
+    let st_text: HashMap<String, String> = st
+        .files
+        .get(name)
+        .and_then(|t| t.text.clone())
+        .map(|t| (name.to_owned(), t))
+        .into_iter()
+        .collect();
     for n in &mut st.store.notes {
         let Some(h0) = n.hunk.clone() else {
             continue;
         };
-        if h0.file != name || n.detached {
+        if h0.file != name || n.detached || decided.contains(&h0.id) {
             continue;
         }
         let (s, e) = (n.anchor.start, n.anchor.end);
+        // (its change where it is: by place first, alike changes elsewhere
+        // share a name)
         let Some(h) = hunks
             .iter()
-            .find(|h| h.id == h0.id)
-            .or_else(|| hunks.iter().find(|h| s <= h.now.1 && h.now.0 <= e))
+            .find(|h| s <= h.now.1 && h.now.0 <= e)
+            .or_else(|| hunks.iter().find(|h| h.id == h0.id))
         else {
             continue;
         };
+        // (the comment on the change's text as it is now)
+        if (n.anchor.start, n.anchor.end) != h.now && h.now.1 > h.now.0 {
+            let t = st_text.get(name).map_or("", String::as_str);
+            if let Some(q) = t.get(h.now.0..h.now.1) {
+                n.anchor.start = h.now.0;
+                n.anchor.end = h.now.1;
+                q.clone_into(&mut n.anchor.quote);
+                changed = true;
+            }
+        }
         if h.id != h0.id {
             if h.old != h0.old || h.new != h0.new {
                 n.thread.push(Post {
@@ -2021,6 +2111,12 @@ fn note_out(st: &State, id: &str) -> Option<Value> {
         .map(|h| h.id.as_str())
         .collect();
     v["hunks"] = json!(hunks);
+    // (a comment on a change accepted or rejected since: the verdict)
+    if let Some(h) = &n.hunk
+        && let Some(x) = st.store.verdicts.iter().rev().find(|x| x.hunk.id == h.id)
+    {
+        v["verdict"] = json!({"verdict": x.verdict, "at": x.at});
+    }
     Some(v)
 }
 
@@ -2055,20 +2151,20 @@ fn hunks_out(st: &State) -> Vec<Value> {
                 .get(&h.file)
                 .and_then(|t| t.text.as_deref())
                 .unwrap_or("");
-            // (a line of context each side, cut at 80 characters)
+            // (a line of context each side, cut at 48 characters)
             let ls = text[..h.now.0].rfind('\n').map_or(0, |i| i + 1);
             let le = text[h.now.1..]
                 .find('\n')
                 .map_or(text.len(), |i| h.now.1 + i);
             let clip = |s: &str, tail: bool| -> String {
                 let n = s.chars().count();
-                if n <= 80 {
+                if n <= 48 {
                     return s.to_owned();
                 }
                 if tail {
-                    format!("…{}", s.chars().skip(n - 79).collect::<String>())
+                    format!("…{}", s.chars().skip(n - 47).collect::<String>())
                 } else {
-                    format!("{}…", s.chars().take(79).collect::<String>())
+                    format!("{}…", s.chars().take(47).collect::<String>())
                 }
             };
             json!({
@@ -2104,6 +2200,7 @@ fn state_json(st: &State) -> Value {
         "notes": notes,
         "hunks": hunks_out(st),
         "reviews": st.store.reviews,
+        "verdicts": st.store.verdicts.iter().rev().take(50).collect::<Vec<_>>(),
         "git": st.baseline.as_ref().is_some_and(Baseline::git),
     })
 }
@@ -2330,15 +2427,24 @@ mod tests {
     fn accept_and_reject_against_a_baseline_folder() {
         let d = project(&[("main.tex", DOC)]);
         let h = hub_on(&d, &["main.tex"]);
-        assert!(
-            pending(&h).is_empty(),
+        assert_eq!(
+            pending(&h),
+            Vec::<Value>::new(),
             "the first text seen is the baseline"
+        );
+        // (nothing to review: nothing written into the project)
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        assert!(
+            !d.join(".phitex").exists(),
+            "a watch with nothing to review wrote .phitex"
         );
         let t = DOC.replace("quick", "QUICK").replace("second", "SECOND");
         std::fs::write(d.join("main.tex"), &t).expect("saved");
-        rebuilt(&h, &d, 2, &["main.tex"]);
+        rebuilt(&h, &d, 3, &["main.tex"]);
         let p = pending(&h);
         assert_eq!(p.len(), 2, "{p:?}");
+        // (a change waits: the text as found kept in the folder)
+        assert!(d.join(".phitex/baseline/main.tex").exists());
         // (accept the first: the baseline has it, one left)
         h.viewer("review_accept", &json!({"ids": [p[0]["id"]]}))
             .expect("accepted");
@@ -2354,13 +2460,13 @@ mod tests {
             .expect("rejected");
         let disk = std::fs::read_to_string(d.join("main.tex")).unwrap();
         assert!(disk.contains("QUICK") && disk.contains("second"));
-        assert!(pending(&h).is_empty());
+        assert_eq!(pending(&h), Vec::<Value>::new());
         // (the agent is told what was rejected, once)
         let c = h.changes();
         assert_eq!(c["verdicts"].as_array().unwrap().len(), 2);
         assert_eq!(c["verdicts"][1]["verdict"], "rejected");
         assert_eq!(c["verdicts"][1]["hunk"]["new"], "SECOND");
-        assert!(h.changes()["verdicts"].as_array().unwrap().is_empty());
+        assert_eq!(h.changes()["verdicts"], json!([]));
         // (a stale id refused)
         let e = h
             .viewer("review_accept", &json!({"ids": ["h00000000"]}))
@@ -2409,6 +2515,55 @@ mod tests {
             n.thread
         );
         assert!(n.hunk.as_ref().unwrap().new.contains("great many"));
+    }
+
+    #[test]
+    fn a_comment_stays_on_its_change_among_changes_alike() {
+        let doc = "Item one is described. Item two is described. Item three is described.\n";
+        let d = project(&[("main.tex", doc)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let v1 = doc.replace("described", "shown");
+        std::fs::write(d.join("main.tex"), &v1).expect("saved");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let p = pending(&h);
+        assert_eq!(p.len(), 3, "{p:?}");
+        // (on the second of three alike)
+        let c = h
+            .viewer(
+                "review_comment",
+                &json!({"hunk": p[1]["id"], "text": "Say what is shown"}),
+            )
+            .expect("commented");
+        let cid = c["id"].as_str().unwrap().to_owned();
+        let v2 = v1.replace("two is shown", "two is drawn in a figure");
+        std::fs::write(d.join("main.tex"), &v2).expect("saved");
+        rebuilt(&h, &d, 3, &["main.tex"]);
+        let st = lock(&h.st);
+        let n = st.store.note(&cid).unwrap();
+        assert_eq!(n.anchor.quote, "drawn in a figure", "{:?}", n.anchor);
+        assert!(
+            n.thread
+                .last()
+                .unwrap()
+                .diff
+                .as_ref()
+                .is_some_and(|d| d.new == "drawn in a figure")
+        );
+        // (and its change named so after: the other two alike untouched)
+        let hs = hunks_out(&st);
+        let mine = hs.iter().find(|x| x["new"] == "drawn in a figure").unwrap();
+        assert!(
+            mine["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x == cid.as_str())
+        );
+        assert!(
+            hs.iter()
+                .filter(|x| x["new"] == "shown")
+                .all(|x| x["comments"].as_array().unwrap().is_empty())
+        );
     }
 
     #[test]

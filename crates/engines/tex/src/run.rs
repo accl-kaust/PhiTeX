@@ -786,7 +786,10 @@ pub(crate) struct Run<'c, 'a> {
     /// A picture of this run went on as if empty, its child's output to
     /// come (`crate::pic`): the pictures after it in the run are given a
     /// state without that one's work, so none is placed anew.
-    pub pic_pending: bool,
+    pub pic_pending: Option<u64>,
+    /// A picture of this run was read inline as one of many in a run
+    /// (`crate::pic`): the pictures after it with no output are too.
+    pub pic_many: bool,
     pub pic_child: Option<crate::pic::PicChild>,
     /// The child's output, in place of the run's ([`Run::finish`]).
     pub pic_out: Option<ValueId>,
@@ -1393,7 +1396,8 @@ impl<'c, 'a> Run<'c, 'a> {
             pic_on: false,
             pic_stop: false,
             pic_seen: Vec::new(),
-            pic_pending: false,
+            pic_pending: None,
+            pic_many: false,
             pic_child: None,
             pic_out: None,
             pic_void: false,
@@ -5402,6 +5406,30 @@ impl<'c, 'a> Run<'c, 'a> {
                 .and_then(char::from_u32)
                 .and_then(|c| text.split(c).next())
                 .unwrap_or(text);
+            // (a message whose first line is its header alone, as
+            // LaTeX3's `\msg_error:nnn` writes every one, fontspec's
+            // "Package fontspec Error: " then `(fontspec) The font
+            // "IPAexMincho" cannot be found; ...`: its lines after it,
+            // their `(fontspec)` prefixes left out, are the message. It
+            // was the header alone: an error that named no font)
+            let whole;
+            let first = match u32::try_from(nl).ok().and_then(char::from_u32) {
+                Some(c) if first.trim_end().ends_with("Error:") => {
+                    let rest: Vec<&str> = text
+                        .split(c)
+                        .skip(1)
+                        .map(continuation)
+                        .filter(|l| !l.is_empty() && !l.starts_with("For immediate help type H"))
+                        .collect();
+                    whole = format!("{} {}", first.trim_end(), rest.join(" "));
+                    if rest.is_empty() {
+                        first
+                    } else {
+                        whole.as_str()
+                    }
+                }
+                _ => first,
+            };
             self.diag(true, first);
         }
         if kind == "error" {

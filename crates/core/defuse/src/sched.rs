@@ -1609,31 +1609,31 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
             // file), feed no pass: kept until a quiet point that starts no
             // pass, below, so that a pass's output is not written only to
             // be written again by the next pass)
-            let (mut rel, outs): (Vec<NodeId>, Vec<NodeId>) = std::mem::take(&mut *pool.shared.deferred.lock())
+            let (read_backs, outs): (Vec<NodeId>, Vec<NodeId>) = std::mem::take(&mut *pool.shared.deferred.lock())
                 .into_iter()
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
                 .partition(|&n| eng.op(eng.node(n).op()).read_back());
             pool.shared.deferred.lock().extend(outs);
-            // (and those at the frontier: the layer is quiet, nothing
-            // places a node before them now. Let go together: one that
-            // reads what an earlier one defines waits for it, below)
+            // (those at the frontier: the layer is quiet, nothing places a
+            // node before them now. Let go together: one that reads what an
+            // earlier one defines waits for it, below)
             eng.frontier_gen.fetch_add(1, Ordering::AcqRel);
             let old = eng.frontier.swap(0, Ordering::AcqRel);
             log_frontier(eng, old, 0, None, "quiet");
-            rel.extend(
-                std::mem::take(&mut *pool.shared.frontier_waiting.lock())
-                    .into_iter()
-                    .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
-            );
+            let mut rel: Vec<NodeId> = std::mem::take(&mut *pool.shared.frontier_waiting.lock())
+                .into_iter()
+                .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
+                .collect();
             // (and the runs that waited for a node that has not committed:
             // they go on, on its prediction. Not those waiting for one this
-            // quiet point lets go itself, held at the frontier or deferred:
-            // its commit is coming and lets them go (`release_waiting`); let
-            // go with it, one read what it had yet to define and ran again
-            // once it had: `settle::runs_held_at_the_frontier_are_let_go_
-            // the_earliest_first`, red on every try with T2 waiting for T1)
+            // quiet point lets go itself or keeps for a quieter one, held at
+            // the frontier or deferred: its commit is coming and lets them
+            // go (`release_waiting`); let go with
+            // it, one read what it had yet to define and ran again once it
+            // had: `settle::runs_held_at_the_frontier_are_let_go_the_
+            // earliest_first`, red on every try with T2 waiting for T1)
             {
-                let going: crate::values::FxHashSet<NodeId> = rel.iter().copied().collect();
+                let going: crate::values::FxHashSet<NodeId> = rel.iter().chain(&read_backs).copied().collect();
                 let mut m = pool.shared.waiting.lock();
                 // (none waits on a stale run's definitions past here: the
                 // quiet point walked them all above, `Ctx::wait_for_settling`)
@@ -1652,6 +1652,18 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                         .flat_map(|(_, ws)| ws)
                         .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
                 );
+            }
+            // (the writers whose definitions are read back (a pass's files,
+            // the tools that run on them): only at a quiet point that lets
+            // nothing else go, on the text the pass has written whole. Let
+            // go with the runs held at the frontier, they read the files as
+            // those runs had yet to write them, and ran again at each quiet
+            // point after: Grail at -j8 read its `.aux` back and ran BibTeX
+            // on it four times, -j1 once, mc 86379)
+            if rel.is_empty() {
+                rel = read_backs;
+            } else {
+                pool.shared.deferred.lock().extend(read_backs);
             }
             if !rel.is_empty() {
                 // (on the ready heap, by place, where every idle worker

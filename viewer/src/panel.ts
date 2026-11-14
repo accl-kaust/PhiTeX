@@ -25,11 +25,13 @@ import { charOffset } from "./edits.ts";
 import { html, rich } from "./html.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
+import { zoomAnchor } from "./glide.ts";
 import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
+import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -287,6 +289,8 @@ export interface PanelOptions {
   header?: boolean;
   /** The panel's footer (false: the host has its own status bar, the CLI's). */
   footer?: boolean;
+  /** Notes on the pages and the agent's changes under review (review.ts): where the host keeps them (the watch). */
+  review?: ReviewHost;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -322,9 +326,11 @@ export interface PanelPrefs {
   /** How much of a line fades, 0 to 200: 100 the whole line (the default); less, the colour only toward its end; more, held flat over more of it. */
   waspLength: number;
   waspText: "body" | "all";
+  /** The highlight's scroll margin, % of the view's height (0 to 45): Viewer.margin. */
+  margin: number;
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body" };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -365,6 +371,7 @@ const PATHS: Record<string, string> = {
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z",
 };
 /** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
@@ -559,7 +566,7 @@ export class Panel {
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
       html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -573,6 +580,7 @@ export class Panel {
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -590,6 +598,7 @@ export class Panel {
       ${item("x-pdf", "download", "Download PDF")}
       ${item("x-log", "log", "View log")}
       ${item("x-contents", "toc", "Contents", "t")}
+      ${item("x-review", "rate_review", "Notes and changes", "m")}
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item("x-compare", "compare", "Compare…", "", "narrow")}
       <hr>
@@ -638,6 +647,7 @@ export class Panel {
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
+    offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -751,7 +761,7 @@ export class Panel {
       box: (d, w) => pageBox(d, w),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange!(file, pos, pos, true) : undefined,
-      selected: (sel) => ev.onSelectPage?.(sel),
+      selected: (sel) => (ev.onSelectPage?.(sel), this.review?.selected(sel)),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
@@ -763,6 +773,25 @@ export class Panel {
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : undefined,
     });
     this.extras(opts);
+    if (opts.review) {
+      const rv = (this.review = new Review(
+        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), laidOut: () => requestAnimationFrame(() => ((this.stageSize = null), this.redraw())) },
+        opts.review,
+      ));
+      const b = this.$("#b-review");
+      b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
+      rv.counts((open, pending) => {
+        const n = open + pending;
+        this.$("#rvcount").textContent = n ? String(n) : "";
+        b.title = `Notes and changes (m): ${open} open note${open === 1 ? "" : "s"}, ${pending} change${pending === 1 ? "" : "s"} to review`;
+      });
+      new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+      window.addEventListener("keydown", (e) => {
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+        e.preventDefault();
+        rv.open();
+      });
+    }
     this.darkPdf("off");
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
@@ -796,11 +825,14 @@ export class Panel {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.linksShown();
+      this.marginApply();
     });
   }
 
   /** The menus and popovers by their buttons. */
   private menus: [string, string][] = [];
+  /** Notes and changes (opts.review). */
+  review?: Review;
 
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   private menu(m: string | null): void {
@@ -1282,6 +1314,8 @@ export class Panel {
   origins(): void {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
+    // (the notes' and changes' marks looked up again in the new origins)
+    this.review?.refresh();
   }
 
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
@@ -2124,6 +2158,22 @@ export class Panel {
       turn: (n) => this.viewer.turn(n),
       scroller: stage,
       zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      zoomBy: (f, ease) => {
+        // (at the pointer over the pages, else the view's centre; the place kept is the gesture's first)
+        const [x, y] = zoomAnchor(stage.getBoundingClientRect(), this.pointer);
+        this.zoomAt(f, x, y, ease);
+      },
+      scrollBy: (dx, dy) => {
+        // (while a zoom runs, the gesture's: its frames keep a place, see zoomScroll)
+        if (this.gesture) return this.zoomScroll(this.gesture, dx, dy, false), [dx, dy];
+        const moved = (d: number, was: number, max: number) => (was + d < 0 ? -was : was + d > max ? max - was : d);
+        const mx = moved(dx, stage.scrollLeft, stage.scrollWidth - stage.clientWidth);
+        const my = moved(dy, stage.scrollTop, stage.scrollHeight - stage.clientHeight);
+        if (mx) stage.scrollLeft += mx;
+        if (my) stage.scrollTop += my;
+        return [Math.round(mx), Math.round(my)];
+      },
+      turnTop: (n, from) => this.viewer.turnTop(n, from) ?? from,
       fitWidth: () => this.zoomTo("fit"),
       fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
       help: (show) => {
@@ -2239,7 +2289,22 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; goal: number; last: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout> }
+    | {
+        from: number;
+        f: number;
+        goal: number;
+        last: number;
+        x: number;
+        y: number;
+        at: { k: number; fx: number; fy: number } | null;
+        frame: number;
+        end?: ReturnType<typeof setTimeout>;
+        /** A scroll while it zooms, still to make: eased (a wheel's), and at the next frame (the keys', eased already). */
+        sx: number;
+        sy: number;
+        ix: number;
+        iy: number;
+      }
     | undefined;
 
   /**
@@ -2257,21 +2322,46 @@ export class Panel {
     if (!g) {
       const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, sx: 0, sy: 0, ix: 0, iy: 0 };
     }
     if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
     if (!ease) g.f = g.goal;
-    const gg = g;
-    const step = (t: number) => {
-      gg.frame = 0;
-      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
-      gg.last = t;
-      this.zoomLay(gg);
-      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-    };
-    if (!g.frame) g.frame = requestAnimationFrame((t) => ((gg.last = t - 16), step(t)));
+    this.zoomRun(g);
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
+  }
+
+  /**
+   * A scroll (pixels) while a zoom gesture runs, made in the gesture's frames: each frame
+   * keeps the place under the pointer there (keepAt sets the scroll), which undid a scroll
+   * made apart from it (the browser's smooth scroll of a wheel, a key's glide), the pages
+   * not scrolling until the zoom rested. `ease`: eased as a browser's smooth scroll (a
+   * wheel's notch); else all of it at the next frame (the keys', eased already).
+   */
+  private zoomScroll(g: NonNullable<Panel["gesture"]>, dx: number, dy: number, ease: boolean): void {
+    if (ease) (g.sx += dx), (g.sy += dy);
+    else (g.ix += dx), (g.iy += dy);
+    this.zoomRun(g);
+  }
+
+  /** The gesture's frames, until its zoom is at its goal and its scroll all made. */
+  private zoomRun(g: NonNullable<Panel["gesture"]>): void {
+    const step = (t: number) => {
+      g.frame = 0;
+      const dt = t - g.last;
+      g.f = zoomToward(g.f, g.goal, dt);
+      g.last = t;
+      // (most of the way in 150 ms, as a browser's smooth scroll; the last pixel at once)
+      const k = 1 - Math.exp(-Math.max(0, dt) / 50);
+      const tx = (Math.abs(g.sx) < 1 ? g.sx : g.sx * k) + g.ix;
+      const ty = (Math.abs(g.sy) < 1 ? g.sy : g.sy * k) + g.iy;
+      g.sx -= tx - g.ix;
+      g.sy -= ty - g.iy;
+      g.ix = g.iy = 0;
+      this.zoomLay(g, false, tx, ty);
+      if (g.f !== g.goal || g.sx || g.sy) g.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => ((g.last = t - 16), step(t)));
   }
 
   /**
@@ -2283,7 +2373,7 @@ export class Panel {
    * not what the layout made of them (a narrow page is centred, the gaps between pages
    * keep their size, pages come into view as it zooms out): they jumped when it rested.
    */
-  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false): void {
+  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false, dx = 0, dy = 0): void {
     this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const st = this.$("#stage");
@@ -2291,8 +2381,14 @@ export class Panel {
     // (the pages' text, for selection and find, out of the layout until the gesture rests:
     // SVG text, its glyphs laid out again at each size, was most of each frame's layout)
     st.classList.toggle("zooming", !final);
+    // (the pages' text layers still to fill wait for the zoom to rest, Viewer.moved; at its
+    // end, those shown before held out of the layout too, shown again a page a frame)
+    if (final) this.viewer.holdText();
+    else this.viewer.moved();
     this.viewer.redraw(true);
-    if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
+    // (scrolled by `dx`, `dy` too: the place kept moved by them, then the one under the pointer kept)
+    if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
+    if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
   }
 
@@ -2301,7 +2397,7 @@ export class Panel {
     const g = this.gesture;
     if (!g) return;
     // (still easing toward its goal: ended once there, not cut short by a jump)
-    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal || g.sx || g.sy || g.ix || g.iy) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = undefined;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);
@@ -2317,6 +2413,8 @@ export class Panel {
   private findTimer: ReturnType<typeof setTimeout> | undefined;
   /** The pointer over the panel (in a host's page, its keys only then). */
   private hover = false;
+  /** The pointer's last place over the pages (client pixels): where the zoom keys zoom. */
+  private pointer: { x: number; y: number } | null = null;
 
   /** The find field opened (its text selected) or closed (the marks gone). */
   find(on: boolean): void {
@@ -2377,11 +2475,21 @@ export class Panel {
   private findAndZoom(all: boolean): void {
     const stage = this.$("#stage");
     this.win.addEventListener("pointerenter", () => (this.hover = true));
+    stage.addEventListener("pointermove", (e) => (this.pointer = { x: e.clientX, y: e.clientY }), { passive: true });
+    stage.addEventListener("pointerleave", () => (this.pointer = null));
     this.win.addEventListener("pointerleave", () => (this.hover = false));
     // (Ctrl+wheel, a trackpad's pinch too: the pages zoom at the pointer, not the browser's page)
     stage.addEventListener(
       "wheel",
       (e) => {
+        const g = this.gesture;
+        if (!e.ctrlKey && g) {
+          // (a scroll while it zooms: the gesture's, see zoomScroll)
+          e.preventDefault();
+          const u = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
+          const x = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, y = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+          return this.zoomScroll(g, x * u, y * u, !matchMedia("(prefers-reduced-motion: reduce)").matches);
+        }
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();
@@ -2472,6 +2580,11 @@ export class Panel {
       const same = groups.find((x) => x.title === g.title);
       if (same) same.rows.push(...g.rows);
       else groups.push({ title: g.title, rows: [...g.rows] });
+    }
+    // (the margin beside the host's "Highlight follows", where there is one)
+    for (const g of groups) {
+      const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
+      if (m >= 0 && f >= 0) g.rows.splice(f + (f > m ? 0 : 1), 0, ...g.rows.splice(m, 1));
     }
     this.settingRows.clear();
     this.tilesGone();
@@ -2619,6 +2732,15 @@ export class Panel {
     const preview: SettingRow[] = [];
     if (this.mainFiles.names.length)
       preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview.push({
+      id: "margin",
+      label: "Keep a margin",
+      help: "The highlight that follows your editor stays at least this far from the top and bottom of the view; the page scrolls just enough to keep it there. 0: it scrolls only once the highlight leaves the view",
+      kind: "range",
+      max: 45,
+      value: String(this.prefs.margin),
+      set: (v) => ((this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0))), this.marginApply(), this.save()),
+    });
     const look: SettingRow[] = [];
     look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
@@ -2810,6 +2932,12 @@ export class Panel {
     ];
     if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (⌘ on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
     return rows;
+  }
+
+  /** The highlight's scroll margin as chosen, given to the viewer. */
+  private marginApply(): void {
+    const m = Number(this.prefs.margin);
+    this.viewer.margin = Number.isFinite(m) ? Math.max(0, Math.min(45, m)) / 100 : DEFAULTS.margin / 100;
   }
 
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */

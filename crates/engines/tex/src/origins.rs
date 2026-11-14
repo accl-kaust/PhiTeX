@@ -52,6 +52,12 @@ pub(crate) struct Code {
     pub v: Scaled,
     pub w: Scaled,
     pub size: Scaled,
+    /// Its reversal level ([`phitex_pdf::GlyphTap::level`]: odd in
+    /// right-to-left text, which the page shows in the reverse of its
+    /// reading order) and the context it is in (the codes between two
+    /// returns to level 0 are read again in their order together).
+    pub level: u8,
+    pub context: u32,
 }
 
 /// A page's codes as its writer showed them.
@@ -87,6 +93,9 @@ fn glyph_char(c: u16) -> char {
 pub(crate) struct Recorder {
     g: PageGlyphs,
     out: Arc<Mutex<Option<PageGlyphs>>>,
+    /// The reversal level now, and its context ([`Code::level`]).
+    level: u8,
+    context: u32,
 }
 
 impl Recorder {
@@ -96,6 +105,8 @@ impl Recorder {
             Recorder {
                 g: PageGlyphs::default(),
                 out: out.clone(),
+                level: 0,
+                context: 0,
             },
             out,
         )
@@ -139,13 +150,24 @@ impl GlyphTap for Recorder {
             v,
             w,
             size,
+            level: self.level,
+            context: self.context,
         });
+    }
+
+    fn level(&mut self, level: u8) {
+        if self.level == 0 && level > 0 {
+            self.context += 1;
+        }
+        self.level = level;
     }
 
     fn none(&mut self, n: usize) {
         for _ in 0..n {
             self.g.codes.push(Code {
                 kind: NONE,
+                level: self.level,
+                context: self.context,
                 ..Code::default()
             });
         }
@@ -174,6 +196,8 @@ impl GlyphTap for Recorder {
     fn xobject(&mut self) {
         self.g.codes.push(Code {
             kind: XOBJECT,
+            level: self.level,
+            context: self.context,
             ..Code::default()
         });
     }
@@ -200,6 +224,8 @@ impl GlyphTap for Recorder {
                     v,
                     w,
                     size,
+                    level: self.level,
+                    context: self.context,
                     ..Code::default()
                 });
             }
@@ -224,6 +250,8 @@ impl GlyphTap for Recorder {
                 v,
                 w,
                 size,
+                level: self.level,
+                context: self.context,
             });
         }
     }
@@ -666,6 +694,61 @@ struct Glyph {
     v: Scaled,
     w: Scaled,
     size: Scaled,
+    /// Its reversal level ([`Code::level`]): odd, read right to left.
+    level: u8,
+}
+
+/// The page's codes (indices) in their reading order: as the page shows
+/// them, but for right-to-left text, which TeX--XeT's writer shows in the
+/// reverse of its reading order ([`Code::level`]). Each context's codes
+/// put back as the bidi algorithm's reordering (rule L2, its own inverse)
+/// puts them: from its highest level down to 1, every run at that level
+/// or higher reversed. A node's codes stay together, in their order (a
+/// native word's glyphs, a virtual font's character's codes).
+fn reading_order(codes: &[Code]) -> Vec<usize> {
+    if codes.iter().all(|c| c.level == 0) {
+        return (0..codes.len()).collect();
+    }
+    // (a node's codes: its first and its further ones)
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in codes.iter().enumerate() {
+        match units.last_mut() {
+            Some(u) if c.kind == GLYPH && !c.first => u.1 = i + 1,
+            _ => units.push((i, i + 1)),
+        }
+    }
+    let level = |u: &(usize, usize)| codes[u.0].level;
+    let context = |u: &(usize, usize)| codes[u.0].context;
+    let mut k = 0;
+    while k < units.len() {
+        if level(&units[k]) == 0 {
+            k += 1;
+            continue;
+        }
+        let mut e = k;
+        while e < units.len() && level(&units[e]) > 0 && context(&units[e]) == context(&units[k]) {
+            e += 1;
+        }
+        let run = &mut units[k..e];
+        let top = run.iter().map(level).max().unwrap_or(0);
+        for l in (1..=top).rev() {
+            let mut i = 0;
+            while i < run.len() {
+                if level(&run[i]) < l {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i;
+                while j < run.len() && level(&run[j]) >= l {
+                    j += 1;
+                }
+                run[i..j].reverse();
+                i = j;
+            }
+        }
+        k = e;
+    }
+    units.into_iter().flat_map(|(a, b)| a..b).collect()
 }
 
 /// A word's character, folded.
@@ -712,18 +795,22 @@ pub(crate) fn match_page_until(
     let mut atoms: Vec<Atom> = Vec::new();
     // (each glyph's atoms: a range)
     let mut glyph_atoms: Vec<(u32, u32)> = Vec::new();
-    for (i, c) in g.codes.iter().enumerate() {
+    // (in the reading order: right-to-left text as it is read, not as the
+    // page shows it, [`reading_order`])
+    for i in reading_order(&g.codes) {
+        let c = &g.codes[i];
         if c.kind != GLYPH {
             continue;
         }
-        // (a node's further codes: its extent to their end, a native
-        // word's glyphs after its first)
+        // (a node's further codes: its extent to theirs, a native
+        // word's glyphs after its first, on either side of it)
         if !c.first {
             if let Some(gl) = glyphs.last_mut()
                 && c.v == gl.v
-                && c.h + c.w > gl.h + gl.w
             {
-                gl.w = c.h + c.w - gl.h;
+                let end = (gl.h + gl.w).max(c.h + c.w);
+                gl.h = gl.h.min(c.h);
+                gl.w = end - gl.h;
             }
             continue;
         }
@@ -738,6 +825,7 @@ pub(crate) fn match_page_until(
             v: c.v,
             w: c.w,
             size: c.size,
+            level: c.level,
         });
     }
     // the page's words: atom lists, a hyphen at a line's end joining
@@ -748,7 +836,15 @@ pub(crate) fn match_page_until(
         if k > 0 {
             let p = &glyphs[k - 1];
             let line = (gl.v - p.v).abs() > p.size.max(gl.size) / 4;
-            let gap = gl.h > p.h + p.w + p.size.max(1) / 6 || gl.h < p.h - p.size.max(1) / 2;
+            // (a space between them, or a step back, in their direction:
+            // right-to-left text read from its right; a change of
+            // direction ends a word)
+            let s = p.size.max(1);
+            let gap = match (p.level % 2, gl.level % 2) {
+                (0, 0) => gl.h > p.h + p.w + s / 6 || gl.h < p.h - s / 2,
+                (1, 1) => gl.h + gl.w < p.h - s / 6 || gl.h + gl.w > p.h + p.w + s / 2,
+                _ => true,
+            };
             if line || gap {
                 // (the next line's: just below, not a page's foot)
                 // (a glyph that is a hyphen alone: not a dash, read as
@@ -1093,26 +1189,27 @@ pub(crate) fn match_page_until(
         return None;
     }
     synthesize(&glyphs, &mut gorg, ix);
+    // (each glyph's origin its node's codes': its first and those after
+    // it that are not a node's first)
     let mut orgs = vec![Org::NONE; g.codes.len()];
-    let mut cur = Org::NONE;
-    let mut gi = 0usize;
-    for (i, c) in g.codes.iter().enumerate() {
-        if c.kind != GLYPH {
-            continue;
-        }
-        if c.first {
-            cur = gorg.get(gi).copied().unwrap_or(Org::NONE);
-            debug_assert_eq!(glyphs.get(gi).map(|x| x.code), Some(i));
-            gi += 1;
-        }
-        orgs[i] = if cur.node == NO_NODE {
+    for (gl, &o) in glyphs.iter().zip(&gorg) {
+        let o = if o.node == NO_NODE {
             Org::NONE
         } else {
             Org {
-                node: local(cur.node),
-                ..cur
+                node: local(o.node),
+                ..o
             }
         };
+        orgs[gl.code] = o;
+        for (x, c) in orgs.iter_mut().zip(&g.codes).skip(gl.code + 1) {
+            if c.kind == GLYPH && c.first {
+                break;
+            }
+            if c.kind == GLYPH {
+                *x = o;
+            }
+        }
     }
     Some(Matched {
         nodes: used
@@ -2706,6 +2803,134 @@ mod tests {
         let mut out = Vec::new();
         diff(&a, &b, 0, a.len(), 0, b.len(), &mut out, 0, false, false);
         assert_eq!(out, [(0, 1), (1, 2), (2, 3), (4, 4), (5, 6)]);
+    }
+
+    /// A text as a `Build` holds its file: one character a byte.
+    fn held(t: &str) -> String {
+        t.bytes().map(char::from).collect()
+    }
+
+    /// Native words told the tap as XeTeX's XDV writer tells them, each
+    /// `(text, left edge)` at `v`, one glyph a character, 5 pt each.
+    fn natives(r: &mut Recorder, ws: &[(&str, Scaled)], v: Scaled) {
+        const PT: Scaled = 65536;
+        for &(t, h) in ws {
+            let text: Vec<u16> = t.encode_utf16().collect();
+            let n = Scaled::try_from(t.chars().count()).unwrap_or(1);
+            // (a right-to-left word's glyphs as the page shows them)
+            let gs: Vec<(Scaled, Scaled, Scaled)> =
+                (0..n).map(|k| (h + k * 5 * PT, v, 5 * PT)).collect();
+            r.native(0, &text, &gs, 10 * PT);
+        }
+    }
+
+    /// The source range (offsets in its node's text) of each glyph of
+    /// `g` placed, not synthesized, in the page's order of its glyphs.
+    fn placed(g: &PageGlyphs, ix: &Index) -> Vec<(u32, u32)> {
+        let m = match_page(g, ix);
+        m.orgs
+            .iter()
+            .zip(&g.codes)
+            .filter(|(o, c)| c.first && o.node != NO_NODE && !o.synth)
+            .map(|(o, _)| (o.from, o.to))
+            .collect()
+    }
+
+    /// Right-to-left text, shown by TeX--XeT's writer in the reverse of
+    /// its reading order (the tap's level 1): each word of the page is
+    /// matched to its own occurrence in the source, the repeated word
+    /// too. Read in the page's order, the leftmost word (the last one
+    /// read) took the source's first.
+    #[test]
+    fn right_to_left_words_match_their_own_occurrence() {
+        const PT: Scaled = 65536;
+        let src = held("Before \\textlang{arabic}{كلمة أخرى كلمة} after.");
+        let ix = Index::update(
+            vec![Node {
+                raw: 1,
+                scan: Arc::new(scan(&src)),
+            }],
+            Arc::default(),
+        );
+        let (mut r, out) = Recorder::new();
+        natives(&mut r, &[("Before", 0)], 0);
+        r.level(1);
+        // (the page's order: the last word read is leftmost)
+        natives(
+            &mut r,
+            &[("كلمة", 40 * PT), ("أخرى", 65 * PT), ("كلمة", 90 * PT)],
+            0,
+        );
+        r.level(0);
+        natives(&mut r, &[("after.", 120 * PT)], 0);
+        drop(r);
+        let g = out.lock().unwrap().take().unwrap();
+        let word = |w: &str, k: usize| {
+            let w = held(w);
+            let at = src.match_indices(&w).nth(k).unwrap().0;
+            (
+                u32::try_from(at).unwrap(),
+                u32::try_from(at + w.len()).unwrap(),
+            )
+        };
+        // (in the page's order: the second كلمة, أخرى, the first كلمة)
+        assert_eq!(
+            placed(&g, &ix),
+            [
+                word("Before", 0),
+                word("كلمة", 1),
+                word("أخرى", 0),
+                word("كلمة", 0),
+                word("after.", 0),
+            ]
+        );
+    }
+
+    /// Two paragraphs of the same right-to-left sentence, each a line of
+    /// its own (a context each): each line matched to its own paragraph.
+    #[test]
+    fn repeated_right_to_left_paragraphs_match_their_own() {
+        const PT: Scaled = 65536;
+        let para = "يكتب الحاسوب الصفحة";
+        let texts = [held(&format!("{para}\n")), held(&format!("{para}\n"))];
+        let ix = Index::update(
+            texts
+                .iter()
+                .enumerate()
+                .map(|(k, t)| Node {
+                    raw: k as u64 + 1,
+                    scan: Arc::new(scan(t)),
+                })
+                .collect(),
+            Arc::default(),
+        );
+        let (mut r, out) = Recorder::new();
+        for line in 0..2 {
+            r.level(1);
+            let v = line * 12 * PT;
+            natives(
+                &mut r,
+                &[("الصفحة", 0), ("الحاسوب", 40 * PT), ("يكتب", 80 * PT)],
+                v,
+            );
+            r.level(0);
+        }
+        drop(r);
+        let g = out.lock().unwrap().take().unwrap();
+        let m = match_page(&g, &ix);
+        let nodes: Vec<u64> = m
+            .orgs
+            .iter()
+            .zip(&g.codes)
+            .filter(|(o, c)| c.first && o.node != NO_NODE)
+            .map(|(o, _)| m.nodes[o.node as usize].0)
+            .collect();
+        assert_eq!(nodes, [1, 1, 1, 2, 2, 2], "{:?}", m.orgs);
+        // (each line read from its right: the page's first word, leftmost,
+        // is the paragraph's last)
+        let first = m.orgs[0];
+        let t = &texts[0];
+        assert_eq!(&t[first.from as usize..first.to as usize], held("الصفحة"));
     }
 
     #[test]

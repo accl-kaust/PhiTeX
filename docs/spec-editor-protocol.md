@@ -707,7 +707,7 @@ folder:
   changes, and removed when the watch ends.
 - A file whose watch does not run (its process gone, or its port not
   answering) is ignored and removed by its readers.
-- `phitex sessions` lists the running watches; `phitex sessions --json`
+- `phitex session list` lists the running watches; `phitex session list --json`
   prints their files' objects as one JSON array on one line.
 - An editor picks the watch whose `root` holds the buffer's file,
   preferring the one whose `main` is that file.
@@ -760,7 +760,7 @@ phitex session problems [--errors] [--warnings] [--file F] [--context N]
 phitex session rebuild [--clean]
 phitex session log [--tail N] [--build N]
 phitex session stop                            # as q: the exact PDF written, then the watch ends
-phitex session list                            # the running watches (`phitex sessions`, hidden, one release)
+phitex session list                            # the running watches
 phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | changes
 ```
 
@@ -916,7 +916,10 @@ accepting a hunk stages it (the index's text with that hunk applied
 written as a blob and staged, as `git apply --cached` would); rejecting
 one writes the index's text of it back to the file. Without git, the
 watch keeps `.phitex/baseline/` (each project file's text as first seen,
-then as accepted).
+then as accepted), written only once a change of that file waits: a
+watch with nothing to review writes nothing into the project, and
+`.phitex/notes.json` likewise appears with the first note, review or
+verdict.
 
 **Whose edit.**
 
@@ -995,7 +998,7 @@ Review = {id, verdict: "approve" | "request_changes" | "reject" | "comment", sum
 | op | params | answer |
 |---|---|---|
 | `review_state` | none | `{notes, hunks, reviews, git, baseline}` |
-| `review_note` | `{kind, anchor, text?}` (anchor without `quote`: the watch fills it from the file) | `Note` |
+| `review_note` | `{kind, anchor, text?, seen?}` (anchor without `quote`: the watch fills it from the file; `seen`, the words the viewer showed, is TEMPORARY: while an `\input` file's glyph origins name the `\input` command, the watch finds the note's place by these words in its file; it goes when the origins name the glyph's own file) | `Note` |
 | `review_reply`, `review_resolve`, `review_reopen`, `review_delete` | `{id, text?}` | `Note` |
 | `review_clear` | none | `{removed}` (the resolved notes) |
 | `review_accept`, `review_reject` | `{ids: [hunk id] \| "all", file?}` | `{done, refused?: why}` |
