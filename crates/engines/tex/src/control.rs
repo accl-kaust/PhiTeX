@@ -135,6 +135,7 @@ impl Run<'_, '_> {
             let slow =
                 crate::exec::obs_str!("PHITEX_SLOW_CMD").and_then(|x| x.parse::<u128>().ok());
             let t0 = slow.map(|_| (std::time::Instant::now(), self.cur.tok, self.cmds));
+            let pending = self.csname_defer;
             self.dispatch()?;
             if let (Some(ms), Some((t, tok, n))) = (slow, t0)
                 && t.elapsed().as_millis() >= ms
@@ -147,7 +148,12 @@ impl Run<'_, '_> {
                     self.trace_context().chars().take(400).collect::<String>()
                 );
             }
-            self.csname_force()?;
+            // (a look-up put off before this command and not bound by it,
+            // made; one put off inside it, by the main loop's look ahead
+            // past characters (§1038), waits for the command it backed up)
+            if pending.is_some() && self.csname_defer == pending {
+                self.csname_force()?;
+            }
             return self.ck();
         }
     }
