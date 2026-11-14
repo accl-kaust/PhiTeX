@@ -137,10 +137,23 @@ fn command(program: &Path, dir: &Path) -> Command {
 
 /// [`command`] with `timeout --foreground`: a signal sent to `timeout` is
 /// given to the program alone, once (without it, `timeout` gives it to
-/// the program and then to its whole process group: twice).
+/// the program and then to its whole process group: twice). The program
+/// starts with SIGINT, SIGTERM and SIGHUP at their defaults, as a
+/// terminal's foreground job has them (`env --default-signal`, which
+/// execs `timeout` in its place, the pid the same): a test run as a
+/// background job of a shell without job control (the gate's lanes,
+/// `( … ) &`) has SIGINT ignored, the watch inherited it, and a SIGINT
+/// sent to it was discarded, as a program started so must discard it:
+/// `watch_signal_ends_as_q` waited for its end until the gate's limit.
 fn command_fg(program: &Path, dir: &Path) -> Command {
-    let mut c = Command::new("timeout");
-    c.args(["--foreground", "600"]).arg(program);
+    let mut c = Command::new("env");
+    c.args([
+        "--default-signal=INT,TERM,HUP",
+        "timeout",
+        "--foreground",
+        "600",
+    ])
+    .arg(program);
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
         .env("FONTCONFIG_FILE", tl_fonts_conf())
