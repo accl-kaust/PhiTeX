@@ -756,16 +756,22 @@ fn glyph_origins_forms_and_pages() {
     assert!(b.pages().len() >= 3, "pages: {}", b.pages().len());
     let f = common::origin_failures(&b, &src, "orig.tex");
     if !f.is_empty() {
-        eprintln!("DBGSRC {} {:?}", src.len(), &src[5900.min(src.len())..]);
-        let p = b.all_page_origins();
-        for (k, p) in p.iter().enumerate() {
+        eprintln!("DBGSRC {:?}", &src[1850..2000]);
+        let pdf: std::sync::Arc<[u8]> = std::sync::Arc::from(b.output_bytes());
+        let doc = phitex_codecs::pdfread::Doc::open(&pdf).unwrap();
+        for (k, p) in b.all_page_origins().iter().enumerate() {
             let p = p.as_ref().unwrap();
+            let codes = phitex_codecs::pdftext::page_codes(&doc, &doc.page(k + 1).unwrap());
+            let t: String = codes
+                .iter()
+                .map(|c| char::from_u32(c.code).unwrap_or('?'))
+                .collect();
+            eprintln!("DBGPAGE {k} text {:?}", t);
             let v: Vec<String> = (0..p.len())
-                .filter(|&i| p.start[i] > 5900)
-                .take(30)
                 .map(|i| {
                     format!(
-                        "{}:{}-{}{}",
+                        "{}{}:{}-{}{}",
+                        char::from_u32(codes[i].code).unwrap_or('?'),
                         p.file[i] as i64,
                         p.start[i],
                         p.end[i],
@@ -773,7 +779,7 @@ fn glyph_origins_forms_and_pages() {
                     )
                 })
                 .collect();
-            eprintln!("DBGPAGE {k} {} {:?}", p.len(), v);
+            eprintln!("DBGORG {k} {}", v.join(" "));
         }
     }
     assert!(f.is_empty(), "origins:\n{}", f.join("\n"));

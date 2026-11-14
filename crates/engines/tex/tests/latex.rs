@@ -2426,78 +2426,53 @@ fn latex_glyph_origins() {
     assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
 }
 
-/// Glyph origins of a document whose chapters are `\\input` files (one
-/// inside another): every glyph from a chapter maps to that chapter's
-/// file and bytes, not to the `\\input` command that read it; every page's
-/// codes have one each, the same at -j1 and -j8; after a word's edit in a
-/// chapter, a cold build's answers.
-#[test]
+/// Glyph origins of a document made of the files `files` (name, text)
+/// that main text `main` reads (`\\input`, `\\include`): every glyph
+/// from a file maps to that file's bytes, not to the command that read
+/// it nor another file's; every page's codes have one each, the same at
+/// -j1 and -j8; after `edit` (file, a word and its replacement), a cold
+/// build's answers.
 #[allow(clippy::too_many_lines)]
-fn latex_glyph_origins_of_input_files() {
-    let dir = common::scratch("origins-input");
-    let para = |k: usize, what: &str| {
-        format!(
-            "Paragraph {k} of the {what} speaks of rivers and gardens, of letters written \\emph{{slowly}} and pages turned, of a window open on the morning.\n\n"
-        )
-    };
-    let mut chap = String::from("\\section{The chapter}\n");
-    let mut inner = String::from("\\subsection{Inside}\n");
-    for k in 0..6 {
-        chap.push_str(&para(k, "chapter"));
-        inner.push_str(&para(k, "inner part"));
-    }
-    chap.push_str("\\input{inner}\n");
-    let main = format!(
-        "\\documentclass{{article}}\n\\begin{{document}}\n{}\\input{{chapter}}\n{}\\end{{document}}\n",
-        para(0, "main text"),
-        para(1, "main text")
-    );
+fn input_origins(case: &str, main: &str, files: &[(&str, String)], edit: (&str, &str, &str)) {
+    let dir = common::scratch(&format!("origins-input-{case}"));
+    let main =
+        format!("\\documentclass{{article}}\n\\begin{{document}}\n{main}\\end{{document}}\n");
     std::fs::write(dir.join("main.tex"), &main).expect("main.tex");
-    std::fs::write(dir.join("chapter.tex"), &chap).expect("chapter.tex");
-    std::fs::write(dir.join("inner.tex"), &inner).expect("inner.tex");
-    let build = |text: &str, threads: usize| {
+    for (name, text) in files {
+        let p = dir.join(name);
+        std::fs::create_dir_all(p.parent().expect("a directory")).expect("its directory");
+        std::fs::write(p, text).expect("a file");
+    }
+    let build = |threads: usize| {
         let opts = Options {
             threads: Some(threads),
             origins: true,
             ..pdf_opts("main", &dir)
         };
-        common::build(opts, Some(&prelude(true)), text)
+        common::build(opts, Some(&prelude(true)), &main)
     };
-    let check = |b: &phitex_tex::Build, chap: &str, inner: &str, when: &str| {
+    let check = |b: &phitex_tex::Build, files: &[(&str, String)], when: &str| {
         let pdf = b.output_bytes();
         let mut fails = Vec::new();
-        for (file, text) in [
-            ("main.tex", main.as_str()),
-            ("chapter.tex", chap),
-            ("inner.tex", inner),
-        ] {
+        for (file, text) in std::iter::once(("main.tex", main.as_str()))
+            .chain(files.iter().map(|(n, t)| (*n, t.as_str())))
+        {
             fails.extend(
                 common::origin_failures_in(b, &pdf, text, file, true, true)
                     .into_iter()
                     .map(|f| format!("{file}: {f}")),
             );
         }
-        assert!(fails.is_empty(), "{when}: origins:\n{}", fails.join("\n"));
+        assert!(
+            fails.is_empty(),
+            "{case} {when}: origins:\n{}",
+            fails.join("\n")
+        );
     };
-    let mut b = build(&main, 1);
-    check(&b, &chap, &inner, "-j1");
-    let b8 = build(&main, 8);
-    check(&b8, &chap, &inner, "-j8");
-    assert_eq!(
-        b8.all_page_origins(),
-        b.all_page_origins(),
-        "-j8's origins are -j1's"
-    );
-    let chap2 = chap.replacen(
-        "Paragraph 3 of the chapter",
-        "Paragraph 3 of the chapters",
-        1,
-    );
-    std::fs::write(dir.join("chapter.tex"), &chap2).expect("chapter.tex");
-    b.stage_file("chapter.tex", Some(chap2.as_bytes()));
-    b.edit(&main);
-    check(&b, &chap2, &inner, "after the edit");
-    let cold = build(&main, 1);
+    let mut b = build(1);
+    check(&b, files, "-j1");
+    let b8 = build(8);
+    check(&b8, files, "-j8");
     let named = |b: &phitex_tex::Build| {
         let pages = b.all_page_origins();
         let files = b.origin_files();
@@ -2521,38 +2496,167 @@ fn latex_glyph_origins_of_input_files() {
             })
             .collect::<Vec<_>>()
     };
-    let (e, c) = (named(&b), named(&cold));
-    let first = e.iter().zip(&c).enumerate().find_map(|(k, (x, y))| {
-        if x == y {
-            return None;
-        }
-        let (Some(x), Some(y)) = (x, y) else {
-            return Some(format!(
-                "page {}: {:?} vs {:?}",
+    let same = |x: &phitex_tex::Build, y: &phitex_tex::Build, what: &str| {
+        let (e, c) = (named(x), named(y));
+        let first = e.iter().zip(&c).enumerate().find_map(|(k, (x, y))| {
+            if x == y {
+                return None;
+            }
+            let (Some(x), Some(y)) = (x, y) else {
+                return Some(format!(
+                    "page {}: {:?} vs {:?}",
+                    k + 1,
+                    x.is_some(),
+                    y.is_some()
+                ));
+            };
+            let i = x
+                .iter()
+                .zip(y)
+                .position(|(a, b)| a != b)
+                .unwrap_or(x.len().min(y.len()));
+            Some(format!(
+                "page {} code {i} of {}/{}: {:?} vs {:?}",
                 k + 1,
-                x.is_some(),
-                y.is_some()
-            ));
-        };
-        let i = x
-            .iter()
-            .zip(y)
-            .position(|(a, b)| a != b)
-            .unwrap_or(x.len().min(y.len()));
-        Some(format!(
-            "page {} code {i} of {}/{}: {:?} vs {:?}",
-            k + 1,
-            x.len(),
-            y.len(),
-            x.get(i),
-            y.get(i)
-        ))
-    });
-    assert!(
-        first.is_none() && e.len() == c.len(),
-        "the edit's origins are a cold build's: {first:?} pages {} vs {}",
-        e.len(),
-        c.len()
+                x.len(),
+                y.len(),
+                x.get(i),
+                y.get(i)
+            ))
+        });
+        assert!(
+            first.is_none() && e.len() == c.len(),
+            "{case}: {what}: {first:?} pages {} vs {}",
+            e.len(),
+            c.len()
+        );
+    };
+    same(&b8, &b, "-j8's origins are -j1's");
+    let (ef, from, to) = edit;
+    let files2: Vec<(&str, String)> = files
+        .iter()
+        .map(|(n, t)| {
+            (
+                *n,
+                if *n == ef {
+                    t.replacen(from, to, 1)
+                } else {
+                    t.clone()
+                },
+            )
+        })
+        .collect();
+    let new = &files2
+        .iter()
+        .find(|(n, _)| *n == ef)
+        .expect("the edited file")
+        .1;
+    assert_ne!(
+        Some(new),
+        files.iter().find(|(n, _)| *n == ef).map(|x| &x.1)
+    );
+    std::fs::write(dir.join(ef), new).expect("the edit");
+    b.stage_file(ef, Some(new.as_bytes()));
+    b.edit(&main);
+    check(&b, &files2, "after the edit");
+    let cold = build(1);
+    same(&b, &cold, "the edit's origins are a cold build's");
+}
+
+fn input_para(k: usize, what: &str) -> String {
+    format!(
+        "Paragraph {k} of the {what} speaks of rivers and gardens, of letters written \\emph{{slowly}} and pages turned, of a window open on the morning.\n\n"
+    )
+}
+
+/// A file of the review's: a heading and one line of eight sentences.
+fn input_file(head: &str, tag: &str) -> String {
+    let s: Vec<String> = (1..=8)
+        .map(|i| {
+            format!(
+                "In the {tag} part, sentence {i} carries the paragraph along with ordinary words."
+            )
+        })
+        .collect();
+    format!("\\section{{{head}}}\n{}\n", s.join(" "))
+}
+
+/// [`input_origins`]: chapters that are `\\input` files (one inside
+/// another), main text around them.
+#[test]
+fn latex_glyph_origins_of_input_files() {
+    let mut chap = String::from("\\section{The chapter}\n");
+    let mut inner = String::from("\\subsection{Inside}\n");
+    for k in 0..6 {
+        chap.push_str(&input_para(k, "chapter"));
+        inner.push_str(&input_para(k, "inner part"));
+    }
+    chap.push_str("\\input{inner}\n");
+    let main = format!(
+        "{}\\input{{chapter}}\n{}",
+        input_para(0, "main text"),
+        input_para(1, "main text")
+    );
+    input_origins(
+        "nested",
+        &main,
+        &[("chapter.tex", chap), ("inner.tex", inner)],
+        (
+            "chapter.tex",
+            "Paragraph 3 of the chapter",
+            "Paragraph 3 of the chapters",
+        ),
+    );
+}
+
+/// [`input_origins`]: one line of main text, then `\\input` files one
+/// after another, in braces, by the space form and in a directory.
+#[test]
+fn latex_glyph_origins_of_input_files_in_a_row() {
+    input_origins(
+        "row",
+        "Main text before the chapters.\n\\input{intro2}\n\\input{ch2}\n\\input ch3\n\\input{chapters/intro}\n",
+        &[
+            ("intro2.tex", input_file("Intro two", "introtwo")),
+            ("ch2.tex", input_file("Two", "two")),
+            ("ch3.tex", input_file("Three", "three")),
+            ("chapters/intro.tex", input_file("Intro", "intro")),
+        ],
+        ("ch2.tex", "sentence 3 carries", "sentence 3 carried"),
+    );
+}
+
+/// [`input_origins`]: an `\\input` file then an `\\include`d one.
+#[test]
+fn latex_glyph_origins_of_input_and_include() {
+    input_origins(
+        "include",
+        "\\input{intro2}\n\\include{ch2}\n",
+        &[
+            ("intro2.tex", input_file("Intro two", "introtwo")),
+            ("ch2.tex", input_file("Two", "two")),
+        ],
+        ("intro2.tex", "sentence 2 carries", "sentence 2 carried"),
+    );
+}
+
+/// [`input_origins`]: a directory's `\\input` file, an `\\include`d
+/// one, then one by the space form.
+#[test]
+fn latex_glyph_origins_of_input_include_input() {
+    input_origins(
+        "mixed",
+        "\\input{chapters/intro}\n\\include{ch2}\n\\input ch3\n",
+        &[
+            ("chapters/intro.tex", input_file("Intro", "intro")),
+            ("ch2.tex", input_file("Two", "two")),
+            ("ch3.tex", input_file("Three", "three")),
+        ],
+        (
+            "chapters/intro.tex",
+            "sentence 5 carries",
+            "sentence 5 carried",
+        ),
     );
 }
 
