@@ -61,6 +61,38 @@ fn a_documents_error_after_wide_bytes_is_at_its_bytes() {
     assert!(d.context.starts_with("l.3 In \u{627}"), "{}", d.context);
 }
 
+/// An `\errmessage` whose first line is its header alone (`LaTeX3`'s
+/// messages, fontspec's "Package fontspec Error: " then `(fontspec) The
+/// font "IPAexMincho" cannot be found; ...`), from a command that looked
+/// ahead past its line (fontspec's `\newfontfamily` looks for an
+/// optional argument, TeX reads the next line's command): the message
+/// is the text, not the header alone, and the place is the argument
+/// that names the key, on its own line. It was "Package fontspec Error: "
+/// at the next line, the next `\newfontfamily`'s: a font that loads
+/// looked like the one that failed.
+#[test]
+fn a_header_only_error_names_its_key_at_its_argument() {
+    let doc = "\\newlinechar=`\\^^J\n\\def\\family#1#2{\\def\\next{\\errmessage{Package fake Error: ^^J(fake)   The font \"#2\" cannot be^^J(fake)   found.^^J^^JFor immediate help type H <return>.}}\\futurelet\\tok\\next}\n\\family\\a{Missing}%\n% a comment between\n\\family\\b{Other}\n\\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let d = ds
+        .iter()
+        .find(|d| d.message.starts_with("Package fake Error"))
+        .expect("the error");
+    assert_eq!(
+        d.message,
+        "Package fake Error: The font \"Missing\" cannot be found."
+    );
+    let at = doc.find("\\a{Missing}").expect("the argument");
+    assert_eq!(
+        (d.line, d.range),
+        (3, (at, at + "\\a{Missing}".len())),
+        "{d:?}"
+    );
+    assert!(d.context.starts_with("l.5 "), "{}", d.context);
+}
+
 /// A paragraph's box report, the paragraph resumed after a display
 /// (§1200's `push_nest`): placed where it begins, after the display, not
 /// where it ends (the next paragraph's first line, or a heading's).
