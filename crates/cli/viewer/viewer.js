@@ -1170,8 +1170,7 @@ var Viewer = class _Viewer {
   static asCited(label, text, at) {
     const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
     const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
-    const years = [...text.matchAll(/\b(1[5-9]\d\d|20\d\d)[a-z]?\b/g)];
-    const year = years.at(-1)?.[0];
+    const year = /\b(1[5-9]\d\d|20\d\d)[a-z]?\b/.exec(label)?.[0] ?? [...text.matchAll(/(?<![\d–-])\b(1[5-9]\d\d|20\d\d)[a-z]?\b(?![–-]\d)/g)].at(-1)?.[0];
     const parts = [];
     let cur = "";
     for (const w of text.split(" ")) {
@@ -1292,7 +1291,7 @@ var Viewer = class _Viewer {
         continue;
       }
       const aux = c.label != null ? _Viewer.texText(c.label) : null;
-      const e = c.at ? this.entryOn(c.at[0], c.at[1], aux) : null;
+      const e = c.at ? this.entryOn(c.at[0], c.at[1], aux, c.at[2] ?? null) : null;
       const label = e?.label || aux;
       out.push(e ? { ..._Viewer.asCited(label ?? "", e.text, [c.at[0], e.top]), key: c.key, label: label ?? "" } : { key: c.key, label: label ?? c.key, title: c.key, authors: [], at: c.at ? [c.at[0], Math.max(0, c.at[1] - 10)] : void 0 });
     }
@@ -1306,8 +1305,8 @@ var Viewer = class _Viewer {
    * matched to the line around it, the place was the line above's, the previous entry's:
    * every card one entry early, the first none.
    */
-  entryOn(k, y, aux = null) {
-    const lines2 = this.pageLines(k);
+  entryOn(k, y, aux = null, left = null) {
+    const lines2 = this.pageLines(k).filter((l) => left == null || l.x0 > left - 2 && l.x0 < left + 60);
     const below = lines2.map((l, j) => [l, j]).filter(([l]) => l.b >= y).sort(([a], [c]) => a.b - c.b || a.x0 - c.x0);
     if (!below.length) return null;
     const near = below.slice(0, 4);

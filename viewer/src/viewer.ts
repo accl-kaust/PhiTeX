@@ -965,8 +965,11 @@ export class Viewer {
   private static asCited(label: string, text: string, at: [number, number]): Cited {
     const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
     const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
-    const years = [...text.matchAll(/\b(1[5-9]\d\d|20\d\d)[a-z]?\b/g)];
-    const year = years.at(-1)?.[0];
+    // (the year: the label's where it names one (natbib's "Kuon and Rose (2007)"), else the
+    // entry's last, never one end of a page range ("1749–1760": the card's year "1760"))
+    const year =
+      /\b(1[5-9]\d\d|20\d\d)[a-z]?\b/.exec(label)?.[0] ??
+      [...text.matchAll(/(?<![\d–-])\b(1[5-9]\d\d|20\d\d)[a-z]?\b(?![–-]\d)/g)].at(-1)?.[0];
     const parts: string[] = [];
     let cur = "";
     for (const w of text.split(" ")) {
