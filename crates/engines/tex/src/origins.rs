@@ -1002,6 +1002,11 @@ pub(crate) fn match_page_until(
     }
     let mut matched_atoms: Vec<Option<(u32, u32, u32)>> = vec![None; atoms.len()];
     let mut word_done = vec![false; words.len()];
+    // (a word the first pass matched outside a run of three in a row:
+    // a later pass's run of three or more takes it over (a footnote's
+    // common words, "from the same", paired one by one with the text
+    // after its mark, where the run of its own node is)
+    let mut alone = vec![false; words.len()];
     let mut src_used: phitex_defuse::FxHashSet<(u32, u32)> = phitex_defuse::FxHashSet::default();
     // (the heaviest cluster with every word of the page; then it and the
     // other clusters again with the runs of words left: floats,
@@ -1049,7 +1054,9 @@ pub(crate) fn match_page_until(
         }
         // (the page's words not matched yet: all of them first, then the
         // runs of three or more left)
-        let free: Vec<usize> = (0..words.len()).filter(|&i| !word_done[i]).collect();
+        let free: Vec<usize> = (0..words.len())
+            .filter(|&i| !word_done[i] || (round > 0 && alone[i]))
+            .collect();
         if free.is_empty() {
             break;
         }
@@ -1103,8 +1110,26 @@ pub(crate) fn match_page_until(
         if round > 0 && !pairs.is_empty() {
             passes.insert(round + 1, ci);
         }
-        for &(i, j) in &pairs {
+        // (each pair's run: the pairs in a row on both sides around it)
+        let mut run = vec![1usize; pairs.len()];
+        let mut k = 0;
+        while k < pairs.len() {
+            let mut e = k + 1;
+            while e < pairs.len()
+                && free[pairs[e].0] == free[pairs[e - 1].0] + 1
+                && pairs[e].1 == pairs[e - 1].1 + 1
+            {
+                e += 1;
+            }
+            run[k..e].iter_mut().for_each(|r| *r = e - k);
+            k = e;
+        }
+        for (&(i, j), &r) in pairs.iter().zip(&run) {
             let wi = free[i];
+            if round > 0 && word_done[wi] && !alone[wi] {
+                continue;
+            }
+            alone[wi] = round == 0 && r < 3;
             word_done[wi] = true;
             src_used.insert(src.words[j]);
             let (n, cs) = src.cands(j);
