@@ -398,11 +398,7 @@ export class Review {
     this.body.addEventListener("click", (e) => void this.clicked(e));
     this.body.addEventListener("keydown", (e) => this.keyed(e));
     this.body.addEventListener("input", (e) => e.target instanceof HTMLTextAreaElement && this.keepDraft(e.target));
-    host.onState((s) => {
-      this.s = s;
-      void this.marks();
-      this.render();
-    });
+    host.onState((s) => this.take(s));
     // (the pages: a selection's end offers the note kinds; a click on a mark selects it; Alt+click a spot)
     p.stage.addEventListener("pointerdown", (e) => {
       this.pointerDown = true;
@@ -421,8 +417,40 @@ export class Review {
       if (this.compose || this.pop) (this.closePop(), e.stopPropagation());
     }, { capture: true });
     void host.request("review_state").then((r) => {
-      if (r.ok && r.json) (this.s = r.json as ReviewState), this.render(), void this.marks();
+      if (r.ok && r.json) this.take(r.json as ReviewState);
     });
+  }
+
+  /**
+   * Whether the review is on: the user's Experimental switch
+   * (`experimental-review`, the state's `changes`). Off, nothing of it
+   * shows: no note kinds offered at a selection, no marks on the pages or
+   * the scrollbar, no side, and the panel's button and menu item hidden
+   * (`onEnabled`). Until the watch says, off.
+   */
+  get enabled(): boolean {
+    return this.s.changes === true;
+  }
+
+  private enabledCb?: (on: boolean) => void;
+
+  /** `cb(on)` now and whenever the review is switched on or off. */
+  onEnabled(cb: (on: boolean) => void): void {
+    this.enabledCb = cb;
+    cb(this.enabled);
+  }
+
+  /** A state from the watch: the side, the marks, and the switch as it says. */
+  private take(s: ReviewState): void {
+    const was = this.enabled;
+    this.s = s;
+    if (!this.enabled) {
+      this.closePop();
+      if (this.isOpen) this.open(false);
+    }
+    if (was !== this.enabled) this.enabledCb?.(this.enabled);
+    void this.marks();
+    this.render();
   }
 
   /** The pages' origins changed (a build): the marks found again. */
@@ -453,6 +481,7 @@ export class Review {
 
   /** The side shown (or hidden), on `tab` if given. */
   open(on = !this.isOpen, tab?: "notes" | "changes"): void {
+    if (on && !this.enabled) return;
     if (tab) this.tab = tab;
     this.p.win.classList.toggle("review-on", on);
     if (on) this.render();
@@ -1145,6 +1174,7 @@ export class Review {
 
   private async marks(): Promise<void> {
     const turn = ++this.drawn;
+    if (!this.enabled) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     // (the typeset comparison shown: its own marks, latexdiff's; the pages' origins are the diff's)
     if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     const out: Parameters<Viewer["reviewMarks"]>[0] = [];
@@ -1189,6 +1219,7 @@ export class Review {
 
   /** A click on the pages: a pin or a mark selects its note or hunk; Alt+click notes a spot. */
   private async pageClick(e: MouseEvent): Promise<void> {
+    if (!this.enabled) return;
     const t = e.target as HTMLElement;
     // (a handle's drag ends in a click: not a click on the page)
     if (t.closest(".rv-h")) return;
@@ -1230,6 +1261,7 @@ export class Review {
 
   /** The note kinds offered at the selection's end. */
   private offer(): void {
+    if (!this.enabled) return this.closePopOnly();
     const rn = this.p.root as ShadowRoot & { getSelection?: () => Selection | null };
     const sel = rn.getSelection?.() ?? document.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount || !this.picked) return this.closePopOnly();

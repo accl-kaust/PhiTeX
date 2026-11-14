@@ -5705,11 +5705,7 @@ var Review = class {
     this.body.addEventListener("click", (e) => void this.clicked(e));
     this.body.addEventListener("keydown", (e) => this.keyed(e));
     this.body.addEventListener("input", (e) => e.target instanceof HTMLTextAreaElement && this.keepDraft(e.target));
-    host2.onState((s) => {
-      this.s = s;
-      void this.marks();
-      this.render();
-    });
+    host2.onState((s) => this.take(s));
     p.stage.addEventListener("pointerdown", (e) => {
       this.pointerDown = true;
       if (!e.target.closest(".rv-pop, .rv-compose, .rv-finish")) this.closePop();
@@ -5727,8 +5723,36 @@ var Review = class {
       if (this.compose || this.pop) this.closePop(), e.stopPropagation();
     }, { capture: true });
     void host2.request("review_state").then((r) => {
-      if (r.ok && r.json) this.s = r.json, this.render(), void this.marks();
+      if (r.ok && r.json) this.take(r.json);
     });
+  }
+  /**
+   * Whether the review is on: the user's Experimental switch
+   * (`experimental-review`, the state's `changes`). Off, nothing of it
+   * shows: no note kinds offered at a selection, no marks on the pages or
+   * the scrollbar, no side, and the panel's button and menu item hidden
+   * (`onEnabled`). Until the watch says, off.
+   */
+  get enabled() {
+    return this.s.changes === true;
+  }
+  enabledCb;
+  /** `cb(on)` now and whenever the review is switched on or off. */
+  onEnabled(cb) {
+    this.enabledCb = cb;
+    cb(this.enabled);
+  }
+  /** A state from the watch: the side, the marks, and the switch as it says. */
+  take(s) {
+    const was = this.enabled;
+    this.s = s;
+    if (!this.enabled) {
+      this.closePop();
+      if (this.isOpen) this.open(false);
+    }
+    if (was !== this.enabled) this.enabledCb?.(this.enabled);
+    void this.marks();
+    this.render();
   }
   /** The pages' origins changed (a build): the marks found again. */
   refresh() {
@@ -5753,6 +5777,7 @@ var Review = class {
   }
   /** The side shown (or hidden), on `tab` if given. */
   open(on = !this.isOpen, tab) {
+    if (on && !this.enabled) return;
     if (tab) this.tab = tab;
     this.p.win.classList.toggle("review-on", on);
     if (on) this.render();
@@ -6371,6 +6396,7 @@ var Review = class {
   // ---- the marks on the pages ----
   async marks() {
     const turn = ++this.drawn;
+    if (!this.enabled) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     const out = [];
     const cls = (n) => n.status === "resolved" ? "n-resolved" : `n-${n.kind}`;
@@ -6412,6 +6438,7 @@ var Review = class {
   }
   /** A click on the pages: a pin or a mark selects its note or hunk; Alt+click notes a spot. */
   async pageClick(e) {
+    if (!this.enabled) return;
     const t = e.target;
     if (t.closest(".rv-h")) return;
     const pin = t.closest(".rv-pin");
@@ -6448,6 +6475,7 @@ var Review = class {
   }
   /** The note kinds offered at the selection's end. */
   offer() {
+    if (!this.enabled) return this.closePopOnly();
     const rn = this.p.root;
     const sel = rn.getSelection?.() ?? document.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount || !this.picked) return this.closePopOnly();
@@ -6998,6 +7026,7 @@ var Panel = class {
         opts.review
       );
       const b = this.$("#b-review");
+      rv.onEnabled((on) => offer("#x-review, #b-review", on));
       b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
       rv.counts((open, pending) => {
         const n = open + pending;
@@ -7006,7 +7035,7 @@ var Panel = class {
       });
       new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
       window.addEventListener("keydown", (e) => {
-        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e) || !rv.enabled) return;
         e.preventDefault();
         rv.open();
       });
