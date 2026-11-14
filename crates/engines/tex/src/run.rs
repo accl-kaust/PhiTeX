@@ -7436,6 +7436,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         // (a finisher's pages leave as their shapes, `pages`: their
         // writers read the lines, `crate::pdfout::PdfPage`)
+        self.mark_fire_points();
         let pages_f = self.v.field("pages");
         self.left_memo = None;
         for (f, x) in std::mem::take(&mut self.contribs) {

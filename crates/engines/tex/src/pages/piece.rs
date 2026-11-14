@@ -674,6 +674,58 @@ impl Run<'_, '_> {
         Err(Halt::Recut(k))
     }
 
+    /// The log's marks of where a page's routine ran ([`crate::log::order_fires`]):
+    /// a piece's run, each candidate it went on past with more of its
+    /// log after it ([`crate::log::FIRE_AT`], where that candidate
+    /// stands among its contributions); a finisher, its events between
+    /// [`crate::log::FIRE`] and [`crate::log::FIRE_END`], named by its
+    /// page's piece and candidate. The candidate a run was cut at has
+    /// nothing of the run after it: the finisher's place after the
+    /// piece is TeX's there.
+    pub(crate) fn mark_fire_points(&mut self) {
+        let v = self.v;
+        let log = v.field("log");
+        let ev =
+            |kind: &str, text: &str| v.seq_unit(v.list(vec![v.str(kind), v.str(text), v.int(-1)]));
+        if self.cx.op() == self.ops.finish {
+            let Some(p) = self.fin.as_ref().and_then(|f| f.page.as_ref()) else {
+                return;
+            };
+            if !self.contribs.iter().any(|&(f, _)| f == log) {
+                return;
+            }
+            let key = format!("{}:{}", p.at.raw(), p.k);
+            self.contribs.insert(0, (log, ev(crate::log::FIRE, &key)));
+            self.contribs.push((log, ev(crate::log::FIRE_END, &key)));
+            return;
+        }
+        if self.cand_marks.is_empty() {
+            return;
+        }
+        let me = self.cx.node().raw();
+        // (from the last, so each mark's place among the contributions
+        // stands as the run recorded it)
+        let mut last_log = None;
+        for (i, &(f, _)) in self.contribs.iter().enumerate() {
+            if f == log {
+                last_log = Some(i);
+            }
+        }
+        let Some(last_log) = last_log else {
+            return;
+        };
+        let marks: Vec<(u32, usize)> = self
+            .cand_marks
+            .iter()
+            .filter(|m| self.cut != Some(m.k) && m.contribs <= last_log)
+            .map(|m| (m.k, m.contribs))
+            .collect();
+        for &(k, at) in marks.iter().rev() {
+            self.contribs
+                .insert(at, (log, ev(crate::log::FIRE_AT, &format!("{me}:{k}"))));
+        }
+    }
+
     /// `PHITEX_CAND_TRACE`: the candidate `k` and what decided its cut.
     pub(crate) fn trace_candidate(&mut self, k: u32, newgraf: bool, fresh: bool, cuttable: bool) {
         let v = self.v;

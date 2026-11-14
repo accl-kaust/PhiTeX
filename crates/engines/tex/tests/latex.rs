@@ -4287,6 +4287,48 @@ fn a_files_rest_read_on_into_keeps_its_line_numbers() {
     assert_eq!(logs[0], logs[1]);
 }
 
+/// A page fires at a candidate a piece's run goes on past: TeX ran the
+/// routine there, so its `[1]` comes before what the paragraphs after the
+/// fire log, wherever the cuts are. Cut at every candidate (`cut_min` 1)
+/// or at none (`cut_min` the most), the logs are one: the finisher, placed
+/// after the whole piece, has its events where the piece passed the fire
+/// (lie-hasse at -j8: `[21]` after 420 lines the paragraphs after it
+/// logged, where its cuts were not -j1's).
+#[test]
+fn a_page_fired_inside_a_piece_logs_where_tex_ran_its_routine() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/fire-log");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let mut doc = String::from("\\documentclass{article}\n\\begin{document}\n");
+    for i in 0..60 {
+        doc.push_str(&format!(
+            "\\message{{P{i}}}Paragraph {i} has words enough to fill a line or two of the page, words and words and more words to set.\n\n"
+        ));
+    }
+    doc.push_str("\\end{document}\n");
+    let log = |cut_min: u64| {
+        let b = common::build(
+            Options {
+                threads: Some(1),
+                cut_min: Some(cut_min),
+                ..pdf_opts("firelog", &dir)
+            },
+            Some(&prelude(true)),
+            &doc,
+        );
+        b.output().1.clone()
+    };
+    let (every, none) = (log(1), log(u64::MAX));
+    // (the last paragraph's message after the first page, as TeX has it)
+    let after_first = |l: &str| l.find("[1").is_some_and(|i| l[i..].contains("P59"));
+    assert!(after_first(&every), "cut at every candidate: {every}");
+    assert!(
+        after_first(&none),
+        "uncut: [1] after the last paragraph's message: {none}"
+    );
+    assert_eq!(every, none, "the logs cut at every candidate and at none");
+}
+
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
 /// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
 /// (microtype's font expansion). A reader cares which ratios are there,
