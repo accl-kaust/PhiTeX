@@ -92,6 +92,35 @@ fn as_program(name: &str) -> PathBuf {
     p
 }
 
+/// The oracle's fontconfig (`scripts/xetex/fonts.conf`: TeX Live's
+/// OpenType and TrueType fonts, as `xelatex`'s references were made,
+/// `scripts/ci/manuals.py`'s `side_env`), its tree this TeX Live's: XeTeX
+/// finds fonts by name in fontconfig's list, the environment's.
+fn tl_fonts_conf() -> PathBuf {
+    static CONF: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CONF.get_or_init(|| {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/xetex/fonts.conf");
+        let text = std::fs::read_to_string(&src).unwrap_or_default();
+        let dist = Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "/usr/share/texmf-dist".to_owned());
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fontconfig");
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join(format!("fonts-{}.conf", std::process::id()));
+        let text = text.replace("/usr/share/texmf-dist", &dist).replace(
+            "/tmp/phitex-xetex-fc-cache",
+            &dir.join("cache").display().to_string(),
+        );
+        std::fs::write(&conf, text).expect("the fonts.conf");
+        conf
+    })
+    .clone()
+}
+
 /// `program` in `dir`, stopped after ten minutes (`timeout`): a build that
 /// hangs fails its test instead of holding the job.
 fn command(program: &Path, dir: &Path) -> Command {
@@ -99,6 +128,7 @@ fn command(program: &Path, dir: &Path) -> Command {
     c.arg("600").arg(program);
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT");
@@ -113,6 +143,7 @@ fn command_fg(program: &Path, dir: &Path) -> Command {
     c.args(["--foreground", "600"]).arg(program);
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT");
@@ -3839,6 +3870,279 @@ fn xelatex_fontspec() {
     );
 }
 
+/// TeX Gyre Heros' face `style` renamed in place, the same lengths:
+/// family "Usr Gyre Heros", PostScript `UsrGyreHeros-…` (its name table
+/// and its CFF): a family TeX Live has not, for a user's font folder.
+fn renamed_heros(dist: &str, style: &str) -> Vec<u8> {
+    let mut b = std::fs::read(format!(
+        "{dist}/fonts/opentype/public/tex-gyre/texgyreheros-{style}.otf"
+    ))
+    .expect("TeX Gyre Heros");
+    let utf16 = |s: &str| {
+        s.encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<u8>>()
+    };
+    for (a, z) in [
+        ("TeX Gyre Heros", "Usr Gyre Heros"),
+        ("TeXGyreHeros", "UsrGyreHeros"),
+    ] {
+        for (a, z) in [
+            (a.as_bytes().to_vec(), z.as_bytes().to_vec()),
+            (utf16(a), utf16(z)),
+        ] {
+            let mut i = 0;
+            while let Some(k) = b[i..].windows(a.len()).position(|w| w == a.as_slice()) {
+                b[i + k..i + k + a.len()].copy_from_slice(&z);
+                i += k + a.len();
+            }
+        }
+    }
+    b
+}
+
+/// A case of [`xelatex_finds_fonts_as_xelatex`]: its name, its document,
+/// the fonts copied into its folder (from, to), its font setups.
+type Case<'a> = (&'a str, String, Vec<(String, String)>, &'a [&'a str]);
+
+/// XeTeX finds fonts as `xelatex` does (docs/spec-xetex.md §3.1), the
+/// PDF, the exit and the errors `xelatex`'s, at -j1 and -j8:
+/// - by file name: TeX Live's (`NewCM10-Regular.otf`, issue #27), the
+///   project's (`MyFont.otf`, `[Path=fonts/]`, `Extension=.otf` with
+///   `Path=./fonts/`, `\font\x="[MyFont]"`), one only in the user's font
+///   folder (not found: kpathsea does not search it), one nowhere;
+/// - by family name: a family only in the user's font folder
+///   (`XDG_DATA_HOME/fonts`) with its bold, italic and bold italic
+///   (`/B`, `/I`, `/BI`) and a full name, the same with TeX Live's trees
+///   in fontconfig before it, a family only in the project's folder
+///   (fontconfig does not list it: not found, unless the user's folder
+///   has it), an unknown family (the same error);
+/// - a font added to the user's font folder after a first run: found
+///   by the next one (the index's cache key moved).
+#[test]
+#[ignore = "heavy: xelatex and phitex's xelatex format; run on accl"]
+#[allow(clippy::too_many_lines, reason = "the cases, then their runs")]
+fn xelatex_finds_fonts_as_xelatex() {
+    let _one = one();
+    let out = Command::new("kpsewhich")
+        .args(["-var-value", "TEXMFDIST"])
+        .output()
+        .expect("kpsewhich (TeX Live) on the test machine");
+    let dist = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let tex_gyre = format!("{dist}/fonts/opentype/public/tex-gyre");
+    let root = scratch("xelatex-fonts-lookup");
+    // the user's font folder: the renamed family's four faces
+    let user = root.join("xdg");
+    std::fs::create_dir_all(user.join("fonts/sub")).expect("the user's fonts");
+    for s in ["regular", "bold", "italic", "bolditalic"] {
+        std::fs::write(
+            user.join(format!("fonts/sub/UserHeros-{s}.otf")),
+            renamed_heros(&dist, s),
+        )
+        .expect("a user font");
+    }
+    // fontconfig over TeX Live's trees, then the user's folder
+    let tluser = root.join("tluser.conf");
+    std::fs::write(
+        &tluser,
+        format!(
+            "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n<fontconfig>\n  <dir>{dist}/fonts/opentype</dir>\n  <dir>{dist}/fonts/truetype</dir>\n  <dir prefix=\"xdg\">fonts</dir>\n  <cachedir>{}</cachedir>\n</fontconfig>\n",
+            root.join("fc-cache").display()
+        ),
+    )
+    .expect("tluser.conf");
+    let doc = |body: &str, pre: &str| {
+        format!(
+            "\\documentclass{{article}}\\usepackage{{fontspec}}\n{pre}\n\\begin{{document}}{body}\\end{{document}}\n"
+        )
+    };
+    let copy = |from: &str, to: &str| (from.to_owned(), to.to_owned());
+    // (name, document, files (from, to), environments)
+    let cases: Vec<Case> = vec![
+        (
+            "filename",
+            doc(
+                "Hello {\\pag Pagella \\textbf{bold}} world. Γράφοντας Писать",
+                "\\setmainfont{NewCM10-Regular.otf}\n\\newfontfamily\\pag{texgyrepagella-regular.otf}[BoldFont=texgyrepagella-bold.otf]",
+            ),
+            vec![],
+            &["tl"],
+        ),
+        (
+            "projfile",
+            doc(
+                "Project font. {\\other The other one.} {\\third A third.} {\\fourth x}",
+                "\\setmainfont{MyFont.otf}\n\\newfontfamily\\other{MyOther.otf}[Path=fonts/]\n\\newfontfamily\\third{MyThird}[Extension=.otf,Path=./fonts/]\n\\font\\fourth=\"[MyFont]\" at 9pt",
+            ),
+            vec![
+                copy(
+                    &format!("{tex_gyre}/texgyretermes-regular.otf"),
+                    "MyFont.otf",
+                ),
+                copy(
+                    &format!("{tex_gyre}/texgyrebonum-regular.otf"),
+                    "fonts/MyOther.otf",
+                ),
+                copy(
+                    &format!("{tex_gyre}/texgyreschola-regular.otf"),
+                    "fonts/MyThird.otf",
+                ),
+            ],
+            &["tl", "tluser"],
+        ),
+        (
+            "userfam",
+            doc(
+                "Regular \\textbf{bold} \\textit{italic} \\textbf{\\textit{bold italic}}. {\\bi full name}",
+                "\\setmainfont{Usr Gyre Heros}\n\\newfontfamily\\bi{Usr Gyre Heros Bold Italic}",
+            ),
+            vec![],
+            &["tl", "tluser", "user"],
+        ),
+        (
+            "projfam",
+            doc(
+                "A family only in the project.",
+                "\\setmainfont{Usr Gyre Heros}",
+            ),
+            vec![copy("user:UserHeros-regular.otf", "ProjSans.otf")],
+            &["tl", "tluser", "user"],
+        ),
+        (
+            "userfile",
+            doc(
+                "A file only in the user's font folder.",
+                "\\setmainfont{UserHeros-regular.otf}",
+            ),
+            vec![],
+            &["tl", "tluser", "user"],
+        ),
+        (
+            "unknown",
+            doc("Unknown.", "\\setmainfont{No Such Font At All}"),
+            vec![],
+            &["tl", "user"],
+        ),
+        (
+            "unknownfile",
+            doc("Unknown file.", "\\setmainfont{NoSuchFile.otf}"),
+            vec![],
+            &["tl"],
+        ),
+    ];
+    let env = |c: &mut Command, e: &str, xdg: &Path| {
+        match e {
+            "tl" => c.env("FONTCONFIG_FILE", tl_fonts_conf()),
+            "tluser" => c.env("FONTCONFIG_FILE", &tluser).env("XDG_DATA_HOME", xdg),
+            _ => c.env_remove("FONTCONFIG_FILE").env("XDG_DATA_HOME", xdg),
+        };
+        c.env("HOME", root.join("home"));
+    };
+    let errors = |log: &Path| -> Vec<String> {
+        chars(&std::fs::read(log).unwrap_or_default())
+            .lines()
+            .filter(|l| l.starts_with('!'))
+            .map(str::to_owned)
+            .collect()
+    };
+    let xelatex = as_program("xelatex");
+    let mut failed = Vec::new();
+    let mut checked = 0;
+    // one run of each side in `dir` (the document doc.tex), compared
+    let mut compare = |what: &str, dir: &Path, e: &str, xdg: &Path, j: usize| {
+        let (x, p) = (dir.join("x"), dir.join("p"));
+        for d in [&x, &p] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).expect("a run folder");
+            for f in std::fs::read_dir(dir).expect("the case").flatten() {
+                let n = f.file_name();
+                if n == "x" || n == "p" {
+                    continue;
+                }
+                let _ = Command::new("cp").arg("-a").arg(f.path()).arg(d).status();
+            }
+        }
+        let mut c = Command::new("timeout");
+        c.args(["600", "xelatex", "-interaction=nonstopmode", "doc.tex"])
+            .current_dir(&x)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1");
+        env(&mut c, e, xdg);
+        let xs = c.output().expect("xelatex runs").status.code();
+        let mut c = command(&xelatex, &p);
+        c.args([
+            &format!("-threads={j}"),
+            "-interaction=nonstopmode",
+            "doc.tex",
+        ]);
+        env(&mut c, e, xdg);
+        let ps = c.output().expect("phitex runs").status.code();
+        let (xp, pp) = (
+            std::fs::read(x.join("doc.pdf")).ok(),
+            std::fs::read(p.join("doc.pdf")).ok(),
+        );
+        let (xe, pe) = (errors(&x.join("doc.log")), errors(&p.join("doc.log")));
+        checked += 1;
+        if xp != pp || xs != ps || xe != pe {
+            failed.push(format!(
+                "{what}: pdf {} (xelatex {}, phitex {}), exit {xs:?} vs {ps:?}, errors {xe:?} vs {pe:?} (in {})",
+                if xp == pp { "same" } else { "differs" },
+                xp.as_ref().map_or(0, Vec::len),
+                pp.as_ref().map_or(0, Vec::len),
+                dir.display()
+            ));
+        }
+        xe.is_empty()
+    };
+    for (name, text, files, envs) in &cases {
+        for e in *envs {
+            for j in [1, 8] {
+                let dir = root.join(format!("{name}-{e}-j{j}"));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).expect("the case");
+                std::fs::write(dir.join("doc.tex"), text).expect("the document");
+                for (from, to) in files {
+                    let to = dir.join(to);
+                    std::fs::create_dir_all(to.parent().expect("a folder")).expect("its folder");
+                    let from = match from.strip_prefix("user:") {
+                        Some(n) => user.join("fonts/sub").join(n),
+                        None => PathBuf::from(from),
+                    };
+                    std::fs::copy(from, to).expect("a font");
+                }
+                compare(&format!("{name} ({e}, -j{j})"), &dir, e, &user, j);
+            }
+        }
+    }
+    // a font added to the user's folder after a first run
+    let late = root.join("xdg-late");
+    let _ = std::fs::remove_dir_all(&late);
+    std::fs::create_dir_all(late.join("fonts")).expect("the late folder");
+    let dir = root.join("added");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the case");
+    std::fs::write(dir.join("doc.tex"), &cases[2].1).expect("the document");
+    let before = compare("added: before", &dir, "user", &late, 1);
+    for f in std::fs::read_dir(user.join("fonts/sub"))
+        .expect("the fonts")
+        .flatten()
+    {
+        std::fs::copy(f.path(), late.join("fonts").join(f.file_name())).expect("a font added");
+    }
+    let after = compare("added: after", &dir, "user", &late, 1);
+    assert!(
+        !before && after,
+        "the font added: xelatex found it before {before}, after {after}"
+    );
+    assert!(
+        failed.is_empty(),
+        "{} of {checked} unlike xelatex:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+    eprintln!("{checked} runs as xelatex's");
+}
+
 /// `r` in `phitex watch` reads again only the files whose key on disk
 /// moved (`Host::stamp`: size, modification and change times, inode): with
 /// nothing changed it runs no node; a file written again with the same
@@ -4525,6 +4829,101 @@ fn xetex_from_shelf() {
         String::from_utf8_lossy(&out.stderr).contains("no font index"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// XeTeX from Shelf finds a font file of the project's as kpathsea
+/// does (docs/spec-xetex.md §3.1): the project's directory (kpathsea's
+/// `.`) before Shelf's tree, kpathsea's suffixes (`[MyFont]` is
+/// `MyFont.otf`), fontspec's `Path=` (`[fonts/Other.otf]`), the path
+/// `./name` as kpathsea gives it; a font the project's
+/// `lmroman10-regular.otf` names is the project's, not Shelf's. A font
+/// found nowhere is said with the host's note: Shelf's fonts, not the
+/// computer's, and how a font of one's own is used.
+#[test]
+fn xetex_from_shelf_finds_project_fonts() {
+    let _one = one();
+    let out = Command::new("kpsewhich")
+        .args(["-var-value", "TEXMFDIST"])
+        .output()
+        .expect("kpsewhich (TeX Live) on the test machine");
+    let dist = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let rel = "fonts/opentype/public/lm/lmroman10-regular.otf";
+    let face = std::fs::read(Path::new(&dist).join(rel)).expect("Latin Modern Roman");
+    let abs = format!("{dist}/{rel}");
+    let mut e = phitex_otf::index::FaceEntry::read(&abs, std::sync::Arc::from(face.clone()), 0);
+    e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+    let index = phitex_otf::index::FontIndex { entries: vec![e] }.relative_to(&dist);
+    let (port, _) = shelf_server(
+        &[
+            (rel.to_owned(), face),
+            (
+                "fonts/misc/partex/fontindex.pxfi".to_owned(),
+                index.to_bytes(),
+            ),
+        ],
+        false,
+    );
+    let gyre = Path::new(&dist).join("fonts/opentype/public/tex-gyre");
+    let run = |dir: &Path, text: &str| {
+        std::fs::write(dir.join("doc.tex"), text).expect("the document");
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir)
+            .args([
+                "build",
+                "--shelf",
+                "--ini",
+                "--engine",
+                "xetex",
+                "--output-format",
+                "xdv",
+                "doc.tex",
+            ])
+            .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env("PHITEX_SHELF_RELEASE", SHELF_RELEASE)
+            .env(
+                "PHITEX_SHELF_URL",
+                format!("http://127.0.0.1:{port}/tl2026/"),
+            )
+            .output()
+            .expect("phitex runs")
+    };
+    let dir = scratch("shelf-xetex-project");
+    std::fs::create_dir_all(dir.join("fonts")).expect("fonts/");
+    for (from, to) in [
+        ("texgyretermes-regular.otf", "MyFont.otf"),
+        ("texgyrebonum-regular.otf", "fonts/Other.otf"),
+        ("texgyreschola-regular.otf", "lmroman10-regular.otf"),
+    ] {
+        std::fs::copy(gyre.join(from), dir.join(to)).expect("a project font");
+    }
+    let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\a=\"[MyFont.otf]\" at 10pt \\font\\b=\"[MyFont]\" at 9pt \\font\\c=\"[fonts/Other.otf]\" at 10pt \\font\\d=\"[lmroman10-regular.otf]\" at 10pt \\setbox0\\hbox{\\a A\\b B\\c C\\d D}\\shipout\\box0 \\end\n";
+    let out = run(&dir, text);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let xdv = std::fs::read(dir.join("doc.xdv")).expect("the XDV");
+    let has = |s: &str| xdv.windows(s.len()).any(|w| w == s.as_bytes());
+    for p in [
+        "./MyFont.otf",
+        "./fonts/Other.otf",
+        "./lmroman10-regular.otf",
+    ] {
+        assert!(has(p), "the XDV names {p}: {err}");
+    }
+    assert!(
+        !has(&format!("/usr/share/texmf-dist/{rel}")),
+        "Shelf's lmroman10-regular.otf, not the project's"
+    );
+    // (a font found nowhere: the host's note)
+    let none = scratch("shelf-xetex-missing");
+    let out = run(
+        &none,
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\u=\"No Such Font\" at 10pt \\setbox0\\hbox{\\u x}\\shipout\\box0 \\end\n",
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("installed font not found")
+            && err.contains("not the fonts installed on this computer"),
+        "{err}"
     );
 }
 
@@ -6027,6 +6426,7 @@ fn watch_time_to_first_page() {
         .arg(env!("CARGO_BIN_EXE_phitex"))
         .current_dir(&dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT")
@@ -6630,6 +7030,7 @@ fn watch_compare_time() {
         .arg(env!("CARGO_BIN_EXE_phitex"))
         .current_dir(&dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT")

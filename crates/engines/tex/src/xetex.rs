@@ -33,6 +33,12 @@ pub struct XeTeX {
     /// clones; a host that makes new font files makes a new one
     /// (`..XeTeX::default()`).
     pub native: Arc<crate::native::NativeFonts>,
+    /// What the host says beside an error of a font not found (a host
+    /// whose fonts are its own, Shelf's or the browser's, not the
+    /// system's: which it has, and how a font file of one's own is
+    /// used); none: nothing (the CLI over TeX Live, whose fonts are
+    /// fontconfig's and kpathsea's, as `xelatex`'s).
+    pub fonts_note: Option<Arc<str>>,
 }
 
 /// [`XeTeX::fonts`].
