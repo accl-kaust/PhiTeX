@@ -1673,6 +1673,16 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cur.tok,
             lists.join(" | ")
         );
+        if crate::exec::obs_flag!("PHITEX_LOAD_TRACE_BT") {
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let fns: Vec<&str> = bt
+                .lines()
+                .filter(|l| l.contains("phitex_tex::") && !l.contains("load_trace"))
+                .map(str::trim)
+                .take(12)
+                .collect();
+            eprintln!("load-trace-bt: {}", fns.join(" <- "));
+        }
     }
 
     /// Integer register `loc` holds an alias definition's value (a
