@@ -1367,8 +1367,11 @@ fn latex_pictures_that_all_change_take_one_run() {
     };
     let mut out = Vec::new();
     for threads in [1, 8] {
+        // (latexmk's rounds: the label's number reaches the pictures in
+        // the second)
         let opts = |name: &str| Options {
             threads: Some(threads),
+            fixpoint: true,
             ..pdf_opts(name, &dir)
         };
         let moving = doc("see \\lastref");
