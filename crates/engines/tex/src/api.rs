@@ -10913,19 +10913,19 @@ mod canonical_tests {
         let k = prefix_hash("x ");
         let met = mark_id(k, "b", true);
         let marks: Vec<CommentMark> = vec![
-            (1, met, "a".to_owned()),
-            (2, k, "b".to_owned()),
-            (3, k, "c".to_owned()),
+            (1, met, Arc::from("a")),
+            (2, k, Arc::from("b")),
+            (3, k, Arc::from("c")),
         ];
         assert!(!ids_hold(&marks));
         let apart: Vec<CommentMark> = vec![
-            (1, met ^ 1, "a".to_owned()),
-            (2, k, "b".to_owned()),
-            (3, k, "c".to_owned()),
+            (1, met ^ 1, Arc::from("a")),
+            (2, k, Arc::from("b")),
+            (3, k, Arc::from("c")),
         ];
         assert!(ids_hold(&apart));
         // (one comment twice under one id: the same text, one mark)
-        assert!(ids_hold(&[(1, k, "a".to_owned()), (2, k, "a".to_owned())]));
+        assert!(ids_hold(&[(1, k, Arc::from("a")), (2, k, Arc::from("a"))]));
     }
 
     /// The marking line by line, as it was before the copy between
