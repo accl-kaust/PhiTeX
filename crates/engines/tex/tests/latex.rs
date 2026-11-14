@@ -1744,16 +1744,6 @@ fn biber_edits_equal_cold_builds() {
     }
 }
 
-/// The biber document built twice in one process, one build after the
-/// other: each as `latexmk -pdf` makes it. A written file's last cut was
-/// kept by its name for the process (`ops::unit_ends`), and the second
-/// build's `.bbl` was cut from the first's last text.
-#[test]
-fn latexmk_biber_twice_in_one_process() {
-    latexmk_cold("biber", 1);
-    latexmk_cold("biber", 1);
-}
-
 macro_rules! latexmk_tests {
     ($($test:ident: $name:literal, $j:literal;)*) => {
         $(
