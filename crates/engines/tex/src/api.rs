@@ -3176,8 +3176,12 @@ pub(crate) fn rest_lines(rest: &RestLines, text: &str, pieces: &[(ValueId, usize
     let starts = line_starts(text);
     let mut m = rest.locked();
     for &(n, s) in pieces {
-        m.entry(n)
+        let k = *m
+            .entry(n)
             .or_insert_with(|| lines_before(&starts, text.len(), s));
+        if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+            eprintln!("rest-lines: {} at byte {s} = {k}", n.raw());
+        }
     }
 }
 
