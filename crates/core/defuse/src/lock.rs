@@ -305,6 +305,12 @@ pub(crate) fn waited(ns: u64) {
     WAIT_MAX_NS.with(|c| c.set(c.get().max(ns)));
 }
 
+/// (`PHITEX_RUN_LOG`) The thread's lock waits since its last take, summed,
+/// not reset.
+pub(crate) fn wait_so_far() -> u64 {
+    WAIT_NS.with(Cell::get)
+}
+
 /// The thread's lock waits since the last take, (summed, longest), reset.
 pub(crate) fn take_wait() -> (u64, u64) {
     let sum = WAIT_NS.with(|c| c.replace(0));

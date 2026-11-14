@@ -2702,6 +2702,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         return Err(EvalError::Deadline);
     }
     let t = Instant::now();
+    let (cpu0, wait0) = if run_log() {
+        (crate::lock::thread_cpu_ns(), crate::lock::wait_so_far())
+    } else {
+        (0, 0)
+    };
     let version = eng.version.load(Ordering::Acquire);
     node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
@@ -2758,11 +2763,15 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         }
         // (the reads it computed again on a moved layout, and the reads it
         // filed)
+        // (and its time on the CPU and waiting for locks, ns: a run
+        // slow on a busy pool is told from one slow alone)
         eprintln!(
-            "runr: node {} retries {} reads {}",
+            "runr: node {} retries {} reads {} cpu {} lockwait {}",
             n.raw(),
             crate::read::retries() - retries0,
-            cx.product.reads.len()
+            cx.product.reads.len(),
+            crate::lock::thread_cpu_ns().saturating_sub(cpu0),
+            crate::lock::wait_so_far().saturating_sub(wait0)
         );
     }
     // (a resumption: the run woken by the answer its node's last run
