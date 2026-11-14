@@ -734,6 +734,25 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The download's bar: its percent, 24 cells, the MB of the whole;
+    /// the bytes alone when the server gave no length.
+    #[test]
+    fn the_downloads_bar() {
+        assert_eq!(
+            bar_line(0, Some(30_000_000)),
+            "  0% [........................] 0.0 of 30.0 MB"
+        );
+        assert_eq!(
+            bar_line(12_300_000, Some(30_000_000)),
+            " 41% [##########..............] 12.3 of 30.0 MB"
+        );
+        assert_eq!(
+            bar_line(30_000_000, Some(30_000_000)),
+            "100% [########################] 30.0 of 30.0 MB"
+        );
+        assert_eq!(bar_line(5_000_000, None), "5.0 MB");
+    }
+
     /// The editor's update notice: the releases after the running one and
     /// the advisories for it; none when it is current and unadvised.
     #[test]
