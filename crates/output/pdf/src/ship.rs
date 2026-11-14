@@ -1705,7 +1705,7 @@ impl PdfState {
         self.print_int(self.objs[n].info);
         self.print_ln(b" Do");
         if let Some(t) = self.tap.sink.as_mut() {
-            t.xobject();
+            t.xobject(n);
         }
         self.print_ln(b"Q");
     }
@@ -1953,6 +1953,7 @@ impl PdfState {
             }
         }
         if shipping_page {
+            self.tap_forms();
             self.write_page_marks();
         }
         self.write_resources(last_resources, shipping_page, src);
@@ -2011,7 +2012,7 @@ impl PdfState {
             self.xform_depth,
         );
         let err = self.error.take();
-        if let Err(e) = self.ship(&b, false, src, wh) {
+        if let Err(e) = self.ship_form_box(k, &b, src, wh) {
             self.fail(e);
         }
         if let Some(e) = err {

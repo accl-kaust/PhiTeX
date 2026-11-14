@@ -150,7 +150,7 @@ pub mod t1;
 mod t3;
 pub use t3::{fixed_pk_resolution, magstep_fix, pk_dpi, pk_file_name, pk_request};
 mod tap;
-pub use tap::GlyphTap;
+pub use tap::{GlyphTap, literal_codes};
 mod tounicode;
 mod ttf;
 mod vf;

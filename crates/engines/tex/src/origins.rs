@@ -33,7 +33,8 @@ use crate::exec::LockWait as _;
 pub(crate) const GLYPH: u8 = 0;
 /// A code no character node made.
 pub(crate) const NONE: u8 = 1;
-/// A form or an included page drawn: its codes counted from the PDF.
+/// A form or an included page drawn ([`Code::lig`]: its object), its
+/// codes as the writer told them ([`PageGlyphs::xcodes`]).
 pub(crate) const XOBJECT: u8 = 2;
 
 /// One entry of a page's own content stream ([`PageGlyphs`]).
@@ -65,6 +66,9 @@ pub(crate) struct Code {
 pub(crate) struct PageGlyphs {
     pub codes: Vec<Code>,
     pub lig: Vec<u16>,
+    /// The codes each object drawn shows ([`XOBJECT`]): its object and
+    /// count, as the writer told them.
+    pub xcodes: Vec<(u32, usize)>,
 }
 
 impl PageGlyphs {
@@ -174,32 +178,24 @@ impl GlyphTap for Recorder {
     }
 
     fn literal(&mut self, bytes: &[u8]) {
-        struct Count(usize);
-        impl phitex_codecs::pdftext::Text for Count {
-            fn font(&mut self, _: &[u8]) -> phitex_codecs::pdftext::Font {
-                phitex_codecs::pdftext::Font::default()
-            }
-            fn code(&mut self, _: &[u8], _: u32, _: f64, _: f64) {
-                self.0 += 1;
-            }
-            fn draw(&mut self, _: &[u8], _: &phitex_codecs::pdftext::State) {}
-        }
-        // (a literal showing text: rare; most set colours)
-        if !bytes.iter().any(|&b| b == b'T' || b == b'\'' || b == b'"') {
-            return;
-        }
-        let mut c = Count(0);
-        phitex_codecs::pdftext::walk(bytes, &mut c);
-        self.none(c.0);
+        self.none(phitex_pdf::literal_codes(bytes));
     }
 
-    fn xobject(&mut self) {
+    fn xobject(&mut self, obj: usize) {
         self.g.codes.push(Code {
             kind: XOBJECT,
+            lig: u32::try_from(obj).unwrap_or(u32::MAX),
             level: self.level,
             context: self.context,
             ..Code::default()
         });
+    }
+
+    fn xobject_codes(&mut self, obj: usize, codes: usize) {
+        let obj = u32::try_from(obj).unwrap_or(u32::MAX);
+        if !self.g.xcodes.iter().any(|&(o, _)| o == obj) {
+            self.g.xcodes.push((obj, codes));
+        }
     }
 
     /// A native word's glyphs: the first carries the word's text (as a
@@ -2261,7 +2257,14 @@ fn answer_fresh(
     nodes: &[Option<(Span, bool)>],
     pdf: &dyn Fn() -> Arc<Vec<u8>>,
 ) -> (PageOrigins, Vec<u32>) {
-    let counts = if g.codes.iter().any(|c| c.kind == XOBJECT) {
+    let told = |c: &Code| g.xcodes.iter().find(|&&(o, _)| o == c.lig).map(|&(_, n)| n);
+    // (an object whose codes the writer did not tell, XeTeX's pictures
+    // drawn by xdvipdfmx: counted in the PDF made)
+    let counts = if g
+        .codes
+        .iter()
+        .any(|c| c.kind == XOBJECT && told(c).is_none())
+    {
         xobject_counts(&pdf(), k)
     } else {
         Vec::new()
@@ -2286,7 +2289,8 @@ fn answer_fresh(
                 }
             }
             XOBJECT => {
-                for _ in 0..forms.next().copied().unwrap_or(0) {
+                let pdf_n = forms.next().copied();
+                for _ in 0..told(c).or(pdf_n).unwrap_or(0) {
                     out.push(u32::MAX, 0, 0, false, x, y, 0.0, 0.0);
                     of.push(u32::MAX);
                 }

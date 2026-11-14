@@ -153,6 +153,23 @@ impl Image {
         }
     }
 
+    /// The codes the image shows where it is drawn: an included page's
+    /// text's (its forms' counted), none for a picture.
+    fn codes(&self) -> usize {
+        let Kind::Pdf(p) = &self.kind else {
+            return 0;
+        };
+        let Ok(doc) = open_doc(&self.data) else {
+            return 0;
+        };
+        usize::try_from(p.page)
+            .ok()
+            .and_then(|k| doc.page(k))
+            .map_or(0, |page| {
+                phitex_codecs::pdftext::page_codes(&doc, &page).len()
+            })
+    }
+
     /// `img_width`, `img_height` as the page is shown.
     fn shown(&self) -> (i32, i32) {
         if matches!(self.rotate(), 90 | 270) {
@@ -950,7 +967,8 @@ impl PdfState {
         self.print_int(self.objs[n].info);
         self.print_ln(b" Do");
         if let Some(t) = self.tap.sink.as_mut() {
-            t.xobject();
+            t.xobject(n);
+            t.xobject_codes(n, image.codes());
         }
         self.print_ln(b"Q");
     }

@@ -2115,7 +2115,7 @@ fn tap_special(t: &mut dyn GlyphTap, s: &[u8]) {
         .position(u8::is_ascii_whitespace)
         .map_or(rest, |k| &rest[..k]);
     match word {
-        b"image" | b"uxobj" => t.xobject(),
+        b"image" | b"uxobj" => t.xobject(usize::MAX),
         b"literal" | b"content" | b"code" => t.literal(&rest[word.len()..]),
         _ => {}
     }
