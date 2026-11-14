@@ -1510,6 +1510,48 @@ var Viewer = class _Viewer {
       }
     }
   }
+  /**
+   * The review's marks (review.ts): each its `boxes` on page `k` as
+   * `.rv.CLS` (`data-id` its note's or hunk's), and with `pin` a button at
+   * the page's right edge beside its first box (a note's: its thread a click
+   * away). The whole set, the last one's replaced; never scrolls, never asks
+   * for a page (one drawn later keeps them, as paint does).
+   */
+  /** A page's size in PDF points (the pages' boxes are in them). */
+  pageSize() {
+    return this.size;
+  }
+  reviewMarks(marks) {
+    for (const m of this.root.querySelectorAll(".rv")) m.remove();
+    const { w, h } = this.size;
+    const pinned = /* @__PURE__ */ new Map();
+    for (const mk of marks) {
+      const s = this.slots[mk.k];
+      if (!s || !mk.boxes.length) continue;
+      for (const [x, y, bw, bh] of mk.boxes) {
+        const m = document.createElement("div");
+        m.className = `rv ${mk.cls}`;
+        m.dataset.id = mk.id;
+        Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${Math.max(bw, 1.5) / w * 100}%`, height: `${bh / h * 100}%` });
+        s.el.append(m);
+      }
+      if (mk.pin !== void 0) {
+        const ys = pinned.get(mk.k) ?? [];
+        let y = mk.boxes[0][1];
+        while (ys.some((o) => Math.abs(o - y) < 13)) y += 13;
+        ys.push(y);
+        pinned.set(mk.k, ys);
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `rv rv-pin ${mk.cls}`;
+        b.dataset.id = mk.id;
+        b.textContent = mk.pin;
+        if (mk.title) b.title = mk.title, b.setAttribute("aria-label", mk.title);
+        Object.assign(b.style, { top: `${y / h * 100}%` });
+        s.el.append(b);
+      }
+    }
+  }
   /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
   mark(k, boxes2, scroll = true) {
     const s = this.slots[k];
@@ -1806,7 +1848,7 @@ var Viewer = class _Viewer {
   }
   paint(s) {
     if (!s.img) return;
-    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
@@ -4931,6 +4973,721 @@ function firstPage(cv, dark) {
   }
 }
 
+// viewer/src/review.ts
+var KIND_WORD = { highlight: "Highlight", note: "Note", comment: "Comment" };
+var VERDICT_WORD = { approve: "Approved", request_changes: "Changes requested", reject: "Rejected", comment: "Commented" };
+var PATHS = {
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
+  close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  check: "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z",
+  undo: "M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z",
+  delete: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+  highlight: "M6 14 3 17v3h3l3-3v-1l7.5-7.5-3-3L6 16zm13.71-8.29-2.42-2.42a1 1 0 0 0-1.41 0L14 5.17l3 3 1.71-1.71a1 1 0 0 0 0-1.46zM4 22h16v-1H4z",
+  note: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
+  comment: "M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18zM18 14H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z",
+  link: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"
+};
+var icon = (name, size = 16) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name] ?? ""}"></path></svg>`;
+function ago(iso, now = Date.now()) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const s = Math.max(0, (now - t) / 1e3);
+  if (s < 45) return "now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+function oneLine(s, max = 160) {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max - 1)}\u2026` : t;
+}
+function placeOf(file, a, b = a) {
+  return a === b ? `${file}:${a}` : `${file}:${a}\u2013${b}`;
+}
+var utf8 = (s) => new TextEncoder().encode(s).length;
+function groupHunks(s) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const h of s.hunks) {
+    const note = h.note ? s.notes.find((n) => n.id === h.note) : void 0;
+    const key = note ? `n:${note.id}` : `f:${h.file}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, g = { key, title: note ? `For your ${KIND_WORD[note.kind].toLowerCase()}: \u201C${oneLine(note.thread.find((p) => p.by !== "agent" && p.text)?.text || note.anchor.quote, 60)}\u201D` : h.file, note, hunks: [] });
+    g.hunks.push(h);
+  }
+  return [...groups.values()].sort((a, b) => Number(!a.note) - Number(!b.note));
+}
+var REVIEW_CSS = `
+.win.review-on .body { flex-direction: row; }
+.rside { display: none; flex: none; width: var(--rv-w, 340px); min-width: 260px; max-width: 70%; flex-direction: column; background: var(--ph-bar); border-left: 1px solid var(--ph-border); color: var(--ph-fg); min-height: 0; position: relative; }
+.win.review-on .rside { display: flex; }
+@container (max-width: 640px) { .win.review-on .rside { position: absolute; inset: 0 0 0 auto; width: min(100%, 360px); z-index: 6; box-shadow: -4px 0 16px rgb(0 0 0 / 22%); } }
+.rside .rgrip { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 2; }
+.rside header { display: flex; align-items: center; gap: 2px; padding: 4px 6px 0; border-bottom: 1px solid var(--ph-border); }
+.rside .rtab { border: 0; background: none; padding: 7px 10px; border-bottom: 2px solid transparent; color: var(--ph-fg2); cursor: pointer; font-weight: 600; }
+.rside .rtab[aria-selected="true"] { color: var(--ph-fg); border-bottom-color: var(--ph-accent); }
+.rside .rtab .n { margin-left: 5px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ph-fg2); }
+.rside .ib { border: 0; background: none; padding: 4px; border-radius: var(--ph-radius); cursor: pointer; color: var(--ph-fg2); display: inline-flex; align-items: center; }
+.rside .ib:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.rside .rbody { flex: 1; min-height: 0; overflow: auto; padding: 8px 8px 24px; }
+.rside .rtools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 2px 8px; }
+.rside .seg { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); overflow: hidden; }
+.rside .seg button { border: 0; background: none; padding: 3px 9px; cursor: pointer; color: var(--ph-fg2); }
+.rside .seg button[aria-pressed="true"] { background: var(--ph-hover); color: var(--ph-fg); font-weight: 600; }
+.rside .btn, .rv-pop .btn, .rv-compose .btn, .rv-finish .btn { display: inline-flex; align-items: center; gap: 4px; line-height: 20px; border: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); padding: 3px 10px; border-radius: var(--ph-radius); cursor: pointer; white-space: nowrap; }
+.rside .btn:hover, .rv-pop .btn:hover, .rv-compose .btn:hover, .rv-finish .btn:hover { background: var(--ph-hover); }
+.rside .btn.primary, .rv-compose .btn.primary, .rv-finish .btn.primary { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.rside .btn.primary:hover, .rv-compose .btn.primary:hover, .rv-finish .btn.primary:hover { background: var(--ph-accent-hover, var(--ph-accent)); }
+.rside .btn.accept { color: #1a7f37; } .rside .btn.reject { color: var(--ph-danger); }
+.rside .btn:disabled { opacity: .5; cursor: default; }
+.rside .empty { color: var(--ph-fg2); padding: 18px 8px; line-height: 1.5; }
+.rside .empty b { color: var(--ph-fg); }
+.rside h3 { font-size: 11px; text-transform: none; letter-spacing: 0; margin: 12px 2px 6px; color: var(--ph-fg2); font-weight: 600; }
+.rside .card { border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); background: var(--ph-menu); margin: 0 0 8px; padding: 8px 10px; cursor: pointer; position: relative; }
+.rside .card:hover { border-color: color-mix(in srgb, var(--ph-accent) 40%, var(--ph-border)); }
+.rside .card.on { border-color: var(--ph-accent); box-shadow: 0 0 0 1px var(--ph-accent); cursor: default; }
+.rside .card.resolved { opacity: .72; }
+.rside .card .top { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ph-fg2); }
+.rside .chip { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: var(--ph-pill); border: 1px solid currentColor; line-height: 16px; }
+.rside .chip.comment { color: #b25e00; } .rside .chip.note { color: #2f6fd1; } .rside .chip.highlight { color: #8a7300; }
+.rside .chip.draft { color: var(--ph-fg2); } .rside .chip.det { color: var(--ph-warning); } .rside .chip.done { color: #1a7f37; }
+.rside .place { color: var(--ph-link); text-decoration: none; cursor: pointer; font-variant-numeric: tabular-nums; border: 0; background: none; padding: 0; font: inherit; }
+.rside .place:hover { text-decoration: underline; }
+.rside .quote { margin: 6px 0 2px; padding-left: 8px; border-left: 3px solid var(--q, #d0b400); color: var(--ph-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.rside .card.on .quote { -webkit-line-clamp: unset; }
+.rside .quote.spot { color: var(--ph-fg2); font-style: italic; }
+.rside .quote.comment { --q: #e08a1e; } .rside .quote.note { --q: #4b8cf0; }
+.rside .post { margin-top: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.rside .card:not(.on) .post:not(.update) { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.rside .post .by { font-weight: 600; margin-right: 4px; }
+.rside .post .by.agent { color: #7a4fc9; }
+.rside .post .when { color: var(--ph-fg2); font-size: 11px; margin-left: 4px; }
+.rside .post .edited { display: block; margin-top: 2px; font-size: 12px; color: var(--ph-fg2); }
+.rside .post.update { font-size: 12px; color: var(--ph-fg2); }
+.rside .more { color: var(--ph-fg2); font-size: 12px; margin-top: 4px; }
+.rside .act { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+.rside textarea, .rv-compose textarea, .rv-finish textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color: var(--ph-fg); background: var(--ph-bar); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 6px 8px; }
+.rside textarea:focus, .rv-compose textarea:focus, .rv-finish textarea:focus { outline: 2px solid var(--ph-link); outline-offset: 0; }
+.rside .hint { font-size: 11px; color: var(--ph-fg2); }
+.rside .diff { font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--ph-bar); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 6px 8px; margin: 6px 0 0; max-height: 260px; overflow: auto; cursor: text; }
+.rside .diff .ctx { color: var(--ph-fg2); }
+.rside .diff del { background: rgb(255 80 70 / 18%); color: var(--ph-danger); text-decoration: line-through; text-decoration-thickness: 1px; }
+.rside .diff ins { background: rgb(40 170 80 / 20%); color: #1a7f37; text-decoration: none; }
+.win.watch.dark .rside .diff ins, .win.vscode .rside .diff ins { color: #57c97a; }
+@media (prefers-color-scheme: dark) { .win.watch:not(.light) .rside .diff ins { color: #57c97a; } .win.watch:not(.light) .rside .btn.accept { color: #57c97a; } }
+.rside .hunk .file { font-weight: 600; color: var(--ph-fg); }
+.rside .comments { border-top: 1px dashed var(--ph-border); margin-top: 8px; padding-top: 4px; }
+.rside .rbar { position: sticky; top: -8px; z-index: 1; margin: -8px -8px 8px; padding: 8px 10px; background: color-mix(in srgb, var(--ph-accent) 12%, var(--ph-bar)); border-bottom: 1px solid var(--ph-border); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rside .reviewrec { font-size: 12px; color: var(--ph-fg2); margin: 2px 2px 8px; }
+.rv-pop { position: absolute; z-index: 30; display: flex; gap: 4px; padding: 4px; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 22%); }
+.rv-pop .btn { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; }
+.rv-pop .btn:hover, .rv-pop .btn:focus-visible { background: var(--ph-hover); }
+.rv-compose, .rv-finish { position: absolute; z-index: 31; width: min(340px, calc(100% - 16px)); padding: 10px; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 8px 28px rgb(0 0 0 / 28%); }
+.rv-compose .q, .rv-finish .q { color: var(--ph-fg2); font-size: 12px; margin-bottom: 6px; overflow-wrap: anywhere; }
+.rv-compose .act, .rv-finish .act { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; align-items: center; }
+.rv-compose .act .hint, .rv-finish .act .hint { margin-right: auto; font-size: 11px; color: var(--ph-fg2); }
+.rv-finish label { display: flex; gap: 8px; align-items: flex-start; padding: 4px 2px; cursor: pointer; }
+.rv-finish label small { display: block; color: var(--ph-fg2); }
+.slot .rv { position: absolute; pointer-events: none; border-radius: 2px; }
+.slot .rv.n-highlight { background: rgb(255 214 0 / 40%); mix-blend-mode: multiply; }
+.slot .rv.n-note { background: rgb(75 140 240 / 22%); mix-blend-mode: multiply; box-shadow: inset 0 -2px 0 rgb(75 140 240 / 70%); }
+.slot .rv.n-comment { background: rgb(240 150 40 / 26%); mix-blend-mode: multiply; box-shadow: inset 0 -2px 0 rgb(224 138 30 / 85%); }
+.slot .rv.n-resolved { background: none; box-shadow: inset 0 -1px 0 rgb(120 120 120 / 45%); mix-blend-mode: normal; }
+.slot .rv.h-add { background: rgb(40 170 80 / 18%); box-shadow: inset 0 -2px 0 rgb(30 150 70 / 75%); mix-blend-mode: multiply; }
+.slot .rv.h-del { background: rgb(220 50 40 / 85%); width: 2px !important; margin-left: -1px; border-radius: 1px; }
+.slot .rv.on { outline: 2px solid var(--ph-accent, #1d3e72); outline-offset: 1px; }
+.slot .rv-pin { pointer-events: auto; position: absolute; right: -2px; transform: translate(100%, -10%); min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px 9px 9px 2px; border: 0; font: 600 10px/18px var(--ph-font, system-ui); color: #fff; cursor: pointer; z-index: 3; box-shadow: 0 1px 3px rgb(0 0 0 / 30%); }
+.slot .rv-pin.n-highlight { background: #b39500; } .slot .rv-pin.n-note { background: #2f6fd1; } .slot .rv-pin.n-comment { background: #d27510; }
+.slot .rv-pin.n-resolved { background: #8a919c; } .slot .rv-pin.h-add, .slot .rv-pin.h-del { background: #1a7f37; }
+.slot .rv-pin.on { outline: 2px solid var(--ph-accent, #1d3e72); outline-offset: 1px; }
+.slot .rv-pin:focus-visible { outline: 2px solid var(--ph-link, #1d3e72); outline-offset: 2px; }
+.stage.dark-pdf .slot .rv { mix-blend-mode: normal; }
+@media (prefers-reduced-motion: no-preference) { .rside .card.flash { animation: rvflash 1.2s ease-out; } @keyframes rvflash { from { box-shadow: 0 0 0 3px var(--ph-progress); } } }
+`;
+var Review = class {
+  p;
+  host;
+  s = { notes: [], hunks: [], reviews: [], git: false };
+  tab = "notes";
+  filter = "open";
+  /** The note or hunk selected (its card open, its marks outlined). */
+  sel = null;
+  side;
+  body;
+  /** The last text selected on the pages, its source looked up when asked. */
+  picked = null;
+  pointerDown = false;
+  pop = null;
+  compose = null;
+  /** Drafts typed in a card's reply box, kept across redraws. */
+  drafts = /* @__PURE__ */ new Map();
+  showing = false;
+  onCount;
+  /** The marks drawn last (a newer drawing stops an older one). */
+  drawn = 0;
+  /** Where each note is on the pages, as last drawn: its page and height (the list's order). */
+  where = /* @__PURE__ */ new Map();
+  constructor(p, host2) {
+    this.p = p;
+    this.host = host2;
+    this.side = document.createElement("aside");
+    this.side.className = "rside";
+    this.side.setAttribute("aria-label", "Review");
+    this.side.append(html`<div class="rgrip" title="Drag to resize"></div><header role="tablist"><button type="button" class="rtab" role="tab" data-tab="notes">Notes<span class="n" id="rv-nn"></span></button><button type="button" class="rtab" role="tab" data-tab="changes">Changes<span class="n" id="rv-nc"></span></button><span class="grow"></span><button type="button" class="ib" id="rv-x" title="Close the review (Esc)" aria-label="Close the review">${icon("close")}</button></header><div class="rbody" id="rv-body" role="tabpanel"></div>`);
+    this.body = this.side.querySelector("#rv-body");
+    p.win.querySelector(".body").append(this.side);
+    this.side.querySelector("header").addEventListener("click", (e) => {
+      const t = e.target.closest("[data-tab]");
+      if (t) this.tab = t.dataset.tab, this.render();
+    });
+    this.side.querySelector("#rv-x").onclick = () => this.open(false);
+    this.grip();
+    this.body.addEventListener("click", (e) => void this.clicked(e));
+    this.body.addEventListener("keydown", (e) => this.keyed(e));
+    host2.onState((s) => {
+      this.s = s;
+      void this.marks();
+      this.render();
+    });
+    p.stage.addEventListener("pointerdown", (e) => {
+      this.pointerDown = true;
+      if (!e.target.closest(".rv-pop, .rv-compose, .rv-finish")) this.closePop();
+    });
+    addEventListener("pointerup", () => {
+      if (!this.pointerDown) return;
+      this.pointerDown = false;
+      setTimeout(() => this.offer(), 0);
+    });
+    p.stage.addEventListener("keyup", (e) => e.shiftKey && setTimeout(() => this.offer(), 0));
+    p.stage.addEventListener("click", (e) => void this.pageClick(e));
+    p.root.addEventListener("keydown", (e) => {
+      const k = e;
+      if (k.key !== "Escape") return;
+      if (this.compose || this.pop) this.closePop(), e.stopPropagation();
+    }, { capture: true });
+    void host2.request("review_state").then((r) => {
+      if (r.ok && r.json) this.s = r.json, this.render(), void this.marks();
+    });
+  }
+  /** The pages' origins changed (a build): the marks found again. */
+  refresh() {
+    void this.marks();
+  }
+  /** The counts for a button outside (the bar's): open notes, pending changes. */
+  counts(cb) {
+    this.onCount = cb;
+    this.count();
+  }
+  count() {
+    const open = this.s.notes.filter((n) => n.status === "open" && !n.draft && !n.hunk).length;
+    this.onCount?.(open, this.s.hunks.length);
+  }
+  get isOpen() {
+    return this.p.win.classList.contains("review-on");
+  }
+  /** The side shown (or hidden), on `tab` if given. */
+  open(on = !this.isOpen, tab) {
+    if (tab) this.tab = tab;
+    this.p.win.classList.toggle("review-on", on);
+    if (on) this.render();
+    this.p.laidOut();
+    if (on) this.side.querySelector(`[data-tab="${this.tab}"]`)?.focus();
+  }
+  grip() {
+    const g = this.side.querySelector(".rgrip");
+    g.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const x0 = e.clientX, w0 = this.side.getBoundingClientRect().width;
+      g.setPointerCapture(e.pointerId);
+      const move = (m) => this.side.style.setProperty("--rv-w", `${Math.round(Math.max(260, w0 + x0 - m.clientX))}px`);
+      const up = () => (g.removeEventListener("pointermove", move), g.removeEventListener("pointerup", up), this.p.laidOut());
+      g.addEventListener("pointermove", move);
+      g.addEventListener("pointerup", up);
+    });
+  }
+  // ---- the side ----
+  render() {
+    this.count();
+    const nn = this.s.notes.filter((n) => n.status === "open" && !n.hunk && !n.draft).length;
+    this.side.querySelector("#rv-nn").textContent = nn ? String(nn) : "";
+    this.side.querySelector("#rv-nc").textContent = this.s.hunks.length ? String(this.s.hunks.length) : "";
+    for (const t of this.side.querySelectorAll("[data-tab]")) t.setAttribute("aria-selected", String(t.dataset.tab === this.tab));
+    if (!this.isOpen) return;
+    const focused = this.p.root.activeElement;
+    const focusKey = focused && this.body.contains(focused) ? focused.dataset.focus ?? null : null;
+    const top = this.body.scrollTop;
+    this.body.replaceChildren(this.tab === "notes" ? this.notesView() : this.changesView());
+    for (const ta of this.body.querySelectorAll("textarea[data-reply], textarea[data-comment]"))
+      ta.value = this.drafts.get(ta.dataset.reply ?? `h:${ta.dataset.comment}`) ?? "";
+    this.body.scrollTop = top;
+    if (focusKey) {
+      const f = this.body.querySelector(`[data-focus="${CSS.escape(focusKey)}"]`);
+      if (f) {
+        f.focus();
+        if (f instanceof HTMLTextAreaElement) f.selectionStart = f.selectionEnd = f.value.length;
+      }
+    }
+  }
+  notesView() {
+    const all = this.s.notes.filter((n) => !n.hunk);
+    const resolved = all.filter((n) => n.status === "resolved").length;
+    const shown = all.filter((n) => this.filter === "all" || n.status === this.filter);
+    const seg = (v, label, n) => html`<button type="button" data-filter="${v}" aria-pressed="${this.filter === v}">${label} ${n ? String(n) : ""}</button>`;
+    const tools = html`<div class="rtools"><span class="seg" role="group" aria-label="Show">${seg("open", "Open", all.length - resolved)}${seg("resolved", "Resolved", resolved)}${seg("all", "All", 0)}</span><span class="grow"></span>${resolved ? html`<button type="button" class="btn" data-act="clear" title="Delete every resolved note">Clear resolved</button>` : ""}</div>`;
+    if (!all.length)
+      return html`${tools}<div class="empty"><b>No notes yet.</b><br>Select text on a page to highlight it, note it, or comment for your agent. <b>Alt+click</b> notes a spot with no text, such as a figure.<br><br>Your agent reads them with <code>phitex session notes</code>.</div>`;
+    if (!shown.length)
+      return html`${tools}<div class="empty">${this.filter === "open" ? "Every note is resolved." : "No resolved notes."}</div>`;
+    const placed = shown.filter((n) => !n.detached);
+    const detached = shown.filter((n) => n.detached);
+    const at = (n) => this.where.get(n.id) ?? [n.anchor.page ?? 1e9, 0];
+    placed.sort((a, b) => at(a)[0] - at(b)[0] || at(a)[1] - at(b)[1] || a.anchor.file.localeCompare(b.anchor.file) || a.anchor.start - b.anchor.start);
+    return html`${tools}${placed.map((n) => this.noteCard(n))}${detached.length ? html`<h3>Detached: their text is gone from the source</h3>${detached.map((n) => this.noteCard(n))}` : ""}`;
+  }
+  noteCard(n, inHunk = false) {
+    const on = this.sel === n.id;
+    const a = n.anchor;
+    const quote = a.quote ? html`<div class="quote ${n.kind}">${oneLine(a.quote, on ? 2e3 : 240)}</div>` : html`<div class="quote spot ${n.kind}">A spot on page ${String((a.page ?? 0) + 1)}</div>`;
+    const thread = n.thread.map((p) => this.post(p));
+    const lastBy = n.thread.at(-1)?.by;
+    const waiting = n.status === "open" && n.kind === "comment" && lastBy !== "agent" && !n.draft && !n.verdict;
+    const reply = on && !n.draft ? html`<textarea data-focus="reply:${n.id}" data-reply="${n.id}" placeholder="${n.kind === "highlight" ? "Add a note\u2026" : "Reply\u2026"}" aria-label="Reply to this note" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="reply" data-id="${n.id}" data-focus="send:${n.id}">Reply</button>${n.status === "open" ? html`<button type="button" class="btn" data-act="resolve" data-id="${n.id}" data-focus="res:${n.id}">${icon("check", 14)} Resolve</button>` : html`<button type="button" class="btn" data-act="reopen" data-id="${n.id}" data-focus="reo:${n.id}">${icon("undo", 14)} Reopen</button>`}<span class="grow"></span><button type="button" class="ib" data-act="delete" data-id="${n.id}" title="Delete this note" aria-label="Delete this note">${icon("delete", 16)}</button></div><div class="hint">Ctrl+Enter replies · Esc closes</div>` : "";
+    const answered = (n.hunks ?? []).length;
+    return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top"><span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
+  }
+  post(p) {
+    if (p.diff)
+      return html`<div class="post update"><span class="by agent">Agent</span>changed it<span class="when">${ago(p.at)}</span><div class="diff">${p.diff.old ? html`<del>${oneLine(p.diff.old, 160)}</del>` : ""}${p.diff.new ? html`<ins>${oneLine(p.diff.new, 160)}</ins>` : ""}</div></div>`;
+    const edited = (p.edited ?? []).map((e) => html`<button type="button" class="place" data-goto="${e.file}" data-line="${String(e.from_line)}" data-from="${String(e.start)}" data-to="${String(e.end)}">${placeOf(e.file, e.from_line, e.to_line)}</button> `);
+    return html`<div class="post"><span class="by ${p.by === "agent" ? "agent" : ""}">${p.by === "agent" ? "Agent" : "You"}</span><span class="txt">${p.text}</span><span class="when" title="${p.at}">${ago(p.at)}</span>${edited.length ? html`<span class="edited">Edited ${edited}</span>` : ""}</div>`;
+  }
+  changesView() {
+    const hs = this.s.hunks;
+    const drafts = this.s.notes.filter((n) => n.draft);
+    const bar2 = drafts.length ? html`<div class="rbar"><span><b>${String(drafts.length)}</b> comment${drafts.length === 1 ? "" : "s"} in your review</span><span class="grow"></span><button type="button" class="btn primary" data-act="finish">Finish review</button></div>` : "";
+    const last = this.s.reviews.at(-1);
+    const rec = last ? html`<div class="reviewrec">Last review: ${VERDICT_WORD[last.verdict]}${last.summary ? `: ${oneLine(last.summary, 80)}` : ""} · ${ago(last.at)}</div>` : "";
+    if (!hs.length)
+      return html`${bar2}${rec}${this.earlier(true)}<div class="empty"><b>No changes waiting.</b><br>Edits your agent makes to the files show here, word by word, to accept or reject. ${this.s.git ? "Accepting one stages it in git; rejecting one puts the staged text back." : "Accepted text is kept in .phitex/baseline."}<br><br>Edits you type in an editor attached to this watch are yours and are accepted as you type.</div>`;
+    const tools = html`<div class="rtools"><button type="button" class="btn accept" data-act="accept-all" title="Accept every change">${icon("check", 14)} Accept all</button><button type="button" class="btn reject" data-act="reject-all" title="Reject every change: the files get the accepted text back">Reject all</button><span class="grow"></span><label class="hint" title="Compare against the accepted text, typeset (latexdiff)"><input type="checkbox" data-act="show" checked="${this.showing}"> Show typeset</label></div>`;
+    const groups = groupHunks(this.s);
+    return html`${bar2}${rec}${tools}${groups.map((g) => html`<h3>${g.title}${g.note ? html` <button type="button" class="place" data-note="${g.note.id}">${g.note.id}</button>` : ""}</h3>${g.hunks.map((h) => this.hunkCard(h))}`)}${this.earlier()}`;
+  }
+  /** The comments on changes accepted or rejected since, with their verdicts: a review's history. */
+  earlier(top = false) {
+    const pending = new Set(this.s.hunks.map((h) => h.id));
+    const done = this.s.notes.filter((n) => n.hunk && !n.draft && !pending.has(n.hunk.id));
+    if (!done.length) return "";
+    const verdict = (n) => n.verdict ?? (this.s.verdicts ?? []).find((v) => v.hunk.id === n.hunk.id);
+    return html`<h3>${top ? "Reviewed" : "Reviewed earlier"}</h3>${done.map((n) => {
+      const v = verdict(n);
+      return html`<div class="card hunk past${this.sel === n.id ? " on" : ""}" data-id="${n.id}" tabindex="0" role="button"><div class="top"><span class="file">${placeOf(n.hunk.file, n.hunk.line)}</span>${v ? html`<span class="chip ${v.verdict === "accepted" ? "done" : "det"}">${v.verdict === "accepted" ? "Accepted" : "Rejected"}</span>` : ""}<span class="grow"></span><span>${v ? ago(v.at) : ""}</span></div><div class="diff">${n.hunk.old ? html`<del>${oneLine(n.hunk.old, 200)}</del>` : ""}${n.hunk.new ? html`<ins>${oneLine(n.hunk.new, 200)}</ins>` : ""}</div><div class="comments">${this.noteCard(n, true)}</div></div>`;
+    })}`;
+  }
+  hunkCard(h) {
+    const on = this.sel === h.id;
+    const comments = this.s.notes.filter((n) => h.comments.includes(n.id));
+    let at = h.now[0];
+    const parts = h.parts.map(([k, t]) => {
+      if (k === "del") return html`<del data-at="${String(at)}">${t}</del>`;
+      const el = k === "add" ? html`<ins data-at="${String(at)}">${t}</ins>` : html`<span data-at="${String(at)}">${t}</span>`;
+      at += utf8(t);
+      return el;
+    });
+    const what = h.whole === "added" ? " (new file)" : h.whole === "deleted" ? " (file deleted)" : "";
+    const diff2 = h.whole ? html`<div class="diff">${h.whole === "added" ? html`<ins data-at="${String(h.now[0])}">${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>` : html`<div class="diff" data-hunk="${h.id}"><span class="ctx">${h.before}</span>${parts}<span class="ctx">${h.after}</span></div>`;
+    const box = on ? html`<textarea data-focus="hc:${h.id}" data-comment="${h.id}" placeholder="Comment on this change (select words in it to comment on them)…" aria-label="Comment on this change" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="comment" data-id="${h.id}">Comment</button><button type="button" class="btn" data-act="draft" data-id="${h.id}" title="Gather it with others and submit them as one review">Add to review</button></div>` : "";
+    return html`<div class="card hunk${on ? " on" : ""}" data-id="${h.id}" data-focus="card:${h.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`Change at ${h.file} line ${h.line}${what}`}"><div class="top"><button type="button" class="place" data-goto="${h.file}" data-line="${String(h.line)}" title="Open in the editor"><span class="file">${placeOf(h.file, h.line, h.end_line)}</span></button>${what}<span class="grow"></span><button type="button" class="btn accept" data-act="accept" data-id="${h.id}" title="Accept: ${this.s.git ? "staged in git" : "kept as the accepted text"}" aria-label="Accept this change">${icon("check", 14)} Accept</button><button type="button" class="btn reject" data-act="reject" data-id="${h.id}" title="Reject: the file gets the accepted text back" aria-label="Reject this change">Reject</button></div>${diff2}${comments.length ? html`<div class="comments">${comments.map((c) => this.noteCard(c, true))}</div>` : ""}${box}</div>`;
+  }
+  // ---- what the user does in the side ----
+  keyed(e) {
+    const t = e.target;
+    if (t instanceof HTMLTextAreaElement) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (t.dataset.reply) void this.act("reply", t.dataset.reply);
+        else if (t.dataset.comment) void this.act("comment", t.dataset.comment);
+      } else if (e.key === "Escape") {
+        e.stopPropagation();
+        this.select(null);
+      }
+      return;
+    }
+    if ((e.key === "Enter" || e.key === " ") && t.classList.contains("card")) {
+      e.preventDefault();
+      this.select(t.dataset.id, true);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const cards = [...this.body.querySelectorAll(".rbody > .card, .rbody > div > .card, .card")].filter((c) => !c.closest(".comments"));
+      const i = cards.indexOf(t.closest(".card"));
+      const next = cards[i + (e.key === "ArrowDown" ? 1 : -1)];
+      if (next) e.preventDefault(), next.focus();
+    }
+  }
+  async clicked(e) {
+    const t = e.target;
+    const f = t.closest("[data-filter]");
+    if (f) return void (this.filter = f.dataset.filter, this.render());
+    const go = t.closest("[data-goto]");
+    if (go) {
+      e.stopPropagation();
+      if (go.dataset.from) void this.reveal(go.dataset.goto, Number(go.dataset.from), Number(go.dataset.to));
+      return this.host.goto(go.dataset.goto, Number(go.dataset.line) || 1);
+    }
+    const nt = t.closest("[data-note]");
+    if (nt) return void (this.tab = "notes", this.filter = "all", this.select(nt.dataset.note, true));
+    const a = t.closest("[data-act]");
+    if (a) {
+      e.stopPropagation();
+      if (a.dataset.act === "show") return this.show(a.checked);
+      return void this.act(a.dataset.act, a.dataset.id);
+    }
+    if (t.closest("textarea, .diff")) return;
+    const card = t.closest(".card");
+    if (card && this.sel !== card.dataset.id) this.select(card.dataset.id, true);
+  }
+  show(on) {
+    this.showing = on;
+    this.host.showChanges?.(on, this.s.git);
+    void this.marks();
+  }
+  /** The op `act` on note or hunk `id`. */
+  async act(act, id) {
+    const r = (op, params) => this.req(op, params);
+    switch (act) {
+      case "clear": {
+        const n = this.s.notes.filter((x) => x.status === "resolved" && !x.hunk).length;
+        if (!confirm(`Delete ${n} resolved note${n === 1 ? "" : "s"}?`)) return;
+        await r("review_clear");
+        return;
+      }
+      case "reply": {
+        const ta = this.body.querySelector(`[data-reply="${id}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!text) return void ta?.focus();
+        if (await r("review_reply", { id, text })) this.drafts.delete(id);
+        return;
+      }
+      case "resolve":
+      case "reopen": {
+        const ta = this.body.querySelector(`[data-reply="${id}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (await r(`review_${act}`, { id, text })) this.drafts.delete(id);
+        if (act === "resolve" && this.filter === "open") this.select(null);
+        return;
+      }
+      case "delete":
+        if (await r("review_delete", { id })) this.select(null);
+        return;
+      case "accept":
+      case "reject":
+        await this.verdict(act, [id]);
+        return;
+      case "accept-all":
+      case "reject-all": {
+        const n = this.s.hunks.length;
+        if (act === "reject-all" && !confirm(`Reject all ${n} change${n === 1 ? "" : "s"}? The files get the accepted text back.`)) return;
+        await this.verdict(act === "accept-all" ? "accept" : "reject", "all");
+        return;
+      }
+      case "comment":
+      case "draft": {
+        const ta = this.body.querySelector(`[data-comment="${id}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!text) return void ta?.focus();
+        const range = this.diffRange(id);
+        if (await r("review_comment", { hunk: id, text, draft: act === "draft", ...range ? { range } : {} })) this.drafts.delete(`h:${id}`);
+        return;
+      }
+      case "finish":
+        return this.finish();
+    }
+  }
+  async verdict(how, ids) {
+    const list = this.s.hunks.map((h) => h.id);
+    const at = ids === "all" ? -1 : list.indexOf(ids[0]);
+    const r = await this.req(`review_${how}`, { ids });
+    if (!r) return;
+    const n = Number(r.done ?? 0);
+    this.p.msg(`${how === "accept" ? "Accepted" : "Rejected"} ${n} change${n === 1 ? "" : "s"}${how === "accept" && this.s.git ? " (staged)" : ""}`);
+    if (at >= 0) {
+      const next = this.s.hunks.find((h) => !list.slice(0, at + 1).includes(h.id)) ?? this.s.hunks.at(-1);
+      this.select(next?.id ?? null, false, true);
+    }
+    if (this.showing) this.host.showChanges?.(true, this.s.git);
+  }
+  /** A range selected inside hunk `id`'s diff: bytes of the current text. */
+  diffRange(id) {
+    const rn = this.p.root;
+    const sel = rn.getSelection?.() ?? document.getSelection();
+    const d = this.body.querySelector(`.diff[data-hunk="${id}"]`);
+    if (!sel || sel.isCollapsed || !d || !d.contains(sel.anchorNode)) return null;
+    const pos = (node, off) => {
+      const el = (node instanceof HTMLElement ? node : node?.parentElement)?.closest("[data-at]");
+      if (!el || !d.contains(el)) return null;
+      const base = Number(el.dataset.at);
+      return el.localName === "del" ? base : base + utf8((el.textContent ?? "").slice(0, off));
+    };
+    const r = sel.getRangeAt(0);
+    const a = pos(r.startContainer, r.startOffset), b = pos(r.endContainer, r.endOffset);
+    if (a === null || b === null) return null;
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+  async req(op, params) {
+    const r = await this.host.request(op, params);
+    if (!r.ok) {
+      this.p.msg(r.error ?? "The watch did not answer", true);
+      return null;
+    }
+    return r.json ?? {};
+  }
+  /** Note or hunk `id` selected (its card open, its marks outlined); `scroll`: the page to it; `focus`: its card focused. */
+  select(id, scroll = false, focus = false) {
+    for (const ta of this.body.querySelectorAll("textarea[data-reply], textarea[data-comment]")) {
+      const key = ta.dataset.reply ?? `h:${ta.dataset.comment}`;
+      if (ta.value) this.drafts.set(key, ta.value);
+      else this.drafts.delete(key);
+    }
+    this.sel = id;
+    const note = id ? this.s.notes.find((n) => n.id === id) : void 0;
+    if (note && !note.hunk) {
+      this.tab = "notes";
+      if (this.filter !== "all" && note.status !== this.filter) this.filter = "all";
+    } else if (id && (this.s.hunks.some((h) => h.id === id) || note?.hunk)) this.tab = "changes";
+    if (id && !this.isOpen) this.open(true);
+    this.render();
+    this.outline();
+    const card = id ? this.body.querySelector(`.card[data-id="${CSS.escape(id)}"]`) : null;
+    if (card) {
+      card.scrollIntoView({ block: "nearest" });
+      if (focus) {
+        const box = card.querySelector("textarea");
+        (box && !focus ? box : card).focus();
+      }
+    }
+    if (scroll && id) void this.toPage(id);
+  }
+  /** The selected one's marks outlined on the pages. */
+  outline() {
+    for (const m of this.p.stage.querySelectorAll(".rv")) m.classList.toggle("on", !!this.sel && m.dataset.id === this.sel);
+  }
+  /** The pages scrolled to note or hunk `id`'s place. */
+  async toPage(id) {
+    const n = this.s.notes.find((x) => x.id === id);
+    const h = this.s.hunks.find((x) => x.id === id);
+    const [file, a, b] = n ? [n.anchor.file, n.anchor.start, n.anchor.end] : h ? [h.file, h.now[0], h.now[1]] : ["", 0, 0];
+    if (!file) return;
+    if (n && !n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) return void this.p.viewer.scrollToPlace(n.anchor.page, n.anchor.point[1]);
+    const at = await this.host.boxes(file, a, Math.max(b, a + 1), n?.anchor.quote ?? h?.new);
+    if (at.length) this.p.viewer.scrollToPlace(at[0].k, at[0].boxes[0][1]);
+    else this.p.msg("Not on the pages (none of its text is typeset)");
+  }
+  /** Bytes [a, b) of `file` shown on the pages a moment (an edit a thread recorded). */
+  async reveal(file, a, b) {
+    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
+    if (at.length) this.p.viewer.mark(at[0].k, at[0].boxes);
+  }
+  // ---- the marks on the pages ----
+  async marks() {
+    const turn = ++this.drawn;
+    if (this.showing) return this.p.viewer.reviewMarks([]);
+    const out = [];
+    const cls = (n) => n.status === "resolved" ? "n-resolved" : `n-${n.kind}`;
+    let i = 0;
+    for (const n of this.s.notes) {
+      if (n.hunk || n.draft) continue;
+      i++;
+      if (n.detached) continue;
+      const said2 = n.thread.filter((p) => p.text).length;
+      const pin = n.status === "resolved" ? "\u2713" : n.kind === "highlight" && !said2 ? "" : String(said2 || "\u2022");
+      const title = `${KIND_WORD[n.kind]}: ${oneLine(n.thread[0]?.text || n.anchor.quote, 80)}`;
+      if (!n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) {
+        const [x, y] = n.anchor.point;
+        out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id, pin, title });
+        continue;
+      }
+      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1), n.anchor.quote);
+      if (turn !== this.drawn) return;
+      at.forEach((p, j) => out.push({ ...p, cls: cls(n), id: n.id, ...j === 0 && pin !== "" ? { pin, title } : {} }));
+    }
+    for (const h of this.s.hunks) {
+      if (h.whole === "deleted") continue;
+      const empty = h.now[1] <= h.now[0];
+      const at = await this.host.boxes(h.file, h.now[0], empty ? h.now[0] + 1 : h.now[1], empty ? void 0 : h.new);
+      if (turn !== this.drawn) return;
+      at.forEach((p) => out.push({ k: p.k, boxes: empty ? p.boxes.slice(0, 1).map(([x, y, , bh]) => [x, y, 2, bh]) : p.boxes, cls: empty ? "h-del" : "h-add", id: h.id }));
+    }
+    void i;
+    this.p.viewer.reviewMarks(out);
+    this.outline();
+    const where = /* @__PURE__ */ new Map();
+    for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
+    const moved = [...where].some(([id, w]) => this.where.get(id)?.join() !== w.join());
+    this.where = where;
+    if (moved && this.isOpen && this.tab === "notes") this.render();
+  }
+  /** A click on the pages: a pin or a mark selects its note or hunk; Alt+click notes a spot. */
+  async pageClick(e) {
+    const t = e.target;
+    const pin = t.closest(".rv-pin");
+    if (pin) {
+      e.stopPropagation();
+      return this.select(pin.dataset.id, false, true);
+    }
+    const slot = t.closest(".slot");
+    if (!slot) return;
+    const rn = this.p.root;
+    const sel = rn.getSelection?.() ?? document.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const r = slot.getBoundingClientRect();
+    const k = Number(slot.dataset.k);
+    const size = this.p.viewer.pageSize();
+    const x = (e.clientX - r.left) / r.width * size.w, y = (e.clientY - r.top) / r.height * size.h;
+    if (e.altKey) {
+      e.preventDefault();
+      const at = await this.host.spot(k, x, y);
+      if (!at) return this.p.msg("No source near that spot (nothing typeset from a file there)", true);
+      return this.openCompose(e.clientX, e.clientY, { kind: "note", anchor: { file: at.file, start: at.start, end: at.start, page: k, point: [x, y] } }, "A spot on this page");
+    }
+    const hit = [...slot.querySelectorAll(".rv:not(.rv-pin)")].reverse().find((m) => {
+      const b = m.getBoundingClientRect();
+      return e.clientX >= b.left - 1 && e.clientX <= b.right + 1 && e.clientY >= b.top - 1 && e.clientY <= b.bottom + 1;
+    });
+    if (hit) this.select(hit.dataset.id, false, false);
+  }
+  // ---- making a note ----
+  /** Text selected on the pages, as the panel tells it (each drag's frame). */
+  selected(sel) {
+    this.picked = sel;
+    if (!this.pointerDown) setTimeout(() => this.offer(), 0);
+  }
+  /** The note kinds offered at the selection's end. */
+  offer() {
+    const rn = this.p.root;
+    const sel = rn.getSelection?.() ?? document.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount || !this.picked) return this.closePopOnly();
+    const range = sel.getRangeAt(0);
+    if (!this.p.stage.contains(range.commonAncestorContainer)) return;
+    const rects = [...range.getClientRects()].filter((r) => r.width > 0);
+    const end = rects.at(-1) ?? range.getBoundingClientRect();
+    const sig = JSON.stringify(this.picked);
+    if (this.pop?.dataset.sig === sig) return;
+    this.closePop();
+    const picked = this.picked;
+    const pop = html`<div class="rv-pop" role="toolbar" aria-label="Note the selection"><button type="button" class="btn" data-k="highlight" title="Highlight (h)">${icon("highlight", 15)} Highlight</button><button type="button" class="btn" data-k="note" title="A note for you and your agent (n)">${icon("note", 15)} Note</button><button type="button" class="btn" data-k="comment" title="A request for your agent (c)">${icon("comment", 15)} Comment</button></div>`.firstElementChild;
+    pop.dataset.sig = sig;
+    const first = rects[0] ?? end;
+    this.place(pop, first.left + first.width / 2, first.top - 6, true, true);
+    pop.addEventListener("pointerdown", (e) => e.preventDefault());
+    pop.addEventListener("click", (e) => {
+      const k = e.target.closest("[data-k]")?.dataset.k;
+      if (k) void this.make(k, picked, end);
+    });
+    pop.addEventListener("keydown", (e) => {
+      const k = { h: "highlight", n: "note", c: "comment" }[e.key];
+      if (k) e.preventDefault(), void this.make(k, picked, end);
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        const bs = [...pop.querySelectorAll("button")];
+        const i = bs.indexOf(e.target);
+        bs[(i + (e.key === "ArrowRight" ? 1 : bs.length - 1)) % bs.length]?.focus();
+      }
+    });
+    this.pop = pop;
+  }
+  /** A popover put at (x, y) in the window's coordinates, kept inside the panel; `center`: x is its middle. */
+  place(el, x, y, center = false, above = false) {
+    const w = this.p.win;
+    w.append(el);
+    const wr = w.getBoundingClientRect(), er = el.getBoundingClientRect();
+    let left = x - wr.left - (center ? er.width / 2 : 0);
+    let top = y - wr.top - (above ? er.height : 0);
+    if (above && top < 44) top = y - wr.top + 30;
+    left = Math.max(8, Math.min(left, wr.width - er.width - 8));
+    if (top + er.height > wr.height - 8) top = Math.max(8, y - wr.top - er.height - 30);
+    Object.assign(el.style, { left: `${left}px`, top: `${top}px` });
+  }
+  closePopOnly() {
+    this.pop?.remove();
+    this.pop = null;
+  }
+  closePop() {
+    this.closePopOnly();
+    this.compose?.remove();
+    this.compose = null;
+    this.p.win.querySelector(".rv-finish")?.remove();
+  }
+  /** A note of `kind` on the selection `picked` (its source looked up now). */
+  async make(kind, picked, end) {
+    const src = await this.host.source(picked);
+    if (!src) return void (this.closePop(), this.p.msg("That text came from no file of the project (a header, a number the class made): Alt+click notes a spot instead", true));
+    const anchor = { file: src.file, start: src.start, end: src.end, page: picked[0].k };
+    const sel = this.p.root.getSelection?.() ?? document.getSelection();
+    const seen = sel?.toString() ?? "";
+    if (kind === "highlight") {
+      this.closePop();
+      const r = await this.req("review_note", { kind, anchor, seen });
+      if (r) this.clearSelection(), this.p.msg("Highlighted");
+      return;
+    }
+    this.openCompose(end.left, end.bottom + 6, { kind, anchor, seen }, seen);
+  }
+  /** The box to write a note in, at (x, y). */
+  openCompose(x, y, note, quote) {
+    this.closePop();
+    const c = html`<div class="rv-compose" role="dialog" aria-label="${note.kind === "comment" ? "Comment for your agent" : "Note"}"><div class="q">${note.kind === "comment" ? "Comment for your agent on" : "Note on"} “${oneLine(quote, 120)}”</div><textarea placeholder="${note.kind === "comment" ? "What should your agent do here?" : "Your note\u2026"}" aria-label="Its text" rows="3"></textarea><div class="act"><span class="hint">Ctrl+Enter saves</span><button type="button" class="btn" data-x>Cancel</button><button type="button" class="btn primary" data-save>${note.kind === "comment" ? "Comment" : "Save note"}</button></div></div>`.firstElementChild;
+    const ta = c.querySelector("textarea");
+    const save2 = async () => {
+      const text = ta.value.trim();
+      if (!text) return ta.focus();
+      const b = c.querySelector("[data-save]");
+      b.disabled = true;
+      const r = await this.req("review_note", { ...note, text });
+      b.disabled = false;
+      if (!r) return;
+      this.closePop();
+      this.clearSelection();
+      this.select(r.id, false, false);
+      this.p.msg(note.kind === "comment" ? "Comment left for your agent" : "Note saved");
+    };
+    c.querySelector("[data-save]").onclick = () => void save2();
+    c.querySelector("[data-x]").onclick = () => this.closePop();
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.preventDefault(), void save2();
+      if (e.key === "Escape") e.stopPropagation(), this.closePop();
+    });
+    c.addEventListener("pointerdown", (e) => e.stopPropagation());
+    this.place(c, x, y);
+    this.compose = c;
+    ta.focus();
+  }
+  clearSelection() {
+    const rn = this.p.root;
+    (rn.getSelection?.() ?? document.getSelection())?.removeAllRanges();
+    this.picked = null;
+  }
+  /** The review's last step: its summary and verdict. */
+  finish() {
+    this.closePop();
+    const drafts = this.s.notes.filter((n2) => n2.draft);
+    const on = new Set(drafts.map((n2) => n2.hunk?.id).filter(Boolean));
+    const n = this.s.hunks.filter((h) => on.has(h.id)).length;
+    const opt = (v, label, help, checked = false) => html`<label><input type="radio" name="rv-verdict" value="${v}" checked="${checked}"><span>${label}<small>${help}</small></span></label>`;
+    const c = html`<div class="rv-finish" role="dialog" aria-label="Finish your review"><b>Finish your review</b><div class="q">${String(drafts.length)} comment${drafts.length === 1 ? "" : "s"} on ${String(n)} change${n === 1 ? "" : "s"}</div><textarea placeholder="Summary for your agent (optional)" aria-label="Summary" rows="3"></textarea>${opt("comment", "Comment", "Send the comments; decide later", true)}${opt("request_changes", "Request changes", "Your agent revises them; nothing is applied")}${opt("approve", "Approve", "Accept the changes commented on")}${opt("reject", "Reject", "Reject the changes commented on")}<div class="act"><button type="button" class="btn" data-x>Cancel</button><button type="button" class="btn primary" data-go>Submit review</button></div></div>`.firstElementChild;
+    c.querySelector("[data-x]").onclick = () => this.closePop();
+    c.querySelector("[data-go]").onclick = async () => {
+      const verdict = c.querySelector("input[name=rv-verdict]:checked")?.value ?? "comment";
+      const summary = c.querySelector("textarea").value;
+      const r2 = await this.req("review_submit", { verdict, summary });
+      if (!r2) return;
+      this.closePop();
+      this.p.msg(`Review sent: ${VERDICT_WORD[verdict].toLowerCase()}`);
+    };
+    c.addEventListener("keydown", (e) => e.key === "Escape" && (e.stopPropagation(), this.closePop()));
+    const r = this.side.getBoundingClientRect();
+    this.place(c, r.left + 8, r.top + 48);
+    this.compose = c;
+    c.querySelector("textarea").focus();
+  }
+};
+
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
@@ -4973,7 +5730,7 @@ function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
 }
-var PATHS = {
+var PATHS2 = {
   preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
   chevron_left: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
   chevron_right: "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
@@ -4997,10 +5754,11 @@ var PATHS = {
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
-var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
-var icon = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild;
+var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon2("copy", 16)}</button>`;
+var icon2 = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS2[name]}"/></svg>`.firstElementChild;
 function zoomToward(f, goal, dt) {
   if (!(f > 0) || !Number.isFinite(f)) return goal;
   const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
@@ -5069,7 +5827,7 @@ var TIPS = [
     title: "Typeset as you type",
     text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
-    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`
+    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon2("bolt", 11)}12 ms</span></div>`
   },
   {
     id: "compare",
@@ -5092,14 +5850,14 @@ var TIPS = [
     at: "#b-rec",
     title: "Clean rebuild",
     text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
-    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
+    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon2("refresh", 12)}Rebuild</span><span class="dd">${icon2("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
   },
   {
     id: "more",
     at: "#b-more",
     title: "Dark PDF and more",
     text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
-    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
+    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon2("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon2("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
   },
   {
     id: "contents",
@@ -5149,7 +5907,7 @@ var Panel = class {
     this.root = host2.attachShadow({ mode: "open" });
     const item2 = (id, name, label, sub = "", cls = "") => html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -5163,6 +5921,7 @@ var Panel = class {
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -5180,6 +5939,7 @@ var Panel = class {
       ${item2("x-pdf", "download", "Download PDF")}
       ${item2("x-log", "log", "View log")}
       ${item2("x-contents", "toc", "Contents", "t")}
+      ${item2("x-review", "rate_review", "Notes and changes", "m")}
       ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item2("x-compare", "compare", "Compare\u2026", "", "narrow")}
       <hr>
@@ -5213,7 +5973,7 @@ var Panel = class {
   </div>
 </div>`;
     for (const ic of skeleton.querySelectorAll("span.icon"))
-      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon(ic.textContent, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
+      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon2(ic.textContent, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
     this.root.replaceChildren(style, skeleton);
     this.host = host2;
     host2.style.display = "none";
@@ -5225,6 +5985,7 @@ var Panel = class {
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
+    offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -5332,7 +6093,7 @@ var Panel = class {
       box: (d, w2) => pageBox(d, w2),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange(file, pos, pos, true) : void 0,
-      selected: (sel) => ev.onSelectPage?.(sel),
+      selected: (sel) => (ev.onSelectPage?.(sel), this.review?.selected(sel)),
       link: ev.onLink ? (u) => ev.onLink(u) : void 0,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from2, to, top) => ev.onCited(from2, to, top) : void 0,
@@ -5344,6 +6105,25 @@ var Panel = class {
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : void 0
     });
     this.extras(opts);
+    if (opts.review) {
+      const rv = this.review = new Review(
+        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), laidOut: () => requestAnimationFrame(() => (this.stageSize = null, this.redraw())) },
+        opts.review
+      );
+      const b = this.$("#b-review");
+      b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
+      rv.counts((open, pending) => {
+        const n = open + pending;
+        this.$("#rvcount").textContent = n ? String(n) : "";
+        b.title = `Notes and changes (m): ${open} open note${open === 1 ? "" : "s"}, ${pending} change${pending === 1 ? "" : "s"} to review`;
+      });
+      new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+      window.addEventListener("keydown", (e) => {
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+        e.preventDefault();
+        rv.open();
+      });
+    }
     this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
@@ -5375,6 +6155,8 @@ var Panel = class {
   }
   /** The menus and popovers by their buttons. */
   menus = [];
+  /** Notes and changes (opts.review). */
+  review;
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   menu(m) {
     for (const [b, el] of this.menus) {
@@ -5498,7 +6280,7 @@ var Panel = class {
     this.win.classList.toggle("collapsed", on);
     const b = this.$("#min");
     b.title = on ? "Expand (Alt+Shift+P)" : "Collapse (Alt+Shift+P)";
-    b.replaceChildren(icon(on ? "open_in_full" : "close_fullscreen"));
+    b.replaceChildren(icon2(on ? "open_in_full" : "close_fullscreen"));
     this.win.style.width = on ? "" : `${this.prefs.w}px`;
     this.win.style.height = on ? "" : `${this.prefs.h}px`;
     if (!on) this.redraw();
@@ -5766,7 +6548,7 @@ var Panel = class {
     const tip = this.$("#ctip");
     tip.dataset.i = "";
     tip.className = `ctip ${m.p?.severity ?? "change"}`;
-    if (m.p) tip.replaceChildren(icon(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
+    if (m.p) tip.replaceChildren(icon2(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
     else tip.replaceChildren(html`<div class="txt"><div>${m.title}</div></div>`);
     tip.hidden = false;
     const body = this.$(".body").getBoundingClientRect(), r = t.getBoundingClientRect();
@@ -5782,6 +6564,7 @@ var Panel = class {
   origins() {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
+    this.review?.refresh();
   }
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
   culpritHit(e) {
@@ -5808,7 +6591,7 @@ var Panel = class {
     if (tip.hidden || tip.dataset.i !== el.dataset.i) {
       tip.dataset.i = el.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.replaceChildren(icon(p.severity, 14), culpritTip(p));
+      tip.replaceChildren(icon2(p.severity, 14), culpritTip(p));
       tip.hidden = false;
     }
     const body = this.$(".body").getBoundingClientRect(), r = el.getBoundingClientRect();
@@ -5931,7 +6714,7 @@ var Panel = class {
     pb.hidden = !errors && !warnings;
     pb.className = `ib probs ${errors ? "error" : "warning"}`;
     pb.title = `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`;
-    this.$("#psev").replaceChildren(icon(errors ? "error" : "warning", 16));
+    this.$("#psev").replaceChildren(icon2(errors ? "error" : "warning", 16));
     this.$("#pcount").textContent = String(errors || warnings);
     this.$("#logshead").textContent = diags.length ? [errors && `${errors} error${errors === 1 ? "" : "s"}`, warnings && `${warnings} warning${warnings === 1 ? "" : "s"}`].filter(Boolean).join(", ") || "Notes" : "No problems";
     const nopages = s.pages === 0 && !this.last;
@@ -6269,7 +7052,7 @@ var Panel = class {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon2(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span").textContent = t.title;
     el.querySelector(".d").textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -6479,7 +7262,7 @@ var Panel = class {
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
     const extra = [["e", "the build's errors and warnings"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
-    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
+    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
     addEventListener(
       "keydown",
       (e) => {
@@ -6825,7 +7608,7 @@ var Panel = class {
     this.tilesGone();
     const shown = groups.filter((g) => g.rows.length);
     const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
-    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
+    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
     const body = el.querySelector(".sbody");
     shown.forEach((g, i) => {
       const sec = document.createElement("section");
@@ -8744,7 +9527,22 @@ var PreviewSession = class {
    * came from, from its first glyph's start to its last's end).
    */
   async selectPage(sel) {
-    if (!this.opened || !sel.length) return;
+    const best = await this.sourceOf(sel);
+    if (!best) return;
+    const { file, start: lo, end: hi } = best;
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
+    const t = this.files[file];
+    if (t === void 0) return;
+    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+  }
+  /**
+   * The source of text selected on the pages ([x, y top, w, h] boxes in PDF
+   * points, by page): the file most of its glyphs came from, from its first
+   * glyph's start to its last's end, in bytes (the glyph origins'); null
+   * where none of it came from a file.
+   */
+  async sourceOf(sel) {
+    if (!this.opened || !sel.length) return null;
     const by = /* @__PURE__ */ new Map();
     for (const { k, rects } of sel) {
       for (const g of this.cached(k) ?? await this.glyphsOf(k)) {
@@ -8757,12 +9555,15 @@ var PreviewSession = class {
     }
     const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
     this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return;
+    if (!best) return null;
     const [file, { lo, hi }] = best;
-    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
-    const t = this.files[file];
-    if (t === void 0) return;
-    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+    return { file, start: lo, end: hi };
+  }
+  /** The source place nearest (x, y) on page `k` (PDF points from its top left): a spot with no text of its own, a figure's. */
+  async spotOf(k, x, y) {
+    if (!this.opened) return null;
+    const g = nearest(this.cached(k) ?? await this.glyphsOf(k), x, y);
+    return g?.file ? { file: g.file, start: g.start } : null;
   }
   /**
    * The editor's cursor at `pos` (UTF-16) in `file`, as it moves: the word it
@@ -9323,7 +10124,7 @@ var Strips = class {
       el2.className = "phx-page";
       Object.assign(el2.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
       el2.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
-      return { el: el2, w: f.w, h: f.h, links: f.links };
+      return { el: el2, w: f.w, h: f.h, links: f.links, hash: f.hash };
     }
     const grow = (a, b2, most2) => {
       const m = (a + b2) / 2, half = Math.min((b2 - a) * 2, most2) / 2;
@@ -9349,7 +10150,7 @@ var Strips = class {
       height: `${h / part3.ph * 100}%`
     });
     el.append(this.canvas(base), tile, textLayer(base.text.map(composeLine), base.w, base.h));
-    return { el, w: base.w, h: base.h, links: base.links };
+    return { el, w: base.w, h: base.h, links: base.links, hash: base.hash === part3.hash ? base.hash : base.hash === void 0 ? void 0 : "" };
   }
   /** Page `k`'s frame at `scale` (only `win` of it, if given), its strips fetched and kept. */
   async frame(k, scale, win) {
@@ -9590,7 +10391,7 @@ function layout(cs) {
   if (rows.length) rows[rows.length - 1].down = pending;
   return { rows, width };
 }
-function ago(t, now = Date.now() / 1e3) {
+function ago2(t, now = Date.now() / 1e3) {
   const s = Math.max(0, now - t);
   const units = [[31536e3, "year"], [2592e3, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
   for (const [n, u] of units)
@@ -9841,7 +10642,7 @@ var Commits = class {
       const title = `${c.subject}
 ${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
 click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
-      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago(c.time)}</span></span></div>`;
+      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago2(c.time)}</span></span></div>`;
     });
     const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
     return html`${top}${lines2}${more}`;
@@ -9988,7 +10789,7 @@ var Pages = class {
       const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
       this.painted();
-      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
+      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links, ...p.hash !== void 0 && p.hash !== null ? { json: { hash: p.hash } } : {} };
     }
     return this.sock.request(op);
   }
@@ -10054,6 +10855,34 @@ async function clearCache() {
   panel.msg(r.ok ? `Cache cleared: ${mb2(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
 }
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
+var review = {
+  request: (op, params) => sock.request({ op, ...params }),
+  onState(cb) {
+    sock.onEvent((e) => e.event === "review" && cb(e));
+    const was = sock.onOpen;
+    sock.onOpen = () => {
+      was();
+      void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json));
+    };
+  },
+  // (where no glyph's origin names the range (an \input file's text, where
+  // the origins name the \input), its words found in the pages' text)
+  async boxes(file, start, end, quote) {
+    const at = await session.boxesOf(file, start, end);
+    if (at.length || !quote) return at;
+    const q = words(quote);
+    if (!q) return [];
+    const hits = await pages.find(q).catch(() => []);
+    return hits.slice(0, 1).map((h) => ({ k: h.k, boxes: h.boxes }));
+  },
+  source: (sel) => session.sourceOf(sel),
+  spot: (k, x, y) => session.spotOf(k, x, y),
+  goto: (file, line) => source(file, line),
+  showChanges(on, git) {
+    if (!on) return controls.stop();
+    void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
+  }
+};
 var panel = new Panel(
   {
     onPage: () => {
@@ -10130,6 +10959,7 @@ var panel = new Panel(
   {
     host: "watch",
     outline: true,
+    review,
     keys: true,
     header: true,
     footer: false,

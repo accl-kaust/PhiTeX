@@ -1406,6 +1406,51 @@ export class Viewer {
     }
   }
 
+  /**
+   * The review's marks (review.ts): each its `boxes` on page `k` as
+   * `.rv.CLS` (`data-id` its note's or hunk's), and with `pin` a button at
+   * the page's right edge beside its first box (a note's: its thread a click
+   * away). The whole set, the last one's replaced; never scrolls, never asks
+   * for a page (one drawn later keeps them, as paint does).
+   */
+  /** A page's size in PDF points (the pages' boxes are in them). */
+  pageSize(): { w: number; h: number } {
+    return this.size;
+  }
+
+  reviewMarks(marks: { k: number; boxes: [number, number, number, number][]; cls: string; id: string; pin?: string; title?: string }[]): void {
+    for (const m of this.root.querySelectorAll(".rv")) m.remove();
+    const { w, h } = this.size;
+    const pinned = new Map<number, number[]>();
+    for (const mk of marks) {
+      const s = this.slots[mk.k];
+      if (!s || !mk.boxes.length) continue;
+      for (const [x, y, bw, bh] of mk.boxes) {
+        const m = document.createElement("div");
+        m.className = `rv ${mk.cls}`;
+        m.dataset.id = mk.id;
+        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(Math.max(bw, 1.5) / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        s.el.append(m);
+      }
+      if (mk.pin !== undefined) {
+        // (pins on one page kept apart: one under the other where they meet)
+        const ys = pinned.get(mk.k) ?? [];
+        let y = mk.boxes[0][1];
+        while (ys.some((o) => Math.abs(o - y) < 13)) y += 13;
+        ys.push(y);
+        pinned.set(mk.k, ys);
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `rv rv-pin ${mk.cls}`;
+        b.dataset.id = mk.id;
+        b.textContent = mk.pin;
+        if (mk.title) (b.title = mk.title), b.setAttribute("aria-label", mk.title);
+        Object.assign(b.style, { top: `${(y / h) * 100}%` });
+        s.el.append(b);
+      }
+    }
+  }
+
   /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
   mark(k: number, boxes: [number, number, number, number][], scroll = true): void {
     const s = this.slots[k];
@@ -1754,7 +1799,7 @@ export class Viewer {
   private paint(s: Slot): void {
     if (!s.img) return;
     // (a highlight outlives the page drawn under it: put back after)
-    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }

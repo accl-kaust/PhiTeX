@@ -30,6 +30,7 @@ import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
+import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -287,6 +288,8 @@ export interface PanelOptions {
   header?: boolean;
   /** The panel's footer (false: the host has its own status bar, the CLI's). */
   footer?: boolean;
+  /** Notes on the pages and the agent's changes under review (review.ts): where the host keeps them (the watch). */
+  review?: ReviewHost;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -367,6 +370,7 @@ const PATHS: Record<string, string> = {
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z",
 };
 /** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
@@ -561,7 +565,7 @@ export class Panel {
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
       html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -575,6 +579,7 @@ export class Panel {
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -592,6 +597,7 @@ export class Panel {
       ${item("x-pdf", "download", "Download PDF")}
       ${item("x-log", "log", "View log")}
       ${item("x-contents", "toc", "Contents", "t")}
+      ${item("x-review", "rate_review", "Notes and changes", "m")}
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item("x-compare", "compare", "Compare…", "", "narrow")}
       <hr>
@@ -640,6 +646,7 @@ export class Panel {
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
+    offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -753,7 +760,7 @@ export class Panel {
       box: (d, w) => pageBox(d, w),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange!(file, pos, pos, true) : undefined,
-      selected: (sel) => ev.onSelectPage?.(sel),
+      selected: (sel) => (ev.onSelectPage?.(sel), this.review?.selected(sel)),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
@@ -765,6 +772,25 @@ export class Panel {
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : undefined,
     });
     this.extras(opts);
+    if (opts.review) {
+      const rv = (this.review = new Review(
+        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), laidOut: () => requestAnimationFrame(() => ((this.stageSize = null), this.redraw())) },
+        opts.review,
+      ));
+      const b = this.$("#b-review");
+      b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
+      rv.counts((open, pending) => {
+        const n = open + pending;
+        this.$("#rvcount").textContent = n ? String(n) : "";
+        b.title = `Notes and changes (m): ${open} open note${open === 1 ? "" : "s"}, ${pending} change${pending === 1 ? "" : "s"} to review`;
+      });
+      new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+      window.addEventListener("keydown", (e) => {
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+        e.preventDefault();
+        rv.open();
+      });
+    }
     this.darkPdf("off");
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
@@ -804,6 +830,8 @@ export class Panel {
 
   /** The menus and popovers by their buttons. */
   private menus: [string, string][] = [];
+  /** Notes and changes (opts.review). */
+  review?: Review;
 
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   private menu(m: string | null): void {
@@ -1285,6 +1313,8 @@ export class Panel {
   origins(): void {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
+    // (the notes' and changes' marks looked up again in the new origins)
+    this.review?.refresh();
   }
 
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */

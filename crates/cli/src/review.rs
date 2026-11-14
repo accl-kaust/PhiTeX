@@ -2096,6 +2096,12 @@ fn note_out(st: &State, id: &str) -> Option<Value> {
         .map(|h| h.id.as_str())
         .collect();
     v["hunks"] = json!(hunks);
+    // (a comment on a change accepted or rejected since: the verdict)
+    if let Some(h) = &n.hunk
+        && let Some(x) = st.store.verdicts.iter().rev().find(|x| x.hunk.id == h.id)
+    {
+        v["verdict"] = json!({"verdict": x.verdict, "at": x.at});
+    }
     Some(v)
 }
 
