@@ -29,7 +29,7 @@ pub(crate) struct Chunk {
 
 /// Whether line `l` (its bytes, without its newline) may end a chunk.
 fn ends_chunk(l: &[u8]) -> bool {
-    hash_bytes(0x6a63_6b65, l) % EVERY == 0
+    hash_bytes(0x6a63_6b65, l).is_multiple_of(EVERY)
 }
 
 /// `text` cut into chunks ([`Chunk`]), in order, covering it all.
