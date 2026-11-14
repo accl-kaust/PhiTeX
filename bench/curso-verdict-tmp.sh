@@ -3,7 +3,9 @@ export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
 cargo build -q --release -p phitex-cli || exit 1
 B=$PWD/target/release/phitex
 w=$(mktemp -d)
-cp -a /usr/share/doc/texlive/latex/cursolatex/. $w/e
+src=$(find /usr/share/doc /usr/share/texmf-dist/doc /usr/share/texlive -name 'cursolatex.tex' 2>/dev/null | head -1)
+echo "source: $src"; [ -n "$src" ] || { find / -xdev -name '*cursolatex*' 2>/dev/null | head; exit 1; }
+cp -a $(dirname $src)/. $w/e
 echo "files:"; ls -R $w/e | head -60
 rm -f $w/e/cursolatex.pdf
 sed 's/if x.endswith((".pdf", ".aux", ".log", ".toc", ".out")):/if x.endswith((".aux", ".log", ".toc", ".out")) or x == os.path.basename(pdf):/' bench/stream-edits-tmp.py > $w/se.py
