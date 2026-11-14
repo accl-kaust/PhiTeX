@@ -3402,6 +3402,7 @@ impl Graph {
         }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
+        let shell = eng.register(Arc::new(crate::shell::ShellChild(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
@@ -3431,6 +3432,7 @@ impl Graph {
             xdvpage,
             readback,
             pic,
+            shell,
             tool_opts: Arc::default(),
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),

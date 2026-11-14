@@ -30,6 +30,16 @@ struct Fake {
     progress: Mutex<Option<Arc<phitex_tex::Progress>>>,
     /// The jobs finished while `sleep` slept.
     during: Mutex<Vec<u64>>,
+    /// `gate` waits until a run has handed a command to a child
+    /// (`ShellHook::handed`); `None`: it returns at once.
+    gate: Option<Gate>,
+}
+
+/// The commands handed to children so far, and the gate's wake.
+#[derive(Default)]
+struct Gate {
+    handed: Mutex<Vec<String>>,
+    cv: std::sync::Condvar,
 }
 
 impl Fake {
@@ -115,6 +125,25 @@ impl ShellHook for Fake {
                     ..ShellRan::default()
                 }
             }
+            // (held until a run after it has handed its command to a
+            // child: so that run met it with the text before it not
+            // settled. Status 99 where none came in a minute)
+            "gate" => {
+                let status = self.gate.as_ref().map_or(0, |g| {
+                    let h = g.handed.lock().unwrap();
+                    let (h, t) = g
+                        .cv
+                        .wait_timeout_while(h, std::time::Duration::from_secs(60), |h| h.is_empty())
+                        .unwrap();
+                    drop(h);
+                    if t.timed_out() { 99 << 8 } else { 0 }
+                });
+                ShellRan {
+                    status,
+                    read: Some(Vec::new()),
+                    ..ShellRan::default()
+                }
+            }
             // (the host could not run it, and says why: a runner not loaded)
             "gone" => ShellRan {
                 status: 127 << 8,
@@ -125,6 +154,13 @@ impl ShellHook for Fake {
                 status: 127 << 8,
                 ..ShellRan::default()
             },
+        }
+    }
+
+    fn handed(&self, command: &str) {
+        if let Some(g) = &self.gate {
+            g.handed.lock().unwrap().push(command.to_owned());
+            g.cv.notify_all();
         }
     }
 }
@@ -688,4 +724,59 @@ Between them.
             "{n}: the run of the command ran again: {reran:?}"
         );
     }
+}
+
+/// A command met while the text before it has not settled is handed to a
+/// child that calls it once that text settles, and the run goes on without
+/// its result: the paragraph after the command reads, on that guess, that
+/// the command wrote nothing, and once the child has called it, reads what
+/// it wrote. The gate (the first paragraph's command, held until the
+/// second paragraph has handed its command over) makes that order at -j8
+/// in every build. The output is -j1's, and each command is called once.
+#[test]
+fn a_command_met_before_the_text_settles_runs_once_and_its_output_is_read() {
+    let doc = format!(
+        r"\def\made{{none}}
+\immediate\write18{{fakecmd gate}}
+First paragraph.
+\par
+\immediate\openout3=ina.txt \immediate\write3{{alpha}}\immediate\closeout3
+\immediate\write18{{fakecmd up ina.txt outa.tex}}
+\openin1=outa.tex \ifeof1 \else\closein1 \input outa.tex \fi
+Second paragraph: \made.
+{SHOW}
+\bye
+"
+    );
+    let one = common::build(
+        options("handed", Some(Arc::new(Fake::default())), 1),
+        Some(&common::plain()),
+        &doc,
+    );
+    let (dvi1, log1) = one.output();
+    assert_eq!(got(&log1), ["ALPHA"], "-j1: {log1}");
+    let fake = Arc::new(Fake {
+        gate: Some(Gate::default()),
+        ..Fake::default()
+    });
+    let b = common::build(
+        options("handed", Some(fake.clone()), 8),
+        Some(&common::plain()),
+        &doc,
+    );
+    let (dvi, log) = b.output();
+    assert_eq!(got(&log), ["ALPHA"], "-j8: {log}");
+    let handed = fake.gate.as_ref().unwrap().handed.lock().unwrap().clone();
+    assert_eq!(handed, ["fakecmd 'up' 'ina.txt' 'outa.tex'"], "-j8");
+    let calls = fake.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "-j8: each command called once: {calls:?}");
+    assert!(
+        common::runs_of(&b, "shell") >= 1,
+        "-j8: the command's child ran"
+    );
+    assert_eq!(
+        common::first_difference(&dvi, &dvi1),
+        None,
+        "-j8 against -j1"
+    );
 }

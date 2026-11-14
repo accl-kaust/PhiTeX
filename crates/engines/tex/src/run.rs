@@ -119,6 +119,9 @@ pub(crate) struct Ops {
     /// A picture of a figure's run as a child node of its own
     /// (`crate::pic`).
     pub pic: OpId,
+    /// A `\write18` a run hands to a child that calls it on the settled
+    /// prefix (`crate::shell::ShellChild`).
+    pub shell: OpId,
     /// The tools' settings ([`crate::Options::bibtex`]).
     pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).

@@ -2113,6 +2113,20 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// Whether [`Ctx::wait_settled`] would let my run go on here: every
+    /// node before me settled, the settling layer's frontier past me, and
+    /// what I read still standing. Not a read, and no stop: a run that
+    /// finds it false can hand the act to a child of its own that waits
+    /// for the settled prefix instead (`phitex-tex`'s shell child), and
+    /// go on.
+    pub fn settled_here(&self) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        let eng = self.eng;
+        read::on_one_layout(eng, || read::unsettled_before(eng, self.me)).is_none()
+            && !crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire))
+            && self.own_reads_hold()
+    }
+
     /// Narrows what I may define, for prediction. Accepted, not used by
     /// this core.
     pub fn narrow(&mut self, _m: MayDefine) {}
