@@ -588,6 +588,25 @@ impl PdfState {
             .collect()
     }
 
+    /// The codes each form or image record `rec` leaves to its placing
+    /// shows (`tex` naming its objects here), in the page's order: a
+    /// form's once written here, an image's once read; `None` where not
+    /// known.
+    #[must_use]
+    pub fn hole_codes(&self, rec: &PageRecord, tex: &dyn Fn(usize) -> usize) -> Vec<Option<usize>> {
+        rec.xholes
+            .iter()
+            .map(|x| {
+                let n = tex(x.n);
+                if x.form {
+                    self.aux.xforms.get(&n).and_then(|f| f.codes)
+                } else {
+                    self.ximage_codes(n)
+                }
+            })
+            .collect()
+    }
+
     /// The page `rec` recorded, placed on this state as `pdf_ship_out`
     /// would ship it here: false (the state untouched but for
     /// `init_output`) where the replay would not give the walk's bytes.
