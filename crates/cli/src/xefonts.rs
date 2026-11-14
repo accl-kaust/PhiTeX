@@ -303,22 +303,36 @@ fn fc_key(conf: &fcconf::Config, extra: &[PathBuf]) -> u64 {
         seen.push((f.clone(), mtime(f).map_or(u128::MAX, |(_, t)| t)));
     }
     let mut stack: Vec<PathBuf> = conf.font_dirs.iter().chain(extra).cloned().collect();
+    // (a directory once, by its device and inode where there are such:
+    // links to directories followed, as fontconfig follows them, without
+    // a loop)
     let mut walked = std::collections::HashSet::new();
     while let Some(d) = stack.pop() {
-        if !walked.insert(std::fs::canonicalize(&d).unwrap_or_else(|_| d.clone())) {
-            continue;
-        }
         let Some((m, t)) = mtime(&d) else {
             seen.push((d, u128::MAX));
             continue;
         };
+        #[cfg(unix)]
+        let id = {
+            use std::os::unix::fs::MetadataExt as _;
+            (m.dev(), m.ino(), PathBuf::new())
+        };
+        #[cfg(not(unix))]
+        let id = (0, 0, d.clone());
+        if !walked.insert(id) {
+            continue;
+        }
         seen.push((d.clone(), t));
         if m.is_dir()
             && let Ok(rd) = std::fs::read_dir(&d)
         {
             for e in rd.flatten() {
-                // (fontconfig follows links to directories, as `stat`)
-                if std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()) {
+                // (the entry's type from the directory, a link's by `stat`)
+                let dir = e.file_type().is_ok_and(|t| {
+                    t.is_dir()
+                        || (t.is_symlink() && std::fs::metadata(e.path()).is_ok_and(|m| m.is_dir()))
+                });
+                if dir {
                     stack.push(e.path());
                 }
             }
