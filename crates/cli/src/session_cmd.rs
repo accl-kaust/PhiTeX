@@ -73,6 +73,10 @@ pub enum Verb {
         /// N source lines around each
         #[arg(long, value_name = "N")]
         context: Option<usize>,
+        /// Counts instead: by kind (error, overfull, underfull, reference,
+        /// font, other), each kind's files by count
+        #[arg(long)]
+        summary: bool,
     },
     /// Build again from the files on disk (--clean: from nothing)
     Rebuild {
@@ -147,8 +151,13 @@ pub fn duration(s: &str) -> Result<Option<Duration>, String> {
 /// The watch for here: `pid` if given, else those whose root holds the
 /// current directory, the one whose main is `file` first, else the newest.
 fn find(pid: Option<u32>, file: Option<&str>) -> Result<Value, Failed> {
-    let d = crate::attach::dir().map_err(|e| no_session(format!("the sessions folder: {e}")))?;
-    let live = crate::attach::live_in(&d);
+    // (every folder a watch may have said itself in: a sandbox may see
+    // the user's runtime folder without $XDG_RUNTIME_DIR, or not at all)
+    let folders = crate::attach::read_folders();
+    let live: Vec<Value> = folders
+        .iter()
+        .flat_map(|(d, _)| crate::attach::live_in(d))
+        .collect();
     if let Some(p) = pid {
         return live
             .into_iter()
@@ -187,9 +196,41 @@ fn find(pid: Option<u32>, file: Option<&str>) -> Result<Value, Failed> {
             file.unwrap_or("")
         )));
     }
-    mine.pop().ok_or_else(|| {
-        no_session("no phitex watch runs here: start one with `phitex session start`")
-    })
+    mine.pop()
+        .ok_or_else(|| no_session(not_found(&here, &folders)))
+}
+
+/// Why no watch was found from `here`: where the discovery files were
+/// looked for, and a watch of this folder that runs but cannot be reached
+/// from here (another PID namespace, its socket not answering: a sandbox
+/// without the host's network).
+fn not_found(here: &Path, folders: &[(PathBuf, String)]) -> String {
+    let unreachable = folders
+        .iter()
+        .flat_map(|(d, _)| crate::attach::files_in(d))
+        .map(|(_, v)| v)
+        .find(|v| {
+            !crate::attach::same_net(v)
+                && v["root"]
+                    .as_str()
+                    .is_some_and(|r| here.starts_with(Path::new(r)))
+        });
+    if let Some(v) = unreachable {
+        return format!(
+            "a phitex watch of this folder runs (pid {} in another sandbox or outside this one) but its socket, 127.0.0.1:{}, does not answer from here: \
+             the sandbox has no network to the host's 127.0.0.1 (bubblewrap: --share-net)",
+            v["pid"], v["lsp"]["port"]
+        );
+    }
+    let looked: Vec<String> = folders
+        .iter()
+        .map(|(d, why)| format!("{} ({why})", d.display()))
+        .collect();
+    format!(
+        "no phitex watch runs here (looked in {}): start one with `phitex session start`, \
+         or, if one runs in your terminal and this is a sandbox, make its sessions folder visible here (read-only will do)",
+        looked.join(", ")
+    )
 }
 
 /// A connection to a watch's socket, `initialize`d.
@@ -323,6 +364,9 @@ fn run(verb: &Verb, pid: Option<u32>, as_json: bool, st: Style, ui: &Ui) -> Resu
                     if as_json {
                         out(&v);
                     } else {
+                        if let Some(l) = setup_line(&v) {
+                            println!("{l}");
+                        }
                         print_status(&v, st, None);
                     }
                     Ok(build_code(&v))
@@ -379,21 +423,27 @@ fn run(verb: &Verb, pid: Option<u32>, as_json: bool, st: Style, ui: &Ui) -> Resu
                     warnings,
                     file,
                     context,
+                    summary,
                 } => {
                     let v = c.call(
                         "phitex/session/problems",
                         &json!({"errors": errors, "warnings": warnings, "file": file}),
                         None,
                     )?;
-                    if as_json {
+                    if as_json && *summary {
+                        let list = v["problems"].as_array().cloned().unwrap_or_default();
+                        out(&json!({"build": v["build"], "summary": summary_json(&list)}));
+                    } else if as_json {
                         out(&v);
                     } else {
                         let root = PathBuf::from(s["root"].as_str().unwrap_or("."));
                         let list = v["problems"].as_array().cloned().unwrap_or_default();
                         if list.is_empty() {
                             println!("no problems (build {})", v["build"]);
+                        } else if *summary {
+                            print_summary(&list);
                         }
-                        for p in &list {
+                        for p in list.iter().filter(|_| !*summary) {
                             println!("{}", problem_line(p, st));
                             if let Some(n) = context {
                                 print_context(&root, p, *n, st);
@@ -526,7 +576,113 @@ fn problem_line(p: &Value, st: Style) -> String {
         "warning" => st.yellow(msg),
         _ => msg.to_owned(),
     };
-    format!("{place}{msg}")
+    let mut out = format!("{place}{msg}");
+    // (an error's help: what TeX or PhiTeX says to do, the engine to
+    // name for a package's engine check)
+    if sev == "error" {
+        for h in p["help"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            out.push_str(&format!("\n  {}", st.dim(h)));
+        }
+    }
+    out
+}
+
+/// The engine and the output folder the watch runs, and how each was
+/// chosen: `engine xelatex (picked: the document loads fontspec) · output
+/// folder . (the default: beside the main file)`.
+fn setup_line(v: &Value) -> Option<String> {
+    let engine = v["engine"].as_str()?;
+    let mut s = format!("engine {engine}");
+    if let Some(w) = v["engine_why"].as_str() {
+        s.push_str(&format!(" ({w})"));
+    }
+    if let Some(d) = v["out_dir"].as_str() {
+        s.push_str(&format!(" · output folder {d}"));
+        if let Some(w) = v["out_dir_why"].as_str() {
+            s.push_str(&format!(" ({w})"));
+        }
+    }
+    Some(s)
+}
+
+/// `problems --summary`: the problems counted by kind, each kind's files
+/// by count, most first: `overfull 211, of which ledger.tex 190, intro.tex 21`.
+fn print_summary(list: &[Value]) {
+    for l in summary(list) {
+        println!("{l}");
+    }
+}
+
+/// The problems counted by kind, most first, each kind's files by count.
+fn tally(list: &[Value]) -> Vec<(String, usize, Vec<(String, usize)>)> {
+    let mut kinds: Vec<(String, usize, Vec<(String, usize)>)> = Vec::new();
+    for p in list {
+        let kind = p["kind"].as_str().unwrap_or_else(|| {
+            phitex_live::problems::kind_of(
+                p["severity"].as_str().unwrap_or(""),
+                p["message"].as_str().unwrap_or(""),
+            )
+        });
+        let kind = kind.to_owned();
+        let file = p["file"].as_str().unwrap_or("").trim_start_matches("./");
+        let file = if file.is_empty() { "(no file)" } else { file };
+        let k = kinds
+            .iter()
+            .position(|(k, ..)| *k == kind)
+            .unwrap_or_else(|| {
+                kinds.push((kind, 0, Vec::new()));
+                kinds.len() - 1
+            });
+        kinds[k].1 += 1;
+        match kinds[k].2.iter_mut().find(|(f, _)| f == file) {
+            Some(f) => f.1 += 1,
+            None => kinds[k].2.push((file.to_owned(), 1)),
+        }
+    }
+    kinds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    for k in &mut kinds {
+        k.2.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
+    kinds
+}
+
+/// `--summary --json`'s: `[{kind, count, files: [{file, count}]}]`.
+fn summary_json(list: &[Value]) -> Value {
+    tally(list)
+        .into_iter()
+        .map(|(kind, n, files)| {
+            let files: Vec<Value> = files
+                .into_iter()
+                .map(|(f, c)| json!({"file": f, "count": c}))
+                .collect();
+            json!({"kind": kind, "count": n, "files": files})
+        })
+        .collect()
+}
+
+fn summary(list: &[Value]) -> Vec<String> {
+    tally(list)
+        .into_iter()
+        .map(|(kind, n, files)| {
+            let shown: Vec<String> = files
+                .iter()
+                .take(5)
+                .map(|(f, c)| format!("{f} {c}"))
+                .collect();
+            let more = files.len().saturating_sub(5);
+            let tail = if more > 0 {
+                format!(", {more} more files")
+            } else {
+                String::new()
+            };
+            format!("{kind} {n}, of which {}{tail}", shown.join(", "))
+        })
+        .collect()
 }
 
 fn print_context(root: &Path, p: &Value, n: usize, st: Style) {
@@ -848,6 +1004,9 @@ fn start(
                 .unwrap_or("(none: --no-view)"),
             log.display()
         );
+        if let Some(l) = setup_line(&w) {
+            println!("{l}");
+        }
         print_status(&w, st, None);
     }
     if w["timed_out"] == true {
@@ -860,8 +1019,9 @@ fn start(
 fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Value, Failed> {
     let here = std::env::current_dir().map_err(|e| Failed(EXIT_REFUSED, e.to_string()))?;
     let dir = here.join(".phitex");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", dir.display())))?;
+    if let Some(said) = crate::review::make_dir(&here).map_err(|e| Failed(EXIT_REFUSED, e))? {
+        eprintln!("phitex: {said}");
+    }
     let log_path = dir.join("session.log");
     let log = std::fs::File::create(&log_path)
         .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", log_path.display())))?;
@@ -939,6 +1099,38 @@ fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Va
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn problems_counted_by_kind_and_file() {
+        let p = |sev: &str, m: &str, f: &str| json!({"severity": sev, "message": m, "file": f});
+        let mut list = vec![p("error", "Undefined control sequence", "./main.tex")];
+        list.extend((0..3).map(|_| {
+            p(
+                "warning",
+                "Overfull \\hbox (1.0pt too wide) in paragraph",
+                "ledger.tex",
+            )
+        }));
+        list.push(p(
+            "warning",
+            "Overfull \\hbox (2.0pt too wide) in paragraph",
+            "intro.tex",
+        ));
+        list.push(json!({"severity": "warning", "message": "Citation `x' undefined", "file": "main.tex", "kind": "reference"}));
+        assert_eq!(
+            summary(&list),
+            [
+                "overfull 4, of which ledger.tex 3, intro.tex 1",
+                "error 1, of which main.tex 1",
+                "reference 1, of which main.tex 1",
+            ]
+        );
+        assert_eq!(
+            summary_json(&list)[0],
+            json!({"kind": "overfull", "count": 4, "files": [{"file": "ledger.tex", "count": 3}, {"file": "intro.tex", "count": 1}]})
+        );
+    }
+
     use super::*;
 
     #[test]

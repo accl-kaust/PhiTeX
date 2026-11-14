@@ -998,6 +998,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         writing,
         t.review_accept_disk,
     );
+    hub.about(serde_json::json!({
+        "engine": job.engine.name,
+        "engine_why": t.engine_why,
+        "out_dir": job.out_dir.display().to_string(),
+        "out_dir_why": t.out_dir_why,
+    }));
     // (the banner: what is built into what, by which engine)
     if !ui.quiet {
         let threads = session::threads(job.threads);

@@ -695,7 +695,9 @@ folder:
  "viewer": "http://127.0.0.1:24817/3f0c.../",
  "lsp": {"host": "127.0.0.1", "port": 40125, "token": "9d1e5c0a7b3f48e2a6c4d8b0f1e2a3c4"},
  "version": "1.0.0",
- "started": "2026-11-09T10:21:07.512Z"}
+ "started": "2026-11-09T10:21:07.512Z",
+ "pidns": "pid:[4026531836]",
+ "netns": "net:[4026531840]"}
 ```
 
 - `main` is absolute, `root` the folder the watch runs in (file names
@@ -706,7 +708,17 @@ folder:
   whole (beside, then renamed), again when the viewer or the main file
   changes, and removed when the watch ends.
 - A file whose watch does not run (its process gone, or its port not
-  answering) is ignored and removed by its readers.
+  answering) is ignored and removed by its readers. `pidns` and `netns`
+  (Linux) are the watch's PID and network namespaces: a reader in a
+  sandbox of its own cannot look the watch's pid up (another PID
+  namespace: only the socket is asked) nor tell a refused connection
+  from a gone watch (another network namespace: the file is ignored,
+  never removed).
+- A reader looks in its own sessions folder and, where they differ, in
+  `/run/user/<uid>/phitex/` and the cache's `sessions/`, those that
+  exist: an agent in a sandbox that drops `$XDG_RUNTIME_DIR` still finds
+  the watch the user started in a terminal, the folder visible
+  read-only.
 - `phitex sessions` lists the running watches; `phitex sessions --json`
   prints their files' objects as one JSON array on one line.
 - An editor picks the watch whose `root` holds the buffer's file,
@@ -756,7 +768,7 @@ pdfTeX's.
 phitex session start [FILE] [-- WATCH-ARGS…]  # a watch in the background, returns once its first build is in
 phitex session wait [--warnings] [--pdf] [--notes] [--timeout 60s]
 phitex session status
-phitex session problems [--errors] [--warnings] [--file F] [--context N]
+phitex session problems [--errors] [--warnings] [--file F] [--context N] [--summary]
 phitex session rebuild [--clean]
 phitex session log [--tail N] [--build N]
 phitex session stop                            # as q: the exact PDF written, then the watch ends
@@ -768,19 +780,33 @@ phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | chan
   directory as an editor does (§8): the running watches whose `root`
   holds it, preferring one whose `main` is `FILE` (or the directory's
   `phitex.toml` main), else the newest. `--session PID` names one.
-  `start` reuses a running watch of the same main file.
+  `start` reuses a running watch of the same main file. Any `phitex
+  watch` is one, also one the user started in a terminal. Found none,
+  the CLI says where it looked; a watch of this folder whose socket does
+  not answer from another network namespace is said as that (a sandbox
+  without the host's 127.0.0.1).
 - **`start`** runs `phitex watch --write FILE` detached (its own process
   group, standard input closed, its output in `.phitex/session.log`),
   waits for its discovery file (the sessions folder watched by the
   system, no polling) and its first build (`wait`), then prints `pid`,
-  the viewer's URL and the log's path. `--json` prints them as one
-  object.
+  the viewer's URL and the log's path, and the engine and output folder
+  with how each was chosen (`engine xelatex (picked: the document loads
+  fontspec) · output folder out (-o)`; `status` too). `--json` prints
+  them as one object. Made in a git work tree, `.phitex/` is added to
+  that clone's `.git/info/exclude` (never a committed `.gitignore`),
+  said once on standard error.
 - **Exit statuses** (stable): 0 done; 1 the build has TeX errors (`wait`,
   `status`, `problems`, `rebuild`); 2 timed out (`wait`, `start`); 3 no
   running watch (or it ended while waited on); 4 refused (a bad note id,
   a usage error).
-- **Output.** One line per problem, `file:line: message`, and with
+- **Output.** One line per problem, `file:line: message`, an error's
+  help indented under it (a package's engine check: the engine to name,
+  `--engine xelatex` or `% !TEX program = xelatex`), and with
   `--context N` the source lines around it, `>` marking the line.
+  `problems --summary`: the counts by kind (`error`, `overfull`,
+  `underfull`, `reference`, `font`, `other`) and each kind's files,
+  `overfull 211, of which ledger.tex 190, intro.tex 21`; with `--json`,
+  `{build, summary: [{kind, count, files: [{file, count}]}]}`.
   `--json`: one JSON object, the method's result. Times are wall times.
 - **Transport.** The watch's attach socket (§8): the CLI connects with
   the token from the discovery file, sends `initialize` with
@@ -805,9 +831,10 @@ phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | chan
 | `phitex/changes/list` | none | `Changes` (§9.4) |
 
 `Status = {build, ok, errors, warnings, pages, ms, pdf, viewer, main,
-root, pid, problems: [Problem], diagnostics_pending, written}`:
+root, pid, engine, engine_why, out_dir, out_dir_why, problems:
+[Problem], diagnostics_pending, written}`:
 `problems` the errors (warnings with `--warnings`), each `{severity,
-file, line, message, excerpt?}` as the viewer's diagnostics have them.
+file, line, message, help, kind, excerpt?}` as the viewer's diagnostics have them.
 
 Left for later, the names kept free: `phitex/session/where` (a page's
 place to source), `…/source` (a source place to pages), `…/page` (a

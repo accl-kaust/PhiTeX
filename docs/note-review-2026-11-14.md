@@ -67,3 +67,28 @@ Per-round medians spread 6.5-12.3 ms (word) and 315-424 ms (paragraph) on
 both; the two agree within that noise, the order flipping between runs.
 The review adds a file hash per read (`Host::fed`) and the hub's work
 after the build event.
+
+## The agent's side (feedback from a real session on Grail)
+
+An agent used `phitex session` on Grail and found: the engine choice
+invisible, `.phitex/` appearing in `git status`, no counts of the
+problems, the output folder unsaid, and nothing saying whether the verbs
+reach a watch the user started. Fixed, then driven again (the CLI from
+bubblewrap sandboxes, target/play/agentpass{,2,3}.sh, logs beside them):
+
+| case | says now |
+|---|---|
+| fontspec paper in git, `session start` | `engine xelatex (picked: the document loads fontspec) · output folder . (the default: beside the main file)`; `phitex: made .phitex/ … and added it to …/.git/info/exclude`; `git status` without it |
+| fontspec behind `\ifXeTeX`, `--engine pdflatex` | the fatal error, then `fontspec runs only under XeTeX or LuaTeX, and this build ran pdflatex: build with XeLaTeX (--engine xelatex, or % !TEX program = xelatex in the main file); LuaLaTeX is not supported yet` |
+| luacode | `paper.tex needs LuaLaTeX (it loads luacode), which PhiTeX does not support yet: …` |
+| `-o out`, a .latexmkrc's `$out_dir` (--exact-latexmk), phitex.toml | `output folder out (-o)`, `… ($out_dir in .latexmkrc:1)`, `… (output-dir in phitex.toml)` |
+| overfull lines in two files | `problems --summary`: `overfull 7, of which ledger.tex 5, main.tex 2` / `reference 2, of which main.tex 2`; `--json` the same as objects |
+| a watch started in a terminal, verbs from a subfolder | found, `status` and `wait` as for a started one |
+| the watch in one sandbox, the agent in another with the network | found (before: "no phitex watch runs here": its pid is another PID namespace's, and a reader with a writable folder removed the watch's file) |
+| … the agent without the network | `a phitex watch of this folder runs (pid 3 …) but its socket, 127.0.0.1:37661, does not answer from here: … (bubblewrap: --share-net)` |
+| … the agent without `$XDG_RUNTIME_DIR` | found in `/run/user/<uid>/phitex` (before: `the sessions folder: …/sessions: Read-only file system`); with no watch, the folders it looked in |
+
+Discovery files now carry the watch's PID and network namespaces: a
+reader removes a file only when it can tell the watch is gone (the same
+PID namespace and the process gone, or the same network and the socket
+refused).

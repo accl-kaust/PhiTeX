@@ -9,7 +9,7 @@
 //!   alone (made 0700; one another user owns, or others may write, is
 //!   refused) and the file 0600: the token, and the viewer's URL with its
 //!   own, are in it. `{pid, main, root, viewer, lsp: {host, port, token},
-//!   version, started}`; written again when the viewer or the main file
+//!   version, started, pidns, netns}`; written again when the viewer or the main file
 //!   changes, removed when the watch ends (`q`). A file whose watch is not
 //!   running is ignored and removed by its readers ([`sessions`]).
 //! - **A connection** must open with `initialize` carrying
@@ -275,6 +275,11 @@ pub fn publish(info: &Value) {
     let mut v = info.clone();
     v["lsp"] = p.lsp.clone();
     v["started"] = json!(p.started);
+    for (key, kind) in [("pidns", "pid"), ("netns", "net")] {
+        if let Some(ns) = namespace(kind) {
+            v[key] = json!(ns);
+        }
+    }
     let _w = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     let tmp = p.file.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
@@ -300,14 +305,15 @@ pub fn forget() {
 }
 
 /// Whether the watch a discovery file names runs: its process (Unix's
-/// `kill(pid, 0)`, macOS's as Linux's; Windows's `OpenProcess`) and its
+/// `kill(pid, 0)`, macOS's as Linux's; Windows's `OpenProcess`; not
+/// where the watch is in another PID namespace, [`ours_to_see`]) and its
 /// socket, which answers a connection.
 pub fn alive(v: &Value) -> bool {
     let Some(pid) = v["pid"].as_u64() else {
         return false;
     };
     #[cfg(unix)]
-    if !unix_runs(pid) {
+    if ours_to_see(v) && !unix_runs(pid) {
         return false;
     }
     #[cfg(windows)]
@@ -386,7 +392,26 @@ fn windows_runs(pid: u64) -> Option<bool> {
 /// The running watches' discovery files in `d`, oldest first; those of
 /// watches that do not run removed.
 pub fn live_in(d: &Path) -> Vec<Value> {
-    let mut found: Vec<(PathBuf, Value)> = std::fs::read_dir(d)
+    let mut found = files_in(d);
+    found.retain(|(p, v)| {
+        let ours = Some(p.as_path()) == PUBLISHED.get().map(|x| x.file.as_path());
+        let keep = ours || alive(v);
+        // (removed only when its watch is known gone: its process looked
+        // up, or its socket refused in the same network; a reader in a
+        // sandbox of its own (PID namespace, no network) cannot tell, and
+        // leaves the file)
+        if !keep && (ours_to_see(v) || same_net(v)) {
+            let _ = std::fs::remove_file(p);
+        }
+        keep
+    });
+    found.sort_by(|a, b| a.1["started"].as_str().cmp(&b.1["started"].as_str()));
+    found.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The discovery files in `d`, running or not, with their paths.
+pub fn files_in(d: &Path) -> Vec<(PathBuf, Value)> {
+    std::fs::read_dir(d)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
@@ -396,17 +421,88 @@ pub fn live_in(d: &Path) -> Vec<Value> {
             let v = serde_json::from_slice::<Value>(&std::fs::read(&p).ok()?).ok()?;
             Some((p, v))
         })
-        .collect();
-    found.retain(|(p, v)| {
-        let ours = Some(p.as_path()) == PUBLISHED.get().map(|x| x.file.as_path());
-        let keep = ours || alive(v);
-        if !keep {
-            let _ = std::fs::remove_file(p);
-        }
-        keep
+        .collect()
+}
+
+/// This process's namespace of `kind` (Linux: `/proc/self/ns/pid`'s
+/// link, `pid:[4026531836]`; `net`): a discovery file says its watch's
+/// PID and network namespaces, so a reader in a sandbox knows when its
+/// `kill(pid, 0)` cannot see the watch, and when a refused connection
+/// says nothing of it.
+pub fn namespace(kind: &str) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/self/ns/{kind}"))
+            .ok()
+            .map(|l| l.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = kind;
+        None
+    }
+}
+
+/// Whether `v`'s `key` namespace is this process's `kind` (or either says
+/// none).
+fn same_ns(v: &Value, key: &str, kind: &str) -> bool {
+    v[key]
+        .as_str()
+        .is_none_or(|ns| namespace(kind).is_none_or(|me| me == ns))
+}
+
+/// Whether `v`'s watch is in this process's PID namespace (or says none):
+/// its pid is one this process can look up.
+pub fn ours_to_see(v: &Value) -> bool {
+    same_ns(v, "pidns", "pid")
+}
+
+/// Whether `v`'s watch is in this process's network namespace (or says
+/// none): its 127.0.0.1 is ours, a refused connection means it is gone.
+pub fn same_net(v: &Value) -> bool {
+    same_ns(v, "netns", "net")
+}
+
+/// The folders a reader looks in for discovery files: this process's
+/// sessions folder ([`folder`]) and, where they differ, the others a
+/// watch started elsewhere writes to (`/run/user/<uid>/phitex` when
+/// `$XDG_RUNTIME_DIR` is not set here, as in a sandbox that drops it;
+/// the cache's `sessions/` when it is), those that exist; each with what
+/// it is said as.
+pub fn read_folders() -> Vec<(PathBuf, String)> {
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    if let Ok(d) = folder() {
+        let why = if std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty()) {
+            "$XDG_RUNTIME_DIR/phitex"
+        } else {
+            "the cache's sessions folder, $XDG_RUNTIME_DIR not set"
+        };
+        out.push((d, why.to_owned()));
+    }
+    #[cfg(unix)]
+    if let Some(uid) = own_uid() {
+        out.push((
+            PathBuf::from(format!("/run/user/{uid}/phitex")),
+            "the runtime folder's".to_owned(),
+        ));
+    }
+    out.push((
+        crate::tex::cache_dir().join("sessions"),
+        "the cache's sessions folder".to_owned(),
+    ));
+    let mut seen = Vec::new();
+    out.retain(|(d, _)| {
+        let key = d.canonicalize().unwrap_or_else(|_| d.clone());
+        let new = !seen.contains(&key);
+        seen.push(key);
+        new && (out_first(d) || d.is_dir())
     });
-    found.sort_by(|a, b| a.1["started"].as_str().cmp(&b.1["started"].as_str()));
-    found.into_iter().map(|(_, v)| v).collect()
+    out
+}
+
+/// (the first folder is said even when missing)
+fn out_first(d: &Path) -> bool {
+    folder().is_ok_and(|f| f == d)
 }
 
 /// `phitex sessions`: the running watches, a line each, or (`--json`)
@@ -534,7 +630,7 @@ mod tests {
         }
         std::fs::write(d.join("4.json"), "{not json").expect("written");
         let live = live_in(&d);
-        assert_eq!(live, [running]);
+        assert_eq!(live, std::slice::from_ref(&running));
         assert!(d.join("1.json").exists());
         assert!(!d.join("2.json").exists(), "a dead process's file removed");
         assert!(!d.join("3.json").exists(), "a closed socket's file removed");
@@ -549,6 +645,27 @@ mod tests {
         let v = json!({"pid": ended, "main": "/p/d.tex",
             "lsp": {"host": "127.0.0.1", "port": port, "token": "t"}});
         assert!(!alive(&v), "an ended process counted as running");
+        // (a watch in another PID namespace, as a sandboxed reader sees
+        // one: its pid not looked up, its socket asked; a file whose
+        // socket does not answer is not listed but kept: its process may
+        // run where this one cannot see it)
+        #[cfg(target_os = "linux")]
+        {
+            let other = |port: u16, main: &str| {
+                json!({"pid": u32::MAX, "main": main, "pidns": "pid:[1]", "netns": "net:[1]",
+                    "lsp": {"host": "127.0.0.1", "port": port, "token": "t"},
+                    "started": "2026-11-09T07:00:00Z"})
+            };
+            let (reach, unreach) = (other(port, "/p/e.tex"), other(closed, "/p/f.tex"));
+            std::fs::write(d.join("5.json"), reach.to_string()).expect("written");
+            std::fs::write(d.join("6.json"), unreach.to_string()).expect("written");
+            assert!(!ours_to_see(&reach) && namespace("pid").is_some());
+            assert_eq!(live_in(&d), [reach, running.clone()]);
+            assert!(
+                d.join("6.json").exists(),
+                "another namespace's file removed"
+            );
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

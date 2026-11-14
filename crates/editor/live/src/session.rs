@@ -1306,6 +1306,7 @@ impl Session {
         } else {
             b.diagnostics()
         };
+        crate::failure::engine_needed(&mut diagnostics, self.job.engine.name);
         if let Some(d) = self.format_unpublished() {
             diagnostics.push(d);
         }
@@ -1677,10 +1678,13 @@ impl Session {
     /// warnings, the engine's), made now: an edit's report leaves them
     /// for when the editing pauses ([`Report::diagnostics_pending`]).
     pub fn diagnostics_now(&self) -> Vec<phitex_tex::Diagnostic> {
-        self.build
+        let mut ds = self
+            .build
             .as_ref()
             .map(phitex_tex::Build::diagnostics)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::failure::engine_needed(&mut ds, self.job.engine.name);
+        ds
     }
 
     fn text_now(&self) -> Arc<str> {
