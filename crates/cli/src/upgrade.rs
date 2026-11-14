@@ -209,22 +209,26 @@ fn get_with(url: &str, mut seen: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>
 /// A download's line: "  41% [########............] 12.3 of 30.0 MB" (no
 /// whole known: the bytes alone).
 fn bar_line(done: u64, total: Option<u64>) -> String {
-    let mb = |b: u64| b as f64 / 1e6;
+    // (in tenths of a MB, rounded: integers only)
+    let mb = |b: u64| {
+        let t = (b + 50_000) / 100_000;
+        format!("{}.{}", t / 10, t % 10)
+    };
     match total {
         Some(t) if t > 0 => {
-            let f = (done as f64 / t as f64).clamp(0.0, 1.0);
-            let w = 24;
-            let full = (f * w as f64).round() as usize;
+            let d = done.min(t);
+            let w = 24u64;
+            let full = usize::try_from((d * w + t / 2) / t).unwrap_or(0);
             format!(
-                "{:>3}% [{}{}] {:.1} of {:.1} MB",
-                (f * 100.0).floor() as u32,
+                "{:>3}% [{}{}] {} of {} MB",
+                d * 100 / t,
                 "#".repeat(full),
-                ".".repeat(w - full),
+                ".".repeat(24 - full),
                 mb(done),
                 mb(t)
             )
         }
-        _ => format!("{:.1} MB", mb(done)),
+        _ => format!("{} MB", mb(done)),
     }
 }
 
