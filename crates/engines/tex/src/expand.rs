@@ -285,8 +285,9 @@ impl Run<'_, '_> {
 
     /// Whether the look-up of `\\csname`'s `t` (§372) may wait for the
     /// command after it ([`Run::csname_defer`]): its location, where the
-    /// run has not touched it, holds no pending append and reads no
-    /// read-back, and no `\\tracingassigns` or `\\tracingrestores` would
+    /// run has not touched it and holds no pending append (a read-back's
+    /// key is defined first where it is touched or bound, as any other
+    /// touch, [`Run::rb_check`]), and no `\\tracingassigns` or `\\tracingrestores` would
     /// show the `\\relax` §372 makes (a global binding after it: the
     /// value it changes, the entry its group's end retains).
     fn csname_deferrable(&mut self, t: Tok) -> R<Option<crate::state::Loc>> {
@@ -296,7 +297,6 @@ impl Run<'_, '_> {
         if self.st.is_loaded(l)
             || self.interp.is_some()
             || self.rec_load
-            || self.rb.is_some()
             || self.appending.iter().any(|x| x.0 == l)
             || self.appending_vals.iter().any(|x| x.0 == l)
             || self.lazy_pre(l)
