@@ -2438,7 +2438,7 @@ impl crate::Build {
                 file_bytes(inp.doc_raw.unwrap_or(inp.doc_text)),
             )];
             let mut seen: phitex_defuse::FxHashSet<String> = phitex_defuse::FxHashSet::default();
-            for (_, f, ..) in &inp.spans {
+            for (_, f, ..) in inp.spans.iter() {
                 if let Some((n, t)) = f
                     && seen.insert(n.clone())
                 {
