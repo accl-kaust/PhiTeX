@@ -771,11 +771,26 @@ phitex session status
 phitex session problems [--errors] [--warnings] [--file F] [--context N] [--summary]
 phitex session rebuild [--clean]
 phitex session log [--tail N] [--build N]
+phitex session pdf [-o PATH] [--synctex]       # the exact PDF written now (any watch), its path printed
 phitex session stop                            # as q: the exact PDF written, then the watch ends
 phitex session list                            # the running watches (`phitex sessions`, hidden, one release)
 phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | changes
 ```
 
+- **By its viewer's URL.** `--session` takes a pid or the viewer's URL
+  (`http://127.0.0.1:PORT/TOKEN/…`), and `PHITEX_SESSION` the same, set
+  once: the viewer serves the watch's discovery object at
+  `GET /TOKEN/session.json` (behind the token that already guards the
+  document's pages), and the verbs then use the attach socket as usual.
+  An agent whose sandbox has a private `/run/user` (the sessions folder
+  not visible) reaches the watch so; "no watch runs here" says so.
+- **`pdf`** has the watch write the last build's exact PDF now, byte for
+  byte a clean build's (`phitex build`'s): `JOB.pdf` in its output
+  folder, or `-o PATH` (from the current directory), nothing else; its
+  `.synctex.gz` beside it only with `--synctex` (from the pages' glyph
+  origins). A watch that writes files (`--write`) writes it at idle: that
+  write is waited for (as `wait --pdf`) and copied to PATH. Prints the
+  path once the file is there.
 - **Which watch.** Every verb finds its watch from the current
   directory as an editor does (§8): the running watches whose `root`
   holds it, preferring one whose `main` is `FILE` (or the directory's
@@ -823,6 +838,7 @@ phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | chan
 | `phitex/session/wait` | `{warnings?, pdf?, notes?, timeout_ms?}` | `Status`, with `timed_out: true` past the timeout; with `notes`, `{notes: [Note], timed_out?}` |
 | `phitex/session/problems` | `{errors?, warnings?, file?}` | `{build, problems: [Problem]}` |
 | `phitex/session/rebuild` | `{clean?}` | `Status` of the build it made |
+| `phitex/session/pdf` | `{to?, synctex?}` | `{build, pdf, synctex}` once written (see `pdf` above) |
 | `phitex/session/log` | `{build?}` | `{build, text}` (the transcript of the last build: older ones are not kept, `build` other than the last fails) |
 | `phitex/session/stop` | none | `null`, then the watch ends as `q` ends it |
 | `phitex/notes/list` | `{open?, all?}` | `{notes: [Note]}`; marks them read (§9.3) |

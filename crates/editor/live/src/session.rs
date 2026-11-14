@@ -2413,6 +2413,17 @@ impl Session {
         Some(gz)
     }
 
+    /// The last build's `JOB.synctex.gz` made now from its pages' glyph
+    /// origins, whatever was made before (`phitex session pdf`); none
+    /// without a build or its origins.
+    pub fn synctex_now(&self) -> Option<Vec<u8>> {
+        let b = self.build.as_ref()?;
+        if !(self.job.origins || self.job.synctex) {
+            return None;
+        }
+        crate::synctex::Writer::default().write_capture(&b.origins_capture(), &self.synctex_root())
+    }
+
     /// `JOB.synctex.gz` written: the file and its bytes' hash.
     ///
     /// # Errors

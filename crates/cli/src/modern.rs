@@ -216,9 +216,11 @@ enum Sub {
     Session {
         #[command(subcommand)]
         verb: crate::session_cmd::Verb,
-        /// The watch to use, by its pid (default: the one running here)
-        #[arg(long, value_name = "PID", global = true)]
-        session: Option<u32>,
+        /// The watch to use: its pid, or its viewer's URL (from a sandbox
+        /// that cannot see the sessions folder); PHITEX_SESSION the same
+        /// (default: the one running here)
+        #[arg(long, value_name = "PID|URL", global = true)]
+        session: Option<String>,
     },
     /// The running watches (now `phitex session list`)
     #[command(hide = true)]
@@ -478,7 +480,7 @@ pub enum Command {
 pub struct Options {
     pub command: Option<Command>,
     /// `phitex session`'s verb and `--session PID`.
-    pub session: Option<(crate::session_cmd::Verb, Option<u32>)>,
+    pub session: Option<(crate::session_cmd::Verb, Option<String>)>,
     pub file: Option<String>,
     pub engine: Option<String>,
     pub output: Option<Output>,
@@ -1653,7 +1655,7 @@ pub fn main(args: &[String]) -> ! {
     if command == Command::Session
         && let Some((verb, pid)) = &o.session
     {
-        std::process::exit(crate::session_cmd::main(verb, *pid, o.json, &ui));
+        std::process::exit(crate::session_cmd::main(verb, pid.as_deref(), o.json, &ui));
     }
     if command == Command::Config {
         if let Some(w) = &o.init {

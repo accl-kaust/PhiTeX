@@ -566,6 +566,9 @@ struct State {
     /// The build whose exact PDF was written last.
     written: usize,
     transcript: (usize, String),
+    /// What `session pdf` asked of a watch that writes no file came to,
+    /// with the build it was of (and how many were asked, to tell them).
+    pdf_out: (u64, usize, Option<Result<Value, String>>),
     store: Store,
     /// Every change to notes, reviews, verdicts: what `wait --notes`
     /// waits on (the user's), by sequence.
@@ -819,6 +822,16 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// `session pdf`'s write (of build `n`) done by the watch.
+    pub fn pdf_written(&self, n: usize, r: Result<Value, String>) {
+        let mut st = lock(&self.st);
+        st.pdf_out.1 = n;
+        st.pdf_out.2 = Some(r);
+        st.pdf_out.0 += 1;
+        drop(st);
+        self.cv.notify_all();
+    }
+
     /// Build `n`'s transcript.
     pub fn transcript(&self, n: usize, text: String) {
         lock(&self.st).transcript = (n, text);
@@ -886,6 +899,7 @@ impl Hub {
             "phitex/session/problems" => Ok(self.problems(p)),
             "phitex/session/rebuild" => self.rebuild(p),
             "phitex/session/log" => self.log(p),
+            "phitex/session/pdf" => self.pdf(p),
             "phitex/session/stop" => {
                 let q = lock(&self.quit).clone();
                 if let Some(q) = q {
@@ -1010,7 +1024,7 @@ impl Hub {
         let mut st = lock(&self.st);
         if pdf && !st.writing {
             return Err(refused(
-                "this watch writes no PDF file (start it with --write, or `phitex config watch-write true`): wait without --pdf",
+                "this watch writes no PDF file (start it with --write, or `phitex config watch-write true`): `phitex session pdf` writes it now",
             ));
         }
         let want = Hub::now_hashes(&st, editors.as_deref());
@@ -1134,6 +1148,88 @@ impl Hub {
             }
             if st.builds.back().is_some_and(|b| b.n > n0) {
                 return Ok(Hub::status_of(&st, st.builds.back(), false));
+            }
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// `session pdf`: the last build's exact PDF and .synctex.gz on disk
+    /// now. A watch that writes them (`--write`) has them written when it
+    /// is idle: waited for, copied to `to` when asked; one that writes
+    /// none is asked to write them now ([`Ask::WritePdf`]).
+    fn pdf(&self, p: &Value) -> Result<Value, Fail> {
+        let to = p["to"].as_str().map(str::to_owned);
+        let synctex = p["synctex"].as_bool().unwrap_or(false);
+        let mut st = lock(&self.st);
+        let Some(n) = st.builds.back().map(|b| b.n) else {
+            return Err(refused("no build yet: `phitex session wait` first"));
+        };
+        let ended = || Fail {
+            status: EXIT_NO_SESSION,
+            message: "the watch ended".into(),
+        };
+        if st.writing {
+            loop {
+                if st.ended {
+                    return Err(ended());
+                }
+                let b = st.builds.back().map_or(n, |b| b.n);
+                if st.written >= b {
+                    break;
+                }
+                st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+            }
+            let b = st.builds.back();
+            let pdf = b
+                .and_then(|b| b.pdf.clone())
+                .ok_or_else(|| refused("the last build wrote no PDF"))?;
+            let n = b.map_or(n, |b| b.n);
+            let root = st.root.clone();
+            drop(st);
+            let pdf = root.join(pdf);
+            // (the watch writes its .synctex.gz beside, at idle: said, and
+            // copied with the PDF, only when asked)
+            let gz = PathBuf::from(format!("{}.synctex.gz", pdf.with_extension("").display()));
+            if synctex && !gz.exists() {
+                return Err(refused(
+                    "no .synctex.gz beside the PDF (`phitex config synctex on`)",
+                ));
+            }
+            let pdf = match to {
+                None => pdf,
+                Some(t) => {
+                    let t = root.join(t);
+                    std::fs::copy(&pdf, &t)
+                        .map_err(|e| refused(format!("{}: {e}", t.display())))?;
+                    if synctex {
+                        let tg =
+                            PathBuf::from(format!("{}.synctex.gz", t.with_extension("").display()));
+                        std::fs::copy(&gz, &tg)
+                            .map_err(|e| refused(format!("{}: {e}", tg.display())))?;
+                    }
+                    t
+                }
+            };
+            return Ok(json!({"build": n, "pdf": pdf.display().to_string(), "synctex": synctex}));
+        }
+        let asked = st.pdf_out.0;
+        drop(st);
+        self.ask_watch(Ask::WritePdf { to, synctex });
+        let mut st = lock(&self.st);
+        loop {
+            if st.ended {
+                return Err(ended());
+            }
+            if st.pdf_out.0 > asked {
+                let n = st.pdf_out.1;
+                return match st.pdf_out.2.clone() {
+                    Some(Ok(mut v)) => {
+                        v["build"] = json!(n);
+                        Ok(v)
+                    }
+                    Some(Err(e)) => Err(refused(e)),
+                    None => Err(refused("nothing written")),
+                };
             }
             st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
         }

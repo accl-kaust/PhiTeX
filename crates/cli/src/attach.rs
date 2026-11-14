@@ -47,6 +47,16 @@ struct Published {
 static PUBLISHED: OnceLock<Published> = OnceLock::new();
 /// (the file written by one thread at a time)
 static WRITING: Mutex<()> = Mutex::new(());
+/// The discovery object last published: what the viewer serves at
+/// `/<token>/session.json` ([`discovery`]).
+static LAST: Mutex<Option<Value>> = Mutex::new(None);
+
+/// This watch's discovery object as its file has it (none before
+/// [`open`]): a sandboxed agent that cannot see the sessions folder finds
+/// the watch by its viewer's URL (`phitex session --session URL`).
+pub fn discovery() -> Option<Value> {
+    LAST.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
 
 /// The sessions folder: made if missing (0700), refused unless it is the
 /// user's alone.
@@ -280,6 +290,7 @@ pub fn publish(info: &Value) {
             v[key] = json!(ns);
         }
     }
+    *LAST.lock().unwrap_or_else(PoisonError::into_inner) = Some(v.clone());
     let _w = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     let tmp = p.file.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);

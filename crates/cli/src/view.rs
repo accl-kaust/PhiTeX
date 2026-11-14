@@ -347,6 +347,20 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
             let page = index_with(s.viewer.prefs_now().as_ref());
             let _ = ws::respond(&mut w, "200 OK", "text/html; charset=utf-8", &page);
         }
+        // (the watch's discovery object, as its sessions folder's file has
+        // it: `phitex session --session URL` from a sandbox that cannot see
+        // that folder; behind the same token as the document's pages)
+        "session.json" => {
+            let _ = match crate::attach::discovery() {
+                Some(v) => ws::respond(
+                    &mut w,
+                    "200 OK",
+                    "application/json",
+                    v.to_string().as_bytes(),
+                ),
+                None => ws::respond(&mut w, "404 Not Found", "text/plain", b"no session yet\n"),
+            };
+        }
         // (whether the watch is here, before the browser opens a WebSocket)
         "ping" => {
             let _ = ws::respond(&mut w, "200 OK", "text/plain", b"phitex watch\n");

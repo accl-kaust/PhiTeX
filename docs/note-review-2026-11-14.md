@@ -92,3 +92,20 @@ Discovery files now carry the watch's PID and network namespaces: a
 reader removes a file only when it can tell the watch is gone (the same
 PID namespace and the process gone, or the same network and the socket
 refused).
+
+## A watch by its viewer's URL, and `session pdf`
+
+Two more from a real agent session: its sandbox had a private
+`/run/user/1000`, so no discovery file was visible, while the viewer's URL
+reached the watch; and it wanted the exact PDF from a watch run without
+`--write`. Driven in target/play/agentpass4.sh (sessions folder and cache
+replaced by empty ones):
+
+| case | result |
+|---|---|
+| `session status` with the folder hidden | `no phitex watch runs here (looked in …): … --session <its viewer's URL> (or PHITEX_SESSION=<URL> once), or make its sessions folder visible here` |
+| `session status --session <viewer URL>`, `PHITEX_SESSION=<URL> session wait` | found, 8-11 ms (`/TOKEN/session.json`) |
+| a URL nothing answers at | `the viewer at 127.0.0.1:1: Connection refused` |
+| `session pdf`, watch with a viewer and no `--write` | `…/paper.pdf` only (no .aux, no .synctex.gz), 10 ms; `cmp` with `phitex build`'s: identical (23654 bytes, SOURCE_DATE_EPOCH set) |
+| `session pdf -o ../elsewhere.pdf --synctex` | the PDF there, identical, and `elsewhere.synctex.gz` beside it |
+| `session pdf` of a `--write` watch | waits for the idle write (300 ms), identical |

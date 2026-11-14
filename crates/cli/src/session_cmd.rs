@@ -48,7 +48,9 @@ pub enum Verb {
         /// …and for its warnings (made when the editing pauses)
         #[arg(long)]
         warnings: bool,
-        /// …and for the exact PDF written after it
+        /// …and for the exact PDF written after it (a watch that writes
+        /// files, --write, writes it when idle; `phitex session pdf` has
+        /// any watch write it now)
         #[arg(long)]
         pdf: bool,
         /// Wait for the user instead: a note, a reply or a review in the
@@ -90,6 +92,22 @@ pub enum Verb {
         tail: Option<usize>,
         #[arg(long, value_name = "N")]
         build: Option<u64>,
+    },
+    /// Write the exact PDF now, and print its path
+    ///
+    /// The last build's PDF, byte for byte the one a clean build makes
+    /// (`phitex build`'s), also from a watch started without --write:
+    /// JOB.pdf in the watch's output folder, as `phitex build` names it,
+    /// or PATH; nothing else is written. Waits until written. A watch that
+    /// writes files (--write) writes it when idle: that is waited for
+    /// (`wait --pdf`), and copied to PATH.
+    Pdf {
+        /// Write it to PATH instead
+        #[arg(short = 'o', long = "output", value_name = "PATH")]
+        output: Option<String>,
+        /// Its .synctex.gz too, beside it
+        #[arg(long)]
+        synctex: bool,
     },
     /// End the watch as q does (the exact PDF written first)
     Stop,
@@ -150,7 +168,67 @@ pub fn duration(s: &str) -> Result<Option<Duration>, String> {
 
 /// The watch for here: `pid` if given, else those whose root holds the
 /// current directory, the one whose main is `file` first, else the newest.
-fn find(pid: Option<u32>, file: Option<&str>) -> Result<Value, Failed> {
+/// The watch `which` names (`--session`, PHITEX_SESSION): a pid, or a
+/// viewer's URL, whose `session.json` is the watch's discovery object;
+/// none: the one running here ([`find_here`]).
+fn find(which: Option<&str>, file: Option<&str>) -> Result<Value, Failed> {
+    match which {
+        None => find_here(None, file),
+        Some(w) if w.starts_with("http://") => by_url(w),
+        Some(w) => match w.parse::<u32>() {
+            Ok(pid) => find_here(Some(pid), file),
+            Err(_) => Err(Failed(
+                EXIT_REFUSED,
+                format!(
+                    "--session {w}: neither a pid nor a viewer's URL (http://127.0.0.1:PORT/TOKEN/)"
+                ),
+            )),
+        },
+    }
+}
+
+/// The watch whose viewer is at `url` (`http://127.0.0.1:PORT/TOKEN/…`):
+/// its discovery object from `/TOKEN/session.json`.
+fn by_url(url: &str) -> Result<Value, Failed> {
+    let rest = url.trim_start_matches("http://");
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let token = path.split('/').next().unwrap_or("");
+    let bad = || {
+        no_session(format!(
+            "{url}: not a phitex viewer's URL (http://127.0.0.1:PORT/TOKEN/)"
+        ))
+    };
+    if token.is_empty() || !host.contains(':') {
+        return Err(bad());
+    }
+    let mut s =
+        TcpStream::connect(host).map_err(|e| no_session(format!("the viewer at {host}: {e}")))?;
+    let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+    write!(
+        s,
+        "GET /{token}/session.json HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|e| no_session(format!("the viewer at {host}: {e}")))?;
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut s, &mut body)
+        .map_err(|e| no_session(format!("the viewer at {host}: {e}")))?;
+    let text = String::from_utf8_lossy(&body);
+    let (head, json) = text.split_once("\r\n\r\n").ok_or_else(bad)?;
+    if !head.starts_with("HTTP/1.1 200") {
+        return Err(no_session(format!(
+            "{url}: the viewer has no session for that (a watch of an older phitex, or a wrong token): {}",
+            head.lines().next().unwrap_or("")
+        )));
+    }
+    let mut v: Value = serde_json::from_str(json.trim()).map_err(|_| bad())?;
+    // (the socket at the viewer's host: the same machine as seen from here)
+    if let Some(h) = host.rsplit_once(':').map(|(h, _)| h) {
+        v["lsp"]["host"] = json!(h);
+    }
+    Ok(v)
+}
+
+fn find_here(pid: Option<u32>, file: Option<&str>) -> Result<Value, Failed> {
     // (every folder a watch may have said itself in: a sandbox may see
     // the user's runtime folder without $XDG_RUNTIME_DIR, or not at all)
     let folders = crate::attach::read_folders();
@@ -228,7 +306,8 @@ fn not_found(here: &Path, folders: &[(PathBuf, String)]) -> String {
         .collect();
     format!(
         "no phitex watch runs here (looked in {}): start one with `phitex session start`, \
-         or, if one runs in your terminal and this is a sandbox, make its sessions folder visible here (read-only will do)",
+         or, if one runs in your terminal and this is a sandbox: --session <its viewer's URL> (or PHITEX_SESSION=<URL> once), \
+         or make its sessions folder visible here (read-only will do)",
         looked.join(", ")
     )
 }
@@ -308,9 +387,13 @@ impl Conn {
 }
 
 /// `phitex session VERB`: its exit status.
-pub fn main(verb: &Verb, pid: Option<u32>, as_json: bool, ui: &Ui) -> i32 {
+pub fn main(verb: &Verb, which: Option<&str>, as_json: bool, ui: &Ui) -> i32 {
     let st = Style::stdout();
-    match run(verb, pid, as_json, st, ui) {
+    let env = std::env::var("PHITEX_SESSION")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let which = which.or(env.as_deref());
+    match run(verb, which, as_json, st, ui) {
         Ok(code) => code,
         Err(Failed(code, m)) => {
             if as_json {
@@ -323,7 +406,7 @@ pub fn main(verb: &Verb, pid: Option<u32>, as_json: bool, ui: &Ui) -> i32 {
     }
 }
 
-fn run(verb: &Verb, pid: Option<u32>, as_json: bool, st: Style, ui: &Ui) -> Result<i32, Failed> {
+fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Result<i32, Failed> {
     let out = |v: &Value| println!("{v}");
     match verb {
         Verb::List => Ok(crate::attach::sessions(ui, as_json)),
@@ -474,6 +557,31 @@ fn run(verb: &Verb, pid: Option<u32>, as_json: bool, st: Style, ui: &Ui) -> Resu
                         let from = tail.map_or(0, |n| lines.len().saturating_sub(n));
                         for l in &lines[from..] {
                             println!("{l}");
+                        }
+                    }
+                    Ok(0)
+                }
+                Verb::Pdf { output, synctex } => {
+                    // (PATH from here, not from the watch's folder)
+                    let to = output.as_ref().map(|o| {
+                        std::env::current_dir()
+                            .unwrap_or_default()
+                            .join(o)
+                            .display()
+                            .to_string()
+                    });
+                    let v = c.call(
+                        "phitex/session/pdf",
+                        &json!({"to": to, "synctex": synctex}),
+                        Some(Duration::from_secs(600)),
+                    )?;
+                    if as_json {
+                        out(&v);
+                    } else {
+                        let pdf = v["pdf"].as_str().unwrap_or("");
+                        println!("{pdf}");
+                        if v["synctex"] == true {
+                            println!("{}.synctex.gz", pdf.trim_end_matches(".pdf"));
                         }
                     }
                     Ok(0)

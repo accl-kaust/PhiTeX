@@ -182,6 +182,13 @@ pub enum Ask {
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
+    /// The exact PDF of the last build written now, `JOB.pdf` in the
+    /// output folder or `to` (`phitex session pdf`), its .synctex.gz beside
+    /// it with `synctex`: done by the session's owner, which says when.
+    WritePdf {
+        to: Option<String>,
+        synctex: bool,
+    },
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.
