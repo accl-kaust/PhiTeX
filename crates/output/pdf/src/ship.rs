@@ -1103,6 +1103,9 @@ impl PdfState {
         flatten_into(list, &mut q);
         // "Initialize the LR stack": `before`, never matched
         let mut lr: Vec<u8> = vec![0];
+        // (the glyph origins' reversal level, [`crate::GlyphTap::level`]:
+        // a list reversed whole, outside reversed text, one level in)
+        let base = self.tap.level;
         if self.cur_dir == 1 {
             // "Reverse the complete hlist"
             let save_h = self.cur_h;
@@ -1111,14 +1114,29 @@ impl PdfState {
             rev.push_front(Lr::N(Node::Kern(-self.cur_h, KernKind::Explicit)));
             q = rev;
             self.cur_h = save_h;
+            if base.is_multiple_of(2) {
+                self.tap.set_level(base + 1);
+            }
         }
+        let floor = self.tap.level;
         fr.left_edge = self.cur_h;
         while let Some(it) = q.pop_front() {
             match it {
-                Lr::Edge { dir, width, dist } => {
+                Lr::Edge {
+                    dir,
+                    width,
+                    dist,
+                    open,
+                } => {
                     self.cur_h += width;
                     fr.left_edge = self.cur_h + dist;
                     self.cur_dir = dir;
+                    let l = self.tap.level;
+                    if open {
+                        self.tap.set_level(l.saturating_add(1));
+                    } else if l > floor {
+                        self.tap.set_level(l - 1);
+                    }
                 }
                 Lr::Fixed(g) => {
                     let w = g.spec.width;
@@ -1144,6 +1162,7 @@ impl PdfState {
                                 dir: 1 - dir,
                                 width: 0,
                                 dist: 0,
+                                open: false,
                             };
                             let mut rev = self.reverse(fr, &mut q, Some(tail), &mut lr, src);
                             let dist = self.cur_h;
@@ -1154,6 +1173,7 @@ impl PdfState {
                                 dir,
                                 width: w,
                                 dist,
+                                open: true,
                             });
                             q = rev;
                             continue;
@@ -1164,6 +1184,7 @@ impl PdfState {
                 Lr::N(n) => self.hlist_nodes(std::slice::from_ref(&n), fr, src, wh),
             }
         }
+        self.tap.set_level(base);
     }
 
     /// The width of character `c` of font `f` as the output moves past it.
@@ -1374,6 +1395,16 @@ impl PdfState {
 
     /// `pdf_vlist_out` (pdfTeX §738–§746).
     fn vlist_out(&mut self, b: &BoxNode, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
+        // (a box of lines: its lines read on their own, each in its
+        // order, [`phitex_pdf::GlyphTap::level`])
+        let level = self.tap.level;
+        self.tap.set_level(0);
+        self.vlist_body(b, src, wh);
+        self.tap.set_level(level);
+    }
+
+    /// [`Self::vlist_out`]'s output of the box.
+    fn vlist_body(&mut self, b: &BoxNode, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
         self.cur_s += 1;
         let left_edge = self.cur_h;
         self.cur_v -= b.height;

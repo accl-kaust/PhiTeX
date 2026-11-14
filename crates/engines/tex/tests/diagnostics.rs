@@ -36,6 +36,48 @@ fn undefined_control_sequence() {
     assert!(d.help.is_some());
 }
 
+/// An error in the document's own text after bytes past 127, on its line
+/// and the lines before ("é", "≤", Arabic), the text held as the CLI and
+/// the browser's core hold a file (a character a byte): its range is the
+/// file's bytes, which the viewer finds the culprit's glyphs by. It was
+/// the held text's UTF-8 offsets, a byte further a byte past 127 before
+/// it: the error underlined on the page lines away from its place, or not
+/// at all.
+#[test]
+fn a_documents_error_after_wide_bytes_is_at_its_bytes() {
+    let doc = "Caf\u{e9} and a \u{2264} b.\n\nIn \u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629} \\foo here.\n\\bye\n";
+    let b = build(&common::held(doc), |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .expect("the error");
+    let at = doc.find("\\foo").expect("the name");
+    assert_eq!((d.line, d.range), (3, (at, at + 4)), "{d:?}");
+    assert_eq!(&doc.as_bytes()[d.range.0..d.range.1], b"\\foo");
+    // (TeX's context shows the line's characters, not its bytes one a
+    // character)
+    assert!(d.context.starts_with("l.3 In \u{627}"), "{}", d.context);
+}
+
+/// A paragraph's box report, the paragraph resumed after a display
+/// (§1200's `push_nest`): placed where it begins, after the display, not
+/// where it ends (the next paragraph's first line, or a heading's).
+#[test]
+fn a_box_report_after_a_display_is_at_its_paragraph() {
+    let doc =
+        "\\hsize=100pt \\parindent=0pt\nText $$x$$\nafter \\hbox to 300pt{wide}\n\nNext.\n\\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let d = ds
+        .iter()
+        .find(|d| d.message.starts_with("Overfull \\hbox"))
+        .expect("the report");
+    assert_eq!(d.line, 2, "{d:?}");
+}
+
 #[test]
 fn an_error_in_an_input_file() {
     let doc = "\\input bad\n\\bye\n";

@@ -372,7 +372,6 @@ pub(crate) fn mode_of_name(name: &str) -> i64 {
 /// UTF-8 byte-order mark is skipped (the mode was `auto`). True when a
 /// sequence was ill-formed ("Invalid UTF-8 byte or sequence").
 pub(crate) fn decode_line(buf: &mut Vec<u32>, m: i64, first: bool) -> bool {
-    const OFFSETS: [u32; 4] = [0, 0x3080, 0xE_2080, 0x3C8_2080];
     if m == mode::RAW || buf.iter().all(|&c| c < 0x80) {
         return false;
     }
@@ -384,48 +383,80 @@ pub(crate) fn decode_line(buf: &mut Vec<u32>, m: i64, first: bool) -> bool {
     let mut bad = false;
     let mut out = Vec::with_capacity(src.len());
     while i < src.len() {
-        let b = src[i];
-        i += 1;
-        let extra = match b {
-            0xC0..=0xDF => 1,
-            0xE0..=0xEF => 2,
-            0xF0..=0xF7 => 3,
-            0xF8..=0xFF => {
-                bad = true;
-                out.push(0xFFFD);
-                continue;
-            }
-            _ => 0,
-        };
-        let mut r = b;
-        let mut ok = true;
-        for _ in 0..extra {
-            match src.get(i) {
-                Some(&c) if (0x80..0xC0).contains(&c) => {
-                    r = (r << 6) + c;
-                    i += 1;
-                }
-                _ => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if !ok {
-            bad = true;
-            out.push(0xFFFD);
-            continue;
-        }
-        let r = r.wrapping_sub(OFFSETS[extra]);
-        if r > BIGGEST_USV {
-            bad = true;
-            out.push(0xFFFD);
-        } else {
-            out.push(r);
-        }
+        let (c, ok) = decode_one(&src, &mut i);
+        bad |= !ok;
+        out.push(c);
     }
     *buf = out;
     bad
+}
+
+/// The character `get_uni_c` decodes at `src[*i]` ([`decode_line`]'s
+/// step), `*i` moved past the bytes it took; false where the sequence
+/// was ill-formed (U+FFFD).
+fn decode_one(src: &[u32], i: &mut usize) -> (u32, bool) {
+    const OFFSETS: [u32; 4] = [0, 0x3080, 0xE_2080, 0x3C8_2080];
+    let b = src[*i];
+    *i += 1;
+    let extra = match b {
+        0xC0..=0xDF => 1,
+        0xE0..=0xEF => 2,
+        0xF0..=0xF7 => 3,
+        0xF8..=0xFF => return (0xFFFD, false),
+        _ => 0,
+    };
+    let mut r = b;
+    for _ in 0..extra {
+        match src.get(*i) {
+            Some(&c) if (0x80..0xC0).contains(&c) => {
+                r = (r << 6) + c;
+                *i += 1;
+            }
+            _ => return (0xFFFD, false),
+        }
+    }
+    let r = r.wrapping_sub(OFFSETS[extra]);
+    if r > BIGGEST_USV {
+        (0xFFFD, false)
+    } else {
+        (r, true)
+    }
+}
+
+/// How many characters of `src` (a line's text from where TeX began
+/// reading it: one character a byte of its file) the first units of
+/// the line's buffer, `units`, were read from. pdfTeX's buffer is the
+/// text's characters one for one (its `xord` maps one to one); XeTeX's
+/// is their UTF-8 decoding ([`decode_line`], a byte-order mark skipped
+/// at a file's start), or, in raw mode or for a line of characters
+/// already, the characters themselves (`xe`: the engine is XeTeX,
+/// whose decoding is the one tried first). A diagnostic's column is a
+/// count of units; its place in the file is this many characters on.
+pub(crate) fn source_width(src: &[u32], units: &[u32], xe: bool) -> usize {
+    let decoded = |from: usize| -> Option<usize> {
+        let mut i = from;
+        for &u in units {
+            if i >= src.len() {
+                return None;
+            }
+            let (c, _) = decode_one(src, &mut i);
+            if c != u {
+                return None;
+            }
+        }
+        Some(i)
+    };
+    if xe && src.iter().take(4 * units.len() + 3).all(|&c| c <= 0xFF) {
+        if let Some(n) = decoded(0) {
+            return n;
+        }
+        if src.starts_with(&[0xEF, 0xBB, 0xBF])
+            && let Some(n) = decoded(3)
+        {
+            return n;
+        }
+    }
+    units.len().min(src.len())
 }
 
 // ------------------------------------------------------------- printing
@@ -1370,6 +1401,29 @@ impl Run<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A diagnostic's column, a count of a line's units, as characters of
+    /// its text (one a byte of the file): XeTeX's units are the bytes
+    /// decoded, pdfTeX's the bytes. Counted one unit a character, an
+    /// error after Arabic on its line was placed 11 bytes early, and in
+    /// the middle of a character.
+    #[test]
+    fn source_width_counts_the_bytes_a_line_was_read_from() {
+        let line = "\\textlang{arabic}{يكتب \\undefinedcs x}";
+        let bytes: Vec<u32> = line.bytes().map(u32::from).collect();
+        let units: Vec<u32> = line.chars().map(u32::from).collect();
+        let at = line.find("\\undefinedcs").unwrap() + "\\undefinedcs".len();
+        let col = line[..at].chars().count();
+        assert_eq!(source_width(&bytes, &units[..col], true), at);
+        // (pdfTeX: a unit a byte)
+        assert_eq!(source_width(&bytes, &bytes[..at], false), at);
+        // (a byte-order mark at a file's start, skipped)
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend(&bytes);
+        assert_eq!(source_width(&bom, &units[..col], true), at + 3);
+        // (raw mode: XeTeX's units the bytes)
+        assert_eq!(source_width(&bytes, &bytes[..at], true), at);
+    }
 
     fn dec(bytes: &[u8], m: i64, first: bool) -> (Vec<u32>, bool) {
         let mut b: Vec<u32> = bytes.iter().map(|&x| u32::from(x)).collect();

@@ -697,3 +697,48 @@ pub fn rss_bytes() -> u64 {
         })
         .map_or(0, |kb| kb << 10)
 }
+
+/// A text as a `Build` holds its file (as the CLI and the browser's core
+/// give it): one character a byte of its UTF-8.
+#[allow(dead_code)]
+pub fn held(t: &str) -> String {
+    t.bytes().map(char::from).collect()
+}
+
+/// Page `k`'s glyphs with origins in `file` (not synthesized), in the
+/// page's order, as the source words they came from: each the word's
+/// first byte in the file (`src`, the file's bytes) and its text, a word
+/// once for its glyphs in a row.
+#[allow(dead_code, clippy::many_single_char_names)]
+pub fn page_words(b: &Build, k: usize, src: &[u8], file: &str) -> Vec<(usize, String)> {
+    let Some(o) = b.page_origins(k) else {
+        return Vec::new();
+    };
+    // (after the page's answer: the files it names are in the table then)
+    let files = b.origin_files();
+    let space = |c: u8| c.is_ascii_whitespace() || c == b'{' || c == b'}' || c == b'\\';
+    let mut out: Vec<(usize, String)> = Vec::new();
+    for i in 0..o.len() {
+        let f = o.file[i];
+        if f == u32::MAX
+            || o.is_synth(i)
+            || !files[f as usize].trim_start_matches("./").ends_with(file)
+        {
+            continue;
+        }
+        let at = o.start[i] as usize;
+        let mut a = at;
+        while a > 0 && !space(src[a - 1]) {
+            a -= 1;
+        }
+        let mut e = at;
+        while e < src.len() && !space(src[e]) {
+            e += 1;
+        }
+        let w = (a, String::from_utf8_lossy(&src[a..e]).into_owned());
+        if out.last() != Some(&w) {
+            out.push(w);
+        }
+    }
+    out
+}
