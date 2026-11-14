@@ -5,7 +5,8 @@
 
 import type { Link, PageImage } from "./types.ts";
 import type { CiteAnswer } from "./session.ts";
-import { LAYER_LINES, ensureText, holdText, textPending } from "./text.ts";
+import { LAYER_LINES, caretAt, ensureText, holdText, textPending } from "./text.ts";
+import type { TextLine } from "./text.ts";
 import { waspLength, waspOff, waspOn } from "./wasp.ts";
 
 export interface ViewerHost {
@@ -231,6 +232,31 @@ export class Viewer {
       const slot = (e.target as Element | null)?.closest?.(".slot");
       if (slot && textPending(slot)) ensureText(slot);
     }, { passive: true });
+    // (a drag that selects text: its ends placed by the viewer (caretAt), not
+    // by the browser's hit test, which over a page's white space (a short
+    // line's end, a column's gap) gave a far line and selected half the page.
+    // A double or triple click, Shift and the other modifiers stay the browser's)
+    let drag: { node: Node; off: number; k: number; line: TextLine } | null = null;
+    root.addEventListener("mousedown", (e) => {
+      drag = null;
+      if (e.button !== 0 || e.detail > 1 || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
+      const t = e.target as Element | null;
+      if (!t?.closest?.(".slot") || t.closest("a, button, input, textarea, select, [contenteditable], .peer-tag")) return;
+      const at = this.caretFrom(e.clientX, e.clientY);
+      const sel = this.selection();
+      if (!at || !sel) return;
+      e.preventDefault();
+      // (the focus a press gives, which preventing it took away: the keys stay the pages')
+      (t.closest("[tabindex]") as HTMLElement | null)?.focus({ preventScroll: true });
+      drag = at;
+      sel.setBaseAndExtent(at.node, at.off, at.node, at.off);
+    });
+    root.addEventListener("pointermove", (e) => {
+      if (!drag || !(e.buttons & 1)) return;
+      const to = this.caretFrom(e.clientX, e.clientY, drag);
+      if (to) this.selection()?.setBaseAndExtent(drag.node, drag.off, to.node, to.off);
+    });
+    root.ownerDocument.addEventListener("pointerup", () => (drag = null));
     root.addEventListener("pointermove", (e) => {
       if (!(e.buttons & 1) || dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
@@ -1270,6 +1296,39 @@ export class Viewer {
       }
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement!.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
+  }
+
+  /** The selection the pages' text is in (the panel's shadow root's, where the browser keeps one). */
+  private selection(): Selection | null {
+    const rn = this.root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
+    return rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
+  }
+
+  /**
+   * The place in the pages' text a point on the screen selects to (text.ts's
+   * caretAt): on the page under it, or the nearest page above or below; kept
+   * in the column of `from`'s line when on its page.
+   */
+  private caretFrom(cx: number, cy: number, from?: { k: number; line: TextLine }): { node: Node; off: number; k: number; line: TextLine } | null {
+    let slot: Slot | null = null, gap = Infinity;
+    for (const s of this.slots) {
+      const b = s.el.getBoundingClientRect();
+      if (!b.height) continue;
+      const d = cy < b.top ? b.top - cy : cy > b.bottom ? cy - b.bottom : 0;
+      if (d < gap) (gap = d), (slot = s);
+      if (!d) break;
+    }
+    if (!slot) return null;
+    ensureText(slot.el);
+    const texts = [...slot.el.querySelectorAll("text")].filter((t) => LAYER_LINES.get(t)?.text && t.firstChild);
+    if (!texts.length) return null;
+    const lines = texts.map((t) => LAYER_LINES.get(t)!);
+    const b = slot.el.getBoundingClientRect();
+    const k = Number(slot.el.dataset.k);
+    const x = ((cx - b.left) / b.width) * this.size.w, y = ((Math.min(Math.max(cy, b.top), b.bottom) - b.top) / b.height) * this.size.h;
+    const c = caretAt(lines, x, y, from && from.k === k ? from.line : undefined);
+    if (!c) return null;
+    return { node: texts[c.i].firstChild!, off: c.off, k, line: lines[c.i] };
   }
 
   /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */

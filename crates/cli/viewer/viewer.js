@@ -272,6 +272,41 @@ function search(pages2, q, max = 1e3) {
   }
   return out;
 }
+function caretAt(lines2, x, y, from2) {
+  if (!lines2.length) return null;
+  const top = (l2) => l2.y - l2.size * 0.8, bottom = (l2) => l2.y + l2.size * 0.25;
+  const dx = (l2) => x < l2.x ? l2.x - x : x > l2.x + l2.w ? x - (l2.x + l2.w) : 0;
+  const dy = (l2) => y < top(l2) ? top(l2) - y : y > bottom(l2) ? y - bottom(l2) : 0;
+  const inColumn = (l2) => !from2 || l2.x < from2.x + from2.w && from2.x < l2.x + l2.w;
+  const idx = lines2.map((_, i2) => i2);
+  const best = (cands, key) => cands.reduce((a, b) => key(lines2[b]) < key(lines2[a]) ? b : a);
+  const row = idx.filter((i2) => dy(lines2[i2]) === 0);
+  let i;
+  const over = row.filter((i2) => dx(lines2[i2]) === 0);
+  const rowCol = row.filter((i2) => inColumn(lines2[i2]));
+  if (over.length) i = over[0];
+  else if (rowCol.length) i = best(rowCol, dx);
+  else {
+    const col = idx.filter((i2) => inColumn(lines2[i2]) && dx(lines2[i2]) === 0);
+    const near = col.length ? col : idx.filter((i2) => inColumn(lines2[i2]));
+    i = best(near.length ? near : idx, (l2) => dy(l2) * 4 + dx(l2));
+  }
+  const l = lines2[i];
+  let off = 0;
+  if (x >= l.x + l.w) off = l.text.length;
+  else if (x > l.x) {
+    const n = l.text.length;
+    off = n;
+    for (let j = 0; j < n; j++) {
+      const a = l.xs?.[j] ?? l.x + l.w * j / n, b = l.rs?.[j] ?? l.x + l.w * (j + 1) / n;
+      if (x < (a + b) / 2) {
+        off = j;
+        break;
+      }
+    }
+  }
+  return { i, off };
+}
 
 // viewer/src/wasp.ts
 var WASP_PRESETS = [
@@ -523,6 +558,26 @@ var Viewer = class _Viewer {
       const slot = e.target?.closest?.(".slot");
       if (slot && textPending(slot)) ensureText(slot);
     }, { passive: true });
+    let drag = null;
+    root.addEventListener("mousedown", (e) => {
+      drag = null;
+      if (e.button !== 0 || e.detail > 1 || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
+      const t = e.target;
+      if (!t?.closest?.(".slot") || t.closest("a, button, input, textarea, select, [contenteditable], .peer-tag")) return;
+      const at = this.caretFrom(e.clientX, e.clientY);
+      const sel = this.selection();
+      if (!at || !sel) return;
+      e.preventDefault();
+      t.closest("[tabindex]")?.focus({ preventScroll: true });
+      drag = at;
+      sel.setBaseAndExtent(at.node, at.off, at.node, at.off);
+    });
+    root.addEventListener("pointermove", (e) => {
+      if (!drag || !(e.buttons & 1)) return;
+      const to = this.caretFrom(e.clientX, e.clientY, drag);
+      if (to) this.selection()?.setBaseAndExtent(drag.node, drag.off, to.node, to.off);
+    });
+    root.ownerDocument.addEventListener("pointerup", () => drag = null);
     root.addEventListener("pointermove", (e) => {
       if (!(e.buttons & 1) || dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
@@ -1415,6 +1470,37 @@ var Viewer = class _Viewer {
       }
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
+  }
+  /** The selection the pages' text is in (the panel's shadow root's, where the browser keeps one). */
+  selection() {
+    const rn = this.root.getRootNode();
+    return rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
+  }
+  /**
+   * The place in the pages' text a point on the screen selects to (text.ts's
+   * caretAt): on the page under it, or the nearest page above or below; kept
+   * in the column of `from`'s line when on its page.
+   */
+  caretFrom(cx, cy, from2) {
+    let slot = null, gap = Infinity;
+    for (const s of this.slots) {
+      const b2 = s.el.getBoundingClientRect();
+      if (!b2.height) continue;
+      const d = cy < b2.top ? b2.top - cy : cy > b2.bottom ? cy - b2.bottom : 0;
+      if (d < gap) gap = d, slot = s;
+      if (!d) break;
+    }
+    if (!slot) return null;
+    ensureText(slot.el);
+    const texts = [...slot.el.querySelectorAll("text")].filter((t) => LAYER_LINES.get(t)?.text && t.firstChild);
+    if (!texts.length) return null;
+    const lines2 = texts.map((t) => LAYER_LINES.get(t));
+    const b = slot.el.getBoundingClientRect();
+    const k = Number(slot.el.dataset.k);
+    const x = (cx - b.left) / b.width * this.size.w, y = (Math.min(Math.max(cy, b.top), b.bottom) - b.top) / b.height * this.size.h;
+    const c = caretAt(lines2, x, y, from2 && from2.k === k ? from2.line : void 0);
+    if (!c) return null;
+    return { node: texts[c.i].firstChild, off: c.off, k, line: lines2[c.i] };
   }
   /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
   drawSelection() {
