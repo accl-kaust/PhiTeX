@@ -1943,6 +1943,6 @@ fn a_format_texts_edit_runs_the_runs_that_read_it() {
     );
     assert!(
         first <= 4,
-        "a word's edit in the first part ran {first} nodes (4 expected: its paragraph, its page and the end)"
+        "a word's edit in the first part ran {first} nodes (4 when this was written, mc 86655)"
     );
 }
