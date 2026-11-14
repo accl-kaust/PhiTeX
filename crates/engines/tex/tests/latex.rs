@@ -4296,6 +4296,7 @@ fn a_files_rest_read_on_into_keeps_its_line_numbers() {
 /// logged, where its cuts were not -j1's).
 #[test]
 fn a_page_fired_inside_a_piece_logs_where_tex_ran_its_routine() {
+    use std::fmt::Write as _;
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/fire-log");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -4303,9 +4304,10 @@ fn a_page_fired_inside_a_piece_logs_where_tex_ran_its_routine() {
     // only once it has done `cut_min` commands)
     let mut many = String::from("\\begingroup ");
     for i in 0..60 {
-        many.push_str(&format!(
+        let _ = write!(
+            many,
             "\\message{{P{i}}}Paragraph {i} has words enough to fill a line or two of the page, words and words and more words to set.\\par "
-        ));
+        );
     }
     many.push_str("\\endgroup");
     let doc = format!(
