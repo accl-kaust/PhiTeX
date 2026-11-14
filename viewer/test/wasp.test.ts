@@ -47,6 +47,18 @@ test("two columns: each line a band of its own column", () => {
   assert.ok(b.slice(0, 4).every((x) => x.x < 300) && b.slice(4).every((x) => x.x > 300));
 });
 
+test("two columns under a line across both (a title, a figure*'s caption): still two columns", () => {
+  const across = line("c".repeat(94), 88, 72);
+  const b = bands([across, ...para(100, 4, 72, 45), ...para(100, 4, 320, 45)]);
+  assert.equal(b.length, 9);
+  // (the line across its own band, over both; each column's lines bands of their own, alternating)
+  assert.ok(b[0].w > 400);
+  const left = b.filter((x) => x.w < 300 && x.x < 300), right = b.filter((x) => x.w < 300 && x.x > 300);
+  assert.equal(left.length, 4);
+  assert.equal(right.length, 4);
+  assert.deepEqual(left.map((x) => x.dir), [1, 0, 1, 0]);
+});
+
 test("All text: a heading is a line too; a centred equation still is not", () => {
   const lines = [line("Heading", 80, 72, 14), ...para(100, 3), line("x=y+z", 150, 250), ...para(170, 2)];
   assert.equal(bands(lines).length, 5);

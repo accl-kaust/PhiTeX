@@ -117,19 +117,32 @@ export function bands(lines: TextLine[], all = false): Band[] {
   const runs = lines.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
   if (!runs.length) return [];
   // (the columns: the long runs' spans merged where they overlap; a page
-  // with none (slides, a page of maths), every run's)
+  // with none (slides, a page of maths), every run's. A run much wider
+  // than the columns' measure (the long runs' median) is set across them,
+  // a two-column page's title or figure*'s caption: merged in, it made the
+  // columns one, each band across both and the alternation lost)
   const long = runs.filter((l) => l.w > em * 15);
-  const spans = (long.length ? long : runs).map((l) => [l.x, l.x + l.w] as [number, number]).sort((a, b) => a[0] - b[0]);
+  const base = long.length ? long : runs;
+  const ws = base.map((l) => l.w).sort((a, b) => a - b);
+  const measure = ws[ws.length >> 1];
+  const across = (l: TextLine) => l.w > measure * 1.4;
+  const spans = base.filter((l) => !across(l)).map((l) => [l.x, l.x + l.w] as [number, number]).sort((a, b) => a[0] - b[0]);
   const cols: [number, number][] = [];
   for (const s of spans) {
     const last = cols[cols.length - 1];
     if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
     else cols.push([...s]);
   }
+  // (the runs across the columns: lines of their own, over the page's
+  // width, first: a title's, an abstract's, a figure*'s caption's)
+  const wide = runs.filter(across);
+  if (wide.length) cols.unshift([Math.min(...wide.map((l) => l.x)), Math.max(...wide.map((l) => l.x + l.w))]);
   const colOf = (l: TextLine) => {
+    if (wide.length && across(l)) return 0;
     const m = l.x + l.w / 2;
-    let best = 0, d = Infinity;
+    let best = -1, d = Infinity;
     cols.forEach(([a, b], i) => {
+      if (wide.length && i === 0) return;
       const e = m < a ? a - m : m > b ? m - b : 0;
       if (e < d) (d = e), (best = i);
     });
