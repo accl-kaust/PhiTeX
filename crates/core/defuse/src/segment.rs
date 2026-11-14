@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::api::{Brackets, NodeId, OpId, PathId, Rel, UnitId};
 use crate::engine::Engine;
 use crate::index::RangeKey;
-use crate::lock::RLock;
+use crate::lock::Lock;
 use crate::node::State;
 use crate::order::{Pos, SEG_CAP, SegId};
 use crate::values::{Field, FxHashMap, ValueId};
@@ -22,7 +22,7 @@ pub(crate) struct Segment {
     pub(crate) unit: UnitId,
     /// Its first label, fixed for its life (a split keeps the lower half here).
     pub(crate) lo: Pos,
-    pub(crate) inner: RLock<Inner>,
+    pub(crate) inner: Lock<Inner>,
     /// The scopes open at its start, outermost first (`read::chain_start`),
     /// and the scope count they were found at (`Engine::scope_gen`): apart
     /// from `inner`, so a read of them never waits for a commit.
@@ -1140,7 +1140,7 @@ impl Segment {
             chain: crate::lock::Mx::new(None),
             surv: crate::lock::Mx::new(crate::values::FxHashMap::default()),
             moved: AtomicU64::new(0),
-            inner: RLock::new(Inner {
+            inner: Lock::new(Inner {
                 brackets: PosMap::Zero,
                 depth_net: 0,
                 depth_min: 0,
@@ -1489,7 +1489,7 @@ impl Segment {
             chain: crate::lock::Mx::new(None),
             surv: crate::lock::Mx::new(crate::values::FxHashMap::default()),
             moved: AtomicU64::new(0),
-            inner: RLock::new(Inner {
+            inner: Lock::new(Inner {
                 brackets,
                 depth_net: 0,
                 depth_min: 0,

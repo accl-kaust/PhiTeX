@@ -9,8 +9,6 @@ autotests = false
 
 [dependencies]
 crossbeam-deque = "0.8"
-# A segment's lock: its readers take their own shard (`lock::RLock`).
-crossbeam-utils = "0.8"
 # Only with the `observe` feature.
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
