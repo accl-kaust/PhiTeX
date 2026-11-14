@@ -7942,7 +7942,7 @@ impl Build {
 
     /// [`Build::node_spans`] with each file's name, and the index of the
     /// document node each node is under (its place in the document).
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub(crate) fn spans_named(&self) -> Vec<crate::origins::SpanRow> {
         let mut out: Vec<crate::origins::SpanRow> = self
             .nodes
