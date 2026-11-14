@@ -749,6 +749,12 @@ impl Hub {
         st.ended = false;
     }
 
+    /// Edits made on the disk taken as accepted (`review-accept-disk`), as
+    /// the setting changes in a running session.
+    pub fn set_accept_disk(&self, on: bool) {
+        lock(&self.st).accept_disk = on;
+    }
+
     /// Reviewing the agent's edits on or off (`experimental-review`, off
     /// by default; the viewer's Settings, Experimental). Off, nothing of
     /// it is done: no baseline read, no hunks, nothing written; turned on,
