@@ -1721,7 +1721,7 @@ impl Run<'_, '_> {
         // the font's own ([`crate::fonts::key_of`]): one read, of that
         // font's fields, never of the fonts loaded before
         let f = if self.xe {
-            self.xe_read_font_info(&name, quoted, s)?
+            self.xe_read_font_info(Some(u), &name, quoted, s)?
         } else {
             self.read_font_info(Some(u), &name, s)?
         };
@@ -1745,6 +1745,15 @@ impl Run<'_, '_> {
         if let Some(f) = self.tfm_font_info(name, s)? {
             return Ok(f);
         }
+        self.font_error(u, name, s)?;
+        Ok(0)
+    }
+
+    /// §561's error of a font not loaded (`start_font_error_message`,
+    /// web2c's reasons; XeTeX's change file's for a font neither a TFM
+    /// file nor an installed font: "Metric (TFM) file or installed font
+    /// not found").
+    pub(crate) fn font_error(&mut self, u: Option<Tok>, name: &str, s: i32) -> R<()> {
         // §561 (`start_font_error_message`, §1260's font identifier `u`,
         // `null_cs` where there is none) and web2c's reasons
         let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
@@ -1775,11 +1784,12 @@ impl Run<'_, '_> {
             " not loadable: Bad metric (TFM) file"
         } else if name.len() > 255 {
             " not loadable: Metric (TFM) file name too long"
+        } else if self.xe {
+            " not loadable: Metric (TFM) file or installed font not found"
         } else {
             " not loadable: Metric (TFM) file not found"
         });
-        self.log("error", &m)?;
-        Ok(0)
+        self.log("error", &m)
     }
 
     /// [`Run::read_font_info`] of a TFM file: `None` where it can't be

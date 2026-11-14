@@ -49,16 +49,6 @@ fn font_index(files: &Arc<Files>, engine: &'static str) -> Option<phitex_tex::Fo
     Some(ix)
 }
 
-/// kpathsea's suffix for XeTeX's font `format`, added to a name without one.
-fn font_suffix(format: phitex_tex::KpseFormat) -> &'static str {
-    match format {
-        phitex_tex::KpseFormat::OpenType => ".otf",
-        phitex_tex::KpseFormat::TrueType => ".ttf",
-        phitex_tex::KpseFormat::Type1 => ".pfb",
-        phitex_tex::KpseFormat::MiscFonts => "",
-    }
-}
-
 /// Ghostscript's font `name` (a file name, no directory: `NimbusRoman-Regular`)
 /// where Shelf serves Ghostscript 10.08.0's own ([`phitex_shelf::GS_FONTS`]),
 /// the bytes the EPS converter embeds as gs does; none before a release has them.
@@ -284,7 +274,7 @@ impl Host for Shelf {
     fn xetex(&self) -> Option<phitex_tex::XeTeX> {
         let ix = font_index(&self.files, self.engine)?;
         let (f1, f2, e) = (self.files.clone(), self.files.clone(), self.engine);
-        Some(phitex_live::xefonts::xetex_of(
+        let mut x = phitex_live::xefonts::xetex_of(
             Box::new(move |path| match f1.read(path) {
                 Some(b) => Some(Arc::from(b.as_slice())),
                 None if path.starts_with(phitex_shelf::TL) => f1
@@ -292,27 +282,27 @@ impl Host for Shelf {
                     .map(|(_, b)| Arc::from(b.as_slice())),
                 None => None,
             }),
+            // (kpathsea's lookup: each name it tries among the project's
+            // given files, its `.`, then in Shelf's tree, then asked of
+            // the host)
             Box::new(move |name, format| {
-                if let Some(p) = f2.given(name) {
+                let targets = phitex_live::xefonts::kpse_targets(name, format);
+                if let Some(p) = targets.iter().find_map(|t| f2.project_font(t, false)) {
                     return Some(p);
                 }
-                let suffix = font_suffix(format);
-                let kind = match format {
-                    phitex_tex::KpseFormat::OpenType => "opentype",
-                    phitex_tex::KpseFormat::TrueType => "truetype",
-                    phitex_tex::KpseFormat::Type1 => "type1",
-                    phitex_tex::KpseFormat::MiscFonts => "misc",
-                };
-                if !suffix.is_empty()
-                    && !name.contains('.')
-                    && let Some((p, _)) = f2.shelf_find(&format!("{name}{suffix}"), Some(kind), e)
-                {
-                    return Some(p);
-                }
-                f2.shelf_find(name, Some(kind), e).map(|(p, _)| p)
+                let kind = phitex_live::xefonts::kpse_kind(format);
+                // (a name Shelf has not: the host asked for it, a project
+                // file it had not given)
+                targets
+                    .iter()
+                    .find_map(|t| f2.shelf_find(t, Some(kind), e))
+                    .map(|(p, _)| p)
+                    .or_else(|| targets.iter().find_map(|t| f2.project_font(t, true)))
             }),
             Some(ix),
-        ))
+        );
+        x.fonts_note = Some(Arc::from(phitex_live::xefonts::SHELF_FONTS_NOTE));
+        Some(x)
     }
 }
 
