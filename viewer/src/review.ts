@@ -95,7 +95,7 @@ export interface ReviewHost {
   request(op: string, params?: object): Promise<{ ok: boolean; json?: any; error?: string }>;
   /** The state, whenever it changes (the `review` event). */
   onState(cb: (s: ReviewState) => void): void;
-  /** Where bytes [start, end) of `file` are on the pages; `quote`, its text, looked for on the pages where no glyph names them. */
+  /** Where bytes [start, end) of `file` are on the pages; `quote`, its text, looked for on the pages where no glyph names them (TEMPORARY: an \input file's glyphs name the \input command until the origins' fix). */
   boxes(file: string, start: number, end: number, quote?: string): Promise<{ k: number; boxes: Box[] }[]>;
   /** The source of text selected on the pages. */
   source(sel: { k: number; rects: Box[] }[]): Promise<{ file: string; start: number; end: number } | null>;

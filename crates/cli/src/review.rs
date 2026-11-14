@@ -1269,9 +1269,12 @@ impl Hub {
                 .unwrap_or(0)
         };
         let (mut file, mut s, mut e) = (file, n("start"), n("end"));
-        // (the words the page shows: where the glyphs' origins name a place
-        // that does not show them (an \input file's text the origins do not
-        // place), found by their letters in the files the build reads)
+        // TEMPORARY, remove with its cause: the glyph origins give an
+        // \input file's text the bytes of the \input command in the file
+        // that inputs it (an engine bug, its root fix in the origins'
+        // rework). Until then, where the origins name a place that does not
+        // show the words seen on the page, they are found by their letters
+        // in the files the build reads.
         let seen = req["seen"].as_str().unwrap_or("");
         let body0 = current_text(&mut st, &file).unwrap_or_default();
         let quote0 = body0

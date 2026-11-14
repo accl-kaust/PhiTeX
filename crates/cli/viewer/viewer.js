@@ -10865,8 +10865,10 @@ var review = {
       void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json));
     };
   },
-  // (where no glyph's origin names the range (an \input file's text, where
-  // the origins name the \input), its words found in the pages' text)
+  // TEMPORARY, remove with its cause: the glyph origins give an \input
+  // file's text the bytes of the \input command (an engine bug, its root
+  // fix in the origins' rework). Until then, where no glyph's origin names
+  // the range, its words are found in the pages' text.
   async boxes(file, start, end, quote) {
     const at = await session.boxesOf(file, start, end);
     if (at.length || !quote) return at;
