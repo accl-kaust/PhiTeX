@@ -2509,7 +2509,7 @@ fn latex_glyph_origins_of_input_files() {
                                 files.get(p.file[i] as usize).cloned(),
                                 p.start[i],
                                 p.end[i],
-                                p.synth[i],
+                                p.is_synth(i),
                                 p.x[i].to_bits(),
                                 p.y[i].to_bits(),
                             )

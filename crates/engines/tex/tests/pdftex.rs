@@ -716,6 +716,7 @@ fn right_to_left_glyph_origins_are_their_own_occurrence() {
             at("one", 1),
         ]
     );
+}
 
 /// [`origins_doc`] with forms and included pages drawn among its
 /// paragraphs: a `\pdfxform` of words, a form in a form, and a page of
