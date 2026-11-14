@@ -1029,6 +1029,7 @@ async function watchSettings(): Promise<SettingsGroup[]> {
       title: "Build",
       rows: [
         toggle("watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does. From the next phitex watch on."),
+        toggle("watch-ask-write", "Ask at quit whether to write the PDF", "When nothing was written while watching, quitting asks whether to write the PDF here. Off: it writes nothing and asks nothing."),
         toggle("synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."),
         {
           id: "threads",

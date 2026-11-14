@@ -64,6 +64,10 @@ pub struct Config {
     /// and the aux files into the folder after each build (off: nothing
     /// there, the pages in the viewer; `--write` asks for it once).
     pub watch_write: Option<bool>,
+    /// Whether `phitex watch`, quitting at a terminal with nothing written,
+    /// asks whether to write the PDF (on, the default; off: it writes
+    /// nothing and asks nothing; `-y` writes, unasked).
+    pub watch_ask_write: Option<bool>,
     /// Whether a watch takes changes that appear on disk (not typed in an
     /// attached editor) as accepted, rather than pending review
     /// (docs/spec-editor-protocol.md §9.4).
@@ -121,6 +125,7 @@ const KEYS: &[&str] = &[
     "update-check",
     "update-channel",
     "watch-write",
+    "watch-ask-write",
     "review-accept-disk",
     "tips-seen",
     "threads",
@@ -529,6 +534,7 @@ const RETIRED: &[&str] = &["problems-hidden"];
 /// `update-channel`). Its others: [`CHOICES`], `threads`, `cache-limit`.
 pub const SWITCHES: &[&str] = &[
     "watch-write",
+    "watch-ask-write",
     "synctex",
     "update-check",
     "underline",
@@ -611,6 +617,7 @@ pub fn prefs(
     Ok(serde_json::json!({
         "tips-seen": c.tips_seen.unwrap_or_default(),
         "watch-write": c.watch_write.unwrap_or(false),
+        "watch-ask-write": c.watch_ask_write.unwrap_or(true),
         "review-accept-disk": c.review_accept_disk.unwrap_or(false),
         "synctex": c.synctex,
         "update-check": c.update_check.unwrap_or(false),
@@ -713,6 +720,11 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "phitex watch writes the PDF (with its .synctex.gz) and the aux files here after each build",
     ),
     (
+        "watch-ask-write",
+        "on",
+        "phitex watch asks at quit whether to write the PDF, when nothing was written (off: never asks, writes nothing)",
+    ),
+    (
         "review-accept-disk",
         "off",
         "changes that appear on disk, not typed in an attached editor, count as accepted (else they wait for review in the viewer)",
@@ -771,6 +783,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("update-check", "true"),
     ("update-channel", "\"stable\""),
     ("watch-write", "false"),
+    ("watch-ask-write", "true"),
     ("review-accept-disk", "false"),
     ("threads", "0"),
     ("follow", "\"cursor\""),
@@ -1110,6 +1123,7 @@ const PROJECTS_TOO: &[&str] = &[
     "files",
     "phitex",
     "watch-write",
+    "watch-ask-write",
     "review-accept-disk",
     "latexmk",
     "inputs",
@@ -1302,6 +1316,7 @@ impl Config {
             update_check: self.update_check.or(under.update_check),
             update_channel: self.update_channel.or(under.update_channel),
             watch_write: self.watch_write.or(under.watch_write),
+            watch_ask_write: self.watch_ask_write.or(under.watch_ask_write),
             review_accept_disk: self.review_accept_disk.or(under.review_accept_disk),
             tips_seen: self.tips_seen.or(under.tips_seen),
             threads: self.threads.or(under.threads),
@@ -1671,6 +1686,7 @@ mod tests {
                 update_check: None,
                 update_channel: None,
                 watch_write: None,
+                watch_ask_write: None,
                 review_accept_disk: None,
                 tips_seen: None,
                 threads: None,

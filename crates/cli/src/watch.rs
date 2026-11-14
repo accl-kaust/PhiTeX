@@ -1417,37 +1417,68 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the last build when nothing is written: what the way out writes on a yes)
     let unwritten: RefCell<Option<session::Report>> = RefCell::new(None);
     let asking = kept.asking.clone();
-    let quit = |ui: &Ui, s: &mut Session, rx: Option<&mut mpsc::Receiver<(Instant, Event)>>| -> ! {
+    // (the way out: it ends the process, unless the question it asks is
+    // answered c, cancel: then it returns and the watch goes on)
+    let quit = |ui: &Ui, s: &mut Session, rx: Option<&mut mpsc::Receiver<(Instant, Event)>>| {
         // (nothing written while watching: asked whether to write the PDF
         // now, where a person is at the terminal; an editor's or a pipe's
         // way out writes nothing)
         // (a signal's way out asks nothing: no one may be there to answer)
-        if let (Some(rx), Some(r)) = (
-            rx.filter(|_| raw && keys::signalled().is_none()),
-            unwritten.borrow_mut().take(),
-        ) {
+        // (`watch-ask-write` off: nothing asked, nothing written; `-y` still writes)
+        let ask = o.no_confirm || t.watch_ask_write;
+        let pending = if ask {
+            unwritten.borrow_mut().take()
+        } else {
+            None
+        };
+        if let (Some(rx), Some(r)) = (rx.filter(|_| raw && keys::signalled().is_none()), pending) {
             ui.finish();
             // (`--no-confirm`: yes, unasked)
-            let yes = o.no_confirm || {
-                asking.store(true, Ordering::Relaxed);
-                // (the cursor after the question, where the key is typed; the
-                // key said after it and the line ended, so what follows, the
-                // files written or the shell's prompt, starts a line)
-                ui.ask(&format!(
-                    "write {}.pdf and its .synctex.gz here? [y/N]",
-                    s.job.jobname
+            let yes = o.no_confirm
+                || {
+                    asking.store(true, Ordering::Relaxed);
+                    // (how not to be asked again: said once, above the question)
+                    ui.line(&st.dim(
+                    "phitex config watch-write on: write after every build · phitex config watch-ask-write off: never ask, write nothing · -y: write, unasked",
                 ));
-                let yes = loop {
-                    match rx.recv() {
-                        Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some(true),
-                        Ok((_, Event::Key(_))) => break Some(false),
-                        Err(_) => break None,
-                        Ok(_) => {}
+                    // (the cursor after the question, where the key is typed; the
+                    // key said after it and the line ended, so what follows, the
+                    // files written or the shell's prompt, starts a line)
+                    let synctex = if t.synctex {
+                        " and its .synctex.gz"
+                    } else {
+                        ""
+                    };
+                    ui.ask(&format!(
+                        "write {}.pdf{synctex} here? [y/N, c: keep watching]",
+                        s.job.jobname
+                    ));
+                    let answer = loop {
+                        match rx.recv() {
+                            Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some('y'),
+                            // (c: the quit taken back, the watch goes on)
+                            Ok((_, Event::Key(Key::Clear))) => break Some('c'),
+                            Ok((_, Event::Key(_))) => break Some('n'),
+                            Err(_) => break None,
+                            Ok(_) => {}
+                        }
+                    };
+                    ui.answered(answer.map(|a| match a {
+                        'y' => "y",
+                        'c' => "c: watching on",
+                        _ => "n",
+                    }));
+                    asking.store(false, Ordering::Relaxed);
+                    if answer == Some('c') {
+                        // (what the way out took back, kept for the next one)
+                        *unwritten.borrow_mut() = Some(r);
+                        if raw {
+                            ui.keys(keys::BAR);
+                        }
+                        return;
                     }
+                    answer == Some('y')
                 };
-                ui.answered(yes.map(|y| if y { "y" } else { "n" }));
-                yes == Some(true)
-            };
             if yes {
                 // (a layout no file holds, the viewer's: its exact file)
                 let mut r = r;
@@ -3126,7 +3157,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }
         }
     }
-    quit(ui, &mut s, None)
+    quit(ui, &mut s, None);
+    // (the way out with no question to answer ends the process)
+    unreachable!("the watch's way out ends the process")
 }
 
 /// Build `builds`'s stats, as `s` shows them, for the viewer's "Copy debug
