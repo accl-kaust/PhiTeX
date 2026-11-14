@@ -168,6 +168,38 @@ impl Files for Logged {
             .insert(Asked::GsFont(name.to_vec()), Answer::Bytes(r.clone()));
         r
     }
+
+    fn kept(&self, file: &Arc<[u8]>, what: &[u8], variant: &[u8]) -> Option<Arc<[u8]>> {
+        let k = kept_key(file, what);
+        kept()
+            .locked()
+            .get(&k)
+            .filter(|e| Arc::ptr_eq(&e.0, file) && *e.1 == *variant)
+            .map(|e| e.2.clone())
+    }
+
+    fn keep(&self, file: &Arc<[u8]>, what: &[u8], variant: &[u8], made: Arc<[u8]>) {
+        let k = kept_key(file, what);
+        kept()
+            .locked()
+            .insert(k, (file.clone(), Arc::from(variant), made));
+    }
+}
+
+/// What xdvipdfmx made of a file's bytes alone (`Files::keep`: a font's
+/// subset of a glyph set), by the file (its bytes' place, held: the same
+/// file while it is) and what it is, the last variant only (a page's file
+/// of its own and the build's file make the subset of the same glyphs;
+/// one of fewer, an earlier page's, is no one's once the set grew).
+type Kept = Mutex<crate::FxHashMap<(usize, usize, Vec<u8>), (Arc<[u8]>, Arc<[u8]>, Arc<[u8]>)>>;
+
+fn kept() -> &'static Kept {
+    static K: std::sync::OnceLock<Kept> = std::sync::OnceLock::new();
+    K.get_or_init(Kept::default)
+}
+
+fn kept_key(file: &Arc<[u8]>, what: &[u8]) -> (usize, usize, Vec<u8>) {
+    (file.as_ptr() as usize, file.len(), what.to_vec())
 }
 
 /// Whether every logged question has the same answer from `files`. A
