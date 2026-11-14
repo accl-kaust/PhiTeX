@@ -3144,6 +3144,19 @@ impl DocFile {
 /// The lines given for the text of a piece of a cut file
 /// ([`DocFile::dlines`]).
 fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
+    // (observe, `PHITEX_DLINE_ENV`: each answer, by file)
+    if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+        for d in docs.locked().values() {
+            let d = d.locked();
+            if let Some(k) = d.dlines.get(&n) {
+                eprintln!(
+                    "dline-env: {n} in {} = {k} (of {} pieces)",
+                    d.path,
+                    d.dlines.len()
+                );
+            }
+        }
+    }
     docs.locked()
         .values()
         .find_map(|d| d.locked().dlines.get(&n).copied())
