@@ -87,6 +87,23 @@ pub trait Files: Send + Sync {
         let _ = path;
         None
     }
+
+    /// What the host kept ([`Files::keep`]) of what was made of file
+    /// `file`'s bytes alone, as `what` (a font of it), for `variant` (its
+    /// subset of the same glyphs): none, the default, where it keeps
+    /// nothing. A page's file of its own and the build's file make the
+    /// same font's subset of the same glyphs: made once.
+    fn kept(&self, file: &Arc<[u8]>, what: &[u8], variant: &[u8]) -> Option<Arc<[u8]>> {
+        let _ = (file, what, variant);
+        None
+    }
+
+    /// Keeps `made`, made of file `file`'s bytes alone as `what` for
+    /// `variant` ([`Files::kept`]): in place of what was kept as `what`
+    /// before (another variant, a glyph set grown).
+    fn keep(&self, file: &Arc<[u8]>, what: &[u8], variant: &[u8], made: Arc<[u8]>) {
+        let _ = (file, what, variant, made);
+    }
 }
 
 /// `dpx_file_apply_filter`'s command: `template` with `%o` the output

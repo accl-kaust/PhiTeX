@@ -3362,6 +3362,7 @@ impl Graph {
             stream: stream_on.clone(),
             watch: watch.clone(),
             xe: xe.clone(),
+            start: Arc::default(),
         }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));

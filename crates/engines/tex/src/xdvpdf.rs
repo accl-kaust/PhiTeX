@@ -168,6 +168,38 @@ impl Files for Logged {
             .insert(Asked::GsFont(name.to_vec()), Answer::Bytes(r.clone()));
         r
     }
+
+    fn kept(&self, file: &Arc<[u8]>, what: &[u8], variant: &[u8]) -> Option<Arc<[u8]>> {
+        let k = kept_key(file, what);
+        kept()
+            .locked()
+            .get(&k)
+            .filter(|e| Arc::ptr_eq(&e.0, file) && *e.1 == *variant)
+            .map(|e| e.2.clone())
+    }
+
+    fn keep(&self, file: &Arc<[u8]>, what: &[u8], variant: &[u8], made: Arc<[u8]>) {
+        let k = kept_key(file, what);
+        kept()
+            .locked()
+            .insert(k, (file.clone(), Arc::from(variant), made));
+    }
+}
+
+/// What xdvipdfmx made of a file's bytes alone (`Files::keep`: a font's
+/// subset of a glyph set), by the file (its bytes' place, held: the same
+/// file while it is) and what it is, the last variant only (a page's file
+/// of its own and the build's file make the subset of the same glyphs;
+/// one of fewer, an earlier page's, is no one's once the set grew).
+type Kept = Mutex<crate::FxHashMap<(usize, usize, Vec<u8>), (Arc<[u8]>, Arc<[u8]>, Arc<[u8]>)>>;
+
+fn kept() -> &'static Kept {
+    static K: std::sync::OnceLock<Kept> = std::sync::OnceLock::new();
+    K.get_or_init(Kept::default)
+}
+
+fn kept_key(file: &Arc<[u8]>, what: &[u8]) -> (usize, usize, Vec<u8>) {
+    (file.as_ptr() as usize, file.len(), what.to_vec())
 }
 
 /// Whether every logged question has the same answer from `files`. A
@@ -1679,13 +1711,18 @@ pub(crate) struct XdvPage {
     pub(crate) stream: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
     pub(crate) xe: Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
+    /// Where its pages' files begin from: this engine's own (a process
+    /// with two documents, or two tests at once, made each other's pages
+    /// from a session one of them had just replaced, with none of the
+    /// glyphs its pages so far used).
+    pub(crate) start: Arc<AloneStart>,
 }
 
 /// The session a XeTeX page's file of its own begins from
 /// ([`XdvPage`]), by what it is made of: the values' table, `\mag`, the
 /// preamble's comment, the PDF's name and date; and the characters the
 /// pages' files so far used of each font (`Session::widen_used`).
-type AloneStart = Mutex<
+pub(crate) type AloneStart = Mutex<
     Option<(
         (u64, i32, String, String, i64),
         Arc<Mutex<Session>>,
@@ -1696,11 +1733,6 @@ type AloneStart = Mutex<
 /// The characters the pages' files used of each font
 /// (`phitex_xdvipdfmx::api::Session::widen_used`).
 type UsedSeen = std::collections::BTreeMap<Vec<u8>, Vec<u8>>;
-
-fn alone_start() -> &'static AloneStart {
-    static S: std::sync::OnceLock<AloneStart> = std::sync::OnceLock::new();
-    S.get_or_init(|| Mutex::new(None))
-}
 
 /// The colour stack commands among a XeTeX page's specials, in order
 /// (`color push`, `color pop`, `color` a value set; dvipdfmx's
@@ -1955,7 +1987,12 @@ impl phitex_defuse::Operation for XdvPage {
         let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
         // (made beside the evaluation, which goes on at once: of what it
         // owns, `Progress::stream_page_beside`)
-        let (p, inst, prog) = (p.clone(), v.instance(), progress.clone());
+        let (p, inst, prog, at) = (
+            p.clone(),
+            v.instance(),
+            progress.clone(),
+            self.start.clone(),
+        );
         progress.stream_page_beside(k, hash, Box::new(move |start, last| {
             let progress = prog;
             let t0 = std::time::Instant::now();
@@ -1980,7 +2017,7 @@ impl phitex_defuse::Operation for XdvPage {
                 .collect();
             all.extend(start.map(color_prelude).unwrap_or_default());
             all.extend(ops.iter().cloned());
-            let pdf = xdv_alone(&p, inst, mag, &comment, &all)?;
+            let pdf = xdv_alone(&at, &p, inst, mag, &comment, &all)?;
             // (exact where both are known; a colour carried in and not
             // known: drawn from none, told exact later only if none is)
             let exact = xdv_alone_exact(&ops) && before.is_some();
@@ -2004,14 +2041,14 @@ impl phitex_defuse::Operation for XdvPage {
             // (made before the pages before it are known: made again from
             // what they leave it, once known, `Progress::page_colors`)
             let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
-                let (p, prog, ops) = (p.clone(), progress.clone(), ops.clone());
+                let (p, prog, ops, at) = (p.clone(), progress.clone(), ops.clone(), at.clone());
                 let comment = comment.clone();
                 Box::new(move |_: &Values, start: &crate::exec::ColorStart| {
                     let before = prog.doc_specials_before(k)?;
                     let mut all: Vec<Op> = before.iter().map(|s| Op::Special(s.clone())).collect();
                     all.extend(color_prelude(start));
                     all.extend(ops.iter().cloned());
-                    let pdf = xdv_alone(&p, inst, mag, &comment, &all)?;
+                    let pdf = xdv_alone(&at, &p, inst, mag, &comment, &all)?;
                     Some((pdf, xdv_alone_exact(&ops)))
                 }) as crate::exec::Remake
             });
@@ -2039,11 +2076,18 @@ fn trace_not_exact(k: u64, start: Option<&crate::exec::ColorStart>, ops: &[Op]) 
 
 /// The PDF of a XeTeX page alone, of its operations `ops`
 /// ([`XdvPage`]).
-fn xdv_alone(p: &XdvPdf, inst: u64, mag: i32, comment: &str, ops: &[Op]) -> Option<Vec<u8>> {
+fn xdv_alone(
+    at: &AloneStart,
+    p: &XdvPdf,
+    inst: u64,
+    mag: i32,
+    comment: &str,
+    ops: &[Op],
+) -> Option<Vec<u8>> {
     let key = (inst, mag, comment.to_owned(), p.name.clone(), p.date);
     let files = (p.files)();
     let (start, seen) = {
-        let mut g = alone_start().locked();
+        let mut g = at.locked();
         match g.as_ref() {
             Some((k, s, u)) if *k == key => (s.clone(), u.clone()),
             _ => {
