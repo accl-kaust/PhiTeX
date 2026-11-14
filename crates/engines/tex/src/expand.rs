@@ -313,7 +313,19 @@ impl Run<'_, '_> {
     /// ([`Run::csname_defer`]).
     pub(crate) fn csname_force(&mut self) -> R<()> {
         match self.csname_defer.take() {
-            Some((_, t)) => self.csname_relax(t),
+            Some((_, t)) => {
+                // (observe, `PHITEX_CSNAME_TRACE`: where a put-off look-up
+                // was made after all)
+                if crate::exec::obs_flag!("PHITEX_CSNAME_TRACE") {
+                    eprintln!(
+                        "csname-trace: node {} {t:?} made at {:?}: {}",
+                        self.cx.node().raw(),
+                        self.cur.tok,
+                        self.trace_context().chars().take(1500).collect::<String>()
+                    );
+                }
+                self.csname_relax(t)
+            }
             None => Ok(()),
         }
     }
