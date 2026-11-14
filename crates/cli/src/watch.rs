@@ -371,13 +371,71 @@ impl Busy {
     }
 }
 
+/// The last build `r`'s exact PDF written now (`phitex session pdf` of a
+/// watch that writes no file): `JOB.pdf` in the output folder, or `to`;
+/// its .synctex.gz beside it with `synctex`. Nothing else is written. The
+/// files known in `ours` as the watch's own (no build for their change).
+fn write_pdf_now(
+    s: &Session,
+    r: Option<&mut session::Report>,
+    to: Option<&str>,
+    synctex: bool,
+    root: &Path,
+    ours: &mut HashMap<PathBuf, u64>,
+) -> Result<Value, String> {
+    let r = r.ok_or("no build to write yet")?;
+    if r.out.pdf.is_empty()
+        && let Some(l) = r.out.layout.take()
+    {
+        r.out.pdf = l.exact().map_err(|e| e.to_string())?;
+    }
+    if r.out.pdf.is_empty() {
+        return Err("the last build made no PDF (no page shipped, or a DVI)".to_owned());
+    }
+    let pdf = match to {
+        Some(p) => root.join(p),
+        None => root
+            .join(s.job.out_dir.strip_prefix(".").unwrap_or(&s.job.out_dir))
+            .join(format!("{}.pdf", s.job.jobname)),
+    };
+    if let Some(d) = pdf.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    let put = |p: &Path, b: &[u8]| -> Result<(PathBuf, u64), String> {
+        // (beside, then renamed: a PDF viewer never reads half a file)
+        let tmp = PathBuf::from(format!("{}.phitex-tmp", p.display()));
+        std::fs::write(&tmp, b).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, p).map_err(|e| format!("{}: {e}", p.display()))?;
+        Ok((p.to_path_buf(), tex::fingerprint(b)))
+    };
+    let mut files = vec![put(&pdf, &r.out.pdf)?];
+    if synctex {
+        let gz = s.synctex_now().ok_or(
+            "no .synctex.gz: this watch keeps no glyph origins (a viewer or --synctex makes them)",
+        )?;
+        let g = PathBuf::from(format!("{}.synctex.gz", pdf.with_extension("").display()));
+        files.push(put(&g, &gz)?);
+    }
+    for (p, h) in &files {
+        ours.insert(p.canonicalize().unwrap_or_else(|_| p.clone()), *h);
+    }
+    Ok(json!({
+        "pdf": pdf.display().to_string(),
+        "synctex": synctex,
+    }))
+}
+
 /// Whether `a` only reads the last build (the viewer's page origins, a
 /// source place's pages, a citation, the transcript): put off while a
 /// change waits to be built.
 fn is_read(a: &Ask) -> bool {
     matches!(
         a,
-        Ask::Origins(_) | Ask::PageOf { .. } | Ask::Cites { .. } | Ask::Transcript
+        Ask::Origins(_)
+            | Ask::PageOf { .. }
+            | Ask::Cites { .. }
+            | Ask::Transcript
+            | Ask::WritePdf { .. }
     )
 }
 
@@ -1179,6 +1237,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         writing,
         t.review_accept_disk,
     );
+    hub.about(serde_json::json!({
+        "engine": job.engine.name,
+        "engine_why": t.engine_why,
+        "out_dir": job.out_dir.display().to_string(),
+        "out_dir_why": t.out_dir_why,
+    }));
     // (the banner: what is built into what, by which engine)
     if !ui.quiet {
         let threads = session::threads(job.threads);
@@ -3052,6 +3116,24 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // gathering or come since, and asked again after it)
                         if is_read(&a) && (again || change_waits(&rx, &mut held)) {
                             held_asks.push(a);
+                            continue;
+                        }
+                        // (`phitex session pdf` of a watch that writes no
+                        // file: the last build's exact PDF and .synctex.gz
+                        // written now, the files known as the watch's own)
+                        if let Ask::WritePdf { to, synctex } = &a {
+                            let n = last.borrow().builds;
+                            let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
+                            let done = write_pdf_now(
+                                &s,
+                                unwritten.borrow_mut().as_mut(),
+                                to.as_deref(),
+                                *synctex,
+                                &root,
+                                &mut mine,
+                            );
+                            drop(mine);
+                            hub.pdf_written(n, done);
                             continue;
                         }
                         if a == Ask::Transcript {

@@ -1387,26 +1387,9 @@ pub fn default_engine(text: &str) -> &'static str {
     }
 }
 
-/// The packages that run only under XeTeX or LuaTeX, and the engine each
-/// asks for (fontspec and unicode-math run under both: XeTeX's is the one
-/// PhiTeX runs). LuaTeX's come first: a document with luacode and fontspec
-/// needs LuaTeX.
-const NATIVE_PACKAGES: [(&str, &str); 14] = [
-    ("luacode", "luatex"),
-    ("luatexja", "luatex"),
-    ("luatexja-fontspec", "luatex"),
-    ("luaotfload", "luatex"),
-    ("luamplib", "luatex"),
-    ("fontspec", "xetex"),
-    ("unicode-math", "xetex"),
-    ("polyglossia", "xetex"),
-    ("xeCJK", "xetex"),
-    ("xltxtra", "xetex"),
-    ("xunicode", "xetex"),
-    ("mathspec", "xetex"),
-    ("xgreek", "xetex"),
-    ("bidi", "xetex"),
-];
+/// The packages that run only under XeTeX or LuaTeX (the engine checks'
+/// help names them too).
+use phitex_live::failure::NATIVE_PACKAGES;
 
 /// The commands that exist only under XeTeX or LuaTeX (fontspec's, in a
 /// file a shared preamble or class loads it for).

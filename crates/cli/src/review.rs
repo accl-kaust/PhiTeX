@@ -197,6 +197,63 @@ impl Default for Store {
     }
 }
 
+/// The project's `.phitex/` made if missing; when it is made in a git
+/// work tree, `.phitex/` is added to that repository's `.git/info/exclude`
+/// (local to this clone, never a committed `.gitignore`) so git leaves it
+/// out. The sentence to say so once, when it was added.
+pub fn make_dir(root: &Path) -> Result<Option<String>, String> {
+    let d = root.join(".phitex");
+    if d.is_dir() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+    Ok(exclude(root))
+}
+
+/// `.phitex/` in the `info/exclude` of the git repository `root` is in;
+/// the sentence saying so, when it was added now.
+fn exclude(root: &Path) -> Option<String> {
+    let o = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ])
+        .current_dir(root)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let path = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
+    let now = std::fs::read_to_string(&path).unwrap_or_default();
+    if now
+        .lines()
+        .any(|l| matches!(l.trim(), ".phitex/" | ".phitex" | "/.phitex/" | "/.phitex"))
+    {
+        return None;
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok()?;
+    }
+    let sep = if now.is_empty() || now.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let line = "# PhiTeX's notes, review baseline and session log (phitex session)\n.phitex/\n";
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{sep}{line}").as_bytes()))
+        .ok()?;
+    Some(format!(
+        "made .phitex/ (notes, review baseline, session log) and added it to {}, so git leaves it out (this clone only)",
+        path.display()
+    ))
+}
+
 impl Store {
     /// The notes file of project `root`.
     pub fn path(root: &Path) -> PathBuf {
@@ -216,8 +273,9 @@ impl Store {
     /// Written whole: beside, then renamed.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         let p = Store::path(root);
-        let dir = p.parent().unwrap_or(root);
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if let Some(said) = make_dir(root)? {
+            eprintln!("phitex: {said}");
+        }
         let tmp = p.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
         std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
@@ -352,6 +410,11 @@ impl Baseline {
                 let p = d.join(name);
                 match text {
                     Some(t) => {
+                        if let Some(root) = d.parent().and_then(Path::parent)
+                            && let Some(said) = make_dir(root)?
+                        {
+                            eprintln!("phitex: {said}");
+                        }
                         if let Some(parent) = p.parent() {
                             std::fs::create_dir_all(parent)
                                 .map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -492,6 +555,9 @@ struct State {
     root: PathBuf,
     main: String,
     viewer: Option<String>,
+    /// What the watch runs and why: `engine`, `engine_why`, `out_dir`,
+    /// `out_dir_why` ([`Hub::about`]), in the status.
+    about: Value,
     started: bool,
     /// The watch ends (its socket closes too, which the CLI sees).
     ended: bool,
@@ -505,6 +571,9 @@ struct State {
     /// The build whose exact PDF was written last.
     written: usize,
     transcript: (usize, String),
+    /// What `session pdf` asked of a watch that writes no file came to,
+    /// with the build it was of (and how many were asked, to tell them).
+    pdf_out: (u64, usize, Option<Result<Value, String>>),
     store: Store,
     /// Every change to notes, reviews, verdicts: what `wait --notes`
     /// waits on (the user's), by sequence.
@@ -618,6 +687,12 @@ impl Hub {
         st.accept_disk = accept_disk;
         st.started = true;
         st.ended = false;
+    }
+
+    /// The engine and the output folder the watch runs, each with how it
+    /// was chosen (`{engine, engine_why, out_dir, out_dir_why}`).
+    pub fn about(&self, v: Value) {
+        lock(&self.st).about = v;
     }
 
     pub fn set_viewer(&self, url: &str) {
@@ -752,6 +827,16 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// `session pdf`'s write (of build `n`) done by the watch.
+    pub fn pdf_written(&self, n: usize, r: Result<Value, String>) {
+        let mut st = lock(&self.st);
+        st.pdf_out.1 = n;
+        st.pdf_out.2 = Some(r);
+        st.pdf_out.0 += 1;
+        drop(st);
+        self.cv.notify_all();
+    }
+
     /// Build `n`'s transcript.
     pub fn transcript(&self, n: usize, text: String) {
         lock(&self.st).transcript = (n, text);
@@ -819,6 +904,7 @@ impl Hub {
             "phitex/session/problems" => Ok(self.problems(p)),
             "phitex/session/rebuild" => self.rebuild(p),
             "phitex/session/log" => self.log(p),
+            "phitex/session/pdf" => self.pdf(p),
             "phitex/session/stop" => {
                 let q = lock(&self.quit).clone();
                 if let Some(q) = q {
@@ -867,6 +953,10 @@ impl Hub {
             "main": st.main,
             "root": st.root.display().to_string(),
             "pid": std::process::id(),
+            "engine": st.about["engine"],
+            "engine_why": st.about["engine_why"],
+            "out_dir": st.about["out_dir"],
+            "out_dir_why": st.about["out_dir_why"],
             "problems": problems,
             "diagnostics_pending": b.is_some_and(|b| b.diags_pending),
             "written": b.is_some_and(|b| st.written >= b.n),
@@ -939,7 +1029,7 @@ impl Hub {
         let mut st = lock(&self.st);
         if pdf && !st.writing {
             return Err(refused(
-                "this watch writes no PDF file (start it with --write, or `phitex config watch-write true`): wait without --pdf",
+                "this watch writes no PDF file (start it with --write, or `phitex config watch-write true`): `phitex session pdf` writes it now",
             ));
         }
         let want = Hub::now_hashes(&st, editors.as_deref());
@@ -1063,6 +1153,88 @@ impl Hub {
             }
             if st.builds.back().is_some_and(|b| b.n > n0) {
                 return Ok(Hub::status_of(&st, st.builds.back(), false));
+            }
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// `session pdf`: the last build's exact PDF and .synctex.gz on disk
+    /// now. A watch that writes them (`--write`) has them written when it
+    /// is idle: waited for, copied to `to` when asked; one that writes
+    /// none is asked to write them now ([`Ask::WritePdf`]).
+    fn pdf(&self, p: &Value) -> Result<Value, Fail> {
+        let to = p["to"].as_str().map(str::to_owned);
+        let synctex = p["synctex"].as_bool().unwrap_or(false);
+        let mut st = lock(&self.st);
+        let Some(n) = st.builds.back().map(|b| b.n) else {
+            return Err(refused("no build yet: `phitex session wait` first"));
+        };
+        let ended = || Fail {
+            status: EXIT_NO_SESSION,
+            message: "the watch ended".into(),
+        };
+        if st.writing {
+            loop {
+                if st.ended {
+                    return Err(ended());
+                }
+                let b = st.builds.back().map_or(n, |b| b.n);
+                if st.written >= b {
+                    break;
+                }
+                st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+            }
+            let b = st.builds.back();
+            let pdf = b
+                .and_then(|b| b.pdf.clone())
+                .ok_or_else(|| refused("the last build wrote no PDF"))?;
+            let n = b.map_or(n, |b| b.n);
+            let root = st.root.clone();
+            drop(st);
+            let pdf = root.join(pdf);
+            // (the watch writes its .synctex.gz beside, at idle: said, and
+            // copied with the PDF, only when asked)
+            let gz = PathBuf::from(format!("{}.synctex.gz", pdf.with_extension("").display()));
+            if synctex && !gz.exists() {
+                return Err(refused(
+                    "no .synctex.gz beside the PDF (`phitex config synctex on`)",
+                ));
+            }
+            let pdf = match to {
+                None => pdf,
+                Some(t) => {
+                    let t = root.join(t);
+                    std::fs::copy(&pdf, &t)
+                        .map_err(|e| refused(format!("{}: {e}", t.display())))?;
+                    if synctex {
+                        let tg =
+                            PathBuf::from(format!("{}.synctex.gz", t.with_extension("").display()));
+                        std::fs::copy(&gz, &tg)
+                            .map_err(|e| refused(format!("{}: {e}", tg.display())))?;
+                    }
+                    t
+                }
+            };
+            return Ok(json!({"build": n, "pdf": pdf.display().to_string(), "synctex": synctex}));
+        }
+        let asked = st.pdf_out.0;
+        drop(st);
+        self.ask_watch(Ask::WritePdf { to, synctex });
+        let mut st = lock(&self.st);
+        loop {
+            if st.ended {
+                return Err(ended());
+            }
+            if st.pdf_out.0 > asked {
+                let n = st.pdf_out.1;
+                return match st.pdf_out.2.clone() {
+                    Some(Ok(mut v)) => {
+                        v["build"] = json!(n);
+                        Ok(v)
+                    }
+                    Some(Err(e)) => Err(refused(e)),
+                    None => Err(refused("nothing written")),
+                };
             }
             st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
         }
@@ -1465,6 +1637,9 @@ impl Hub {
                 let p = st.root.join(&f);
                 if gone {
                     // (a new file rejected: kept aside, never deleted)
+                    if let Ok(Some(said)) = make_dir(&st.root) {
+                        eprintln!("phitex: {said}");
+                    }
                     let aside = st.root.join(".phitex").join("rejected").join(&f);
                     if let Some(d) = aside.parent() {
                         let _ = std::fs::create_dir_all(d);
@@ -2564,6 +2739,40 @@ mod tests {
                 .filter(|x| x["new"] == "shown")
                 .all(|x| x["comments"].as_array().unwrap().is_empty())
         );
+    }
+
+    #[test]
+    fn the_folder_made_in_a_git_clone_is_excluded_there_once() {
+        let d = project(&[]);
+        let run = |a: &[&str]| {
+            std::process::Command::new("git")
+                .args(a)
+                .current_dir(&d)
+                .output()
+                .expect("git runs")
+        };
+        run(&["init", "-q"]);
+        let said = make_dir(&d).expect("made");
+        assert!(
+            said.as_deref().is_some_and(|s| s.contains("info/exclude")),
+            "{said:?}"
+        );
+        let ex = std::fs::read_to_string(d.join(".git/info/exclude")).expect("the exclude file");
+        assert_eq!(ex.matches(".phitex/").count(), 1, "{ex}");
+        std::fs::remove_dir_all(d.join(".phitex")).expect("removed");
+        assert_eq!(make_dir(&d).expect("made again"), None);
+        let ex = std::fs::read_to_string(d.join(".git/info/exclude")).expect("the exclude file");
+        assert_eq!(ex.matches(".phitex/").count(), 1, "{ex}");
+        std::fs::write(d.join("a.tex"), "x").expect("a file");
+        let st = String::from_utf8_lossy(
+            &run(&["status", "--porcelain", "--untracked-files=all"]).stdout,
+        )
+        .into_owned();
+        assert!(!st.contains(".phitex"), "{st}");
+        // (outside git: made, nothing said)
+        let plain = project(&[]);
+        assert_eq!(make_dir(&plain).expect("made"), None);
+        assert!(plain.join(".phitex").is_dir());
     }
 
     #[test]

@@ -3262,7 +3262,7 @@ fn lualatex_refused() {
         (
             &["build", "c.tex"][..],
             "c.pdf",
-            "needs lualatex (it loads luacode)",
+            "needs LuaLaTeX (it loads luacode), which PhiTeX does not support yet",
         ),
     ] {
         let out = command(bin, &dir).args(args).output().expect("phitex runs");

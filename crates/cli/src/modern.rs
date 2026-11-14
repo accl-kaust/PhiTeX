@@ -39,11 +39,23 @@ browser; each PDF is the one a clean build makes. PhiTeX never stops to
 ask for input, and never runs an external TeX, BibTeX or \\write18
 command.
 
+The engine is picked from the document: pdflatex, or xelatex when it
+loads fontspec, unicode-math or polyglossia (a `% !TEX program = …`
+comment, --engine or phitex.toml's `engine` names one instead); each
+build says which. LuaLaTeX is not supported yet.
+
 Exit status: 0 done (warnings allowed); 1 the document has errors (as
 pdflatex's 1); 2 PhiTeX could not start: a usage error, a wrong setting,
 a file not found, no TeX Live; 3 PhiTeX failed: the engine stopped, a
 file could not be written, the network (upgrade, Shelf). Standard error
 says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
+
+/// `phitex session --help`'s last lines: which watch, and the engine.
+const SESSION_AFTER_HELP: &str = "\
+Any running `phitex watch` is one, also one started in your own terminal: the one whose folder
+holds the current directory (a sandboxed agent needs the sessions folder visible and the host's
+127.0.0.1; it is told which is missing). `start` and `status` say the engine and the output folder
+and why; the engine is picked from the document (xelatex for fontspec), LuaLaTeX not supported yet.";
 
 /// `--help`'s last lines: where the settings are, and `--help-all`.
 fn short_after_help() -> String {
@@ -51,6 +63,7 @@ fn short_after_help() -> String {
     format!(
         "Settings: phitex.toml (the project's), ~/.config/phitex/phitex.toml (yours; PHITEX_CONFIG: another file):
   {l}phitex config KEY VALUE{l:#}, e.g. {l}phitex config update-check on{l:#}; {l}phitex config --init{l:#} writes one with every setting
+Engine: picked from the document (xelatex for fontspec), or {l}--engine NAME{l:#}; LuaLaTeX not supported yet
 Every option: {l}phitex --help-all{l:#} · https://phitex.org"
     )
 }
@@ -187,12 +200,27 @@ enum Sub {
     /// as they are, `notes` and `changes` are the viewer's notes and your
     /// edits under review. Exit status: 0 done, 1 TeX errors, 2 timed
     /// out, 3 no running watch, 4 refused.
+    ///
+    /// The verbs work on any running `phitex watch`, also one started in
+    /// your own terminal: the watch whose folder holds the current
+    /// directory (--session PID: that one). Each watch says itself in the
+    /// sessions folder ($XDG_RUNTIME_DIR/phitex, else the cache's
+    /// sessions/) and serves 127.0.0.1; an agent in a sandbox needs that
+    /// folder visible (read-only will do) and the host's 127.0.0.1, and is
+    /// told which is missing.
+    ///
+    /// `start` and `status` say the engine and the output folder and how
+    /// each was chosen; the engine is picked from the document (xelatex
+    /// for fontspec), LuaLaTeX not supported yet.
+    #[command(after_help = SESSION_AFTER_HELP)]
     Session {
         #[command(subcommand)]
         verb: crate::session_cmd::Verb,
-        /// The watch to use, by its pid (default: the one running here)
-        #[arg(long, value_name = "PID", global = true)]
-        session: Option<u32>,
+        /// The watch to use: its pid, or its viewer's URL (from a sandbox
+        /// that cannot see the sessions folder); PHITEX_SESSION the same
+        /// (default: the one running here)
+        #[arg(long, value_name = "PID|URL", global = true)]
+        session: Option<String>,
     },
     /// What is new in this version
     News,
@@ -448,7 +476,7 @@ pub enum Command {
 pub struct Options {
     pub command: Option<Command>,
     /// `phitex session`'s verb and `--session PID`.
-    pub session: Option<(crate::session_cmd::Verb, Option<u32>)>,
+    pub session: Option<(crate::session_cmd::Verb, Option<String>)>,
     pub file: Option<String>,
     pub engine: Option<String>,
     pub output: Option<Output>,
@@ -672,7 +700,13 @@ pub struct Target {
     /// runs in).
     pub file: String,
     pub engine: tex::Engine,
+    /// How the engine was chosen: "named by --engine", "picked: the
+    /// document loads fontspec", "the default for a LaTeX document".
+    pub engine_why: String,
     pub output_dir: Option<String>,
+    /// Where `output_dir` came from (-o, a .latexmkrc, phitex.toml, the
+    /// default).
+    pub out_dir_why: String,
     /// Where to copy the PDF after a successful build.
     pub copy_pdf: Option<PathBuf>,
     pub synctex: bool,
@@ -924,7 +958,9 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             )
         }))
         .or(program.map(|e| (e, format!("{file}'s % !TEX program"))));
+    let engine_why;
     let mut engine = if let Some((e, at)) = named {
+        engine_why = format!("named by {at}");
         tex::engine(&e).map_err(|err| format!("{err} (from {at})"))?
     } else {
         // (the main file, the files it inputs by name, and the classes and
@@ -956,22 +992,50 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             .iter()
             .any(|t| config::default_engine(t) == "pdflatex");
         let native = texts.iter().find_map(|t| config::native_engine(t));
-        match native {
-            Some((n, why)) => {
-                let e = config::native_program(n, latex);
-                tex::engine(e).map_err(|err| {
-                    format!(
-                        "{file} needs {e} (it {why}): {err}; if it runs under pdflatex too, \
-                         name that engine (--engine pdflatex, or `% !TEX program = pdflatex`)"
-                    )
-                })?
+        if let Some((n, why)) = native {
+            let e = config::native_program(n, latex);
+            engine_why = format!("picked: the document {why}");
+            if n == "luatex" {
+                return Err(format!(
+                    "{file} needs {} (it {why}), which PhiTeX does not support yet: it runs \
+                         pdflatex and xelatex (and latex, pdftex, xetex, etex, tex); if the document \
+                         runs under one of those too, name it (--engine xelatex, or `% !TEX program = xelatex`)",
+                    if latex { "LuaLaTeX" } else { "LuaTeX" }
+                ));
             }
-            None => tex::engine(if latex { "pdflatex" } else { "pdftex" })?,
+            tex::engine(e).map_err(|err| {
+                format!(
+                    "{file} needs {e} (it {why}): {err}; if it runs under pdflatex too, \
+                         name that engine (--engine pdflatex, or `% !TEX program = pdflatex`)"
+                )
+            })?
+        } else {
+            engine_why = if latex {
+                "the default for a LaTeX document".to_owned()
+            } else {
+                "the default for a plain TeX document".to_owned()
+            };
+            tex::engine(if latex { "pdflatex" } else { "pdftex" })?
         }
     };
     if let Some(out) = o.output {
         engine = engine.with_output(out)?;
     }
+    let out_dir_why = if o.output_dir.is_some() {
+        "-o".to_owned()
+    } else if rc_out_dir.is_some() {
+        applied
+            .as_ref()
+            .and_then(|a| a.out_dir.as_ref())
+            .map_or_else(
+                || "a .latexmkrc's $out_dir".to_owned(),
+                |(_, at)| format!("$out_dir in {at}"),
+            )
+    } else if cfg.output_dir.is_some() {
+        "output-dir in phitex.toml".to_owned()
+    } else {
+        "the default: beside the main file".to_owned()
+    };
     let mut output_dir = o.output_dir.clone().or(rc_out_dir).or(cfg.output_dir);
     if !configured
         && let Some(dir) = Path::new(&file)
@@ -1005,7 +1069,9 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     Ok(Target {
         file,
         engine,
+        engine_why,
         output_dir,
+        out_dir_why,
         copy_pdf,
         // (off unless asked for: the pages' glyph origins it is made
         // from cost the build a little)
@@ -1584,7 +1650,7 @@ pub fn main(args: &[String]) -> ! {
     if command == Command::Session
         && let Some((verb, pid)) = &o.session
     {
-        std::process::exit(crate::session_cmd::main(verb, *pid, o.json, &ui));
+        std::process::exit(crate::session_cmd::main(verb, pid.as_deref(), o.json, &ui));
     }
     if command == Command::Config {
         if let Some(w) = &o.init {
