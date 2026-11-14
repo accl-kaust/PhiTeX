@@ -3929,6 +3929,7 @@ impl Graph {
             return false;
         }
         let new = by_field(self.marks.entries(self.eng.values()));
+        crate::timeline::lap("env: the comments' entries");
         let cs = env_changes(&self.marks_pushed, &new, true).unwrap_or_default();
         if !cs.is_empty() {
             self.eng.update_environment(&cs);
@@ -7100,13 +7101,16 @@ impl Build {
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
         stats.relations = self.relations_now();
+        crate::timeline::lap("engine: the relations counted");
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
         }
         self.dump_claims();
         self.dump_readers();
+        crate::timeline::lap("engine: the edit's phases noted");
         self.tell_settled_pages();
+        crate::timeline::lap("engine: the pages settled told");
         // (a debug or observe build stops on a defect of the settled
         // line, not on a run's it does not keep: `Run::order_after_pages`)
         if cfg!(any(debug_assertions, feature = "observe"))

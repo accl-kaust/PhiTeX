@@ -1842,6 +1842,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             // (the review's record of it: what it read, its problems; a
             // `wait` answered by it, the notes moved)
             let w = s.watched();
+            phitex_tex::timeline::lap("watch: the files the build read");
             let found: HashSet<String> = w
                 .paths
                 .iter()

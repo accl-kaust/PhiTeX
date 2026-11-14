@@ -1232,10 +1232,12 @@ impl Session {
                 *last = from;
                 same
             };
+            phitex_tex::timeline::lap("session: the written files' source");
             if !same {
                 self.store_wkeys(b);
                 self.store_wnames(b);
             }
+            phitex_tex::timeline::lap("session: written keys and names stored");
             // (what the tools made follows their other inputs too, a
             // `.bib`: stored whether or not the written files changed)
             self.store_made(b);
@@ -1898,6 +1900,7 @@ impl Session {
         // (made from the same values as last stored: the same bytes, none
         // made or compared: Grail's .bbl, 0.4 ms an edit)
         let from = b.made_source();
+        phitex_tex::timeline::lap("session: the made files' source");
         let mut last = self
             .made_stored
             .lock()
