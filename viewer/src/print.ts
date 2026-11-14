@@ -305,8 +305,19 @@ header:active { cursor: grabbing; }
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 /* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
 .peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: default; font: var(--ph-size)/1.4 var(--ph-font); }
-.peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
-.peek .pv canvas { display: block; }
+.peek .pv { position: relative; height: 250px; overflow: auto; overscroll-behavior: contain; background: #fff; touch-action: pan-x pan-y; }
+.peek .pv canvas { display: block; position: absolute; left: 0; top: 0; }
+.peek .pv .pz { pointer-events: none; }
+.peek.zoomed .pv { cursor: grab; }
+.peek.zoomed .pv.grabbing { cursor: grabbing; }
+.peek .pf .zm { display: inline-flex; align-items: center; gap: 1px; margin-left: auto; }
+.peek .pf .zm button { all: unset; cursor: pointer; display: inline-grid; place-items: center; min-width: 20px; height: 20px; border-radius: var(--ph-radius); color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.peek .pf .zm button svg { width: 14px; height: 14px; }
+.peek .pf .zm .zl { min-width: 38px; font-size: 11.5px; }
+.peek .pf .zm button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg); }
+.peek .pf .zm button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.peek.cite .pf .zm, .peek.url .pf .zm, .peek.wait .pf .zm { display: none; }
+.peek .pf .zm + .go { margin-left: 4px; }
 .peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
 .peek.wait .pv canvas, .peek.wait .pv .at { visibility: hidden; }
 .peek .pu { display: none; padding: 8px 10px 0; word-break: break-all; color: var(--ph-link, var(--ph-accent)); }

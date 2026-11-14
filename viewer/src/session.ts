@@ -63,7 +63,7 @@ export type CoreReq =
   | { op: "open"; main: string; files: Record<string, string>; fuel: number; engine?: Engine; workers?: 1; latexmk?: { files: Record<string, string>; exact: boolean }; projectFiles?: string[] }
   | { op: "edit"; file: string; start: number; end: number; text: string; page: number; dpi: number }
   | { op: "set_file"; file: string; text: string }
-  | { op: "png"; page: number; dpi: number }
+  | { op: "png"; page: number; dpi: number; scale?: number; view?: [number, number, number, number] }
   | { op: "pdf" }
   | { op: "status" }
   | { op: "log" }
@@ -234,6 +234,8 @@ export interface PreviewSink {
   outline?(items: Entry[]): void;
   /** The session's citation lookup, given once (the `cites` op: the citation under a point of page `k`, in the origins' points; null: none, or no answer). */
   citesBy?(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void;
+  /** The session's drawing of part of a page at a zoom of its own, given once: a link's window zoomed in (the `png` op at `scale` pixels a point, around `view`, fractions of the page). */
+  zoomBy?(ask: (k: number, scale: number, view: [number, number, number, number]) => Promise<PageImage | null>): void;
   /** A streamed open: the pages shipped so far (null: it ended). */
   streaming?(s: { pages: number; phase: string } | null): void;
   /** A repaint is on screen, `ms` after the keystroke that made it. */
@@ -546,6 +548,7 @@ export class PreviewSession {
     };
     this.sink = sink;
     sink.citesBy?.((k, x, y) => this.cites(k, x, y));
+    sink.zoomBy?.((k, scale, view) => this.zoomed(k, scale, view));
     this.o = { ...defaults, ...opts };
     host.onOpen((f0, t) => {
       const f = this.known(f0);
@@ -1013,6 +1016,13 @@ export class PreviewSession {
     const img = image(r);
     // (the hash of the page drawn: the draw worker's PDF may be a build behind or ahead)
     if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
+  }
+
+  /** Part of page `k` (`view`, fractions of it) at `scale` pixels a point, for a link's window zoomed in: not the pages' drawing, which stays as it is. */
+  async zoomed(k: number, scale: number, view: [number, number, number, number]): Promise<PageImage | null> {
+    if (!this.opened) return null;
+    const r = await this.core.request({ op: "png", page: k, dpi: this.dpi(), scale, view }).catch(() => null);
+    return r?.ok ? image(r) : null;
   }
 
   async showPage(): Promise<void> {

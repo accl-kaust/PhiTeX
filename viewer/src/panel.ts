@@ -749,7 +749,7 @@ export class Panel {
       }
     });
     // (a zoom gesture over the opening's whole page: the zoom it starts from made the user's, the sheet's ease stopped first)
-    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && this.ownZoom(), { capture: true, passive: true });
+    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && !(e.target as Element).closest?.(".peek") && this.ownZoom(), { capture: true, passive: true });
     this.drag();
     this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
       need: (k) => ev.onNeed?.(k),
@@ -769,6 +769,8 @@ export class Panel {
       cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
       // (the engine's reading of a citation: the session's, given by it (citesBy); none yet, the pages')
       cites: (k, x, y) => this.citesAsk?.(k, x, y) ?? Promise.resolve(null),
+      // (a link's window zoomed in: the session's drawing of that part, sharp (zoomBy); none, the pages' bitmaps enlarged)
+      zoomed: (k, scale, view) => this.zoomAsk?.(k, scale, view) ?? Promise.resolve(null),
       openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt!(k, top) : undefined,
       // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
       // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
@@ -2082,6 +2084,12 @@ export class Panel {
   private citesAsk?: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>;
   citesBy(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void {
     this.citesAsk = ask;
+  }
+
+  /** The session's drawing of part of a page at a zoom of its own (PreviewSink.zoomBy), for a link's window zoomed in. */
+  private zoomAsk?: (k: number, scale: number, view: [number, number, number, number]) => Promise<PageImage | null>;
+  zoomBy(ask: (k: number, scale: number, view: [number, number, number, number]) => Promise<PageImage | null>): void {
+    this.zoomAsk = ask;
   }
 
   outline(items: Entry[]): void {

@@ -245,11 +245,13 @@ class Pages implements CoreTransport {
   }
 
   async request(op: object): Promise<CoreRes> {
-    const o = op as { op: string; page?: number };
+    const o = op as { op: string; page?: number; scale?: number; view?: [number, number, number, number] };
     if (o.op === "png") {
-      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
+      // (a link's window zoomed in: its own scale and part of the page, not the pages' zoom, and no repaint to time)
+      const zoom = typeof o.scale === "number" && o.scale > 0;
+      const p = await strips.page(o.page ?? 0, zoom ? o.scale! : panel.pixelsPerPoint(), zoom ? (o.view ?? null) : panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
-      this.painted();
+      if (!zoom) this.painted();
       return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links, ...(p.hash !== undefined && p.hash !== null ? { json: { hash: p.hash } } : {}) };
     }
     return this.sock.request(op);

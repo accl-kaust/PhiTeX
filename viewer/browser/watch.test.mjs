@@ -473,3 +473,70 @@ test("a double-click starts only the user's editor; a project's phitex.toml runs
   assert.match(p.out, /`editor` in a project's phitex\.toml is ignored/);
   assert.equal((await run(false, true)).ran, true, "the user's editor did not run");
 });
+
+test("a link's window zooms: Ctrl+wheel and a trackpad's pinch at the pointer, two fingers, its magnifiers; pinned, it keeps its place and zoom, dragged to pan (peek zoom)", async () => {
+  const fig = "\\begin{figure}[t]\\centering\\fbox{\\parbox{0.8\\linewidth}{\\tiny tiny figure text \\par\\rule{2cm}{1cm}}}\\caption{A figure}\\label{f}\\end{figure}";
+  const { w, t } = await open({ "main.tex": doc(`${fig}\n\nSee Figure~\\ref{f}. ${"Words around it. ".repeat(40)}`, "\\usepackage{hyperref}") });
+  await waitBuild(w, 1);
+  // (the reference's number, hovered: its window)
+  const at = await t.until(`(() => { for (const e of $$(".phx-text text")) { const s = e.textContent, i = s.indexOf("See Figure 1"); if (i < 0) continue; const x = e.getExtentOfChar(i + 11), p = new DOMPoint(x.x + x.width / 2, x.y + x.height / 2).matrixTransform(e.getScreenCTM()); return [p.x, p.y]; } return null; })()`, "the reference on the page");
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at[0], y: at[1] });
+  await t.until(`$(".peek:not([hidden]) .zl")?.textContent === "100%" && !$(".peek").classList.contains("wait")`, "the link's window, drawn, at 100%");
+  const peek = (sel = ".peek:not([hidden])") =>
+    t.q(`(() => { const el = $(${JSON.stringify(sel)}), pv = el.querySelector(".pv"), c = pv.querySelector("canvas"), v = pv.getBoundingClientRect(); const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let ink = 0; for (let i = 0; i < d.length; i += 16) if (d[i] + d[i + 1] + d[i + 2] < 450) ink++; return { z: el.querySelector(".zl").textContent, pv: [v.x, v.y, v.width, v.height], scroll: [pv.scrollLeft, pv.scrollTop], canvas: [parseFloat(c.style.left), parseFloat(c.style.top)], ink, vv: visualViewport.scale, pages: $("#viewer")?.style.cssText ?? "" }; })()`);
+  let s = await peek();
+  const pages = s.pages;
+  assert.ok(s.ink > 20, "the window drawn");
+  // (a mouse's notch with Ctrl: the window by a step of 25%, not the browser's page, not the pages)
+  const wheel = (dy, x, y) => t.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: dy, modifiers: 2 });
+  await wheel(-100, s.pv[0] + s.pv[2] / 2, s.pv[1] + s.pv[3] / 2);
+  await sleep(150);
+  s = await peek();
+  assert.equal(s.z, "125%");
+  assert.equal(s.vv, 1, "the browser's page not zoomed");
+  assert.equal(s.pages, pages, "the pages' zoom not changed");
+  // (pinned: where it was scrolled, drawn (a moved element loses its scroll: it was blank))
+  const before = s.scroll;
+  await t.click(".peek:not([hidden]) [data-pin]");
+  await t.until(`!!$(".peek.pinned")`, "the pinned window");
+  await sleep(200);
+  s = await peek(".peek.pinned");
+  assert.deepEqual(s.scroll, before, "pinned, its scroll kept");
+  assert.ok(s.ink > 20, `pinned, drawn (${s.ink})`);
+  assert.deepEqual(s.canvas, s.scroll, "its canvas over the part in view");
+  // (a trackpad's pinch: small pixel deltas with Ctrl, in proportion)
+  for (let i = 0; i < 20; i++) await wheel(-6, s.pv[0] + 40, s.pv[1] + 40);
+  await sleep(100);
+  s = await peek(".peek.pinned");
+  assert.ok(Math.abs(parseInt(s.z) - 125 * Math.exp(1.2)) < 6, `pinched to ${s.z}`);
+  // (the magnifiers: a step of 25% in and out; the level between them back to 100%; never below it)
+  await t.click(".peek.pinned [data-zoom='0']");
+  assert.equal((await peek(".peek.pinned")).z, "100%");
+  await t.click(".peek.pinned [data-zoom='1']");
+  await t.click(".peek.pinned [data-zoom='1']");
+  assert.equal((await peek(".peek.pinned")).z, "156%");
+  await t.click(".peek.pinned [data-zoom='-1']");
+  assert.equal((await peek(".peek.pinned")).z, "125%");
+  for (let i = 0; i < 6; i++) await t.click(".peek.pinned [data-zoom='-1']");
+  assert.equal((await peek(".peek.pinned")).z, "100%", "never below 100%");
+  // (two fingers spread on a touch screen: their distance's ratio)
+  s = await peek(".peek.pinned");
+  const [mx, my] = [s.pv[0] + s.pv[2] / 2, s.pv[1] + s.pv[3] / 2];
+  const two = (d) => [{ x: mx - d, y: my, id: 1 }, { x: mx + d, y: my, id: 2 }];
+  await t.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: two(20) });
+  for (let d = 24; d <= 60; d += 4) await t.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: two(d) });
+  await t.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await sleep(150);
+  s = await peek(".peek.pinned");
+  assert.ok(Math.abs(parseInt(s.z) - 300) <= 10, `two fingers 40 to 120 px apart: ${s.z}`);
+  assert.equal(s.vv, 1, "the browser's page not zoomed");
+  // (zoomed, a drag pans it)
+  const s0 = s.scroll;
+  await t.drag(mx, my, mx + 60, my + 40);
+  await sleep(150);
+  s = await peek(".peek.pinned");
+  assert.deepEqual([Math.round(s0[0] - s.scroll[0]), Math.round(s0[1] - s.scroll[1])], [60, 40], "dragged 60, 40: panned as much");
+  assert.ok(s.ink > 20, "drawn where it panned to");
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});
