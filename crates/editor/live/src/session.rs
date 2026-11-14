@@ -774,7 +774,7 @@ impl Session {
         let stale: Vec<String> = self
             .inputs
             .iter()
-            .filter(|(n, found, p)| {
+            .filter(|(n, found, p, _)| {
                 let (stale, why) = match (found, p) {
                     (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
                         (Some(a), Some(_)) if a.is_empty() => (true, "read under two keys"),
@@ -2286,7 +2286,7 @@ impl Session {
                     || self
                         .inputs
                         .iter()
-                        .any(|(i, found, _)| !found && plain_name(i) == plain_name(n));
+                        .any(|(i, found, ..)| !found && plain_name(i) == plain_name(n));
                 if kept
                     && self
                         .host
