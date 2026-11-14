@@ -2677,6 +2677,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         pool.shared.done_one();
         return Ok(());
     }
+    eprintln!("DBG work {} on w{}", node.id.raw(), w.ix);
     release_yielders(eng, w, node);
     // (a quiet point let it go: nothing it waited for will come first)
     let quiet = node.held.swap(false, Ordering::AcqRel);
