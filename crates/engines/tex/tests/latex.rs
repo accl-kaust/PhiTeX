@@ -1696,6 +1696,65 @@ fn latexmk_cold(name: &str, threads: usize) {
     );
 }
 
+/// The biber document edited (a citation taken out, then put back, then
+/// another taken out) as a watch edits it, each round's `.bbl` written
+/// and read back: each edit's PDF the PDF a cold build of its text makes.
+/// A written file's units are cut again from its last cut where the
+/// text changed (`ops::units_again`): the cuts decide how it is read
+/// back in pieces, never what is read.
+#[test]
+fn biber_edits_equal_cold_builds() {
+    let fx = common::fixtures().join("latexmk");
+    let src_dir = fx.join("biber");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join("biber-edits");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for e in std::fs::read_dir(&src_dir).expect("the sources").flatten() {
+        std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
+    }
+    let src = common::read(&dir.join("biber.tex"));
+    let opts = |threads: usize| Options {
+        fixpoint: true,
+        threads: Some(threads),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("biber", &dir)
+    };
+    let two = "described by Lamport~\\cite{lamport94}, ";
+    assert!(src.contains("~\\cite{mittelbach04}") && src.contains(two));
+    let texts = [
+        src.replace("~\\cite{mittelbach04}", ""),
+        src.clone(),
+        src.replace(two, "described by Lamport, "),
+        src.replace("~\\cite{mittelbach04}", "")
+            .replace(two, "described by Lamport, "),
+        src.clone(),
+    ];
+    for threads in [1, 8] {
+        let mut b = common::build(opts(threads), Some(&prelude(true)), &src);
+        let mut failed = Vec::new();
+        for (k, t) in texts.iter().enumerate() {
+            b.edit(t);
+            let cold = common::build(opts(threads), Some(&prelude(true)), t);
+            if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+                failed.push(format!("edit {k}: {d}"));
+            }
+        }
+        assert!(failed.is_empty(), "-j{threads}: {failed:?}");
+    }
+}
+
+/// The biber document built twice in one process, one build after the
+/// other: each as `latexmk -pdf` makes it. A written file's last cut was
+/// kept by its name for the process (`ops::unit_ends`), and the second
+/// build's `.bbl` was cut from the first's last text.
+#[test]
+fn latexmk_biber_twice_in_one_process() {
+    latexmk_cold("biber", 1);
+    latexmk_cold("biber", 1);
+}
+
 macro_rules! latexmk_tests {
     ($($test:ident: $name:literal, $j:literal;)*) => {
         $(
