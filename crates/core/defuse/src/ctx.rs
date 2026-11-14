@@ -2537,7 +2537,7 @@ impl<'a> Ctx<'a> {
                 e.insert(self.placed_child_output(i));
             }
         }
-        let moved = self.product.reads.iter().any(|rd| {
+        let moved = self.product.reads.iter().position(|rd| {
             if matches!(rd.kind(), ReadKind::Following { .. }) {
                 return false;
             }
@@ -2569,8 +2569,20 @@ impl<'a> Ctx<'a> {
             }
             !crate::read::holds(self.eng, self.me, rd, &mut memo)
         });
-        if !moved {
+        let Some(at) = moved else {
             return Ok(());
+        };
+        // (`PHITEX_RUN_LOG`, profile: which read stopped the run)
+        if crate::sched::run_log() {
+            let rd = &self.product.reads[at];
+            eprintln!(
+                "recheck: node {} read {at} of {} moved: {}",
+                self.me.id.raw(),
+                self.product.reads.len(),
+                rd.kind()
+                    .field()
+                    .map_or_else(|| format!("{:?}", rd.kind()), |f| self.values().render(f.0))
+            );
         }
         match wake {
             Some(wake) => {
