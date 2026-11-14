@@ -93,6 +93,14 @@ pub(crate) struct Node {
     /// reads was still to run (`commit::ask_placer`): asked once the last
     /// of them commits, so it takes all their outputs in one run.
     pub(crate) owed_ask: AtomicBool,
+    /// Its commits as a sequence a placer looks at (`Ctx::placed_keys_built`,
+    /// the check of a placement waited for in `commit::commit`): odd from
+    /// the publication of a commit's record, before the commit reads its
+    /// parent's record, to the end of that run (`sched`'s `end_run`, its
+    /// state left `Running`), even otherwise. One that had not moved past
+    /// a placer's look by the time the placer published its record makes
+    /// its next commit read that record.
+    pub(crate) commit_seq: AtomicU32,
     /// Its wake is more than one: a re-ask came while it was queued (or a
     /// re-ask kept for a run's check while one was) and only one cause is
     /// told ([`crate::sched`]'s `merge_woke`, `note_stale`). The next run
@@ -416,6 +424,7 @@ impl Node {
             filed_floor: AtomicU32::new(0),
             asked: AtomicBool::new(false),
             owed_ask: AtomicBool::new(false),
+            commit_seq: AtomicU32::new(0),
             woke_merged: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
@@ -978,6 +987,11 @@ pub(crate) struct Product {
     /// `Ctx::placed_output_wait`: the placements whose next commit
     /// re-asks the run, whatever their output.
     pub(crate) waits: Vec<usize>,
+    /// The placements' [`Node::commit_seq`] at the run's first look at
+    /// them (`Ctx::placed_keys_built`): a placement waited for whose sequence
+    /// has moved since may have committed on this node's record before
+    /// this run's, and its guess is checked at the commit.
+    pub(crate) looked: crate::FxHashMap<NodeId, u32>,
     /// `Ctx::set_frontier`: the settling layer's frontier this run moves
     /// (`Some(None)`: none, every reader free).
     pub(crate) frontier: Option<Option<NodeId>>,

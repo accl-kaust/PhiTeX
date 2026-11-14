@@ -3080,6 +3080,7 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             // (removed meanwhile; nothing else leaves a run's states)
             State::Gone | State::Inert | State::Clean | State::Dirty => {
                 node.committing.store(false, Ordering::Release);
+                crate::commit::seq_end(node);
                 pool.shared.done_one();
                 return false;
             }
@@ -3088,6 +3089,11 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             continue;
         }
         node.committing.store(false, Ordering::Release);
+        // (a commit's run over, its state left `Running`: a placer's look
+        // from here reads the state that commit left; before it is queued
+        // again, so a next run's commit starts its own sequence,
+        // `commit::waited_holds`)
+        crate::commit::seq_end(node);
         // (an edited node committed, or taken: what it defines is known now.
         // Not at its commit's start: a reader let go then ran before the
         // commit's definitions were filed and again after, block_heads at

@@ -2099,6 +2099,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             &mut placed,
         );
         let old = node.last.lock().replace(rec.clone());
+        // (its record published: a placer that looked at it before this
+        // sees the sequence moved, or this commit's read of the placer's
+        // record below comes after the placer's, `waited_holds`)
+        seq_begin(node);
         if old.as_ref().is_some_and(|o| o.reads.len() > 0) {
             inner.replaced = inner.replaced.saturating_add(1);
         }
@@ -2565,8 +2569,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // this run again, `wake_waiting`; checked here against the output the
     // child had made before, the run was asked again at once and took that
     // stale output, then again once the child had run: lie-hasse's piece
-    // of diagrams, 30 s a run, twice per picture moved)
-    let waited: Vec<usize> = node.run_record().map(|r| r.waits.to_vec()).unwrap_or_default();
+    // of diagrams, 30 s a run, twice per picture moved. Not checked only
+    // where that commit is still to come, `waited_holds`: one that came
+    // during the run read this node's record before this one's, and its
+    // re-ask, if any, asked a running node only to check its reads, so
+    // skipped here the run stood on its guess (pgf-umlcd-manual, a
+    // picture empty under its \resizebox, about 1 build in 75 at -j4 on 4
+    // CPUs))
+    let waited: Vec<(usize, NodeId)> = node
+        .run_record()
+        .map(|r| r.waits.iter().filter_map(|&j| Some((j, *r.placed.get(j)?))).collect())
+        .unwrap_or_default();
     let refuted = refuted.or_else(|| {
         let mut memo = read::FoldMemo::new();
         // (siblings read in turn, checked in one pass)
@@ -2574,7 +2587,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         unchecked.into_iter().find(|&i| {
             let r = &reads[i];
             if let ReadKind::Placed { i: j, guess: true } = *r.kind()
-                && waited.contains(&j)
+                && waited
+                    .iter()
+                    .any(|&(k, c)| k == j && waited_holds(eng, c, p.looked.get(&c).copied()))
             {
                 return false;
             }
@@ -2929,6 +2944,10 @@ pub(crate) fn commit_stood(
         take_stops(&mut inner, node.id)
     };
     let mut st = CommitStats::default();
+    // (it stands, its record the last: a placer's look before this sees
+    // the sequence moved, or this commit's read of its record below
+    // comes after the placer's, `waited_holds`)
+    seq_begin(node);
     crate::sched::clear_front(eng, node);
     reask_stops(eng, ww, stops, node.id, &mut st);
     // (the fields a commit before it left unwalked: this run stands on
@@ -3240,6 +3259,62 @@ fn wake_waiting(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
     }
 }
 
+/// Marks the start of `node`'s commit for its placer's check: odd from
+/// here (its record published, before its parent's record is read) to the
+/// end of the run (`seq_end`). Once a run: a stand that falls back to a
+/// full commit marks it once.
+pub(crate) fn seq_begin(node: &Node) {
+    if node.commit_seq.load(Ordering::SeqCst) & 1 == 0 {
+        node.commit_seq.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Marks the end of a committed run of `node`, its state left `Running`
+/// (`sched`'s `end_run`): even again.
+pub(crate) fn seq_end(node: &Node) {
+    if node.commit_seq.load(Ordering::SeqCst) & 1 == 1 {
+        node.commit_seq.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a commit's guess of placement `child`, a node its run waits
+/// for (`Ctx::placed_output_wait`), may stand unchecked: the child's next
+/// commit is sure to re-ask the placer, `wake_waiting` reading the record
+/// this commit has published (`looked`: the child's
+/// [`Node::commit_seq`] at the run's first look at it, `Ctx`'s
+/// `placed_keys_built`). Called after that record's publication under
+/// the placer's `last` lock.
+///
+/// The child's commit, C, publishes its record (`last` lock), then
+/// `seq_begin` (SeqCst), then reads the placer's record under the
+/// placer's `last` lock (`reask_parent`, `wake_waiting`), then its state
+/// leaves `Running`, then `seq_end` (SeqCst). The placer, P, loads the
+/// sequence at its look (SeqCst), then reads the child's state and
+/// output, runs on, publishes its record under its `last` lock, then
+/// loads the sequence again here (SeqCst). Each order of the two:
+/// - C's `seq_begin` before P's look: P's look is in C's tail (odd: not
+///   held, the guess checked against C's output now, C's record, so P runs
+///   again if it differs), or after C's `seq_end` (P read C's state and
+///   output as C left them: a C asked again since commits again, below).
+/// - C's `seq_begin` after P's look, seen here: the sequence moved, the
+///   guess checked against the output now, at least C's: P runs again if
+///   it differs.
+/// - C's `seq_begin` after P's look, not seen here: C's read of P's
+///   record comes after P's publication. Were C's lock section first,
+///   `seq_begin` (before it in C) would happen before P's publication
+///   (after it in the lock's order), so before this load, which would see
+///   it. So C reads this record, which waits for C: `wake_waiting` asks P
+///   (`ask_placer`), P then committing or done, never left on the guess.
+///
+/// A child placed new by this commit (no look): its first commit is
+/// after this commit made it, so after the record: held.
+fn waited_holds(eng: &Engine, child: NodeId, looked: Option<u32>) -> bool {
+    let Some(seen) = looked else {
+        return eng.node(child).run_record().is_none();
+    };
+    seen & 1 == 0 && eng.node(child).commit_seq.load(Ordering::SeqCst) == seen
+}
+
 /// Whether a placement of `parent` other than `child` that its last run
 /// read or waits for is to run again (asked, not run since).
 fn placements_pending(eng: &Engine, parent: &Node, child: NodeId) -> bool {
@@ -3266,10 +3341,35 @@ fn placements_pending(eng: &Engine, parent: &Node, child: NodeId) -> bool {
 /// diagrams, 30 s a run).
 fn ask_placer(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeId, st: &mut CommitStats) {
     if placements_pending(eng, parent, child) {
-        parent.owed_ask.store(true, Ordering::Release);
-        return;
+        #[cfg(test)]
+        owed_window(eng, parent, child);
+        // (the debt stored, then the others looked at again: a placement
+        // found pending above may have left its pending state and run its
+        // `settle_owed` between that look and this store, finding no debt,
+        // and nothing would pay it. A Dekker handshake, its accesses SeqCst
+        // or behind SeqCst fences. Here: S, the debt's store; a fence; L,
+        // the second look at the others' states. There: X, the other
+        // placement's state leaving Dirty or RunningDirty (its run's start,
+        // `cas_state`), before its commit; then in `settle_owed` a fence
+        // and D, the load of the debt. In the order of the two fences:
+        // - this fence first: D, after the other's fence, sees S, and that
+        //   commit pays the debt (`ask_placer` again, from there), or, a
+        //   third placement still pending at its own look, leaves it to
+        //   that one's commit, which meets the same handshake;
+        // - the other's fence first: X comes before L, which sees that
+        //   placement not pending (or pending again, asked meanwhile: its
+        //   next run's X and D come after L, and D sees S). Not pending,
+        //   this commit takes the debt back (`swap`) and asks now.
+        // Both: one `swap` or `store(false)` takes the debt, and an ask
+        // made twice merges (`mark_stale`).)
+        parent.owed_ask.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if placements_pending(eng, parent, child) || !parent.owed_ask.swap(false, Ordering::SeqCst) {
+            return;
+        }
+    } else {
+        parent.owed_ask.store(false, Ordering::SeqCst);
     }
-    parent.owed_ask.store(false, Ordering::Release);
     if mark_stale(
         eng,
         w,
@@ -3284,10 +3384,31 @@ fn ask_placer(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeI
     }
 }
 
+/// (test) Called in [`ask_placer`] between its first look at the
+/// placements pending and its store of the debt.
+#[cfg(test)]
+pub(crate) static OWED_HOOK: std::sync::Mutex<Option<OwedHook>> = std::sync::Mutex::new(None);
+
+/// (test) [`OWED_HOOK`]'s function: the engine, the placer, the placement
+/// whose commit asks it.
+#[cfg(test)]
+pub(crate) type OwedHook = fn(&Engine, &Arc<Node>, NodeId);
+
+#[cfg(test)]
+fn owed_window(eng: &Engine, parent: &Arc<Node>, child: NodeId) {
+    let h = *OWED_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(h) = h {
+        h(eng, parent, child);
+    }
+}
+
 /// A re-ask `parent` is owed ([`ask_placer`]), made once this commit of
 /// its placement `child` leaves none of the others it reads to run.
 fn settle_owed(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeId, st: &mut CommitStats) {
-    if parent.owed_ask.load(Ordering::Acquire) && !placements_pending(eng, parent, child) {
+    // (after this run left its pending state at its start: ordered with
+    // `ask_placer`'s store of the debt and its second look)
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if parent.owed_ask.load(Ordering::SeqCst) && !placements_pending(eng, parent, child) {
         ask_placer(eng, w, parent, child, st);
     }
 }
@@ -8232,5 +8353,112 @@ mod tests {
             e.node(r).pos_hint().0,
             pos.0
         );
+    }
+}
+
+#[cfg(test)]
+mod owed_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::api::{NodeId, Operation, Stop};
+    use crate::ctx::Ctx;
+    use crate::engine::Engine;
+    use crate::node::{Node, State};
+    use crate::values::ValueId;
+
+    /// `[x]`: outputs x.
+    struct Leaf;
+
+    impl Operation for Leaf {
+        fn name(&self) -> &'static str {
+            "owed-leaf"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(cx.args()[0])
+        }
+    }
+
+    /// `[a, b]`: places leaves `[a]` and `[b]` and sums their outputs,
+    /// each read on the guess 0 while it has not run.
+    struct Placer(std::sync::OnceLock<crate::api::OpId>);
+
+    impl Operation for Placer {
+        fn name(&self) -> &'static str {
+            "owed-placer"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let leaf = *self.0.get().expect("the leaf");
+            let i = cx.child(leaf, vec![cx.args()[0]]);
+            let j = cx.child(leaf, vec![cx.args()[1]]);
+            let x = v.as_int(cx.placed_output_or(i, v.int(0))).unwrap_or(0);
+            let y = v.as_int(cx.placed_output_or(j, v.int(0))).unwrap_or(0);
+            Ok(v.int(x + y))
+        }
+    }
+
+    /// The other placement played its run and commit inside the window.
+    static IN_WINDOW: AtomicBool = AtomicBool::new(false);
+
+    /// In [`super::ask_placer`]'s window: the other placement, found
+    /// pending (Dirty) by the first look, runs and commits as a worker
+    /// does: its state leaves Dirty at its run's start, its commit pays
+    /// any debt it finds (`settle_owed`), its run ends Clean.
+    fn other_commits(eng: &Engine, parent: &Arc<Node>, child: NodeId) {
+        let Some(r) = parent.run_record() else { return };
+        let Some(&other) = r.placed.iter().find(|&&c| c != child) else {
+            return;
+        };
+        let o = eng.node(other);
+        if o.state() != State::Dirty {
+            return;
+        }
+        assert!(o.cas_state(State::Dirty, State::Running));
+        super::settle_owed(eng, None, parent, other, &mut super::CommitStats::default());
+        assert!(o.cas_state(State::Running, State::Clean));
+        IN_WINDOW.store(true, Ordering::SeqCst);
+    }
+
+    /// A placer's re-ask owed for one placement while another was pending
+    /// (`Node::owed_ask`): that other one ran and committed between the
+    /// look and the store of the debt, found no debt, and asked nothing.
+    /// The placer is asked all the same, by the commit that stored the
+    /// debt; before the handshake (dcf9cfd6b) it was left on its guess.
+    #[test]
+    fn a_placement_committing_between_the_look_and_the_debt_leaves_the_placer_asked() {
+        let e = Engine::new();
+        let v = e.values();
+        let leaf = e.register(Arc::new(Leaf));
+        let p = Arc::new(Placer(std::sync::OnceLock::new()));
+        p.0.set(leaf).unwrap();
+        let op = e.register(p);
+        let u = e.new_unit();
+        let n = e.push(u, op, vec![v.int(10), v.int(5)]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(15));
+        let kids = e.children(n);
+        let (a, b) = (kids[0], kids[1]);
+        let parent = e.node(n).clone();
+        // (both placements asked again; the placer's commit made, clean)
+        assert!(e.node(b).cas_state(State::Clean, State::Dirty));
+        assert_eq!(parent.state(), State::Clean);
+        *super::OWED_HOOK.lock().unwrap() = Some(other_commits);
+        // `a`'s commit asks its placer, `b` pending at the first look
+        super::ask_placer(&e, None, &parent, a, &mut super::CommitStats::default());
+        *super::OWED_HOOK.lock().unwrap() = None;
+        assert!(
+            IN_WINDOW.load(Ordering::SeqCst),
+            "the other placement committed in the window"
+        );
+        assert_eq!(
+            parent.state(),
+            State::Dirty,
+            "the placer asked again (owed {})",
+            parent.owed_ask.load(Ordering::SeqCst)
+        );
+        assert!(!parent.owed_ask.load(Ordering::SeqCst), "the debt paid");
     }
 }
