@@ -6165,8 +6165,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// conditional branch, or fetched only to be stored or matched, needs,
     /// read through the engine's step projection
     /// ([`crate::val::step_projection`]) where the run has not bound it
-    /// itself: a redefinition within the class leaves this run standing.
-    /// `None` where it is this run's own, or not defined (read in full).
+    /// itself: a redefinition within the class leaves this run standing,
+    /// and so does a first definition in class 0 of a name undefined
+    /// where the run read it (the projection's answer for no value, as
+    /// TeX's `undefined_cs` is stepped over: pgf's
+    /// `\pgfpositionnodelaterpath`, a macro argument in every picture,
+    /// first defined by the picture before, asked each picture again
+    /// once that one had run, Grail at -j8). `None` where it is this
+    /// run's own (read in full).
     #[inline(never)]
     fn step_lookup(&mut self, tok: Tok) -> R<Option<i64>> {
         let Some(l) = self.mean_loc(tok) else {

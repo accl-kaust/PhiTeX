@@ -3407,7 +3407,12 @@ impl Graph {
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
-        let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
+        // (an undefined name steps as a plain macro does: class 0, so its
+        // first definition, a macro's, asks no stepping reader again)
+        let step_proj = eng.register_projection_with_none(
+            Arc::new(crate::val::step_projection),
+            eng.values().int(0),
+        );
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let mean_class_proj = eng.register_projection(Arc::new(crate::val::mean_class_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));

@@ -592,7 +592,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             .map(|b| vals.bool(b))
         }
         Step::Proj(p) => {
-            let x = v?;
+            let Some(x) = v else {
+                return eng.projection_of_none(p);
+            };
             let proj = eng.projection(p)?;
             Some(proj(x, vals))
         }

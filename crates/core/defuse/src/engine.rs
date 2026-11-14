@@ -114,6 +114,9 @@ pub struct Engine {
     pub(crate) env: Env,
     pub(crate) paths: Paths,
     pub(crate) projections: Table<Projection>,
+    /// A projection's answer where the field has no value
+    /// ([`Engine::register_projection_with_none`]); none: none.
+    pub(crate) proj_none: Lock<FxHashMap<ProjId, ValueId>>,
     /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
     append: std::sync::OnceLock<AppendFn>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
@@ -517,6 +520,7 @@ impl Engine {
             },
             paths,
             projections,
+            proj_none: Lock::new(FxHashMap::default()),
             append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
             member_paths: Lock::new(FxHashMap::default()),
@@ -744,6 +748,23 @@ impl Engine {
                 (self.append.get().expect("an append relation needs the client's append"))(input, items, v)
             }
         }
+    }
+
+    /// [`Engine::register_projection`], with the projection's answer where
+    /// the field has no value at all: `none`, an immediate value (a small
+    /// int or a bool, never collected). Without it, no value projects to
+    /// none, and a reader through the projection is asked again when a
+    /// first definition comes whatever it projects to; with it, one whose
+    /// projection is `none` leaves it standing (a token's step class:
+    /// an undefined name's is a plain macro's, both stepped over alike).
+    pub fn register_projection_with_none(&self, p: Projection, none: ValueId) -> ProjId {
+        let id = self.register_projection(p);
+        self.proj_none.write().insert(id, none);
+        id
+    }
+
+    pub(crate) fn projection_of_none(&self, p: ProjId) -> Option<ValueId> {
+        self.proj_none.read().get(&p).copied()
     }
 
     pub fn register_projection(&self, p: Projection) -> ProjId {
