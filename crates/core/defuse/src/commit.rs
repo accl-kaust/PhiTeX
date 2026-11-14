@@ -91,7 +91,7 @@ impl CommitStats {
 pub(crate) fn own_write<'a>(
     eng: &'a Engine,
     node: &Node,
-) -> Option<(&'a Arc<Segment>, crate::lock::WriteGuard<'a, Inner>)> {
+) -> Option<(&'a Arc<Segment>, crate::lock::RWriteGuard<'a, Inner>)> {
     loop {
         if node.state() == State::Gone {
             return None;
