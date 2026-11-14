@@ -2961,6 +2961,9 @@ struct Graph {
     /// The comments `env_pushed` holds, by id ([`Marks::ids`]): a change
     /// of the comments alone pushed as theirs ([`Graph::push_marks`]).
     marks_pushed: FxHashMap<u64, Arc<str>>,
+    /// The PDF line (`crate::pdfout::XPAGES`) the last evaluation's
+    /// pruning kept the commands and pages of.
+    xpages_pruned: Option<ValueId>,
     pub(crate) env_calls: u64,
     /// The job's bindings (the format's state, the job's names and
     /// dates: [`job_env`]), pushed with the environment.
@@ -3445,6 +3448,7 @@ impl Graph {
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
             marks_pushed: FxHashMap::default(),
+            xpages_pruned: None,
             env_calls: 0,
             job: Vec::new(),
             files_op,
@@ -4206,7 +4210,11 @@ impl Graph {
                 // (the PDF commands no record names any more: dropped now,
                 // with no run in work)
                 let v = self.eng.values();
-                if let Some(line) = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES)) {
+                // (the line the last pruning kept: the same value, the
+                // same records named, nothing to drop that it did not)
+                let now = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES));
+                if let Some(line) = now.filter(|_| now != self.xpages_pruned) {
+                    self.xpages_pruned = now;
                     let line: Vec<ValueId> = crate::val::CatMemo::default().walk(v, line, Some);
                     crate::pdfout::prune_cmds(v, &line, &self.ops.pdf_cmds);
                     crate::pdfout::prune_pieces(v, &line);
