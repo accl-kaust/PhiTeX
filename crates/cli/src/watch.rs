@@ -381,6 +381,139 @@ fn is_read(a: &Ask) -> bool {
     )
 }
 
+/// The viewer's reads (a page's origins, the pages of a source place, a
+/// citation) answered on a thread of their own, from what the last build
+/// left ([`phitex_live::session::Reads`], taken as it ends): the watch's
+/// loop only builds, and a save never waits behind a read, whatever the
+/// machine's load (a page's origins made on the loop held a save 222 ms
+/// on a loaded node, though each read gave way to a save between the
+/// steps it could stop at). While a build runs there is nothing to read:
+/// the reads wait for its end, and one made of the build before it is
+/// not given ([`ReadsWorker::building`]).
+struct ReadsWorker {
+    tx: mpsc::Sender<Ask>,
+    /// The builds begun, and what the last one ended with (none while one
+    /// runs).
+    now: Arc<(
+        Mutex<(u64, Option<Arc<phitex_live::session::Reads>>)>,
+        std::sync::Condvar,
+    )>,
+}
+
+impl ReadsWorker {
+    fn start(v: Arc<phitex_live::view::Viewer>) -> ReadsWorker {
+        let (tx, rx) = mpsc::channel::<Ask>();
+        let now: Arc<(
+            Mutex<(u64, Option<Arc<phitex_live::session::Reads>>)>,
+            std::sync::Condvar,
+        )> = Arc::default();
+        let at = now.clone();
+        let _ = std::thread::Builder::new()
+            .name("phitex-watch-reads".into())
+            .spawn(move || {
+                let mut asked: VecDeque<Ask> = VecDeque::new();
+                loop {
+                    if asked.is_empty() {
+                        match rx.recv() {
+                            Ok(a) => asked.push_back(a),
+                            Err(_) => return,
+                        }
+                    }
+                    while let Ok(a) = rx.try_recv() {
+                        if !asked.contains(&a) {
+                            asked.push_back(a);
+                        }
+                    }
+                    let (n, reads) = {
+                        let (m, cv) = &*at;
+                        let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
+                        if g.1.is_none() {
+                            // (a build runs: its end awaited, new reads
+                            // taken meanwhile)
+                            g = cv
+                                .wait_timeout(g, Duration::from_millis(50))
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .0;
+                        }
+                        (g.0, g.1.clone())
+                    };
+                    let Some(reads) = reads else { continue };
+                    let Some(a) = asked.pop_front() else { continue };
+                    // (made, then given only if no build began meanwhile:
+                    // the viewer asks the new build's again)
+                    let give: Box<dyn FnOnce()> = match a {
+                        Ask::Origins(k) => {
+                            let (files, page) = reads.page_origins(k);
+                            let v = v.clone();
+                            Box::new(move || v.put_origins(k, files, page))
+                        }
+                        Ask::PageOf { file, at } => {
+                            let pages = reads.pages_of_source(&file, at);
+                            let v = v.clone();
+                            Box::new(move || v.put_page_of(file, at, pages))
+                        }
+                        Ask::Cites { page, x, y } => {
+                            let links = v.cite_links(
+                                page,
+                                f64::from(f32::from_bits(x)),
+                                f64::from(f32::from_bits(y)),
+                            );
+                            let cites = if links.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                let (labels, numbers) = reads.cite_labels();
+                                serde_json::Value::Array(
+                                    links
+                                        .into_iter()
+                                        .map(|(key, p, top)| {
+                                            json!({
+                                                "key": key,
+                                                "label": labels.get(&key),
+                                                "number": numbers.get(&key),
+                                                "at": [p, top],
+                                            })
+                                        })
+                                        .collect(),
+                                )
+                            };
+                            let v = v.clone();
+                            Box::new(move || v.put_cites(page, x, y, json!({ "cites": cites })))
+                        }
+                        _ => continue,
+                    };
+                    let g = at.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if g.0 == n && g.1.is_some() {
+                        give();
+                    }
+                }
+            });
+        ReadsWorker { tx, now }
+    }
+
+    /// A read the thread answers (one it does not: false).
+    fn ask(&self, a: &Ask) -> bool {
+        if !matches!(a, Ask::Origins(_) | Ask::PageOf { .. } | Ask::Cites { .. }) {
+            return false;
+        }
+        let _ = self.tx.send(a.clone());
+        true
+    }
+
+    /// A build begins: what the last one left is read no more.
+    fn building(&self) {
+        let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
+        g.0 += 1;
+        g.1 = None;
+    }
+
+    /// The build ended with `r` (none: no build to read).
+    fn built(&self, r: Option<phitex_live::session::Reads>) {
+        let mut g = self.now.0.lock().unwrap_or_else(PoisonError::into_inner);
+        g.1 = r.map(Arc::new);
+        self.now.1.notify_all();
+    }
+}
+
 /// Whether a change of the files (a save, an editor's) has come and waits:
 /// the events come since taken into `held`, in order.
 fn change_waits(
@@ -1344,6 +1477,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             v.on_review(Box::new(move |op, req| h.viewer(op, req)));
         }
     }
+    // (the viewer's reads, answered off this loop)
+    let reads = view.as_ref().map(|v| ReadsWorker::start(v.viewer()));
     // (what the viewer and the editor asked, taken together)
     let take_asks = || {
         let mut a = view.as_ref().map(|v| v.take_asks()).unwrap_or_default();
@@ -1597,6 +1732,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(v) = &view {
             v.building(true);
         }
+        if let Some(rw) = &reads {
+            rw.building();
+        }
         let spin = ui.spin(
             format!("{what}: build {builds} ({})", crate::ui::said_why(why)),
             status.clone(),
@@ -1661,6 +1799,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if let Some(v) = &view {
                     v.built(&b);
                     v.building(false);
+                }
+                if let Some(rw) = &reads {
+                    rw.built(s.reads());
                 }
                 if let Some(l) = &lsp {
                     l.built(&b);
@@ -1809,6 +1950,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             if let Some(v) = &view {
                 v.built(&b);
                 v.building(false);
+            }
+            if let Some(rw) = &reads {
+                rw.built(s.reads());
             }
             phitex_tex::timeline::lap("watch: the viewers told");
             if let Some(l) = &lsp {
@@ -2821,35 +2965,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     let mut asks = std::mem::take(&mut held_asks);
                     asks.extend(take_asks());
                     for a in asks {
-                        // (a viewer's read never holds a change's build
-                        // back: put off while one is to be built, from
-                        // this gathering or come since, and asked again
-                        // after it. Each is made on this loop, a page's
-                        // origins up to 0.3 s of Grail's: a browser that
-                        // asked for every page it shows held a save 5 s)
-                        if is_read(&a) && (again || change_waits(&rx, &mut held)) {
-                            held_asks.push(a);
+                        // (a page's origins, a source place's pages, a
+                        // citation: answered off this loop, [`ReadsWorker`])
+                        if reads.as_ref().is_some_and(|rw| rw.ask(&a)) {
                             continue;
                         }
-                        // (a page's origins given up for a change come
-                        // while they are made, asked again after its build)
-                        if let (Ask::Origins(k), Some(v)) = (&a, view.as_deref()) {
-                            let t = Instant::now();
-                            let came: RefCell<VecDeque<(Instant, Event)>> = RefCell::default();
-                            let stop = |_: bool| {
-                                let mut c = came.borrow_mut();
-                                while let Ok(e) = rx.try_recv() {
-                                    c.push_back(e);
-                                }
-                                c.iter()
-                                    .any(|e| matches!(e.1, Event::Files(_) | Event::Edited(_)))
-                            };
-                            match s.page_origins_until(*k, &stop) {
-                                Some((files, page)) => v.put_origins(*k, files, page),
-                                None => held_asks.push(a),
-                            }
-                            held.extend(came.into_inner());
-                            busy.borrow_mut().did("the viewer's asks", t);
+                        // (the transcript never holds a change's build
+                        // back: put off while one is to be built, from this
+                        // gathering or come since, and asked again after it)
+                        if is_read(&a) && (again || change_waits(&rx, &mut held)) {
+                            held_asks.push(a);
                             continue;
                         }
                         if a == Ask::Transcript {
@@ -3001,7 +3126,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                         .insert(file.clone(), splice_utf16(&cur, start, end, text));
                                 }
                                 other => {
-                                    held_asks.push(other);
+                                    // (a read: to its thread, which answers
+                                    // it once this build ends)
+                                    if !reads.as_ref().is_some_and(|rw| rw.ask(&other)) {
+                                        held_asks.push(other);
+                                    }
                                     continue;
                                 }
                             }

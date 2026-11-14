@@ -436,6 +436,47 @@ impl Report {
     }
 }
 
+/// A build's answers to the viewer's reads, taken apart from the session
+/// ([`Session::reads`]): made on a thread of their own, never on the
+/// one that builds.
+pub struct Reads {
+    origins: Option<Arc<phitex_tex::OriginsCapture>>,
+    aux: String,
+}
+
+impl Reads {
+    /// [`Session::page_origins_until`]'s answer, made from the build
+    /// this was taken of.
+    #[must_use]
+    pub fn page_origins(&self, k: usize) -> (Vec<String>, Option<Arc<phitex_tex::PageOrigins>>) {
+        match &self.origins {
+            Some(c) => {
+                let page = c.page(k);
+                (c.files(), page)
+            }
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// [`Session::pages_of_source`] of the build this was taken of.
+    #[must_use]
+    pub fn pages_of_source(&self, file: &str, at: usize) -> Vec<usize> {
+        self.origins
+            .as_ref()
+            .map(|c| c.pages_of_source(file, u32::try_from(at).unwrap_or(u32::MAX)))
+            .unwrap_or_default()
+    }
+
+    /// [`Session::cite_labels`] of the build this was taken of.
+    #[must_use]
+    pub fn cite_labels(&self) -> (HashMap<String, String>, HashMap<String, String>) {
+        (
+            crate::cites::bibcites(&self.aux),
+            crate::cites::bibnumbers(&self.aux),
+        )
+    }
+}
+
 /// What the builds read ([`Session::watched`]).
 #[derive(Clone, Debug, Default)]
 pub struct Watched {
@@ -1640,6 +1681,29 @@ impl Session {
             })
             .unwrap_or_default();
         (crate::cites::bibcites(&aux), crate::cites::bibnumbers(&aux))
+    }
+
+    /// What the viewer's reads of this build are answered from, taken
+    /// now and answered on any thread whatever the session becomes
+    /// ([`Reads`]): the pages' origins and the places on them, the
+    /// citations' labels. None without a build.
+    #[must_use]
+    pub fn reads(&self) -> Option<Reads> {
+        let b = self.build.as_ref()?;
+        let origins = (self.job.origins || self.job.synctex).then(|| Arc::new(b.origins_capture()));
+        let name = format!("{}.aux", self.job.jobname);
+        let aux = b
+            .files_shared()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| t.clone())
+            .or_else(|| {
+                self.sink
+                    .get(&name)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })
+            .unwrap_or_default();
+        Some(Reads { origins, aux })
     }
 
     /// Page `k`'s glyph origins (0 the first), made for that page alone

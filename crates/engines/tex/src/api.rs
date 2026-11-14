@@ -6541,6 +6541,17 @@ pub struct Build {
     /// Glyph origins' memos ([`Build::page_origins`]), shared with the
     /// captures of them ([`Build::origins_capture`]).
     origins: Arc<crate::origins::State>,
+    /// Files staged ([`Build::stage_file`]), for [`Build::origins_key`].
+    stages: u64,
+    /// The text nodes' spans ([`Build::spans_named`]) by the
+    /// [`Build::origins_key`] they were made at.
+    #[allow(clippy::type_complexity)]
+    spans_memo: Mutex<
+        Option<(
+            u64,
+            Arc<[(u64, Option<(String, Arc<str>)>, usize, usize, usize)]>,
+        )>,
+    >,
 }
 
 impl Drop for Build {
@@ -6805,6 +6816,8 @@ impl Build {
             staged: false,
             evaluated: false,
             origins: Arc::default(),
+            stages: 0,
+            spans_memo: Mutex::new(None),
         };
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -7228,6 +7241,7 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
+        self.stages += 1;
         // (what the provider answered in the last evaluation joins the
         // supplied files first, as `push_staged` joins it: the file is
         // looked up among all the build holds)
@@ -7740,10 +7754,23 @@ impl Build {
             .into_iter()
             .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
             .collect();
+        let key = self.origins_key();
+        let spans = {
+            let mut m = self.spans_memo.locked();
+            match m.as_ref().filter(|x| x.0 == key) {
+                Some(x) => x.1.clone(),
+                None => {
+                    let sp: Arc<[_]> = Arc::from(self.spans_named());
+                    *m = Some((key, sp.clone()));
+                    sp
+                }
+            }
+        };
         crate::origins::Input {
+            key,
             inst: v.instance(),
             shown,
-            spans: self.spans_named(),
+            spans,
             doc_name: self.opts.name.trim_start_matches("./").to_owned(),
             doc_text: &self.text,
             doc_raw: if self.canon {
@@ -7753,6 +7780,23 @@ impl Build {
             },
             glyphs: None,
         }
+    }
+
+    /// Which state of the Build glyph origins are made of
+    /// ([`crate::origins::Input::key`]): its evaluations settled and the
+    /// files staged since, the text's length (the nodes, their texts and
+    /// places change with these alone).
+    fn origins_key(&self) -> u64 {
+        phitex_defuse::hash_words(
+            0x6f6b_6579,
+            &[
+                self.serial,
+                self.settles,
+                self.stages,
+                self.text.len() as u64,
+            ],
+        )
+        .max(1)
     }
 
     /// Glyph origins' memos.
@@ -7798,7 +7842,9 @@ impl Build {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
+        // (each file's name and text by its name's value, made once)
+        let mut texts: FxHashMap<ValueId, Option<(String, Arc<str>)>> = FxHashMap::default();
+        let s_tag = v.str("s");
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
         let mut stack: Vec<(NodeId, i64, usize)> = self
             .nodes
@@ -7820,30 +7866,40 @@ impl Build {
             };
             stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
             let Some(&fs) = i.args.first() else { continue };
-            let mut span: Option<(String, usize, usize)> = None;
-            for f in list_of(v, fs) {
-                let xs = list_of(v, f);
-                let Some(&t) = xs.first() else { continue };
-                let (name, s, e) = match (str_of(v, t).as_str(), &xs[..]) {
-                    ("s", &[_, seg, _, _, _, name, pos]) => {
-                        let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
-                        (str_of(v, name), s, s + str_of(v, seg).len() + 1)
-                    }
-                    _ => continue,
-                };
-                span = Some(match span {
-                    Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
-                    Some(sp) => sp,
-                    None => (name, s, e),
-                });
-            }
+            // (the frames read in place: no string made of a line's text
+            // or a frame's name, a name compared by its value)
+            let mut span: Option<(ValueId, usize, usize)> = None;
+            v.with_list(fs, |frames| {
+                for &f in frames {
+                    let Some((name, s, e)) = v
+                        .with_list(f, |xs| match xs {
+                            &[t, seg, _, _, _, name, pos] if t == s_tag => {
+                                let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
+                                Some((name, s, s + v.with_str(seg, str::len).unwrap_or(0) + 1))
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    span = Some(match span {
+                        Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
+                        Some(sp) => sp,
+                        None => (name, s, e),
+                    });
+                }
+            });
             let Some((name, s, e)) = span else { continue };
             let text = texts
-                .entry(name.clone())
-                .or_insert_with(|| self.g.file_text(&name))
+                .entry(name)
+                .or_insert_with(|| {
+                    let n = str_of(v, name);
+                    self.g.file_text(&n).map(|t| (n, t))
+                })
                 .clone();
-            if let Some(t) = text {
-                out.push((x.raw(), Some((name, t)), s, e, top));
+            if let Some((n, t)) = text {
+                out.push((x.raw(), Some((n, t)), s, e, top));
             }
         }
         out
