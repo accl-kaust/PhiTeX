@@ -6787,6 +6787,22 @@ impl<'c, 'a> Run<'c, 'a> {
             args.push(v.str(rec.as_deref().unwrap_or(&*own)));
             out.push(args);
         }
+        // (a document file the client cut, whose first lines this run read
+        // itself: its rest's pieces given their lines in the file as the
+        // client's pieces are, `api::doc_file_rest_lines`; folded, the
+        // lines before them this run read, numbered as a file's, were
+        // missed. Grail's appendix at -j1, its first paragraph read on
+        // into from the file before it: every line two short)
+        if let Some(key) = f.cut {
+            let pieces: Vec<(u64, usize)> = t
+                .slices
+                .iter()
+                .filter(|&&(_, e)| e > f.off)
+                .zip(&out)
+                .map(|(&(s, _), a)| (a[0].raw(), s.max(f.off)))
+                .collect();
+            crate::api::doc_file_rest_lines(&self.ops.docs, &str_of(v, key), &text, &pieces);
+        }
         out
     }
 

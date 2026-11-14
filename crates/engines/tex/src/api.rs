@@ -3105,6 +3105,11 @@ pub(crate) struct DocFile {
     /// the file; two slices with the same frames (a kept one's stale place
     /// a new one's now) have none: their runs fold the lines.
     dlines: FxHashMap<u64, i64>,
+    /// The same for the pieces of the file's rest that a run reading the
+    /// file's first lines itself cut ([`doc_file_rest_lines`]): the lines
+    /// before them that run read have numbers of their own, so a fold of
+    /// the lines the nodes before a piece began misses them.
+    rest_lines: FxHashMap<u64, i64>,
 }
 
 impl DocFile {
@@ -3157,9 +3162,27 @@ fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
             }
         }
     }
-    docs.locked()
-        .values()
-        .find_map(|d| d.locked().dlines.get(&n).copied())
+    docs.locked().values().find_map(|d| {
+        let d = d.locked();
+        d.dlines.get(&n).or_else(|| d.rest_lines.get(&n)).copied()
+    })
+}
+
+/// The pieces a run cut of the rest of document file `key` it read the
+/// first lines of itself (`Run::doc_file_regions`): the lines of `text`
+/// before each (`(frames, byte)`), given as `dline:<frames>` as a cut
+/// piece's are ([`DocFile::rest_lines`]).
+pub(crate) fn doc_file_rest_lines(docs: &DocFiles, key: &str, text: &str, pieces: &[(u64, usize)]) {
+    let Some(df) = docs.locked().get(key).cloned() else {
+        return;
+    };
+    let starts = line_starts(text);
+    let mut df = df.locked();
+    for &(n, s) in pieces {
+        df.rest_lines
+            .entry(n)
+            .or_insert_with(|| lines_before(&starts, text.len(), s));
+    }
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -3200,6 +3223,7 @@ fn cut_doc_file(
         placed: FxHashMap::default(),
         args: Vec::new(),
         dlines: FxHashMap::default(),
+        rest_lines: FxHashMap::default(),
     };
     docs.locked()
         .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
