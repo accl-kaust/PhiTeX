@@ -431,17 +431,18 @@ fn run(verb: &Verb, pid: Option<u32>, as_json: bool, st: Style, ui: &Ui) -> Resu
                 Verb::Stop => {
                     let pid = s["pid"].as_u64().unwrap_or(0);
                     c.call("phitex/session/stop", &json!({}), None)?;
-                    // (until its process is gone, the exact PDF written:
-                    // its socket closes as it ends)
-                    let _ =
-                        c.r.get_ref()
-                            .set_read_timeout(Some(Duration::from_secs(120)));
-                    while crate::lsp::read(&mut c.r).is_some() {}
-                    if crate::attach::alive(&s) {
-                        return Err(Failed(
-                            EXIT_TIMEOUT,
-                            format!("the watch (pid {pid}) did not end"),
-                        ));
+                    // (until its process is gone, the exact PDF written
+                    // as it ends)
+                    drop(c);
+                    let t0 = Instant::now();
+                    while crate::attach::alive(&s) {
+                        if t0.elapsed() > Duration::from_secs(120) {
+                            return Err(Failed(
+                                EXIT_TIMEOUT,
+                                format!("the watch (pid {pid}) did not end"),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
                     }
                     if as_json {
                         out(&json!({"stopped": pid}));
@@ -597,6 +598,20 @@ fn edited_text(e: &Value) -> String {
     }
 }
 
+/// The last `max` characters of `s` on one line and a space, "…" before
+/// them where cut.
+fn tail(s: &str, max: usize) -> String {
+    let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n = s.chars().count();
+    if n == 0 {
+        return String::new();
+    }
+    if n <= max {
+        return format!("{s} ");
+    }
+    format!("…{} ", s.chars().skip(n - max).collect::<String>())
+}
+
 /// A quote on one line, cut to `max` characters.
 fn one_line(s: &str, max: usize) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -633,23 +648,20 @@ fn print_notes(notes: &Value, st: Style) {
         }
         println!("{head}");
         let quote = a["quote"].as_str().unwrap_or("");
-        if quote.is_empty() {
+        let on_change = n.get("hunk").is_some_and(Value::is_object);
+        if quote.is_empty() && on_change {
+            // (a comment on a change: the change says where)
+        } else if quote.is_empty() {
             println!("    {}", st.dim("(a spot, no text)"));
         } else {
             println!(
                 "    {}\u{201c}{}\u{201d}{}",
-                st.dim(
-                    &one_line(a["before"].as_str().unwrap_or(""), 30)
-                        .chars()
-                        .rev()
-                        .take(30)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect::<String>()
-                ),
+                st.dim(&tail(a["before"].as_str().unwrap_or(""), 30)),
                 one_line(quote, 200),
-                st.dim(&one_line(a["after"].as_str().unwrap_or(""), 30))
+                st.dim(&format!(
+                    " {}",
+                    one_line(a["after"].as_str().unwrap_or(""), 30)
+                ))
             );
         }
         if let Some(h) = n.get("hunk").filter(|h| h.is_object()) {
@@ -751,26 +763,34 @@ fn print_changes(v: &Value, st: Style) {
     if !verdicts.is_empty() {
         println!("the user's verdicts since you last looked:");
     }
-    for x in &verdicts {
-        let h = &x["hunk"];
-        let how = if x["verdict"] == "rejected" {
-            st.red("rejected")
-        } else {
-            st.green("accepted")
-        };
-        let detail = if x["verdict"] == "rejected" {
-            format!(
-                " (kept {:?}, not {:?}: do not write it again)",
-                one_line(h["old"].as_str().unwrap_or(""), 60),
-                one_line(h["new"].as_str().unwrap_or(""), 60)
-            )
-        } else {
-            String::new()
-        };
+    // (the accepted counted by file; each rejected one said with its text)
+    let mut accepted: Vec<(String, usize)> = Vec::new();
+    for x in verdicts.iter().filter(|x| x["verdict"] == "accepted") {
+        let f = x["hunk"]["file"].as_str().unwrap_or("").to_owned();
+        match accepted.iter_mut().find(|(g, _)| *g == f) {
+            Some((_, n)) => *n += 1,
+            None => accepted.push((f, 1)),
+        }
+    }
+    if !accepted.is_empty() {
+        let n: usize = accepted.iter().map(|x| x.1).sum();
+        let by: Vec<String> = accepted.iter().map(|(f, k)| format!("{f} {k}")).collect();
         println!(
-            "  {how} {}:{}{detail}",
+            "  {} {n} change{} ({})",
+            st.green("accepted"),
+            if n == 1 { "" } else { "s" },
+            by.join(", ")
+        );
+    }
+    for x in verdicts.iter().filter(|x| x["verdict"] == "rejected") {
+        let h = &x["hunk"];
+        println!(
+            "  {} {}:{} (kept {:?}, not {:?}: do not write it again)",
+            st.red("rejected"),
             h["file"].as_str().unwrap_or(""),
-            h["line"]
+            h["line"],
+            one_line(h["old"].as_str().unwrap_or(""), 60),
+            one_line(h["new"].as_str().unwrap_or(""), 60)
         );
     }
     let comments = v["comments"].as_array().cloned().unwrap_or_default();

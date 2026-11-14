@@ -539,9 +539,20 @@ impl Viewer {
                 lock(&self.streamed).pdfs.get(&k).cloned()
             }
         };
-        let (pdf, at) = match streamed {
-            Some(p) => (p, 0),
-            None => (self.pdf()?, k),
+        // (the page's identity with the file it is drawn from, read with
+        // it: a frame asked as a build came in is said to be the last
+        // build's page, which the viewer draws again, not the new one's)
+        let (pdf, at, hash) = if let Some(p) = streamed {
+            (p, 0, lock(&self.streamed).hashes.get(k).copied().flatten())
+        } else {
+            let d = lock(&self.diff);
+            if d.shown {
+                (d.pdf.clone()?, k, d.hashes.get(k).copied())
+            } else {
+                drop(d);
+                let p = lock(&self.pages);
+                (p.pdf.clone()?, k, p.hashes.get(k).copied())
+            }
         };
         let t = std::time::Instant::now();
         let f = lock(&self.strips).frame_in(&pdf, at, scale, win)?;
@@ -571,6 +582,7 @@ impl Viewer {
             "pw": f.pw, "ph": f.ph, "w": f.w, "h": f.h,
             "bands": bands, "text": lines_json(&f.text), "links": links,
             "drawn": f.drawn, "kept": f.kept, "win": f.win,
+            "hash": hash.map(|h| format!("{h:016x}")),
             "us": {"open": f.open_us, "probe": f.probe_us, "draw": f.draw_us, "all": us},
         }))
     }
