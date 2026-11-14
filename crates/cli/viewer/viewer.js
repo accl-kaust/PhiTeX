@@ -10668,13 +10668,21 @@ var Socket = class {
    * those after failures: such a tab would hold back every other's).
    */
   async connect() {
-    if (!await this.there()) return this.again();
+    const there = await this.there();
+    if (!there) return this.again();
+    if (there !== true && ownViewer() && there !== ownViewer()) return this.onStale();
     this.open();
   }
-  /** Whether the watch answers HTTP here. */
+  /** A watch serving another viewer than this page's (`ping`'s `viewer` line): the tab must be reloaded. */
+  onStale = () => {
+  };
+  /** Whether the watch answers HTTP here: false, else the viewer it serves (`ping`), true where it says none. */
   async there() {
     try {
-      return (await fetch(new URL("ping", location.href), { cache: "no-store" })).ok;
+      const r = await fetch(new URL("ping", location.href), { cache: "no-store" });
+      if (!r.ok) return false;
+      const m = /^viewer (\S+)$/m.exec(await r.text());
+      return m ? m[1] : true;
     } catch {
       return false;
     }
@@ -10844,6 +10852,7 @@ if (location.hash === "#debug") {
 }
 var strips = new Strips(stripSource, chip ?? null);
 var sock = new Socket();
+sock.onStale = staleBar;
 var pages = new Pages(sock);
 async function clearCache() {
   const mb2 = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
@@ -10986,6 +10995,41 @@ var panel = new Panel(
 {
   const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
   if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
+}
+function ownViewer() {
+  return document.querySelector('meta[name="phitex-viewer"]')?.content ?? "";
+}
+function staleBar() {
+  if (document.getElementById("phitex-stale")) return;
+  const bar2 = document.createElement("div");
+  bar2.id = "phitex-stale";
+  bar2.setAttribute("role", "alert");
+  Object.assign(bar2.style, {
+    position: "fixed",
+    top: "0",
+    left: "0",
+    right: "0",
+    zIndex: "2147483647",
+    display: "flex",
+    gap: "12px",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 16px",
+    font: "14px system-ui, sans-serif",
+    background: "#1d3e72",
+    color: "#ffffff",
+    boxShadow: "0 2px 8px rgba(0,0,0,.25)"
+  });
+  const text = document.createElement("span");
+  text.textContent = "phitex was updated: reload this tab to use the new viewer.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Reload";
+  Object.assign(button.style, { font: "inherit", padding: "4px 14px", borderRadius: "6px", border: "0", background: "#ffffff", color: "#1d3e72", cursor: "pointer" });
+  button.onclick = () => location.reload();
+  bar2.append(text, button);
+  document.body.append(bar2);
+  button.focus();
 }
 var PAGE_PREFS = (() => {
   try {

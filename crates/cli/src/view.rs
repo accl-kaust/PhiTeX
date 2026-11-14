@@ -43,17 +43,38 @@ use crate::ws;
 const INDEX: &[u8] = include_bytes!("../viewer/index.html");
 const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
 
+/// The served viewer's identity, a hash of [`SCRIPT`] (FNV-1a, 64 bits,
+/// hex): written into the page (`<meta name="phitex-viewer">`) and told by
+/// `ping`, so a tab whose page came from another phitex (a watch
+/// upgraded and started again at the same address) sees that it differs
+/// and asks to be reloaded before it talks to this watch.
+fn viewer_hash() -> &'static str {
+    static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        let h = SCRIPT.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        format!("{h:016x}")
+    })
+}
+
 /// The viewer's page with the user's preferences in it (`prefs`: the `prefs`
 /// op's answer), read by its script before anything is drawn: the first
 /// build's opening is the one chosen, not the default's while the socket
 /// connects. `<` written `<`, so the JSON can't end its script element.
 fn index_with(prefs: Option<&Value>) -> Vec<u8> {
     let page = String::from_utf8_lossy(INDEX);
-    let Some(p) = prefs else {
-        return INDEX.to_vec();
-    };
-    let json = p.to_string().replace('<', "\\u003c");
-    let tag = format!("<script id=\"phitex-prefs\" type=\"application/json\">{json}</script>\n");
+    // (the viewer this page is for, `viewer_hash`: always, prefs or not)
+    let mut tag = format!(
+        "<meta name=\"phitex-viewer\" content=\"{}\">\n",
+        viewer_hash()
+    );
+    if let Some(p) = prefs {
+        let json = p.to_string().replace('<', "\\u003c");
+        tag.push_str(&format!(
+            "<script id=\"phitex-prefs\" type=\"application/json\">{json}</script>\n"
+        ));
+    }
     match page.find("<script type=\"module\"") {
         Some(at) => format!("{}{tag}{}", &page[..at], &page[at..]).into_bytes(),
         None => INDEX.to_vec(),
@@ -349,7 +370,8 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
         }
         // (whether the watch is here, before the browser opens a WebSocket)
         "ping" => {
-            let _ = ws::respond(&mut w, "200 OK", "text/plain", b"phitex watch\n");
+            let body = format!("phitex watch\nviewer {}\n", viewer_hash());
+            let _ = ws::respond(&mut w, "200 OK", "text/plain", body.as_bytes());
         }
         "viewer.js" => {
             let _ = ws::respond(&mut w, "200 OK", "text/javascript; charset=utf-8", SCRIPT);
@@ -631,7 +653,15 @@ mod tests {
         let json = &page[page[tag..].find('>').unwrap() + tag + 1..];
         let json = &json[..json.find("</script>").unwrap()];
         assert_eq!(serde_json::from_str::<serde_json::Value>(json).unwrap(), p);
-        // (no host's preferences: the page as built)
-        assert_eq!(index_with(None), INDEX);
+        // (no host's preferences: the page as built, with the viewer's identity alone)
+        let bare = String::from_utf8(index_with(None)).unwrap();
+        assert!(!bare.contains("phitex-prefs"));
+        // (both name the viewer this phitex serves, as `ping` tells it)
+        for page in [&page, &bare] {
+            let at = page.find("<meta name=\"phitex-viewer\"").unwrap();
+            assert!(at < page.find("<script type=\"module\"").unwrap());
+            assert!(page.contains(&format!("content=\"{}\"", viewer_hash())));
+        }
+        assert_eq!(viewer_hash().len(), 16);
     }
 }

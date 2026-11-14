@@ -46,14 +46,24 @@ class Socket implements CoreTransport {
    */
   async connect(): Promise<void> {
     // (a tab in the background asks too, over HTTP first: the watch then sees it and opens no second tab)
-    if (!(await this.there())) return this.again();
+    const there = await this.there();
+    if (!there) return this.again();
+    // (another phitex's watch at this address, its viewer not this page's: the
+    // tab is told to reload, its pages kept as they are, and talks to it no more)
+    if (there !== true && ownViewer() && there !== ownViewer()) return this.onStale();
     this.open();
   }
 
-  /** Whether the watch answers HTTP here. */
-  async there(): Promise<boolean> {
+  /** A watch serving another viewer than this page's (`ping`'s `viewer` line): the tab must be reloaded. */
+  onStale: () => void = () => {};
+
+  /** Whether the watch answers HTTP here: false, else the viewer it serves (`ping`), true where it says none. */
+  async there(): Promise<string | boolean> {
     try {
-      return (await fetch(new URL("ping", location.href), { cache: "no-store" })).ok;
+      const r = await fetch(new URL("ping", location.href), { cache: "no-store" });
+      if (!r.ok) return false;
+      const m = /^viewer (\S+)$/m.exec(await r.text());
+      return m ? m[1] : true;
     } catch {
       return false;
     }
@@ -303,6 +313,7 @@ if (location.hash === "#debug") {
 
 const strips = new Strips(stripSource, chip ?? null);
 const sock = new Socket();
+sock.onStale = staleBar;
 const pages = new Pages(sock);
 /** A place in a file (1-based line and column): the watch opens it in the editor (`--editor`). */
 /** The watch's cache (TeX Live's packs, the formats): its size asked first, emptied on a yes, as `phitex clean --all`. */
@@ -464,6 +475,38 @@ const panel = new Panel(
  * which played the default's while the socket connected. The `prefs` op
  * answers them again once it is open.
  */
+/** The viewer this page was served for (`<meta name="phitex-viewer">`, a hash of viewer.js, crates/cli/src/view.rs). */
+function ownViewer(): string {
+  return document.querySelector<HTMLMetaElement>('meta[name="phitex-viewer"]')?.content ?? "";
+}
+
+/**
+ * The tab told that phitex was updated (`Socket.onStale`): a bar across the top it can't
+ * close, with Reload; the pages shown stay, and nothing more is asked of the watch.
+ */
+function staleBar(): void {
+  if (document.getElementById("phitex-stale")) return;
+  const bar = document.createElement("div");
+  bar.id = "phitex-stale";
+  bar.setAttribute("role", "alert");
+  Object.assign(bar.style, {
+    position: "fixed", top: "0", left: "0", right: "0", zIndex: "2147483647",
+    display: "flex", gap: "12px", alignItems: "center", justifyContent: "center",
+    padding: "10px 16px", font: "14px system-ui, sans-serif",
+    background: "#1d3e72", color: "#ffffff", boxShadow: "0 2px 8px rgba(0,0,0,.25)",
+  });
+  const text = document.createElement("span");
+  text.textContent = "phitex was updated: reload this tab to use the new viewer.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Reload";
+  Object.assign(button.style, { font: "inherit", padding: "4px 14px", borderRadius: "6px", border: "0", background: "#ffffff", color: "#1d3e72", cursor: "pointer" });
+  button.onclick = () => location.reload();
+  bar.append(text, button);
+  document.body.append(bar);
+  button.focus();
+}
+
 const PAGE_PREFS = ((): any => {
   try {
     return JSON.parse(document.getElementById("phitex-prefs")?.textContent ?? "null");
