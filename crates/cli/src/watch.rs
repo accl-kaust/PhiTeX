@@ -1846,6 +1846,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     std::iter::once(n).chain(tex)
                 })
                 .collect();
+            phitex_tex::timeline::lap("watch: the files the review is told of");
             hub.built(crate::review::BuildFacts {
                 n: builds,
                 ok: !failed,
@@ -1865,7 +1866,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 pdf: written.as_ref().map(|p| p.display().to_string()),
             });
             status.set("");
-            phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
+            phitex_tex::timeline::lap("watch: the review told");
         }
         spin.done();
         building.store(false, Ordering::Relaxed);
