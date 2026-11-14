@@ -660,6 +660,7 @@ fn watch_word_edit_ms() -> f64 {
 /// core kept busy, where a read on the loop held a save 220 ms (mc 86542).
 /// Every page's origins made first held a save 5.2 s behind them in Grail.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn watch_save_starts_at_once() {
     let _one = one();
     let text = big();

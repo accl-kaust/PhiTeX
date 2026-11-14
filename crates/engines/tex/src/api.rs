@@ -7757,15 +7757,14 @@ impl Build {
         let key = self.origins_key();
         let spans = {
             let mut m = self.spans_memo.locked();
-            match m.as_ref().filter(|x| x.0 == key) {
-                Some(x) => x.1.clone(),
-                None => {
-                    let t0 = std::time::Instant::now();
-                    let sp: Arc<[_]> = Arc::from(self.spans_named());
-                    crate::timeline::note("origins: the nodes' spans made", t0.elapsed());
-                    *m = Some((key, sp.clone()));
-                    sp
-                }
+            if let Some(x) = m.as_ref().filter(|x| x.0 == key) {
+                x.1.clone()
+            } else {
+                let t0 = std::time::Instant::now();
+                let sp: Arc<[_]> = Arc::from(self.spans_named());
+                crate::timeline::note("origins: the nodes' spans made", t0.elapsed());
+                *m = Some((key, sp.clone()));
+                sp
             }
         };
         crate::origins::Input {
