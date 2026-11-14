@@ -2059,9 +2059,6 @@ pub struct Stats {
     pub refuted_by_field: Vec<(String, u64)>,
     /// The refuted predictions by field, with counts, most first.
     pub predictions_refuted_by_field: Vec<(String, u64)>,
-    /// The relations the live nodes' last runs filed, by operation and
-    /// field, counted ([`crate::run::NodeAudit`]).
-    pub relations: Vec<(&'static str, String, u64)>,
     /// The readers re-asked by field, by the reader's operation: `(op,
     /// field, count)` over the build ([`Stats::refuted_by_op`]).
     pub refuted_by_op_field: Vec<(&'static str, String, u64)>,
@@ -2672,17 +2669,6 @@ impl Stats {
         if op == "pages" { self.units_folded } else { 0 }
     }
 
-    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
-    /// operation `op` filed at their last runs (tests/state.rs).
-    #[must_use]
-    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
-        self.relations
-            .iter()
-            .filter(|r| r.0 == op && r.1 == field)
-            .map(|r| r.2)
-            .sum()
-    }
-
     /// The readers of operation `op` re-asked through field `name`, or a
     /// field of its family (`name:…`), over the build.
     #[must_use]
@@ -2972,10 +2958,9 @@ struct Graph {
     /// ([`Graph::push_env`], spec-final §4.5).
     env_pushed: Vec<(Field, ValueId)>,
     absent_pushed: Vec<Field>,
-    /// The comments' entries among `env_pushed` ([`Marks::entries`], by
-    /// field): a change of the comments alone pushed as theirs
-    /// ([`Graph::push_marks`]).
-    marks_pushed: Vec<(Field, ValueId)>,
+    /// The comments `env_pushed` holds, by id ([`Marks::ids`]): a change
+    /// of the comments alone pushed as theirs ([`Graph::push_marks`]).
+    marks_pushed: FxHashMap<u64, String>,
     pub(crate) env_calls: u64,
     /// The job's bindings (the format's state, the job's names and
     /// dates: [`job_env`]), pushed with the environment.
@@ -3459,7 +3444,7 @@ impl Graph {
             link,
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
-            marks_pushed: Vec::new(),
+            marks_pushed: FxHashMap::default(),
             env_calls: 0,
             job: Vec::new(),
             files_op,
@@ -3910,7 +3895,7 @@ impl Graph {
             self.env_calls += 1;
             self.env_pushed = env;
         }
-        self.marks_pushed = by_field(self.marks.entries(self.eng.values()));
+        self.marks_pushed = self.marks.ids();
         if absent != self.absent_pushed {
             let gone: Vec<(Field, Option<ValueId>)> = absent.iter().map(|&f| (f, None)).collect();
             self.eng.update_environment(&gone);
@@ -3928,9 +3913,21 @@ impl Graph {
         if self.env_pushed.is_empty() {
             return false;
         }
-        let new = by_field(self.marks.entries(self.eng.values()));
-        crate::timeline::lap("env: the comments' entries");
-        let cs = env_changes(&self.marks_pushed, &new, true).unwrap_or_default();
+        let new = self.marks.ids();
+        let v = self.eng.values();
+        let field = |id: u64| v.field(&format!("{DOC_MARKS}{id:016x}"));
+        let mut cs: Vec<(Field, Option<ValueId>)> = new
+            .iter()
+            .filter(|(id, t)| self.marks_pushed.get(id) != Some(t))
+            .map(|(&id, t)| (field(id), Some(v.str(t))))
+            .collect();
+        cs.extend(
+            self.marks_pushed
+                .keys()
+                .filter(|id| !new.contains_key(id))
+                .map(|&id| (field(id), None)),
+        );
+        crate::timeline::lap("env: the comments' changes");
         if !cs.is_empty() {
             self.eng.update_environment(&cs);
             self.env_calls += 1;
@@ -5163,6 +5160,17 @@ impl Marks {
                 let id = mark_id(*h, c, collide.contains(h));
                 (v.field(&format!("{DOC_MARKS}{id:016x}")), v.str(c))
             })
+            .collect()
+    }
+
+    /// Each comment's id and text ([`Marks::entries`] without a field
+    /// or a value made); the environment holds them from here.
+    fn ids(&self) -> FxHashMap<u64, String> {
+        let mut m = self.0.locked();
+        m.1 = false;
+        let collide = collisions(&m.0);
+        m.0.iter()
+            .map(|(_, h, c)| (mark_id(*h, c, collide.contains(h)), c.clone()))
             .collect()
     }
 
@@ -6988,7 +6996,6 @@ impl Build {
             version: last.version.max(v),
             live: last.live,
             threads: last.threads,
-            relations: last.relations,
             ..Stats::default()
         };
         self.loads_ran = false;
@@ -7100,8 +7107,8 @@ impl Build {
         crate::timeline::lap("engine: package load stats");
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
-        stats.relations = self.relations_now();
-        crate::timeline::lap("engine: the relations counted");
+        self.audit_live();
+        crate::timeline::lap("engine: the gone nodes' audits dropped");
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
@@ -8307,14 +8314,24 @@ impl Build {
         made_bytes(self.g.eng.values(), &self.made_values())
     }
 
-    /// What [`Build::export_made`] is made from: each made file's name
-    /// and value, hashed (the same, the same bytes: a value is never
-    /// changed in place).
+    /// What [`Build::export_made`] is made from: each file a tool may
+    /// make of the files written, and the definitions of it filed
+    /// ([`phitex_defuse::Engine::defs_digest`]): the same, the same bytes
+    /// (a value is never changed in place), found without a pass over
+    /// every node's record per name.
     #[must_use]
     pub fn made_source(&self) -> u64 {
-        self.made_values().iter().fold(0x6d61_6465, |h, (n, x)| {
-            phitex_defuse::hash_words(phitex_defuse::hash_bytes(h, n.as_bytes()), &[x.raw()])
-        })
+        let v = self.g.eng.values();
+        let mut h = 0x6d61_6465;
+        for (input, _) in self.files_shared().iter() {
+            for o in crate::tools::made_names(input) {
+                h = phitex_defuse::hash_words(
+                    phitex_defuse::hash_bytes(h, o.as_bytes()),
+                    &[self.g.eng.defs_digest(crate::tools::made_field(v, &o))],
+                );
+            }
+        }
+        h
     }
 
     /// The files the tools made, by name: their values as defined.
@@ -9884,27 +9901,30 @@ impl Build {
         out
     }
 
-    /// The relations the live nodes' last runs filed, by operation and
-    /// field ([`Stats::relations_by_op`]).
-    fn relations_now(&self) -> Vec<(&'static str, String, u64)> {
-        let v = self.g.eng.values();
-        let mut a = self.g.ops.audit.locked();
-        // (the nodes gone since: their runs' records dropped)
-        a.retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
-        let mut out: Vec<(&'static str, String, u64)> = Vec::new();
-        for x in a.values() {
-            for &(f, rel) in &x.defs {
-                if !rel {
-                    continue;
-                }
-                let name = field_name(v, f);
-                match out.iter_mut().find(|r| r.0 == x.op && r.1 == name) {
-                    Some(r) => r.2 += 1,
-                    None => out.push((x.op, name, 1)),
-                }
-            }
-        }
-        out
+    /// The gone nodes' runs' records ([`crate::run::NodeAudit`])
+    /// dropped.
+    fn audit_live(&self) {
+        self.g
+            .ops
+            .audit
+            .locked()
+            .retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
+    }
+
+    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
+    /// operation `op` filed at their last runs (tests/state.rs), counted
+    /// when asked, not after every evaluation.
+    #[must_use]
+    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
+        let f = self.g.eng.values().field(field);
+        self.g
+            .ops
+            .audit
+            .locked()
+            .iter()
+            .filter(|(n, x)| x.op == op && self.g.eng.is_live(NodeId::from_raw(**n)))
+            .map(|(_, x)| x.defs.iter().filter(|d| d.0 == f && d.1).count() as u64)
+            .sum()
     }
 
     /// The reads of fields whose name starts with `prefix` the live

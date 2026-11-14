@@ -302,7 +302,7 @@ pub(crate) struct Ops {
     /// What each node's last run published and read of the state, by
     /// node ([`NodeAudit`]): the state model's tests ask it
     /// (`Build::definitions_by_op`, `Build::reads_by_op`,
-    /// `Stats::relations_by_op`).
+    /// `Build::relations_by_op`).
     pub audit: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, NodeAudit>>>,
 }
 
