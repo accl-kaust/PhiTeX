@@ -32,8 +32,7 @@ A big one :) Lots of speed, and a nicer preview to read your paper in!
 - **Fonts are found the way xelatex finds them.**
 - **Long sessions stay healthy.** After many builds in one watch or editor
   session, tables (`tabular`, `align` and friends) could suddenly break
-  until you restarted PhiTeX. Fixed, along with a rare empty picture at
-  `-j4` and up.
+  until you restarted PhiTeX. Fixed.
 
 Thanks for all the feedback, keep it coming!
 
