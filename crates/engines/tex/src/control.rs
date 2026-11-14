@@ -86,7 +86,23 @@ impl Run<'_, '_> {
             // (the command loop's one check of the token path's halt)
             self.ck()?;
             if !got {
-                return Ok(());
+                return self.csname_force();
+            }
+            // (a `\\csname` look-up put off waits for this command alone,
+            // an assignment that may bind its name globally,
+            // [`Run::csname_defer`])
+            if self.csname_defer.is_some()
+                && !matches!(
+                    self.cur.cmd,
+                    cmd::PREFIX
+                        | cmd::LET
+                        | cmd::DEF
+                        | cmd::SHORTHAND_DEF
+                        | cmd::DEF_FONT
+                        | cmd::READ_TO_CS
+                )
+            {
+                self.csname_force()?;
             }
             if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
                 self.cmd_trace();
@@ -101,7 +117,7 @@ impl Run<'_, '_> {
                     && self.cur.cmd != cmd::DONT_EXPAND
                     && self.cur.cmd != cmd::SYM
                 {
-                    return Ok(());
+                    return self.csname_force();
                 }
                 self.command_call = self.cur.cmd == cmd::CALL;
                 self.expand();
@@ -110,9 +126,10 @@ impl Run<'_, '_> {
                     self.pdf_cmd = 0;
                     continue;
                 }
-                return Ok(());
+                return self.csname_force();
             }
             self.dispatch()?;
+            self.csname_force()?;
             return self.ck();
         }
     }

@@ -4126,6 +4126,70 @@ fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
     }
 }
 
+/// A `\csname` whose control sequence the next command assigns globally
+/// (pgf's `\pgfsys@invalidate@currentid`: `\expandafter\global\expandafter
+/// \let\csname pgf@sys@id@keylist@<ref>\endcsname\pgfutil@empty`) reads
+/// nothing of it: whatever §372 found, the binding after the `\let` is the
+/// same global one. A paragraph put first that defines the name globally
+/// runs no later paragraph again; a `\csname` met otherwise (tested, shown,
+/// let locally) reads as before. Every edited PDF equals a cold build's,
+/// at one and eight threads.
+#[test]
+fn a_csname_bound_globally_at_once_reads_nothing() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/csname-dead");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |first: bool| {
+        let mut s = String::from("\\documentclass{article}\n\\begin{document}\n");
+        if first {
+            s.push_str("First \\expandafter\\gdef\\csname kl@a\\endcsname{set} and \\csname kl@a\\endcsname.\n\n");
+        }
+        for i in 0..8 {
+            s.push_str(&format!(
+                "Paragraph {i} \\expandafter\\global\\expandafter\\let\\csname kl@a\\endcsname\\empty \
+                 \\expandafter\\global\\expandafter\\let\\csname kl@b{i}\\endcsname\\relax words.\n\n"
+            ));
+        }
+        s.push_str(
+            "Tested: \\expandafter\\ifx\\csname kl@u\\endcsname\\relax relax\\else other\\fi; \
+             {\\expandafter\\let\\csname kl@l\\endcsname\\empty local}\\expandafter\\meaning\\csname kl@l\\endcsname; \
+             \\expandafter\\gdef\\csname kl@g\\endcsname{g}\\meaning\\kl@g; \\meaning\\kl@a.\n\n\\end{document}\n",
+        );
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("csdead", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for first in [true, false] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let on: Vec<&String> = r.iter().filter(|x| x.contains("kl@a")).collect();
+            assert!(
+                on.is_empty(),
+                "-j{threads} first {first}: ran again on kl@a: {on:?}"
+            );
+        }
+    }
+}
+
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
 /// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
 /// (microtype's font expansion). A reader cares which ratios are there,

@@ -272,6 +272,54 @@ impl Run<'_, '_> {
     /// §372's end: control sequence `t` made `\relax` where undefined,
     /// and put back.
     fn cs_name_end(&mut self, t: Tok) -> R<()> {
+        self.csname_force()?;
+        if let Some(l) = self.csname_deferrable(t)? {
+            self.csname_defer = Some((l, t));
+            self.back_input(t);
+            return Ok(());
+        }
+        self.csname_relax(t)?;
+        self.back_input(t);
+        Ok(())
+    }
+
+    /// Whether the look-up of `\\csname`'s `t` (§372) may wait for the
+    /// command after it ([`Run::csname_defer`]): its location, where the
+    /// run has not touched it, holds no pending append and reads no
+    /// read-back, and no `\\tracingassigns` or `\\tracingrestores` would
+    /// show the `\\relax` §372 makes (a global binding after it: the
+    /// value it changes, the entry its group's end retains).
+    fn csname_deferrable(&mut self, t: Tok) -> R<Option<crate::state::Loc>> {
+        let Some(l) = self.mean_loc(t) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l)
+            || self.interp.is_some()
+            || self.rec_load
+            || self.rb.is_some()
+            || self.appending.iter().any(|x| x.0 == l)
+            || self.appending_vals.iter().any(|x| x.0 == l)
+            || self.lazy_pre(l)
+        {
+            return Ok(None);
+        }
+        if self.param("tracingassigns")? > 0 || self.param("tracingrestores")? > 0 {
+            return Ok(None);
+        }
+        Ok(Some(l))
+    }
+
+    /// The look-up [`Run::cs_name_end`] put off, made now
+    /// ([`Run::csname_defer`]).
+    pub(crate) fn csname_force(&mut self) -> R<()> {
+        match self.csname_defer.take() {
+            Some((_, t)) => self.csname_relax(t),
+            None => Ok(()),
+        }
+    }
+
+    /// §372: `t` made `\\relax` where undefined.
+    fn csname_relax(&mut self, t: Tok) -> R<()> {
         // (§372: of the name's meaning only whether it is defined)
         let undefined = match self.defined_lookup(t)? {
             Some(d) => !d,
@@ -282,7 +330,6 @@ impl Run<'_, '_> {
             let f = t.field_name().unwrap_or_default();
             self.set(&f, relax, false);
         }
-        self.back_input(t);
         Ok(())
     }
 
