@@ -300,7 +300,60 @@ pub(crate) fn keep_shipped(inst: u64, id: u64, g: PageGlyphs) {
     put(inst, id, g, true);
 }
 
-fn put(inst: u64, id: u64, g: PageGlyphs, shipped: bool) {
+/// The codes of the forms and images a page's record left to the link
+/// (`phitex_pdf::PdfState::hole_codes`), by the value store and the
+/// page's identity: told the page's glyphs, kept or to come.
+type HoleMemo = Mutex<FxHashMap<(u64, u64), Arc<[Option<usize>]>>>;
+
+fn hole_memo() -> &'static HoleMemo {
+    static M: OnceLock<HoleMemo> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// Page `id`'s glyphs told the codes of its objects drawn, in order
+/// (the page written apart did not know them: they are the link's).
+fn told_holes(g: &mut PageGlyphs, holes: &[Option<usize>]) {
+    let objs: Vec<u32> = g
+        .codes
+        .iter()
+        .filter(|c| c.kind == XOBJECT)
+        .map(|c| c.lig)
+        .collect();
+    for (o, n) in objs.into_iter().zip(holes) {
+        if let Some(n) = *n
+            && !g.xcodes.iter().any(|&(x, _)| x == o)
+        {
+            g.xcodes.push((o, n));
+        }
+    }
+}
+
+/// Page `id`'s objects' codes as the link placed them (value store
+/// `inst`): its glyphs told them, those kept now and those kept later.
+pub(crate) fn keep_holes(inst: u64, id: u64, holes: Vec<Option<usize>>) {
+    let holes: Arc<[Option<usize>]> = Arc::from(holes);
+    {
+        let mut h = hole_memo().locked();
+        if h.get(&(inst, id)).is_some_and(|x| **x == *holes) {
+            return;
+        }
+        if h.len() > 1 << 16 {
+            h.clear();
+        }
+        h.insert((inst, id), holes.clone());
+    }
+    let mut m = glyph_memo().locked();
+    if let Some(e) = m.get_mut(&(inst, id)) {
+        let mut g = (*e.0).clone();
+        told_holes(&mut g, &holes);
+        e.0 = Arc::new(g);
+    }
+}
+
+fn put(inst: u64, id: u64, mut g: PageGlyphs, shipped: bool) {
+    if let Some(h) = hole_memo().locked().get(&(inst, id)).cloned() {
+        told_holes(&mut g, &h);
+    }
     let mut m = glyph_memo().locked();
     if !shipped && m.get(&(inst, id)).is_some_and(|e| e.1) {
         return;
@@ -316,6 +369,7 @@ fn put(inst: u64, id: u64, g: PageGlyphs, shipped: bool) {
 /// Page `id`'s glyphs (value store `inst`) dropped: its record is gone.
 pub(crate) fn forget(inst: u64, id: u64) {
     glyph_memo().locked().remove(&(inst, id));
+    hole_memo().locked().remove(&(inst, id));
 }
 
 /// Page `id`'s glyphs (value store `inst`), if kept.

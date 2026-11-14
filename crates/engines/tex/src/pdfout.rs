@@ -6205,7 +6205,20 @@ fn link(
                 };
                 let wh: Option<&mut phitex_pdf::WhatsitSource<'_>> =
                     alone.is_some().then_some(&mut wh);
-                st.replay_page(rec, &src, &fmap, &at, None, &mut ps, wh)
+                let r = st.replay_page(rec, &src, &fmap, &at, None, &mut ps, wh);
+                // (origins on: the codes of the forms and images the page
+                // left to its placing, as the link has them)
+                if f.origins && r.is_ok() {
+                    let holes = st.hole_codes(rec, &at);
+                    if !holes.is_empty() {
+                        crate::origins::keep_holes(
+                            v.instance(),
+                            shown_id(x.raw(), Some(&h)),
+                            holes,
+                        );
+                    }
+                }
+                r
             };
             t_step[2] += ts.elapsed();
             if alone.is_some() && crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {

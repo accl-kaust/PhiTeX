@@ -1756,8 +1756,15 @@ impl PdfState {
                 v,
             });
         }
-        if let Some(t) = self.tap.sink.as_mut() {
-            t.xobject();
+        // (its codes told where the object is known here: an image's;
+        // a form's where the page is shipped whole, else counted in the
+        // file made)
+        if form {
+            if let Some(t) = self.tap.sink.as_mut() {
+                t.xobject(n);
+            }
+        } else {
+            self.tap_image(n);
         }
         true
     }

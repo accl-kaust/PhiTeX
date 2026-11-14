@@ -947,9 +947,31 @@ impl PdfState {
         if let Some(ops) = self.xobject_ops(n, false, vertical, h, v) {
             self.print(&ops);
         }
+        self.tap_image(n);
+    }
+
+    /// The codes image `n` shows where it is drawn, where its picture is
+    /// read.
+    pub(crate) fn ximage_codes(&self, n: usize) -> Option<usize> {
+        self.aux
+            .ximages
+            .get(&n)
+            .and_then(|x| x.image.as_ref())
+            .map(Image::codes)
+    }
+
+    /// Tells the tap image `n` drawn, and its codes where its picture is
+    /// read.
+    pub(crate) fn tap_image(&mut self, n: usize) {
+        if !self.tap.on() {
+            return;
+        }
+        let codes = self.ximage_codes(n);
         if let Some(t) = self.tap.sink.as_mut() {
             t.xobject(n);
-            t.xobject_codes(n, image.codes());
+            if let Some(c) = codes {
+                t.xobject_codes(n, c);
+            }
         }
     }
 
