@@ -5601,8 +5601,9 @@ mod culprit_tests {
 /// canonical form is its own; the marks after them renumbered). The new
 /// marks, and the range of `canon` replaced, `(start, old end, new end)`;
 /// `None` (`canon` untouched) where a comment's line made again or gone
-/// has the text before its `%` of another one's, whose id may change
-/// with it ([`mark_id`]): the whole text is made again.
+/// has the text before its `%` of a line kept, and that text now names
+/// one comment where it named more, or more where it named one: the
+/// kept line's id changes ([`mark_id`]), the whole text is made again.
 fn canonical_splice(
     old: &str,
     canon: &mut String,
@@ -5716,26 +5717,9 @@ fn canonical_lines_splice(
     for m in &mut mid {
         m.0 = m.0.saturating_add(lift);
     }
-    // (the marks of the lines kept, and of those made again or gone: a
-    // line text before a `%` they share takes the whole text again)
+    // (the marks of the lines kept, and of those made again or gone)
     let lo = u32::try_from(first).unwrap_or(u32::MAX);
     let hi = u32::try_from(first + old_lines).unwrap_or(u32::MAX);
-    let kept: phitex_defuse::FxHashSet<u64> = marks
-        .iter()
-        .filter(|m| m.0 <= lo || m.0 > hi)
-        .map(|m| m.1)
-        .collect();
-    if marks
-        .iter()
-        .filter(|m| m.0 > lo && m.0 <= hi)
-        .chain(&mid)
-        .any(|m| kept.contains(&m.1))
-    {
-        return None;
-    }
-    fill_ids(&mut out, &at, &mid, &collisions(&mid));
-    canon.replace_range(cs..ce, &out);
-    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     // (the marks: before the lines, theirs made again, after them moved)
     let new_lines = newlines(&n[ls..le]);
     let shift = |l: u32| -> u32 {
@@ -5744,16 +5728,45 @@ fn canonical_lines_splice(
         u32::try_from(l).unwrap_or(u32::MAX)
     };
     let mut ms: Vec<CommentMark> = marks.iter().filter(|m| m.0 <= lo).cloned().collect();
-    ms.extend(mid);
+    ms.extend(mid.iter().cloned());
     ms.extend(
         marks
             .iter()
             .filter(|m| m.0 > hi && le_old < o.len())
             .map(|(l, h, c)| (shift(*l), *h, c.clone())),
     );
+    // (a line kept whose text before its `%` is that of a comment made
+    // again or gone keeps its id while that text names more than one
+    // comment before and after, or one alone both times ([`mark_id`]);
+    // where that changed, the whole text again)
+    let kept: phitex_defuse::FxHashSet<u64> = marks
+        .iter()
+        .filter(|m| m.0 <= lo || m.0 > hi)
+        .map(|m| m.1)
+        .collect();
+    let shared: Vec<u64> = marks
+        .iter()
+        .filter(|m| m.0 > lo && m.0 <= hi)
+        .chain(&mid)
+        .map(|m| m.1)
+        .filter(|h| kept.contains(h))
+        .collect();
+    let collide = collisions(&ms);
+    if !shared.is_empty() {
+        let before = collisions(marks);
+        if shared
+            .iter()
+            .any(|h| before.contains(h) != collide.contains(h))
+        {
+            return None;
+        }
+    }
     if !ids_hold(&ms) {
         return None;
     }
+    fill_ids(&mut out, &at, &mid, &collide);
+    canon.replace_range(cs..ce, &out);
+    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     Some((ms, (cs, ce, cs + out.len())))
 }
 
