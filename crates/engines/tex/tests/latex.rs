@@ -2498,8 +2498,9 @@ fn latex_glyph_origins_of_input_files() {
     check(&b, &chap2, &inner, "after the edit");
     let cold = build(&main, 1);
     let named = |b: &phitex_tex::Build| {
+        let pages = b.all_page_origins();
         let files = b.origin_files();
-        b.all_page_origins()
+        pages
             .iter()
             .map(|p| {
                 p.as_ref().map(|p| {
