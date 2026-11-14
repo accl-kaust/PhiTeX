@@ -772,6 +772,8 @@ phitex session problems [--errors] [--warnings] [--file F] [--context N] [--summ
 phitex session rebuild [--clean]
 phitex session log [--tail N] [--build N]
 phitex session pdf [-o PATH] [--synctex]       # the exact PDF written now (any watch), its path printed
+phitex session propose -m WHY [--title T] [--revise ID]   # a proposal (§9.6), or the changes waiting named
+phitex session mode [direct|propose]
 phitex session stop                            # as q: the exact PDF written, then the watch ends
 phitex session list                            # the running watches
 phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | changes
@@ -952,6 +954,28 @@ read the note (a diff of the text then and now, by file and line), so
 the thread says "edited: paper.tex:118–121", a link to the place.
 Those ranges move with later edits as anchors do.
 
+**Editing and deleting.** A click on a note (its mark, its pin, its
+card) opens it with **Edit** and **Delete**; Enter on its card edits,
+Delete or Backspace deletes, Esc closes. Edit changes its words and, for
+the first post, its kind (highlight, note, comment); a reply the user
+wrote is edited the same way (`edited_at` says when, and `session notes`
+prints "edited 05:12 UTC"). Delete removes the note, or one of the
+user's replies, and shows **Undo** for a few seconds instead of a
+confirm (the op answers what it removed, `review_restore` puts it back
+where it was); deleting a note the agent replied to or answered with an
+edit asks once, as its thread goes too. A selected note's ends on the
+page are handles: dragged, the end moves to the source place nearest the
+pointer, snapped to its word (`review_anchor`). Every edit, move and
+delete wakes `wait --notes`: the agent may need to read the note again.
+Deleted notes are gone from `session notes`.
+
+**On the scrollbar.** Every note and every change waiting has a mark
+beside the pages' scrollbar, a colour each kind (highlight, note,
+comment, a change), resolved notes fainter: hovered, its first line;
+clicked, the pages there and its card open. They are placed from the
+marks' page and height, drawn again only when the notes or the layout
+change.
+
 ### 9.4 Changes: the agent's edits, reviewed as hunks
 
 **Opt-in.** Reviewing the agent's edits is experimental and off by
@@ -1054,13 +1078,100 @@ Review = {id, verdict: "approve" | "request_changes" | "reject" | "comment", sum
 |---|---|---|
 | `review_state` | none | `{notes, hunks, reviews, git, baseline}` |
 | `review_note` | `{kind, anchor, text?}` (anchor without `quote`: the watch fills it from the file) | `Note` |
-| `review_reply`, `review_resolve`, `review_reopen`, `review_delete` | `{id, text?}` | `Note` |
+| `review_reply`, `review_resolve`, `review_reopen` | `{target, text?}` | `Note` |
+| `review_edit` | `{target, text?, kind?, post?}` (`post`: a reply's index, the user's own) | `Note` |
+| `review_anchor` | `{target, start?, end?, snap?}` (bytes of its file; `snap`: to the word's edge) | `Note` |
+| `review_delete` | `{target, post?}` | `{removed, gone}` (what was removed, for an undo) |
+| `review_restore` | `{target?, gone}` | `{restored}` |
+| `review_changes` | `{on}` | `{changes}` (reviewing the agent's edits on or off, §9.4) |
+| `review_mode` | `{mode}` (`direct`, `propose`) | `{mode, workspace?}` |
+| `review_proposal_accept`, `review_proposal_reject` | `{target, hunks: [hunk id] \| "all"}` | `{done}` |
+| `review_proposal_comment` | `{target, text, hunk?, verdict?: "request_changes"}` | `{id}` |
 | `review_clear` | none | `{removed}` (the resolved notes) |
 | `review_accept`, `review_reject` | `{ids: [hunk id] \| "all", file?}` | `{done, refused?: why}` |
 | `review_comment` | `{hunk, text, range?, draft?}` | `Note` |
 | `review_submit` | `{verdict, summary}` | `Review` |
 
+A note or proposal an op is on is named `target`: `id` is the request's
+own, which its answer carries (an op that named the note `id` lost its
+answer: the reply came back under the note's name).
+
 The event `{"event": "review", "notes": [...], "hunks": [...],
-"reviews": [...]}` is sent to every viewer whenever any of it changes
+"reviews": [...], "proposals": [...], "mode", "changes"}` is sent to every viewer whenever any of it changes
 (a note made or moved, a reply, a build, an accept): the whole state,
 small next to a page.
+
+### 9.6 Proposals: changes kept apart until accepted
+
+Two modes, per watch (`session start --review direct|propose`, `session
+mode`, the `review-mode` setting, the viewer's Settings, Experimental),
+both behind `experimental-review` (§9.4):
+
+- **direct** (the default): the agent edits the files; its changes wait
+  as hunks (§9.4). `session propose -m WHY [--title T]` gives the changes
+  waiting a title and a why: the Changes tab shows them as one card.
+- **propose**: the agent's change does not touch the user's files or
+  PDF until accepted.
+
+**How the agent proposes.** The watch keeps a **workspace**,
+`.phitex/work/`: a copy of the project's text files the last build read
+(and `.phitex/work-base/`, the copy as made). The agent writes its change
+there with its usual tools, then `phitex session propose -m WHY [--title
+T]`: the workspace's difference from its base becomes a proposal
+(`.phitex/proposals/ID/rREV.json`: each file's base and proposed text),
+and the workspace is made again from the files as they are. Nothing the
+watch builds changes, so the pages never show the agent's text before
+the user accepts it. Chosen over the alternatives: a patch on standard
+input asks the agent for a diff it would write by hand, and is wrong
+where it miscounts; editing the files and propose putting them back
+shows the change on the pages for as long as it takes, and a build of
+it. That second way still works, as a fallback for an agent that edited
+the files anyway: with nothing in the workspace, `propose` takes the
+files' pending hunks as the proposal and puts the files back to their
+accepted text (refused where an editor holds unsaved text of one).
+`--revise ID` makes a new revision of a proposal: its thread kept, a
+post by the agent listing what this revision proposes that the last did
+not (the "updated" diff), its decisions cleared.
+
+**Applying.** A proposal's hunks are the word-level hunks (§9.4) from
+each file's base to its proposed text. A hunk is applied to the file as
+it is now (an editor's buffer where one has it, through the editor:
+`workspace/applyEdit`) by finding its base range there: where the user
+changed nothing in it since the agent read it, it moves with the edits
+around it; where the user changed its words, it **conflicts**, is shown
+so, and is not applied (Accept of it is refused, saying where). An
+accepted hunk becomes the accepted text too (the baseline takes the same
+hunk), so it is never shown again as the agent's pending change.
+Partial accepts work hunk by hunk; a proposal whose hunks are all
+decided is `accepted`, `rejected` or `partial`.
+
+**The card.** Each open proposal (and, in direct mode, the changes
+waiting) is a card: its title, its why, its files and its number of
+changes; Accept all, Reject all, Request changes, Comment; **Show diff**
+(the proposal typeset against the files as they are, latexdiff through
+Compare: `diff_start {rev: "now", to: "proposal:ID"}`, toggled back to
+the clean pages); the source as Words (deleted and added inline) or
+Lines; each hunk with Accept, Reject and a comment. Keys on a card: `n`
+and `p` step through its changes, `a` accepts the one focused, `r`
+rejects it, `c` comments on it; keys typed in a text box are the box's.
+
+**The agent's side.** `session changes` lists each proposal: its state,
+the user's decisions since the agent last looked, its thread (comments,
+on a hunk or the whole; requests for changes; its revisions).
+`wait --notes` wakes on a decision, a comment or a request for changes
+and answers the proposals concerned.
+
+| method | params | result |
+|---|---|---|
+| `phitex/propose` | `{why, title?, revise?}` | `Proposal` with its hunks, `from` (`workspace`, `files`), `workspace` |
+| `phitex/review/mode` | `{mode?}` | `{mode, workspace?}` |
+| `phitex/review/workspace` | none | `{workspace}` (made again from the files) |
+
+```
+Proposal = {id: "p2", title, why, status, mode: "direct" | "propose",
+            created, updated, revision, files: [name],
+            decided: [{hunk: {id, file, line, old, new}, verdict, at}],
+            thread: [Post],                 // `diff`: the hunk a comment is on; `changes`: a revision's
+            hunks: [Hunk & {state: "open" | "accepted" | "rejected" | "conflict"}]}
+```
+

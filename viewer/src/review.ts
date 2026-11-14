@@ -16,6 +16,12 @@
 //   answered), Accept and Reject each or all, comments on a hunk (at once,
 //   or gathered as a review submitted with a verdict), and Show changes:
 //   Compare against the accepted text, typeset.
+// - Proposals (§9.6, `propose` mode): the agent's change kept apart from
+//   the files, one card each (its title, why, files and hunks): Accept all,
+//   Reject all, Request changes, Comment, Show diff (typeset, latexdiff,
+//   against the files as they are), the source as words or lines, and each
+//   hunk accepted, rejected or commented on (keys a, r, c; n, p to step).
+//   In `direct` mode the agent's changes waiting are one such card.
 
 import { html } from "./html.ts";
 import type { Viewer } from "./viewer.ts";
@@ -28,6 +34,10 @@ export interface ReviewPost {
   at: string;
   edited?: { file: string; start: number; end: number; from_line: number; to_line: number }[];
   diff?: { id: string; file: string; line: number; old: string; new: string };
+  /** A proposal's revision: what changed since the last. */
+  changes?: { id: string; file: string; line: number; old: string; new: string }[];
+  /** When its author last edited it. */
+  edited_at?: string;
 }
 
 export interface ReviewNote {
@@ -62,6 +72,23 @@ export interface ReviewHunk {
   whole: "added" | "deleted" | null;
   note: string | null;
   comments: string[];
+  /** A proposal's hunk: decided, open, or conflicting with the user's edits since. */
+  state?: "open" | "accepted" | "rejected" | "conflict";
+  proposal?: string;
+}
+
+export interface ReviewProposal {
+  id: string;
+  title: string;
+  why: string;
+  status: "open" | "changes_requested" | "accepted" | "rejected" | "partial" | "done";
+  mode: "direct" | "propose";
+  created: string;
+  updated: string;
+  revision: number;
+  files: string[];
+  thread: ReviewPost[];
+  hunks: ReviewHunk[];
 }
 
 export interface ReviewRec {
@@ -89,6 +116,9 @@ export interface ReviewState {
   git: boolean;
   /** Reviewing the agent's edits on (Settings, Experimental; off by default): off, no Changes tab, no marks of them. */
   changes?: boolean;
+  /** The proposals, newest first (§9.6). */
+  proposals?: ReviewProposal[];
+  mode?: "direct" | "propose";
 }
 
 /** Where the review's state lives (the watch), and what the pages give it. */
@@ -105,8 +135,8 @@ export interface ReviewHost {
   spot(k: number, x: number, y: number): Promise<{ file: string; start: number } | null>;
   /** The editor to `file`'s `line`. */
   goto(file: string, line: number): void;
-  /** Compare against the accepted text, typeset (true), or back to the pages (false). */
-  showChanges?(on: boolean, git: boolean): void;
+  /** Compare against the accepted text, typeset (true), or back to the pages (false); `proposal`: that proposal against the files as they are. */
+  showChanges?(on: boolean, git: boolean, proposal?: string): void;
 }
 
 /** The panel's part the review needs. */
@@ -119,10 +149,27 @@ export interface ReviewPanel {
   msg(t: string, err?: boolean): void;
   /** The side pane shown or hidden (the panel lays the pages out again). */
   laidOut(): void;
+  /** Marks beside the pages' scrollbar: each note's and pending change's place, its kind's colour. */
+  scrollMarks?(m: { k: number; y: number; cls: string; title: string; go: () => void }[]): void;
 }
 
 const KIND_WORD: Record<ReviewNote["kind"], string> = { highlight: "Highlight", note: "Note", comment: "Comment" };
 const VERDICT_WORD: Record<ReviewRec["verdict"], string> = { approve: "Approved", request_changes: "Changes requested", reject: "Rejected", comment: "Commented" };
+const STATUS_WORD: Record<ReviewProposal["status"], string> = { open: "Waiting for you", changes_requested: "Changes requested", accepted: "Accepted", rejected: "Rejected", partial: "Partly accepted", done: "Done" };
+const STATE_WORD: Record<NonNullable<ReviewHunk["state"]>, string> = { open: "", accepted: "Accepted", rejected: "Rejected", conflict: "Conflicts with your edit" };
+
+/** The open changes of a proposal (a direct batch's are all waiting). */
+export function openHunks(x: ReviewProposal): ReviewHunk[] {
+  return x.hunks.filter((h) => (h.state ?? "open") === "open");
+}
+
+/** A hunk as source lines: `-` the old lines, `+` the new, with the line around it. */
+export function lineDiff(h: ReviewHunk): { del: string[]; add: string[] } {
+  const lines = (t: string) => (t.endsWith("\n") ? t.slice(0, -1) : t).split("\n");
+  const pre = h.before.replace(/^…/, "");
+  const post = h.after.replace(/…$/, "");
+  return { del: h.whole === "added" ? [] : lines(pre + h.old + post), add: h.whole === "deleted" ? [] : lines(pre + h.new + post) };
+}
 
 /** Material icons (Apache-2.0) the review draws, inline. */
 const PATHS: Record<string, string> = {
@@ -263,6 +310,35 @@ export const REVIEW_CSS = `
 .slot .rv-pin.on { outline: 2px solid var(--ph-accent, #1d3e72); outline-offset: 1px; }
 .slot .rv-pin:focus-visible { outline: 2px solid var(--ph-link, #1d3e72); outline-offset: 2px; }
 .stage.dark-pdf .slot .rv { mix-blend-mode: normal; }
+.rside .pcard { cursor: default; }
+.rside .pcard .ptitle { font-weight: 650; font-size: 14px; margin: 4px 0 2px; overflow-wrap: anywhere; }
+.rside .pcard .pwhy { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ph-fg); margin: 2px 0 4px; max-height: 8.5em; overflow: auto; }
+.rside .pcard .pmeta { font-size: 12px; color: var(--ph-fg2); }
+.rside .pcard .phunks { margin-top: 8px; }
+.rside .pcard .phunks .card { margin: 0 0 6px; padding: 6px 8px; }
+.rside .card.phunk:focus-visible, .rside .card.hunk:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.rside .card.phunk.st-accepted, .rside .card.phunk.st-rejected { opacity: .62; }
+.rside .chip.st-accepted { color: #1a7f37; } .rside .chip.st-rejected, .rside .chip.st-conflict { color: var(--ph-danger); }
+.rside .chip.st-changes_requested { color: var(--ph-warning); } .rside .chip.st-open { color: var(--ph-link); } .rside .chip.st-partial { color: var(--ph-fg2); }
+.rside .ldiff { font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); margin: 6px 0 0; max-height: 260px; overflow: auto; }
+.rside .ldiff div { padding: 0 6px; }
+.rside .ldiff .d { background: rgb(255 80 70 / 14%); } .rside .ldiff .a { background: rgb(40 170 80 / 16%); }
+.rside .ldiff .d::before { content: "−"; color: var(--ph-danger); margin-right: 6px; } .rside .ldiff .a::before { content: "+"; color: #1a7f37; margin-right: 6px; }
+.rside .keys { font-size: 11px; color: var(--ph-fg2); margin-top: 6px; }
+.rside .keys kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--ph-border); border-radius: 3px; padding: 0 3px; }
+.rside .post .on { color: var(--ph-fg2); font-size: 12px; }
+.rside .pcompose { margin-top: 8px; }
+.slot .rv-h { pointer-events: auto; position: absolute; width: 10px !important; margin-left: -5px; cursor: ew-resize; z-index: 4; background: none; }
+.slot .rv-h::before { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; background: var(--ph-accent, #1d3e72); }
+.slot .rv-h::after { content: ""; position: absolute; left: 1px; width: 8px; height: 8px; border-radius: 50%; background: var(--ph-accent, #1d3e72); }
+.slot .rv-h.start::after { top: -6px; } .slot .rv-h.end::after { bottom: -6px; }
+.rv-toast { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 40; display: flex; gap: 12px; align-items: center; padding: 8px 10px 8px 14px; background: var(--ph-fg, #222); color: var(--ph-bar, #fff); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 30%); }
+.rv-toast .btn { border: 0; background: none; color: inherit; font-weight: 700; cursor: pointer; padding: 2px 6px; text-decoration: underline; }
+.rside .editbox { margin-top: 6px; }
+.rside .editbox .seg { margin-bottom: 6px; }
+.rside .pact { display: flex; gap: 10px; margin: 0 0 2px; }
+.rside .lnk { border: 0; background: none; padding: 0; color: var(--ph-link); cursor: pointer; font-size: 12px; }
+.rside .lnk:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: no-preference) { .rside .card.flash { animation: rvflash 1.2s ease-out; } @keyframes rvflash { from { box-shadow: 0 0 0 3px var(--ph-progress); } } }
 `;
 
@@ -290,6 +366,19 @@ export class Review {
   private drawn = 0;
   /** Where each note is on the pages, as last drawn: its page and height (the list's order). */
   private where = new Map<string, [number, number]>();
+  /** The proposals shown as source lines (else words). */
+  private lines = new Set<string>();
+  /** A comment being written on a proposal (on one of its hunks; asking for changes). */
+  private pcompose: { id: string; hunk?: string; request: boolean } | null = null;
+  /** The proposal shown typeset (Show diff), "" the direct batch. */
+  private showingP: string | null = null;
+  /** The note being edited (`id`), or one of its replies (`id#i`). */
+  private editing: string | null = null;
+  private toastEl: HTMLElement | null = null;
+  /** The change to focus once drawn (the next after one decided: the state comes after the op). */
+  private wantFocus: string | null = null;
+  /** The marks drawn last: the selected note's handles from them. */
+  private lastOut: { k: number; boxes: Box[]; id: string }[] = [];
 
   constructor(p: ReviewPanel, host: ReviewHost) {
     this.p = p;
@@ -308,6 +397,7 @@ export class Review {
     this.grip();
     this.body.addEventListener("click", (e) => void this.clicked(e));
     this.body.addEventListener("keydown", (e) => this.keyed(e));
+    this.body.addEventListener("input", (e) => e.target instanceof HTMLTextAreaElement && this.keepDraft(e.target));
     host.onState((s) => {
       this.s = s;
       void this.marks();
@@ -348,7 +438,13 @@ export class Review {
 
   private count(): void {
     const open = this.s.notes.filter((n) => n.status === "open" && !n.draft && !n.hunk).length;
-    this.onCount?.(open, this.s.hunks.length);
+    this.onCount?.(open, this.pendingCount());
+  }
+
+  /** Changes waiting for the user: the agent's hunks and the proposals' open ones. */
+  private pendingCount(): number {
+    const props = (this.s.proposals ?? []).filter((x) => x.mode === "propose").reduce((n, x) => n + openHunks(x).length, 0);
+    return this.s.hunks.length + props;
   }
 
   get isOpen(): boolean {
@@ -383,7 +479,8 @@ export class Review {
     this.count();
     const nn = this.s.notes.filter((n) => n.status === "open" && !n.hunk && !n.draft).length;
     this.side.querySelector("#rv-nn")!.textContent = nn ? String(nn) : "";
-    this.side.querySelector("#rv-nc")!.textContent = this.s.hunks.length ? String(this.s.hunks.length) : "";
+    const nc = this.pendingCount();
+    this.side.querySelector("#rv-nc")!.textContent = nc ? String(nc) : "";
     for (const t of this.side.querySelectorAll<HTMLElement>("[data-tab]")) t.setAttribute("aria-selected", String(t.dataset.tab === this.tab));
     if (!this.isOpen) return;
     // (the focus and the reply typed kept across a redraw)
@@ -396,16 +493,37 @@ export class Review {
     if (!changesOn && this.tab === "changes") this.tab = "notes";
     this.body.replaceChildren(this.tab === "notes" ? this.notesView() : this.changesView());
     // (what was typed in a reply or a comment, put back)
-    for (const ta of this.body.querySelectorAll<HTMLTextAreaElement>("textarea[data-reply], textarea[data-comment]"))
-      ta.value = this.drafts.get(ta.dataset.reply ?? `h:${ta.dataset.comment}`) ?? "";
+    for (const ta of this.body.querySelectorAll<HTMLTextAreaElement>("textarea[data-reply], textarea[data-comment], textarea[data-pc]"))
+      ta.value = this.drafts.get(this.draftKey(ta)) ?? "";
+    for (const ta of this.body.querySelectorAll<HTMLTextAreaElement>("textarea[data-edit]")) {
+      const n = this.s.notes.find((x) => x.id === ta.dataset.edit);
+      const key = `e:${ta.dataset.edit}#${ta.dataset.i}`;
+      ta.value = this.drafts.get(key) ?? n?.thread[Number(ta.dataset.i)]?.text ?? "";
+    }
     this.body.scrollTop = top;
-    if (focusKey) {
+    const want = this.wantFocus ? this.body.querySelector<HTMLElement>(`[data-ph="${CSS.escape(this.wantFocus)}"], .card.hunk[data-id="${CSS.escape(this.wantFocus)}"]`) : null;
+    if (want) {
+      want.focus();
+      this.wantFocus = null;
+    } else if (focusKey) {
       const f = this.body.querySelector<HTMLElement>(`[data-focus="${CSS.escape(focusKey)}"]`);
       if (f) {
         f.focus();
         if (f instanceof HTMLTextAreaElement) f.selectionStart = f.selectionEnd = f.value.length;
       }
     }
+  }
+
+  private draftKey(ta: HTMLTextAreaElement): string {
+    if (ta.dataset.edit !== undefined) return `e:${ta.dataset.edit}#${ta.dataset.i}`;
+    return ta.dataset.reply ?? (ta.dataset.pc !== undefined ? `p:${ta.dataset.pc}` : `h:${ta.dataset.comment}`);
+  }
+
+  /** What is typed in a box, kept for the next drawing (as it is typed: a box sent is forgotten with its draft). */
+  private keepDraft(ta: HTMLTextAreaElement): void {
+    const key = this.draftKey(ta);
+    if (ta.value) this.drafts.set(key, ta.value);
+    else this.drafts.delete(key);
   }
 
   private notesView(): DocumentFragment {
@@ -427,43 +545,121 @@ export class Review {
     return html`${tools}${placed.map((n) => this.noteCard(n))}${detached.length ? html`<h3>Detached: their text is gone from the source</h3>${detached.map((n) => this.noteCard(n))}` : ""}`;
   }
 
+  /** The box editing note `n`'s words (post `i`; its kind with the first). */
+  private editBox(n: ReviewNote, i: number): DocumentFragment {
+    const kinds = (["highlight", "note", "comment"] as const).map((k) => html`<button type="button" data-kind="${k}" data-id="${n.id}" aria-pressed="${n.kind === k}">${KIND_WORD[k]}</button>`);
+    return html`<div class="editbox">${i === 0 && !n.hunk ? html`<span class="seg" role="group" aria-label="Kind">${kinds}</span>` : ""}<textarea data-edit="${n.id}" data-i="${String(i)}" data-focus="ed:${n.id}#${String(i)}" rows="3" aria-label="Edit the words" placeholder="${i === 0 && n.kind === "highlight" ? "Words for this highlight (none: a plain highlight)" : "Your words"}"></textarea><div class="act"><button type="button" class="btn primary" data-act="save-edit" data-id="${n.id}" data-i="${String(i)}">Save</button><button type="button" class="btn" data-act="cancel-edit" data-id="${n.id}">Cancel</button><span class="hint">Ctrl+Enter saves · Esc cancels</span></div></div>`;
+  }
+
   private noteCard(n: ReviewNote, inHunk = false): DocumentFragment {
     const on = this.sel === n.id;
     const a = n.anchor;
     const quote = a.quote
       ? html`<div class="quote ${n.kind}">${oneLine(a.quote, on ? 2000 : 240)}</div>`
       : html`<div class="quote spot ${n.kind}">A spot on page ${String((a.page ?? 0) + 1)}</div>`;
-    const thread = n.thread.map((p) => this.post(p));
+    const editingNote = on && this.editing === n.id;
+    const thread = n.thread.map((p, i) => (on && this.editing === `${n.id}#${i}` ? this.editBox(n, i) : html`${editingNote && i === 0 ? "" : this.post(p)}${on && !inHunk && i > 0 && p.by === "you" ? html`<div class="pact"><button type="button" class="lnk" data-act="edit-post" data-id="${n.id}" data-i="${String(i)}">Edit</button><button type="button" class="lnk" data-act="del-post" data-id="${n.id}" data-i="${String(i)}">Delete</button></div>` : ""}`));
+    if (editingNote) thread.unshift(this.editBox(n, 0));
     const lastBy = n.thread.at(-1)?.by;
     // (a comment asks the agent; a note and a highlight are kept, asking nothing)
     const waiting = n.status === "open" && n.kind === "comment" && lastBy !== "agent" && !n.draft && !n.verdict;
-    const reply = on && !n.draft
-      ? html`<textarea data-focus="reply:${n.id}" data-reply="${n.id}" placeholder="${n.kind === "highlight" ? "Add a note…" : "Reply…"}" aria-label="Reply to this note" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="reply" data-id="${n.id}" data-focus="send:${n.id}">Reply</button>${n.status === "open" ? html`<button type="button" class="btn" data-act="resolve" data-id="${n.id}" data-focus="res:${n.id}">${icon("check", 14)} Resolve</button>` : html`<button type="button" class="btn" data-act="reopen" data-id="${n.id}" data-focus="reo:${n.id}">${icon("undo", 14)} Reopen</button>`}<span class="grow"></span><button type="button" class="ib" data-act="delete" data-id="${n.id}" title="Delete this note" aria-label="Delete this note">${icon("delete", 16)}</button></div><div class="hint">Ctrl+Enter replies · Esc closes</div>`
+    const reply = on && !n.draft && !this.editing?.startsWith(n.id)
+      ? html`<textarea data-focus="reply:${n.id}" data-reply="${n.id}" placeholder="${n.kind === "highlight" ? "Add a note…" : "Reply…"}" aria-label="Reply to this note" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="reply" data-id="${n.id}" data-focus="send:${n.id}">Reply</button>${n.status === "open" ? html`<button type="button" class="btn" data-act="resolve" data-id="${n.id}" data-focus="res:${n.id}">${icon("check", 14)} Resolve</button>` : html`<button type="button" class="btn" data-act="reopen" data-id="${n.id}" data-focus="reo:${n.id}">${icon("undo", 14)} Reopen</button>`}<span class="grow"></span>${inHunk ? "" : html`<button type="button" class="btn" data-act="edit" data-id="${n.id}" data-focus="edit:${n.id}" title="Edit its words or kind (Enter)">${icon("note", 14)} Edit</button>`}<button type="button" class="btn" data-act="delete" data-id="${n.id}" data-focus="del:${n.id}" title="Delete (Delete key)">${icon("delete", 14)} Delete</button></div><div class="hint">Ctrl+Enter replies · Enter on the card edits · Delete deletes · Esc closes</div>`
       : "";
     const answered = (n.hunks ?? []).length;
     return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top"><span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
   }
 
   private post(p: ReviewPost): DocumentFragment {
+    if (p.changes?.length)
+      return html`<div class="post update"><span class="by agent">Agent</span>revised it<span class="when">${ago(p.at)}</span>${p.text ? html`<div class="txt">${p.text}</div>` : ""}${p.changes.slice(0, 8).map((c) => html`<div class="diff"><span class="ctx">${c.file}:${String(c.line)} </span>${c.old ? html`<del>${oneLine(c.old, 160)}</del>` : ""}${c.new ? html`<ins>${oneLine(c.new, 160)}</ins>` : ""}</div>`)}${p.changes.length > 8 ? html`<div class="more">and ${String(p.changes.length - 8)} more</div>` : ""}</div>`;
+    if (p.diff && p.by !== "agent")
+      return html`<div class="post"><span class="by">You</span><span class="txt">${p.text}</span><span class="when" title="${p.at}">${ago(p.at)}</span><div class="on">on ${placeOf(p.diff.file, p.diff.line)}: ${p.diff.old ? html`<del>${oneLine(p.diff.old, 60)}</del>` : ""}${p.diff.new ? html`<ins>${oneLine(p.diff.new, 60)}</ins>` : ""}</div></div>`;
     if (p.diff)
       return html`<div class="post update"><span class="by agent">Agent</span>changed it<span class="when">${ago(p.at)}</span><div class="diff">${p.diff.old ? html`<del>${oneLine(p.diff.old, 160)}</del>` : ""}${p.diff.new ? html`<ins>${oneLine(p.diff.new, 160)}</ins>` : ""}</div></div>`;
     const edited = (p.edited ?? []).map((e) => html`<button type="button" class="place" data-goto="${e.file}" data-line="${String(e.from_line)}" data-from="${String(e.start)}" data-to="${String(e.end)}">${placeOf(e.file, e.from_line, e.to_line)}</button> `);
-    return html`<div class="post"><span class="by ${p.by === "agent" ? "agent" : ""}">${p.by === "agent" ? "Agent" : "You"}</span><span class="txt">${p.text}</span><span class="when" title="${p.at}">${ago(p.at)}</span>${edited.length ? html`<span class="edited">Edited ${edited}</span>` : ""}</div>`;
+    return html`<div class="post"><span class="by ${p.by === "agent" ? "agent" : ""}">${p.by === "agent" ? "Agent" : "You"}</span><span class="txt">${p.text}</span><span class="when" title="${p.edited_at ? `Edited ${p.edited_at}` : p.at}">${ago(p.at)}${p.edited_at ? " · edited" : ""}</span>${edited.length ? html`<span class="edited">Edited ${edited}</span>` : ""}</div>`;
   }
 
   private changesView(): DocumentFragment {
-    const hs = this.s.hunks;
+    const mode = this.s.mode ?? "direct";
+    const props = this.s.proposals ?? [];
     const drafts = this.s.notes.filter((n) => n.draft);
     const bar = drafts.length
       ? html`<div class="rbar"><span><b>${String(drafts.length)}</b> comment${drafts.length === 1 ? "" : "s"} in your review</span><span class="grow"></span><button type="button" class="btn primary" data-act="finish">Finish review</button></div>`
       : "";
     const last = this.s.reviews.at(-1);
     const rec = last ? html`<div class="reviewrec">Last review: ${VERDICT_WORD[last.verdict]}${last.summary ? `: ${oneLine(last.summary, 80)}` : ""} · ${ago(last.at)}</div>` : "";
-    if (!hs.length)
-      return html`${bar}${rec}${this.earlier(true)}<div class="empty"><b>No changes waiting.</b><br>Edits your agent makes to the files show here, word by word, to accept or reject. ${this.s.git ? "Accepting one stages it in git; rejecting one puts the staged text back." : "Accepted text is kept in .phitex/baseline."}<br><br>Edits you type in an editor attached to this watch are yours and are accepted as you type.</div>`;
-    const tools = html`<div class="rtools"><button type="button" class="btn accept" data-act="accept-all" title="Accept every change">${icon("check", 14)} Accept all</button><button type="button" class="btn reject" data-act="reject-all" title="Reject every change: the files get the accepted text back">Reject all</button><span class="grow"></span><label class="hint" title="Compare against the accepted text, typeset (latexdiff)"><input type="checkbox" data-act="show" checked="${this.showing}"> Show typeset</label></div>`;
+    const segb = (m: "direct" | "propose", label: string, title: string) => html`<button type="button" data-mode="${m}" aria-pressed="${mode === m}" title="${title}">${label}</button>`;
+    const modes = html`<div class="rtools"><span class="hint">Your agent</span><span class="seg" role="group" aria-label="How your agent's changes come">${segb("direct", "Edits", "It edits the files; its changes show on the pages, waiting for you")}${segb("propose", "Proposes", "Its changes are kept apart until you accept them; the pages show them only with Show diff")}</span></div>`;
+    // (the direct batch: the agent's changes waiting, in either mode)
+    const batch = this.s.hunks.length ? this.batchCard(props.find((x) => x.mode === "direct" && x.status !== "done")) : "";
+    const live = props.filter((x) => x.mode === "propose" && (x.status === "open" || x.status === "changes_requested"));
+    const decided = props.filter((x) => x.mode === "propose" && !live.includes(x));
+    const empty = !this.s.hunks.length && !live.length
+      ? mode === "propose"
+        ? html`<div class="empty"><b>No proposals waiting.</b><br>Your agent writes its change in the workspace (<code>.phitex/work/</code>) and sends it with <code>phitex session propose -m "why"</code>. Your files and pages stay as they are until you accept it here.<br><br>Accept all, or change by change; <b>Show diff</b> typesets it against your text.</div>`
+        : html`<div class="empty"><b>No changes waiting.</b><br>Edits your agent makes to the files show here, word by word, to accept or reject. ${this.s.git ? "Accepting one stages it in git; rejecting one puts the staged text back." : "Accepted text is kept in .phitex/baseline."}<br><br>Edits you type in an editor attached to this watch are yours and are accepted as you type.</div>`
+      : "";
+    return html`${bar}${rec}${modes}${empty}${live.map((x) => this.propCard(x))}${batch}${decided.length ? html`<h3>Decided</h3>${decided.slice(0, 6).map((x) => this.propCard(x))}` : ""}${this.earlier(!this.s.hunks.length)}`;
+  }
+
+  /** The keys of a card's changes, said under its buttons. */
+  private keysHint(): DocumentFragment {
+    return html`<div class="keys"><kbd>n</kbd> <kbd>p</kbd> next, previous change · <kbd>a</kbd> accept · <kbd>r</kbd> reject · <kbd>c</kbd> comment</div>`;
+  }
+
+  /** A card's buttons and its compose box (`id`: the proposal, "" the direct batch not named). */
+  private cardTools(id: string, open: number, showing: boolean, propose: boolean): DocumentFragment {
+    const lines = this.lines.has(id);
+    return html`<div class="act"><button type="button" class="btn accept" data-pact="accept-all" data-p="${id}" disabled="${!open}" title="Accept every change waiting${propose ? ": applied to your files" : ""}">${icon("check", 14)} Accept all</button><button type="button" class="btn reject" data-pact="reject-all" data-p="${id}" disabled="${!open}" title="${propose ? "Reject every change waiting: your files stay as they are" : "Reject every change: the files get the accepted text back"}">Reject all</button><button type="button" class="btn" data-pact="request" data-p="${id}" title="Ask your agent to change it (it is told at once)">Request changes</button><button type="button" class="btn" data-pact="comment" data-p="${id}">Comment</button></div><div class="act"><label class="hint" title="Typeset it against your text (latexdiff), on the pages"><input type="checkbox" data-pact="show" data-p="${id}" checked="${showing}"> Show diff</label><span class="grow"></span><span class="seg" role="group" aria-label="The source as"><button type="button" data-pact="words" data-p="${id}" aria-pressed="${!lines}">Words</button><button type="button" data-pact="lines" data-p="${id}" aria-pressed="${lines}">Lines</button></span></div>${this.composeBox(id)}`;
+  }
+
+  private composeBox(id: string): DocumentFragment | "" {
+    const c = this.pcompose;
+    if (!c || c.id !== id) return "";
+    const h = c.hunk ? this.findHunk(c.hunk) : undefined;
+    return html`<div class="pcompose">${h ? html`<div class="hint">On ${placeOf(h.file, h.line)}</div>` : ""}<textarea data-pc="${id}" data-focus="pc:${id}" rows="2" placeholder="${c.request ? "What should your agent change?" : "Your comment for the agent…"}" aria-label="${c.request ? "Changes to request" : "Comment"}"></textarea><div class="act"><button type="button" class="btn primary" data-pact="send" data-p="${id}">${c.request ? "Request changes" : "Comment"}</button><button type="button" class="btn" data-pact="cancel" data-p="${id}">Cancel</button><span class="hint">Ctrl+Enter sends · Esc cancels</span></div></div>`;
+  }
+
+  private findHunk(id: string): ReviewHunk | undefined {
+    return this.s.hunks.find((h) => h.id === id) ?? (this.s.proposals ?? []).flatMap((x) => x.hunks).find((h) => h.id === id);
+  }
+
+  /** The direct batch: the agent's changes waiting, under the title and why it gave them. */
+  private batchCard(x: ReviewProposal | undefined): DocumentFragment {
+    const id = x?.id ?? "";
+    const hs = this.s.hunks;
+    const files = [...new Set(hs.map((h) => h.file))];
     const groups = groupHunks(this.s);
-    return html`${bar}${rec}${tools}${groups.map((g) => html`<h3>${g.title}${g.note ? html` <button type="button" class="place" data-note="${g.note.id}">${g.note.id}</button>` : ""}</h3>${g.hunks.map((h) => this.hunkCard(h))}`)}${this.earlier()}`;
+    const flash = (this.s.mode ?? "direct") === "propose" ? html`<div class="hint">Your agent edited these files directly, so they show on the pages: <code>phitex session propose</code> makes them a proposal and puts the files back.</div>` : "";
+    return html`<div class="card pcard batch" data-p="${id}"><div class="top"><span class="chip st-${x?.status ?? "open"}">${STATUS_WORD[x?.status ?? "open"]}</span><span class="grow"></span><span>${x ? ago(x.updated) : ""}</span></div><div class="ptitle">${x?.title || "The agent's changes"}</div>${x?.why && x.why !== x.title ? html`<div class="pwhy">${x.why}</div>` : ""}<div class="pmeta">${files.join(", ")} · ${String(hs.length)} change${hs.length === 1 ? "" : "s"}${this.s.git ? " · accepting stages them in git" : ""}</div>${flash}${this.cardTools(id, hs.length, this.showing && this.showingP === "", false)}${(x?.thread ?? []).map((p) => this.post(p))}<div class="phunks">${groups.map((g) => html`${groups.length > 1 || g.note ? html`<h3>${g.title}${g.note ? html` <button type="button" class="place" data-note="${g.note.id}">${g.note.id}</button>` : ""}</h3>` : ""}${g.hunks.map((h) => this.hunkCard(h, this.lines.has(id)))}`)}</div>${this.keysHint()}</div>`;
+  }
+
+  /** A proposal: its title, why, files, hunks and thread, and what the user can do with it. */
+  private propCard(x: ReviewProposal): DocumentFragment {
+    const open = openHunks(x).length;
+    const count = (st: string) => x.hunks.filter((h) => h.state === st).length;
+    const said = [count("accepted") && `${count("accepted")} accepted`, count("rejected") && `${count("rejected")} rejected`, count("conflict") && `${count("conflict")} conflicting`].filter(Boolean).join(", ");
+    const live = x.status === "open" || x.status === "changes_requested";
+    return html`<div class="card pcard" data-p="${x.id}"><div class="top"><span class="chip st-${x.status}">${STATUS_WORD[x.status]}</span><span>${x.id}${x.revision > 1 ? ` · revision ${x.revision}` : ""}</span><span class="grow"></span><span title="${x.updated}">${ago(x.updated)}</span></div><div class="ptitle">${x.title}</div>${x.why && x.why !== x.title ? html`<div class="pwhy">${x.why}</div>` : ""}<div class="pmeta">${x.files.join(", ")} · ${String(x.hunks.length)} change${x.hunks.length === 1 ? "" : "s"}${said ? ` (${said})` : ""}</div>${live ? this.cardTools(x.id, open, this.showing && this.showingP === x.id, true) : ""}${x.thread.map((p) => this.post(p))}${live ? html`<div class="phunks">${x.hunks.map((h) => this.propHunk(x, h))}</div>${this.keysHint()}` : ""}</div>`;
+  }
+
+  /** The source of a change: its words (deleted and added in line), or its lines. */
+  private source(h: ReviewHunk, lines: boolean): DocumentFragment {
+    if (lines) {
+      const d = lineDiff(h);
+      return html`<div class="ldiff">${d.del.map((l) => html`<div class="d">${l}</div>`)}${d.add.map((l) => html`<div class="a">${l}</div>`)}</div>`;
+    }
+    if (h.whole) return html`<div class="diff">${h.whole === "added" ? html`<ins>${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>`;
+    return html`<div class="diff"><span class="ctx">${h.before}</span>${h.parts.map(([k, t]) => (k === "del" ? html`<del>${t}</del>` : k === "add" ? html`<ins>${t}</ins>` : html`<span>${t}</span>`))}<span class="ctx">${h.after}</span></div>`;
+  }
+
+  private propHunk(x: ReviewProposal, h: ReviewHunk): DocumentFragment {
+    const st = h.state ?? "open";
+    const what = h.whole === "added" ? " (new file)" : h.whole === "deleted" ? " (file deleted)" : "";
+    const open = st === "open";
+    return html`<div class="card hunk phunk st-${st}" data-ph="${h.id}" data-p="${x.id}" data-focus="ph:${h.id}" tabindex="0" aria-label="${`Proposed change at ${h.file} line ${h.line}${what}${st !== "open" ? `, ${STATE_WORD[st]}` : ""}`}"><div class="top"><button type="button" class="place" data-goto="${h.file}" data-line="${String(h.line)}" title="Open in the editor"><span class="file">${placeOf(h.file, h.line, h.end_line)}</span></button>${what}${st !== "open" ? html`<span class="chip st-${st}">${STATE_WORD[st]}</span>` : ""}<span class="grow"></span><button type="button" class="btn accept" data-pact="accept" data-p="${x.id}" data-h="${h.id}" disabled="${!open}" aria-label="Accept this change">${icon("check", 14)} Accept</button><button type="button" class="btn reject" data-pact="reject" data-p="${x.id}" data-h="${h.id}" disabled="${!open}" aria-label="Reject this change">Reject</button><button type="button" class="ib" data-pact="comment" data-p="${x.id}" data-h="${h.id}" title="Comment on this change" aria-label="Comment on this change">${icon("comment", 16)}</button></div>${this.source(h, this.lines.has(x.id))}</div>`;
   }
 
   /** The comments on changes accepted or rejected since, with their verdicts: a review's history. */
@@ -479,7 +675,7 @@ export class Review {
     })}`;
   }
 
-  private hunkCard(h: ReviewHunk): DocumentFragment {
+  private hunkCard(h: ReviewHunk, lines = false): DocumentFragment {
     const on = this.sel === h.id;
     const comments = this.s.notes.filter((n) => h.comments.includes(n.id));
     // (each part's place in the current text, bytes: a selection in the diff is a range to comment on)
@@ -491,7 +687,7 @@ export class Review {
       return el;
     });
     const what = h.whole === "added" ? " (new file)" : h.whole === "deleted" ? " (file deleted)" : "";
-    const diff = h.whole ? html`<div class="diff">${h.whole === "added" ? html`<ins data-at="${String(h.now[0])}">${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>` : html`<div class="diff" data-hunk="${h.id}"><span class="ctx">${h.before}</span>${parts}<span class="ctx">${h.after}</span></div>`;
+    const diff = lines ? this.source(h, true) : h.whole ? html`<div class="diff">${h.whole === "added" ? html`<ins data-at="${String(h.now[0])}">${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>` : html`<div class="diff" data-hunk="${h.id}"><span class="ctx">${h.before}</span>${parts}<span class="ctx">${h.after}</span></div>`;
     const box = on
       ? html`<textarea data-focus="hc:${h.id}" data-comment="${h.id}" placeholder="Comment on this change (select words in it to comment on them)…" aria-label="Comment on this change" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="comment" data-id="${h.id}">Comment</button><button type="button" class="btn" data-act="draft" data-id="${h.id}" title="Gather it with others and submit them as one review">Add to review</button></div>`
       : "";
@@ -502,6 +698,38 @@ export class Review {
 
   private keyed(e: KeyboardEvent): void {
     const t = e.target as HTMLElement;
+    if (t instanceof HTMLTextAreaElement && t.dataset.edit !== undefined) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) (e.preventDefault(), void this.act("save-edit", t.dataset.edit, t.dataset.i));
+      else if (e.key === "Escape") (e.stopPropagation(), void this.act("cancel-edit", t.dataset.edit));
+      return;
+    }
+    // (a note's card: Enter opens it, again edits; Delete deletes; Esc closes)
+    if (t.classList.contains("note") && t.classList.contains("card") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const id = t.dataset.id!;
+      if (e.key === "Enter" && this.sel === id) return void (e.preventDefault(), this.act("edit", id));
+      if (e.key === "Delete" || e.key === "Backspace") return void (e.preventDefault(), e.stopPropagation(), this.act("delete", id));
+      if (e.key === "Escape" && this.sel === id) return void (e.stopPropagation(), this.select(null), this.body.querySelector<HTMLElement>(`.card[data-id="${CSS.escape(id)}"]`)?.focus());
+    }
+    if (t instanceof HTMLTextAreaElement && t.dataset.pc !== undefined) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) (e.preventDefault(), void this.pact("send", t.dataset.pc));
+      else if (e.key === "Escape") (e.stopPropagation(), void this.pact("cancel", t.dataset.pc));
+      return;
+    }
+    // (a card's changes: n, p to step; a, r, c on the one focused)
+    const hc = t.closest<HTMLElement>(".card.hunk");
+    const card = t.closest<HTMLElement>(".pcard");
+    if (card && !(t instanceof HTMLTextAreaElement) && !e.ctrlKey && !e.altKey && !e.metaKey && "nprac".includes(e.key) && e.key.length === 1) {
+      const list = [...card.querySelectorAll<HTMLElement>(".phunks .card.hunk")];
+      const i = hc ? list.indexOf(hc) : -1;
+      const pid = card.dataset.p ?? "";
+      const hid = hc?.dataset.ph ?? hc?.dataset.id;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "n" || e.key === "p") return void list[Math.max(0, Math.min(list.length - 1, i + (e.key === "n" ? 1 : i < 0 ? 1 : -1)))]?.focus();
+      if (!hid) return void list[0]?.focus();
+      if (e.key === "c") return void this.pact("comment", pid, hid);
+      return void this.pact(e.key === "a" ? "accept" : "reject", pid, hid);
+    }
     if (t instanceof HTMLTextAreaElement) {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -536,15 +764,129 @@ export class Review {
     }
     const nt = t.closest<HTMLElement>("[data-note]");
     if (nt) return void ((this.tab = "notes"), (this.filter = "all"), this.select(nt.dataset.note!, true));
+    const kd = t.closest<HTMLElement>("[data-kind]");
+    if (kd) return void (e.stopPropagation(), this.req("review_edit", { id: kd.dataset.id, kind: kd.dataset.kind }));
+    const md = t.closest<HTMLElement>("[data-mode]");
+    if (md) return void this.setMode(md.dataset.mode as "direct" | "propose");
+    const pa = t.closest<HTMLElement>("[data-pact]");
+    if (pa) {
+      e.stopPropagation();
+      if (pa.dataset.pact === "show") return void this.pshow(pa.dataset.p ?? "", (pa as HTMLInputElement).checked);
+      return void this.pact(pa.dataset.pact!, pa.dataset.p ?? "", pa.dataset.h);
+    }
     const a = t.closest<HTMLElement>("[data-act]");
     if (a) {
       e.stopPropagation();
       if (a.dataset.act === "show") return this.show((a as HTMLInputElement).checked);
-      return void this.act(a.dataset.act!, a.dataset.id);
+      return void this.act(a.dataset.act!, a.dataset.id, a.dataset.i);
     }
-    if (t.closest("textarea, .diff")) return;
+    if (t.closest("textarea, .diff, .ldiff, .pcard:not(.batch) .phunk, .pcard > *:not(.phunks)")) return;
     const card = t.closest<HTMLElement>(".card");
     if (card && this.sel !== card.dataset.id) this.select(card.dataset.id!, true);
+  }
+
+  /** The review mode: this watch's (and said). */
+  async setMode(m: "direct" | "propose"): Promise<void> {
+    if ((this.s.mode ?? "direct") === m) return;
+    if (await this.req("review_mode", { mode: m })) this.p.msg(m === "propose" ? "Your agent's changes now come as proposals: your files stay as they are until you accept one" : "Your agent edits the files; its changes wait for you here");
+  }
+
+  /** Show diff of proposal `id` ("" the direct batch): typeset, or back to the pages. */
+  private pshow(id: string, on: boolean): void {
+    this.showingP = on ? id : null;
+    this.showing = on;
+    if (id && id !== this.directId()) this.host.showChanges?.(on, this.s.git, id);
+    else this.host.showChanges?.(on, this.s.git);
+    this.render();
+    void this.marks();
+  }
+
+  private directId(): string {
+    return (this.s.proposals ?? []).find((x) => x.mode === "direct" && x.status !== "done")?.id ?? "";
+  }
+
+  /** What the user does with proposal `id` ("" the direct batch not named yet), or its hunk `h`. */
+  async pact(act: string, id: string, h?: string): Promise<void> {
+    const direct = !id || id === this.directId();
+    const x = (this.s.proposals ?? []).find((p) => p.id === id);
+    switch (act) {
+      case "words":
+      case "lines":
+        if (act === "lines") this.lines.add(id);
+        else this.lines.delete(id);
+        return this.render();
+      case "comment":
+      case "request":
+        this.pcompose = { id, hunk: h, request: act === "request" };
+        this.render();
+        this.body.querySelector<HTMLTextAreaElement>(`textarea[data-pc="${CSS.escape(id)}"]`)?.focus();
+        return;
+      case "cancel":
+        this.pcompose = null;
+        this.drafts.delete(`p:${id}`);
+        return this.render();
+      case "send": {
+        const c = this.pcompose;
+        const ta = this.body.querySelector<HTMLTextAreaElement>(`textarea[data-pc="${CSS.escape(id)}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!text && !c?.request) return void ta?.focus();
+        const r = await this.req("review_proposal_comment", { id, text, ...(c?.hunk ? { hunk: c.hunk } : {}), ...(c?.request ? { verdict: "request_changes" } : {}) });
+        if (!r) return;
+        this.drafts.delete(`p:${id}`);
+        this.pcompose = null;
+        this.p.msg(c?.request ? "Changes requested: your agent is told" : "Comment sent to your agent");
+        return this.render();
+      }
+      case "accept-all":
+      case "reject-all": {
+        const n = direct ? this.s.hunks.length : x ? openHunks(x).length : 0;
+        const yes = act === "accept-all";
+        if (!yes && !confirm(`Reject all ${n} change${n === 1 ? "" : "s"}?${direct ? " The files get the accepted text back." : " Your files stay as they are."}`)) return;
+        if (direct && !id) return this.verdict(yes ? "accept" : "reject", "all");
+        const r = await this.req(`review_proposal_${yes ? "accept" : "reject"}`, { id, hunks: "all" });
+        if (r) this.p.msg(`${yes ? "Accepted" : "Rejected"} ${String(r.done ?? n)} change${Number(r.done ?? n) === 1 ? "" : "s"}${yes && !direct ? ": applied to your files" : ""}`);
+        return this.afterDecision(id);
+      }
+      case "accept":
+      case "reject": {
+        if (!h) return;
+        // (the change after it focused next: going down the list)
+        const card = this.body.querySelector<HTMLElement>(`.pcard[data-p="${CSS.escape(id)}"]`);
+        const list = card ? [...card.querySelectorAll<HTMLElement>(".phunks .card.hunk")].map((c) => c.dataset.ph ?? c.dataset.id!) : [];
+        const next = list[list.indexOf(h) + 1] ?? list[list.indexOf(h) - 1];
+        this.wantFocus = next ?? null;
+        if (direct && !id) await this.verdict(act, [h]);
+        else {
+          const r = await this.req(`review_proposal_${act}`, { id, hunks: [h] });
+          if (!r) return;
+          this.p.msg(act === "accept" ? (direct ? "Accepted" : "Accepted: applied to your file") : "Rejected");
+        }
+        await this.afterDecision(id);
+        // (drawn already: focused now; else when the state comes)
+        const el = next ? this.body.querySelector<HTMLElement>(`[data-ph="${CSS.escape(next)}"], .card.hunk[data-id="${CSS.escape(next)}"]`) : null;
+        if (el && el.isConnected) el.focus();
+        return;
+      }
+    }
+  }
+
+  /** A short message with Undo, gone after a few seconds: a deletion's way back. */
+  private toast(text: string, undo: { id?: string; gone: unknown }): void {
+    this.toastEl?.remove();
+    const el = html`<div class="rv-toast" role="status"><span>${text}</span><button type="button" class="btn">Undo</button></div>`.firstElementChild as HTMLElement;
+    this.p.win.append(el);
+    this.toastEl = el;
+    const done = setTimeout(() => el.remove(), 6000);
+    el.querySelector("button")!.onclick = async () => {
+      clearTimeout(done);
+      el.remove();
+      if (await this.req("review_restore", undo)) this.p.msg("Restored");
+    };
+  }
+
+  /** After a decision: the typeset diff made again where shown. */
+  private async afterDecision(id: string): Promise<void> {
+    if (this.showing && this.showingP === id) this.host.showChanges?.(true, this.s.git, id && id !== this.directId() ? id : undefined);
   }
 
   private show(on: boolean): void {
@@ -553,10 +895,40 @@ export class Review {
     void this.marks();
   }
 
-  /** The op `act` on note or hunk `id`. */
-  private async act(act: string, id?: string): Promise<void> {
+  /** The op `act` on note or hunk `id` (`i`: a post of its thread). */
+  private async act(act: string, id?: string, i?: string): Promise<void> {
     const r = (op: string, params?: object) => this.req(op, params);
     switch (act) {
+      case "edit":
+      case "edit-post": {
+        this.editing = act === "edit" ? id! : `${id}#${i}`;
+        if (this.sel !== id) this.sel = id!;
+        this.render();
+        const ta = this.body.querySelector<HTMLTextAreaElement>(`textarea[data-edit="${CSS.escape(id!)}"]`);
+        if (ta) (ta.focus(), (ta.selectionStart = ta.selectionEnd = ta.value.length));
+        return;
+      }
+      case "cancel-edit":
+        for (const k of [...this.drafts.keys()]) if (k.startsWith(`e:${id}#`)) this.drafts.delete(k);
+        this.editing = null;
+        this.render();
+        this.body.querySelector<HTMLElement>(`.card[data-id="${CSS.escape(id!)}"]`)?.focus();
+        return;
+      case "save-edit": {
+        const ta = this.body.querySelector<HTMLTextAreaElement>(`textarea[data-edit="${CSS.escape(id!)}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!(await r("review_edit", { id, text, post: Number(i ?? 0) }))) return;
+        for (const k of [...this.drafts.keys()]) if (k.startsWith(`e:${id}#`)) this.drafts.delete(k);
+        this.editing = null;
+        this.render();
+        this.body.querySelector<HTMLElement>(`.card[data-id="${CSS.escape(id!)}"]`)?.focus();
+        return;
+      }
+      case "del-post": {
+        const g = await r("review_delete", { id, post: Number(i) });
+        if (g) this.toast("Reply deleted", { id, gone: g.gone });
+        return;
+      }
       case "clear": {
         const n = this.s.notes.filter((x) => x.status === "resolved" && !x.hunk).length;
         if (!confirm(`Delete ${n} resolved note${n === 1 ? "" : "s"}?`)) return;
@@ -578,9 +950,16 @@ export class Review {
         if (act === "resolve" && this.filter === "open") this.select(null);
         return;
       }
-      case "delete":
-        if (await r("review_delete", { id })) this.select(null);
+      case "delete": {
+        const n = this.s.notes.find((x) => x.id === id);
+        // (the thread goes with it: asked once where the agent took part)
+        if (n && (n.thread.some((p) => p.by === "agent") || (n.hunks ?? []).length) && !confirm("Delete this note with its thread? Your agent's replies go too.")) return;
+        const g = await r("review_delete", { id });
+        if (!g) return;
+        this.select(null);
+        this.toast(`${n ? KIND_WORD[n.kind] : "Note"} deleted`, { gone: g.gone });
         return;
+      }
       case "accept":
       case "reject":
         await this.verdict(act, [id!]);
@@ -641,7 +1020,9 @@ export class Review {
   }
 
   private async req(op: string, params?: object): Promise<any | null> {
-    const r = await this.host.request(op, params);
+    // (a note's or proposal's id as `target`: `id` is the request's own, the reply's name)
+    const { id, ...rest } = (params ?? {}) as { id?: unknown };
+    const r = await this.host.request(op, id === undefined ? rest : { ...rest, target: id });
     if (!r.ok) {
       this.p.msg(r.error ?? "The watch did not answer", true);
       return null;
@@ -651,12 +1032,7 @@ export class Review {
 
   /** Note or hunk `id` selected (its card open, its marks outlined); `scroll`: the page to it; `focus`: its card focused. */
   select(id: string | null, scroll = false, focus = false): void {
-    // (the reply typed so far kept)
-    for (const ta of this.body.querySelectorAll<HTMLTextAreaElement>("textarea[data-reply], textarea[data-comment]")) {
-      const key = ta.dataset.reply ?? `h:${ta.dataset.comment}`;
-      if (ta.value) this.drafts.set(key, ta.value);
-      else this.drafts.delete(key);
-    }
+    if (this.editing && this.editing.split("#")[0] !== id) this.editing = null;
     this.sel = id;
     const note = id ? this.s.notes.find((n) => n.id === id) : undefined;
     if (note && !note.hunk) {
@@ -666,6 +1042,7 @@ export class Review {
     if (id && !this.isOpen) this.open(true);
     this.render();
     this.outline();
+    this.handles(this.lastOut);
     const card = id ? this.body.querySelector<HTMLElement>(`.card[data-id="${CSS.escape(id)}"]`) : null;
     if (card) {
       card.scrollIntoView({ block: "nearest" });
@@ -700,12 +1077,76 @@ export class Review {
     if (at.length) this.p.viewer.mark(at[0].k, at[0].boxes);
   }
 
+  /** Each note's and pending change's place beside the scrollbar: its kind's colour, resolved ones fainter; hovered its first line, clicked opened. */
+  private scrollbar(where: Map<string, [number, number]>): void {
+    if (!this.p.scrollMarks) return;
+    const out: { k: number; y: number; cls: string; title: string; go: () => void }[] = [];
+    for (const [id, [k, y]] of where) {
+      const n = this.s.notes.find((x) => x.id === id);
+      const h = n ? undefined : this.s.hunks.find((x) => x.id === id);
+      if (!n && !h) continue;
+      const title = n ? `${KIND_WORD[n.kind]}: ${oneLine(n.thread.find((p) => p.text)?.text || n.anchor.quote, 80)}` : `Change at ${placeOf(h!.file, h!.line)}: ${oneLine(h!.new || h!.old, 70)}`;
+      const cls = n ? `rv-${n.kind}${n.status === "resolved" ? " rv-dim" : ""}` : "rv-change";
+      out.push({ k, y, cls, title, go: () => this.select(id, true, true) });
+    }
+    this.p.scrollMarks(out);
+  }
+
+  /** The selected note's ends on the pages: handles that move them (a drag, then its source place). */
+  private handles(out: { k: number; boxes: Box[]; id: string }[]): void {
+    for (const h of this.p.stage.querySelectorAll(".rv-h")) h.remove();
+    const n = this.sel ? this.s.notes.find((x) => x.id === this.sel) : undefined;
+    if (!n || !n.anchor.quote || n.hunk) return;
+    const mine = out.filter((m) => m.id === n.id && m.boxes.length);
+    if (!mine.length) return;
+    const size = this.p.viewer.pageSize();
+    const first = mine[0], last = mine.at(-1)!;
+    const put = (k: number, b: Box, end: boolean) => {
+      const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
+      if (!slot) return;
+      const h = document.createElement("div");
+      h.className = `rv rv-h ${end ? "end" : "start"}`;
+      h.title = end ? "Drag to move the note's end" : "Drag to move the note's start";
+      Object.assign(h.style, { left: `${((end ? b[0] + b[2] : b[0]) / size.w) * 100}%`, top: `${(b[1] / size.h) * 100}%`, height: `${(b[3] / size.h) * 100}%` });
+      h.addEventListener("pointerdown", (e) => this.drag(e, h, n, end));
+      slot.append(h);
+    };
+    put(first.k, first.boxes[0], false);
+    put(last.k, last.boxes.at(-1)!, true);
+  }
+
+  private drag(e: PointerEvent, h: HTMLElement, n: ReviewNote, end: boolean): void {
+    e.preventDefault();
+    e.stopPropagation();
+    h.setPointerCapture(e.pointerId);
+    const move = (m: PointerEvent) => {
+      const slot = h.parentElement!.getBoundingClientRect();
+      h.style.left = `${((m.clientX - slot.left) / slot.width) * 100}%`;
+      h.style.top = `${((m.clientY - slot.top) / slot.height) * 100 - 1}%`;
+    };
+    const up = async (u: PointerEvent) => {
+      h.removeEventListener("pointermove", move);
+      h.removeEventListener("pointerup", up);
+      // (the page under the pointer, and the source place nearest it there)
+      const slot = (this.p.root.elementsFromPoint?.(u.clientX, u.clientY) ?? []).map((x) => (x as HTMLElement).closest?.(".slot")).find(Boolean) as HTMLElement | undefined;
+      if (!slot) return void this.marks();
+      const r = slot.getBoundingClientRect();
+      const size = this.p.viewer.pageSize();
+      const at = await this.host.spot(Number(slot.dataset.k), ((u.clientX - r.left) / r.width) * size.w, ((u.clientY - r.top) / r.height) * size.h);
+      if (!at || at.file !== n.anchor.file) return void (this.p.msg("Not in the note's file there", true), this.marks());
+      // (to the word's end or start there: the host snaps it)
+      if (await this.req("review_anchor", end ? { id: n.id, end: Math.max(at.start + 1, n.anchor.start + 1), snap: true } : { id: n.id, start: Math.min(at.start, n.anchor.end - 1), snap: true })) this.select(n.id);
+    };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up);
+  }
+
   // ---- the marks on the pages ----
 
   private async marks(): Promise<void> {
     const turn = ++this.drawn;
     // (the typeset comparison shown: its own marks, latexdiff's; the pages' origins are the diff's)
-    if (this.showing) return this.p.viewer.reviewMarks([]);
+    if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     const out: Parameters<Viewer["reviewMarks"]>[0] = [];
     const cls = (n: ReviewNote) => (n.status === "resolved" ? "n-resolved" : `n-${n.kind}`);
     let i = 0;
@@ -734,18 +1175,23 @@ export class Review {
     }
     void i;
     this.p.viewer.reviewMarks(out);
+    this.lastOut = out;
+    this.handles(out);
     this.outline();
     // (the list in the pages' order, where it changed)
     const where = new Map<string, [number, number]>();
     for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
     const moved = [...where].some(([id, w]) => this.where.get(id)?.join() !== w.join());
     this.where = where;
+    this.scrollbar(where);
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
 
   /** A click on the pages: a pin or a mark selects its note or hunk; Alt+click notes a spot. */
   private async pageClick(e: MouseEvent): Promise<void> {
     const t = e.target as HTMLElement;
+    // (a handle's drag ends in a click: not a click on the page)
+    if (t.closest(".rv-h")) return;
     const pin = t.closest<HTMLElement>(".rv-pin");
     if (pin) {
       e.stopPropagation();
@@ -767,7 +1213,7 @@ export class Review {
       return this.openCompose(e.clientX, e.clientY, { kind: "note", anchor: { file: at.file, start: at.start, end: at.start, page: k, point: [x, y] } }, "A spot on this page");
     }
     // (a mark under the click: the last drawn on top)
-    const hit = [...slot.querySelectorAll<HTMLElement>(".rv:not(.rv-pin)")].reverse().find((m) => {
+    const hit = [...slot.querySelectorAll<HTMLElement>(".rv:not(.rv-pin):not(.rv-h)")].reverse().find((m) => {
       const b = m.getBoundingClientRect();
       return e.clientX >= b.left - 1 && e.clientX <= b.right + 1 && e.clientY >= b.top - 1 && e.clientY <= b.bottom + 1;
     });

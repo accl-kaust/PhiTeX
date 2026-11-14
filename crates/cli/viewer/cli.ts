@@ -113,7 +113,7 @@ class Socket implements CoreTransport {
     const id = this.next++;
     return new Promise((ok) => {
       this.waiting.set(id, ok);
-      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ ...op, id }));
       else (this.waiting.delete(id), ok({ ok: false, error: "not connected" } as CoreRes));
     });
   }
@@ -361,8 +361,9 @@ const review: ReviewHost = {
   source: (sel) => session.sourceOf(sel),
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),
-  showChanges(on, git) {
+  showChanges(on, git, proposal) {
     if (!on) return controls.stop();
+    if (proposal) return void controls.start({ from: "now", to: `proposal:${proposal}` }, `Proposal ${proposal}`, "against your files as they are");
     void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
   },
 };
@@ -1001,7 +1002,7 @@ const setPref = async (k: string, v: unknown): Promise<string | undefined> => {
 
 /** The watch's rows of the Settings dialog: the user's file's (set here) and the project's (shown: its phitex.toml's, or the command line's). */
 async function watchSettings(): Promise<SettingsGroup[]> {
-  const [r, info, cache] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" })]);
+  const [r, info, cache, rv] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" }), sock.request({ op: "review_state" })]);
   if (!r.ok) return [{ title: "Preview", rows: [{ id: "prefs", label: "Your settings", kind: "info", value: "", disabled: `Couldn't read them: ${r.error ?? "not available"}` }] }];
   const p = r.json ?? {}, at = info.ok ? (info.json ?? {}) : {};
   const file = String(p.file ?? "phitex.toml");
@@ -1072,6 +1073,19 @@ async function watchSettings(): Promise<SettingsGroup[]> {
             const r = await sock.request({ op: "review_changes", on: !!v });
             if (!r.ok) return r.error ?? "not changed";
             return (await setPref("experimental-review", !!v)) ?? undefined;
+          },
+        },
+        {
+          id: "review-mode",
+          label: "Your agent's changes",
+          help: "Edits: it edits the files, its changes show on the pages and wait for you. Proposes: they are kept apart until you accept them (the agent writes in .phitex/work/). For this watch now, and your default from the next.",
+          kind: "choice",
+          options: [["direct", "Edits"], ["propose", "Proposes"]],
+          value: String(rv.json?.mode ?? p["review-mode"] ?? "direct"),
+          set: async (v) => {
+            const r = await sock.request({ op: "review_mode", mode: v });
+            if (!r.ok) return r.error ?? "not changed";
+            return (await setPref("review-mode", v)) ?? undefined;
           },
         },
       ],

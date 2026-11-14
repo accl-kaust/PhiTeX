@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ago, groupHunks, oneLine, placeOf, type ReviewHunk, type ReviewNote, type ReviewState } from "../src/review.ts";
+import { ago, groupHunks, lineDiff, oneLine, openHunks, placeOf, type ReviewHunk, type ReviewNote, type ReviewProposal, type ReviewState } from "../src/review.ts";
 
 const note = (id: string, kind: ReviewNote["kind"], text: string, quote = "the words"): ReviewNote => ({
   id,
@@ -61,4 +61,19 @@ test("changes are grouped under the note they answered, then by file, notes firs
   assert.deepEqual(g.map((x) => x.key), ["n:n1", "f:ch1.tex"]);
   assert.equal(g[0].title, "For your comment: “Use a fresher image.”");
   assert.deepEqual(g[1].hunks.map((h) => h.id), ["h1", "h3"]);
+});
+
+test("a proposal's open changes are those neither decided nor conflicting", () => {
+  const x: ReviewProposal = {
+    id: "p1", title: "Words", why: "", status: "open", mode: "propose", created: "", updated: "", revision: 1, files: ["main.tex"], thread: [],
+    hunks: [{ ...hunk("h1", "main.tex"), state: "open" }, { ...hunk("h2", "main.tex"), state: "accepted" }, { ...hunk("h3", "main.tex"), state: "conflict" }, hunk("h4", "main.tex")],
+  };
+  assert.deepEqual(openHunks(x).map((h) => h.id), ["h1", "h4"]);
+});
+
+test("a change as source lines: the old lines, then the new, with the line around it", () => {
+  const h: ReviewHunk = { ...hunk("h1", "main.tex"), before: "The ", old: "quick", new: "swift\nand sure", after: " fox." };
+  assert.deepEqual(lineDiff(h), { del: ["The quick fox."], add: ["The swift", "and sure fox."] });
+  assert.deepEqual(lineDiff({ ...h, before: "…ver the ", after: " dog…" }).del, ["ver the quick dog"]);
+  assert.deepEqual(lineDiff({ ...h, whole: "added", before: "", after: "", new: "A new file.\n" }), { del: [], add: ["A new file."] });
 });

@@ -1238,6 +1238,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         t.review_accept_disk,
     );
     hub.set_changes(t.experimental_review);
+    hub.set_mode(t.review_mode.as_deref().unwrap_or("direct"));
     hub.about(serde_json::json!({
         "engine": job.engine.name,
         "engine_why": t.engine_why,
@@ -3350,6 +3351,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         let src: Result<Box<dyn crate::compare::Versions>, String> =
                             if rev == "baseline" {
                                 Ok(Box::new(crate::review::BaselineFiles(root.clone())))
+                            } else if rev == "now"
+                                || to.as_deref().is_some_and(|t| t.starts_with("proposal:"))
+                            {
+                                // (a proposal against the files as they
+                                // are, §9.6)
+                                Ok(Box::new(hub.versions()))
                             } else {
                                 crate::compare::Git::open(&root)
                                     .map(|g| Box::new(g) as Box<dyn crate::compare::Versions>)

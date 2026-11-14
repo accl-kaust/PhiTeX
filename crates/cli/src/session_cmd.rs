@@ -36,6 +36,12 @@ pub enum Verb {
         /// How long to wait for the first build (default 10m)
         #[arg(long, value_name = "TIME")]
         timeout: Option<String>,
+        /// How your changes are reviewed: direct (you edit the files, they
+        /// wait as hunks) or propose (kept apart until the user accepts;
+        /// write them in the workspace, then `session propose`). Default:
+        /// `review-mode`, else direct
+        #[arg(long, value_name = "MODE")]
+        review: Option<String>,
         /// The watch's own options
         #[arg(last = true, value_name = "WATCH-ARGS")]
         args: Vec<String>,
@@ -108,6 +114,29 @@ pub enum Verb {
         /// Its .synctex.gz too, beside it
         #[arg(long)]
         synctex: bool,
+    },
+    /// Send your change for review, with why (and a title)
+    ///
+    /// propose mode: what you wrote in the workspace (`status` names it;
+    /// else the files you edited, put back as they were) becomes a
+    /// proposal, the user's files untouched until they accept it; with
+    /// --revise ID, a new revision of that proposal (its thread kept).
+    /// direct mode: the changes waiting get the title and the why.
+    Propose {
+        /// Why: what the change does and for what (its first line the
+        /// title unless --title)
+        #[arg(short = 'm', long = "message", value_name = "WHY")]
+        why: String,
+        #[arg(long, value_name = "TITLE")]
+        title: Option<String>,
+        /// A new revision of proposal ID
+        #[arg(long, value_name = "ID")]
+        revise: Option<String>,
+    },
+    /// The review mode: direct or propose (none: say it)
+    Mode {
+        #[arg(value_name = "MODE")]
+        mode: Option<String>,
     },
     /// End the watch as q does (the exact PDF written first)
     Stop,
@@ -413,8 +442,16 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
         Verb::Start {
             file,
             timeout,
+            review,
             args,
-        } => start(file.as_deref(), timeout.as_deref(), args, as_json, st),
+        } => start(
+            file.as_deref(),
+            timeout.as_deref(),
+            review.as_deref(),
+            args,
+            as_json,
+            st,
+        ),
         Verb::Notes { open: _, all } => {
             // (no watch: the notes file read as it is)
             let v = if let Ok(mut c) = find(pid, None).and_then(|s| Conn::open(&s)) {
@@ -481,6 +518,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         for r in v["reviews"].as_array().into_iter().flatten() {
                             print_review(r, st);
                         }
+                        print_proposals(&v, st);
                     } else {
                         print_status(&v, st, v["waited_ms"].as_f64());
                         for f in v["held"].as_array().into_iter().flatten() {
@@ -643,6 +681,70 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     }
                     Ok(0)
                 }
+                Verb::Propose { why, title, revise } => {
+                    let v = c.call(
+                        "phitex/propose",
+                        &json!({"why": why, "title": title, "revise": revise}),
+                        None,
+                    )?;
+                    if as_json {
+                        out(&v);
+                    } else if v["mode"] == "direct" {
+                        println!(
+                            "{}: \"{}\", {} change{} waiting for the user",
+                            v["id"].as_str().unwrap_or(""),
+                            v["title"].as_str().unwrap_or(""),
+                            v["hunks"].as_array().map_or(0, Vec::len),
+                            if v["hunks"].as_array().map_or(0, Vec::len) == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        );
+                    } else {
+                        let n = v["hunks"].as_array().map_or(0, Vec::len);
+                        println!(
+                            "{} (revision {}): \"{}\", {n} change{} in {}, waiting for the user",
+                            v["id"].as_str().unwrap_or(""),
+                            v["revision"],
+                            v["title"].as_str().unwrap_or(""),
+                            if n == 1 { "" } else { "s" },
+                            v["files"]
+                                .as_array()
+                                .map(|f| f
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(", "))
+                                .unwrap_or_default()
+                        );
+                        if v["from"] == "files" {
+                            println!(
+                                "the files you edited are back as they were; the change is in the proposal"
+                            );
+                        }
+                        println!(
+                            "workspace (as the files are now): {}",
+                            v["workspace"].as_str().unwrap_or("")
+                        );
+                    }
+                    Ok(0)
+                }
+                Verb::Mode { mode } => {
+                    let v = c.call("phitex/review/mode", &json!({"mode": mode}), None)?;
+                    if as_json {
+                        out(&v);
+                    } else {
+                        print!("review mode: {}", v["mode"].as_str().unwrap_or(""));
+                        match v["workspace"].as_str() {
+                            Some(w) => println!(
+                                " · write your changes in {w}, then `phitex session propose -m WHY`"
+                            ),
+                            None => println!(" · edit the files; your changes wait as hunks"),
+                        }
+                    }
+                    Ok(0)
+                }
                 Verb::Changes => {
                     let v = c.call("phitex/changes/list", &json!({}), None)?;
                     if as_json {
@@ -705,7 +807,17 @@ fn problem_line(p: &Value, st: Style) -> String {
 /// folder . (the default: beside the main file)`.
 fn setup_line(v: &Value) -> Option<String> {
     let engine = v["engine"].as_str()?;
-    let mut s = format!("engine {engine}");
+    let mut s = String::new();
+    if let Some(m) = v["review"].as_str() {
+        s.push_str(&format!("review {m}"));
+        if let Some(w) = v["workspace"].as_str() {
+            s.push_str(&format!(
+                " (write your changes in {w}, then `phitex session propose -m WHY`)"
+            ));
+        }
+        s.push_str(" · ");
+    }
+    s.push_str(&format!("engine {engine}"));
     if let Some(w) = v["engine_why"].as_str() {
         s.push_str(&format!(" ({w})"));
     }
@@ -965,6 +1077,11 @@ fn print_notes(notes: &Value, st: Style) {
                 .map(edited_text)
                 .collect();
             let mut line = format!("    {by}: {}", p["text"].as_str().unwrap_or(""));
+            // (the user's words edited since written: read them again)
+            if let Some(at) = p["edited_at"].as_str() {
+                let hm = at.get(11..16).unwrap_or(at);
+                line.push_str(&st.yellow(&format!(" (edited {hm} UTC)")));
+            }
             if !edited.is_empty() {
                 line.push_str(&st.dim(&format!(" (edited: {})", edited.join(", "))));
             }
@@ -992,6 +1109,87 @@ fn print_review(r: &Value, st: Style) {
     );
 }
 
+/// The proposals in `session changes`: each with its state, the user's
+/// decisions since you last looked, its thread.
+fn print_proposals(v: &Value, st: Style) {
+    for x in v["proposals"].as_array().into_iter().flatten() {
+        let hunks = x["hunks"].as_array().cloned().unwrap_or_default();
+        let count = |s: &str| hunks.iter().filter(|h| h["state"] == s).count();
+        let state = match x["status"].as_str().unwrap_or("") {
+            "changes_requested" => st.yellow("changes requested"),
+            "accepted" => st.green("accepted"),
+            "rejected" => st.red("rejected"),
+            "partial" => "partly accepted".to_owned(),
+            o => o.to_owned(),
+        };
+        if x["mode"] == "direct" {
+            println!(
+                "{} \"{}\" ({state}): your changes above",
+                x["id"].as_str().unwrap_or(""),
+                x["title"].as_str().unwrap_or("")
+            );
+        } else {
+            println!(
+                "{} r{} \"{}\" ({state}): {} open, {} accepted, {} rejected{}",
+                x["id"].as_str().unwrap_or(""),
+                x["revision"],
+                x["title"].as_str().unwrap_or(""),
+                count("open"),
+                count("accepted"),
+                count("rejected"),
+                match count("conflict") {
+                    0 => String::new(),
+                    n => format!(", {n} conflicting with the user's edits since"),
+                }
+            );
+        }
+        for d in x["decided"].as_array().into_iter().flatten() {
+            let h = &d["hunk"];
+            println!(
+                "  {} {}:{}  {} {}",
+                d["verdict"].as_str().unwrap_or(""),
+                h["file"].as_str().unwrap_or(""),
+                h["line"],
+                st.red(&format!(
+                    "-{}",
+                    one_line(h["old"].as_str().unwrap_or(""), 50)
+                )),
+                st.green(&format!(
+                    "+{}",
+                    one_line(h["new"].as_str().unwrap_or(""), 50)
+                ))
+            );
+        }
+        for p in x["thread"].as_array().into_iter().flatten() {
+            let on = p["diff"]["file"]
+                .as_str()
+                .map(|f| {
+                    format!(
+                        " (on {f}:{} -{} +{})",
+                        p["diff"]["line"],
+                        one_line(p["diff"]["old"].as_str().unwrap_or(""), 30),
+                        one_line(p["diff"]["new"].as_str().unwrap_or(""), 30)
+                    )
+                })
+                .unwrap_or_default();
+            println!(
+                "    {}: {}{on}",
+                p["by"].as_str().unwrap_or(""),
+                p["text"].as_str().unwrap_or("")
+            );
+            for c in p["changes"].as_array().into_iter().flatten() {
+                println!(
+                    "      updated {}:{}  -{} +{}",
+                    c["file"].as_str().unwrap_or(""),
+                    c["line"],
+                    one_line(c["old"].as_str().unwrap_or(""), 40),
+                    one_line(c["new"].as_str().unwrap_or(""), 40)
+                );
+            }
+        }
+    }
+}
+
 fn print_changes(v: &Value, st: Style) {
     if v["off"] == true {
         println!(
@@ -1000,6 +1198,7 @@ fn print_changes(v: &Value, st: Style) {
         );
         return;
     }
+    print_proposals(v, st);
     let pending = v["pending"].as_array().cloned().unwrap_or_default();
     if pending.is_empty() {
         println!("no changes waiting for the user");
@@ -1078,6 +1277,7 @@ fn print_changes(v: &Value, st: Style) {
 fn start(
     file: Option<&str>,
     timeout: Option<&str>,
+    review: Option<&str>,
     args: &[String],
     as_json: bool,
     st: Style,
@@ -1093,6 +1293,9 @@ fn start(
     };
     let left = t.map(|d| d.saturating_sub(t0.elapsed()));
     let mut c = Conn::open(&v)?;
+    if let Some(m) = review {
+        c.call("phitex/review/mode", &json!({"mode": m}), None)?;
+    }
     let ms = left.map_or(0, |d| d.as_millis().max(1));
     let w = c.call(
         "phitex/session/wait",

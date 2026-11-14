@@ -90,7 +90,7 @@ export interface ViewState {
 }
 
 /** A mark along the pages' scrollbar: a problem's place (`p`, its first box `box`) or a diff's change. */
-type ScrollMark = { k: number; y: number; cls: string; title: string; p?: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"]; severity: "error" | "warning" }; box?: [number, number, number, number] };
+type ScrollMark = { k: number; y: number; cls: string; title: string; go?: () => void; p?: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"]; severity: "error" | "warning" }; box?: [number, number, number, number] };
 
 /** What each kind of problem is, under its switch in Settings. */
 const KIND_HELP: Record<Kind, string> = {
@@ -614,7 +614,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -777,7 +777,7 @@ export class Panel {
     this.extras(opts);
     if (opts.review) {
       const rv = (this.review = new Review(
-        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), laidOut: () => requestAnimationFrame(() => ((this.stageSize = null), this.redraw())) },
+        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), scrollMarks: (m) => ((this.noteMarks = m), this.drawScrollMarks()), laidOut: () => requestAnimationFrame(() => ((this.stageSize = null), this.redraw())) },
         opts.review,
       ));
       const b = this.$("#b-review");
@@ -1262,6 +1262,8 @@ export class Panel {
   /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
   private problemMarks: ScrollMark[] = [];
   private changeMarks: ScrollMark[] = [];
+  /** The review's notes and pending changes (review.ts), beside the scrollbar too. */
+  private noteMarks: ScrollMark[] = [];
 
   /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
   diffMarks(changes: { k: number; y: number; title: string }[]): void {
@@ -1277,7 +1279,7 @@ export class Panel {
    */
   private drawScrollMarks(): void {
     const el = this.$("#smarks");
-    const marks = [...this.problemMarks, ...this.changeMarks];
+    const marks = [...this.problemMarks, ...this.changeMarks, ...this.noteMarks];
     el.replaceChildren();
     el.hidden = !marks.length;
     if (!marks.length) return;
@@ -1292,6 +1294,7 @@ export class Panel {
       t.onmouseleave = () => (this.$("#ctip").hidden = true);
       t.onclick = () => {
         this.$("#ctip").hidden = true;
+        if (m.go) return m.go();
         this.viewer.scrollToPlace(m.k, m.y);
         if (m.box) this.viewer.mark(m.k, [m.box], false);
       };
