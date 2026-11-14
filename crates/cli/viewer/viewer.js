@@ -1291,8 +1291,9 @@ var Viewer = class _Viewer {
         waiting = true;
         continue;
       }
-      const e = c.at ? this.entryOn(c.at[0], c.at[1]) : null;
-      const aux = c.label != null ? _Viewer.texText(c.label) : null, label = e?.label || aux;
+      const aux = c.label != null ? _Viewer.texText(c.label) : null;
+      const e = c.at ? this.entryOn(c.at[0], c.at[1], aux) : null;
+      const label = e?.label || aux;
       out.push(e ? { ..._Viewer.asCited(label ?? "", e.text, [c.at[0], e.top]), key: c.key, label: label ?? "" } : { key: c.key, label: label ?? c.key, title: c.key, authors: [], at: c.at ? [c.at[0], Math.max(0, c.at[1] - 10)] : void 0 });
     }
     return waiting ? null : out;
@@ -1305,11 +1306,15 @@ var Viewer = class _Viewer {
    * matched to the line around it, the place was the line above's, the previous entry's:
    * every card one entry early, the first none.
    */
-  entryOn(k, y) {
+  entryOn(k, y, aux = null) {
     const lines2 = this.pageLines(k);
-    let i = -1;
-    lines2.forEach((l, j) => l.b >= y && (i < 0 || l.b < lines2[i].b || l.b === lines2[i].b && l.x0 < lines2[i].x0) && (i = j));
-    if (i < 0) return null;
+    const below = lines2.map((l, j) => [l, j]).filter(([l]) => l.b >= y).sort(([a], [c]) => a.b - c.b || a.x0 - c.x0);
+    if (!below.length) return null;
+    const near = below.slice(0, 4);
+    const who = aux ? /\p{L}[\p{L}'’-]+/u.exec(aux)?.[0] : void 0;
+    const numbers = (t) => /^[\d\s.,;:–—-]+$/.test(t);
+    const pick2 = near.find(([l]) => _Viewer.LABEL.test(l.t)) ?? (who ? near.find(([l]) => l.t.includes(who)) : void 0) ?? near.find(([l]) => !numbers(l.t)) ?? near[0];
+    const i = pick2[1];
     const first = lines2[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
       const l = lines2[j];

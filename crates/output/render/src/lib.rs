@@ -125,6 +125,10 @@ pub struct Link {
     pub rect: [f64; 4],
     pub target: Target,
     pub name: Option<String>,
+    /// Where a page destination's left is given (`/XYZ`'s left, points
+    /// from the page's left): hyperref's anchor, the start of its line
+    /// (a bibliography entry's, in the column it is in).
+    pub left: Option<f64>,
 }
 
 /// A page as the viewer shows it: its size in pixels and in points, its
@@ -523,7 +527,10 @@ fn page_index(pages: &[Page<'_>], id: ObjectIdentifier) -> Option<usize> {
 }
 
 /// A destination (`[page /XYZ x y z]` and its kin) as a page and a top.
-fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> {
+/// A destination's page (from 0), top (points from the page's top) and left.
+type Place = (usize, Option<f64>, Option<f64>);
+
+fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<Place> {
     let mut it = arr.raw_iter();
     let page = match it.next()? {
         MaybeRef::Ref(r) => page_index(pages, r.into())?,
@@ -534,23 +541,22 @@ fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> 
         MaybeRef::NotRef(Object::Name(n)) => Some(n.as_str().to_owned()),
         _ => None,
     });
-    let top = match kind.as_deref() {
-        Some("XYZ") => {
-            let _left = it.next();
-            it.next().and_then(|o| match o {
-                MaybeRef::NotRef(Object::Number(n)) => Some(n.as_f64()),
-                _ => None,
-            })
-        }
-        Some("FitH" | "FitBH") => it.next().and_then(|o| match o {
-            MaybeRef::NotRef(Object::Number(n)) => Some(n.as_f64()),
-            _ => None,
-        }),
+    let num = |o: Option<MaybeRef<Object<'_>>>| match o {
+        Some(MaybeRef::NotRef(Object::Number(n))) => Some(n.as_f64()),
         _ => None,
+    };
+    let (left, top) = match kind.as_deref() {
+        Some("XYZ") => {
+            let left = num(it.next());
+            (left, num(it.next()))
+        }
+        Some("FitH" | "FitBH") => (None, num(it.next())),
+        _ => (None, None),
     };
     let h = f64::from(pages[page].render_dimensions().1);
     let y0 = pages[page].media_box().y0;
-    Some((page, top.map(|t| h - (t - y0))))
+    let x0 = pages[page].media_box().x0;
+    Some((page, top.map(|t| h - (t - y0)), left.map(|l| l - x0)))
 }
 
 /// A destination's value (an array, or a dictionary with one under `/D`).
@@ -566,7 +572,7 @@ fn as_dest(o: Object<'_>) -> Option<Array<'_>> {
 /// (a value written inside its node).
 enum NameVal {
     Ref(ObjectIdentifier),
-    At(Option<(usize, Option<f64>)>),
+    At(Option<Place>),
 }
 
 /// A document's named destinations (the catalog's `/Dests` dictionary,
@@ -581,17 +587,12 @@ struct Names {
     /// The tree's names (none: not read yet).
     tree: Option<HashMap<Vec<u8>, NameVal>>,
     /// Each name asked, and its place.
-    asked: HashMap<Vec<u8>, Option<(usize, Option<f64>)>>,
+    asked: HashMap<Vec<u8>, Option<Place>>,
 }
 
 impl Names {
     /// Named destination `name`'s page and top.
-    fn place(
-        &mut self,
-        pdf: &Pdf,
-        pages: &[Page<'_>],
-        name: &[u8],
-    ) -> Option<(usize, Option<f64>)> {
+    fn place(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<Place> {
         if let Some(p) = self.asked.get(name) {
             return *p;
         }
@@ -600,7 +601,7 @@ impl Names {
         p
     }
 
-    fn find(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<(usize, Option<f64>)> {
+    fn find(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<Place> {
         let xref = pdf.xref();
         let root: Dict<'_> = xref.get(xref.root_id())?;
         if let Some(d) = root.get::<Dict<'_>>(b"Dests")
@@ -693,6 +694,7 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
             h - (v[1].min(v[3]) - mb.y0),
         ];
         let mut name = None;
+        let mut left = None;
         let mut dest = |o: Object<'_>| -> Option<Target> {
             match o {
                 Object::Array(a) => dest_of(pages, &a),
@@ -706,7 +708,10 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
                 }
                 _ => None,
             }
-            .map(|(p, y)| Target::Page(p, y))
+            .map(|(p, y, x)| {
+                left = x;
+                Target::Page(p, y)
+            })
         };
         let target = if let Some(act) = a.get::<Dict<'_>>(b"A") {
             match act
@@ -726,7 +731,12 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
             a.get::<Object<'_>>(b"Dest").and_then(&mut dest)
         };
         if let Some(target) = target {
-            out.push(Link { rect, target, name });
+            out.push(Link {
+                rect,
+                target,
+                name,
+                left,
+            });
         }
     }
     out

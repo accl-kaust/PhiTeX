@@ -1098,11 +1098,12 @@ export class Viewer {
         waiting = true;
         continue;
       }
-      const e = c.at ? this.entryOn(c.at[0], c.at[1]) : null;
-      // (no entry read there: the key and its label, still a card)
       // (the label as the page prints it, where the entry has one ([1] in a numbered list):
       // what the reader sees; else the .aux's (natbib's "Knuth and Plass (1981)" for every style))
-      const aux = c.label != null ? Viewer.texText(c.label) : null, label = e?.label || aux;
+      const aux = c.label != null ? Viewer.texText(c.label) : null;
+      // (no entry read there: the key and its label, still a card)
+      const e = c.at ? this.entryOn(c.at[0], c.at[1], aux, c.at[2] ?? null) : null;
+      const label = e?.label || aux;
       out.push(e ? { ...Viewer.asCited(label ?? "", e.text, [c.at![0], e.top]), key: c.key, label: label ?? "" } : { key: c.key, label: label ?? c.key, title: c.key, authors: [], at: c.at ? [c.at[0], Math.max(0, c.at[1] - 10)] : undefined });
     }
     return waiting ? null : out;
@@ -1116,11 +1117,35 @@ export class Viewer {
    * matched to the line around it, the place was the line above's, the previous entry's:
    * every card one entry early, the first none.
    */
-  private entryOn(k: number, y: number): { label: string; text: string; top: number } | null {
-    const lines = this.pageLines(k);
-    let i = -1;
-    lines.forEach((l, j) => l.b >= y && (i < 0 || l.b < lines[i].b || (l.b === lines[i].b && l.x0 < lines[i].x0)) && (i = j));
-    if (i < 0) return null;
+  private entryOn(k: number, y: number, aux: string | null = null, left: number | null = null): { label: string; text: string; top: number } | null {
+    // (in the entry's column, where the destination gives its left (hyperref's
+    // anchor, the entry's start): in a two-column page the other column's
+    // lines at the same height read as the entry's, the card's title the
+    // body's "Filler text" and its venue the next entry's. A line of the
+    // column starts at its left, or a label's width or hanging indent past it)
+    const lines = this.pageLines(k).filter((l) => left == null || (l.x0 > left - 2 && l.x0 < left + 60));
+    // (the lines at or below the destination, nearest first)
+    const below = lines
+      .map((l, j) => [l, j] as const)
+      .filter(([l]) => l.b >= y)
+      .sort(([a], [c]) => a.b - c.b || a.x0 - c.x0);
+    if (!below.length) return null;
+    // (the entry's first line among the next few: hyperref raises the destination
+    // by the text's \baselineskip, more than a small-type bibliography's leading, so
+    // in acmart's references the nearest line below it was the previous entry's
+    // last one ("1760." of its pages) and the card read a page number as the
+    // title. A line of the entry's own: one starting with a printed label, else
+    // one naming the citation's first author (the .aux label's first name, natbib's
+    // "Kuon and Rose (2007)"), never a line of numbers alone)
+    const near = below.slice(0, 4);
+    const who = aux ? /\p{L}[\p{L}'’-]+/u.exec(aux)?.[0] : undefined;
+    const numbers = (t: string) => /^[\d\s.,;:–—-]+$/.test(t);
+    const pick =
+      near.find(([l]) => Viewer.LABEL.test(l.t)) ??
+      (who ? near.find(([l]) => l.t.includes(who)) : undefined) ??
+      near.find(([l]) => !numbers(l.t)) ??
+      near[0];
+    const i = pick[1];
     const first = lines[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines.length && out.length < 8; j++) {
       const l = lines[j];

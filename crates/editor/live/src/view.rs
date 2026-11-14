@@ -997,9 +997,14 @@ impl Viewer {
     /// its top left, a point's slack around each link's box), as hyperref
     /// makes them: each a link to the named destination `cite.KEY`. Each
     /// key in the links' order, with where its link goes (its entry: page
-    /// from 0, its top). Exact, read from the PDF: a document without
-    /// hyperref's citation links has none.
-    pub fn cite_links(&self, k: usize, x: f64, y: f64) -> Vec<(String, usize, Option<f64>)> {
+    /// from 0, its top, its left). Exact, read from the PDF: a document
+    /// without hyperref's citation links has none.
+    pub fn cite_links(
+        &self,
+        k: usize,
+        x: f64,
+        y: f64,
+    ) -> Vec<(String, usize, Option<f64>, Option<f64>)> {
         let Some(pdf) = self.pdf() else {
             return Vec::new();
         };
@@ -1013,7 +1018,7 @@ impl Viewer {
             .filter_map(|l| {
                 let key = l.name.as_deref()?.strip_prefix("cite.")?.to_owned();
                 match l.target {
-                    phitex_render::Target::Page(p, top) => Some((key, p, top)),
+                    phitex_render::Target::Page(p, top) => Some((key, p, top, l.left)),
                     phitex_render::Target::Uri(_) => None,
                 }
             })

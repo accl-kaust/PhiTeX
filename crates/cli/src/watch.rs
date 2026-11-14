@@ -528,12 +528,12 @@ impl ReadsWorker {
                                 serde_json::Value::Array(
                                     links
                                         .into_iter()
-                                        .map(|(key, p, top)| {
+                                        .map(|(key, p, top, left)| {
                                             json!({
                                                 "key": key,
                                                 "label": labels.get(&key),
                                                 "number": numbers.get(&key),
-                                                "at": [p, top],
+                                                "at": [p, top, left],
                                             })
                                         })
                                         .collect(),

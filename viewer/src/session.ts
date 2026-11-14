@@ -14,7 +14,8 @@ import { Batch, byteOffset, charOffset, textSum, type Edit } from "./edits.ts";
 export interface CiteAnswer {
   key: string;
   label: string | null;
-  at: [number, number] | null;
+  /** Its entry: page, top, and left where the destination gives one (its column). */
+  at: [number, number, (number | null)?] | null;
 }
 import type { DiffReq } from "./diff.ts";
 import { ENGINES, type Engine } from "./engines.ts";
