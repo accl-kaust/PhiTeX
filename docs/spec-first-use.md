@@ -270,3 +270,38 @@ today:
 3. The pass-two flips (§4.1, 2): not pursued, see there.
 4. Grail's chain: placing picture children early
    (spec-picture-child §8.5), the next target.
+
+## 7. Built (agent firstuse, 2026-11-14)
+
+**§2.1, the `\csname` bound at once** (`Run::csname_defer`,
+`Run::csname_force`). `cs_name_end` puts its look-up off where the run
+has not touched the name, holds no pending append on it, and neither
+`\tracingassigns` nor `\tracingrestores` is positive. It is made, as
+§372 makes it, at the first of: a touch of the location
+(`Run::load_slow`, `Run::touch`, the name fetched as a command,
+`set_cur_cs_rest`), a local binding of it, any command but an
+assignment (`\global`, `\let`, `\def`, `\chardef`, `\font`, `\read`),
+the end of the command it was put off before, or the run's exits
+(`Run::run_all`). A global binding of the name drops it unread. One put
+off inside a command (the main loop's look ahead past characters,
+§1038) waits for the command that look ahead backed up. Test
+`latex::a_csname_bound_globally_at_once_reads_nothing`.
+
+**What Grail's chain held at -j8 instead** (found while measuring): three
+resume runs of 1.1-1.3 s each, one after another, thrown away. Each
+read a continuation's state that its placer replaced 9 ms later (acmart's
+`\Sectionformat` let to `\ACM@NR@adjustedSectionformat` and not back),
+so `\realSectionformat` called itself with an argument one token longer
+a level, until "TeX capacity exceeded [main memory size=5000000]": 5
+million tokens copied in about 10 000 commands and calls. A run's first
+reads are filed nowhere a walk can re-ask, so only `Ctx::recheck` could
+stop it, and the run's work ticks counted commands and calls, not
+tokens. Now the tokens a macro call with arguments writes count too
+(`Run::tok_work`, a tick every 8192), and the recheck stops such a run
+once its read moved.
+
+Measured on acclnode11 (Shelf's files, release, warm format, base dev
+9150034b9 and new interleaved, median of 3): Grail -j1 12.24 / 12.47 s,
+-j8 13.60 / 11.84 s, -j16 15.90 / 11.48 s; amsldoc -j1 1.78 / 1.76 s,
+-j8 1.97 / 2.00 s (5 each), -j16 2.36 / 2.31 s. The PDF and log md5s
+are the same base and new at each -j.
