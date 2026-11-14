@@ -3255,7 +3255,7 @@ fn park_yielder(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, x: NodeId) {
     }
     drop(m);
     if let Some(n) = eng.placed_node(node.id) {
-        requeue(eng, Some(w), &n);
+        requeue(eng, Some(w), n);
     }
 }
 
@@ -3273,7 +3273,7 @@ fn release_yielders(eng: &Engine, w: &Worker, x: &Node) {
     };
     for y in ys.into_iter().flatten() {
         if let Some(n) = eng.placed_node(y).filter(|n| n.state() == State::Dirty) {
-            requeue(eng, Some(w), &n);
+            requeue(eng, Some(w), n);
         }
     }
 }
