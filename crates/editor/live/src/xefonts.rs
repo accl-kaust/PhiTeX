@@ -63,3 +63,80 @@ pub fn xetex_of(read: ReadFont, find: FindFont, index: Option<FontIndex>) -> XeT
         ..XeTeX::default()
     }
 }
+
+/// The names kpathsea's `kpse_find_file(name, format, 0)` tries in each
+/// directory of the format's path, in order (`kpathsea_find_file_generic`
+/// with TeX Live's `try_std_extension_first = t`): the name with each of
+/// the format's suffixes unless it ends in one, then the name itself
+/// unless the format searches suffixed names only (OpenType's). A host
+/// tries them all in the project's directory (kpathsea's `.`, first on
+/// every font path) before its tree's.
+#[must_use]
+pub fn kpse_targets(name: &str, format: KpseFormat) -> Vec<String> {
+    let (suffixes, suffix_only): (&[&str], bool) = match format {
+        KpseFormat::OpenType => (&[".otf", ".OTF"], true),
+        KpseFormat::TrueType => (&[".ttf", ".ttc", ".TTF", ".TTC", ".dfont"], false),
+        KpseFormat::Type1 => (&[".pfa", ".pfb"], false),
+        KpseFormat::MiscFonts => (&[], false),
+    };
+    let has = suffixes.iter().any(|s| name.ends_with(s));
+    let mut t = Vec::new();
+    if !has {
+        t.extend(suffixes.iter().map(|s| format!("{name}{s}")));
+    }
+    if has || !suffix_only {
+        t.push(name.to_owned());
+    }
+    t
+}
+
+/// kpathsea's format name of `format`, as Shelf's index keys it.
+#[must_use]
+pub fn kpse_kind(format: KpseFormat) -> &'static str {
+    match format {
+        KpseFormat::OpenType => "opentype",
+        KpseFormat::TrueType => "truetype",
+        KpseFormat::Type1 => "type1",
+        KpseFormat::MiscFonts => "misc",
+    }
+}
+
+/// What a host without the system's fonts says beside an error of a
+/// font not found ([`XeTeX::fonts_note`]): the fonts it has, and how a
+/// font of one's own is used there.
+pub const SHELF_FONTS_NOTE: &str = "Here XeTeX has TeX Live's fonts (from Shelf) and the project's own font files, not the fonts installed on this computer: a font that is not in TeX Live works when its file is in the project and is loaded by file name (\\setmainfont{MyFont.otf}, or [Path=fonts/] for a subfolder). fontconfig does not list the project's folder, so a family name finds only TeX Live's fonts, as with xelatex.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// kpathsea's names for a `[file]` font, in its order.
+    #[test]
+    fn kpse_targets_in_kpathseas_order() {
+        assert_eq!(
+            kpse_targets("MyFont", KpseFormat::OpenType),
+            ["MyFont.otf", "MyFont.OTF"]
+        );
+        assert_eq!(
+            kpse_targets("MyFont.otf", KpseFormat::OpenType),
+            ["MyFont.otf"]
+        );
+        assert_eq!(
+            kpse_targets("a.b", KpseFormat::TrueType),
+            [
+                "a.b.ttf",
+                "a.b.ttc",
+                "a.b.TTF",
+                "a.b.TTC",
+                "a.b.dfont",
+                "a.b"
+            ]
+        );
+        assert_eq!(kpse_targets("x.pfb", KpseFormat::Type1), ["x.pfb"]);
+        assert_eq!(
+            kpse_targets("x.otf", KpseFormat::Type1),
+            ["x.otf.pfa", "x.otf.pfb", "x.otf"]
+        );
+        assert_eq!(kpse_targets("m.tec", KpseFormat::MiscFonts), ["m.tec"]);
+    }
+}

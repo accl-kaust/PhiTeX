@@ -348,7 +348,13 @@ impl Run<'_, '_> {
     /// XeTeX's `read_font_info`: a quoted name a native font first, then
     /// a TFM file, then (unquoted) a native font; the null font, with
     /// the error unless `\\suppressfontnotfounderror`, where none is.
-    pub(crate) fn xe_read_font_info(&mut self, name: &str, quoted: bool, s: i32) -> R<i64> {
+    pub(crate) fn xe_read_font_info(
+        &mut self,
+        u: Option<crate::val::Tok>,
+        name: &str,
+        quoted: bool,
+        s: i32,
+    ) -> R<i64> {
         if quoted && let Some(f) = self.load_native_font(name, s)? {
             return Ok(f);
         }
@@ -359,7 +365,7 @@ impl Run<'_, '_> {
             return Ok(f);
         }
         if self.param("suppressfontnotfounderror")? == 0 {
-            self.log("error", "Font not loadable")?;
+            self.font_error(u, name, s)?;
         }
         Ok(0)
     }

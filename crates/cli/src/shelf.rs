@@ -506,17 +506,6 @@ pub fn font_index(files: &Files) -> Result<phitex_tex::FontIndex, String> {
     Ok(ix)
 }
 
-/// kpathsea's suffix for XeTeX's font `format`, added to a name without
-/// one.
-fn font_suffix(format: phitex_tex::KpseFormat) -> &'static str {
-    match format {
-        phitex_tex::KpseFormat::OpenType => ".otf",
-        phitex_tex::KpseFormat::TrueType => ".ttf",
-        phitex_tex::KpseFormat::Type1 => ".pfb",
-        phitex_tex::KpseFormat::MiscFonts => "",
-    }
-}
-
 /// The name and the kpathsea format of a finder's key
 /// ([`phitex_tex::Finder`]): the font side's in the format its extension
 /// names, TeX's own (`\\input`, `\\openin`) in the `tex` format.
@@ -760,7 +749,7 @@ impl Host for ShelfHost {
     fn xetex(&self) -> Option<phitex_tex::XeTeX> {
         let ix = font_index(&self.files).ok()?;
         let (f1, f2) = (self.files.clone(), self.files.clone());
-        Some(phitex_live::xefonts::xetex_of(
+        let mut x = phitex_live::xefonts::xetex_of(
             Box::new(move |path| match f1.read(path) {
                 Some(b) => Some(Arc::from(b.as_slice())),
                 None if path.starts_with(phitex_shelf::TL) => {
@@ -768,27 +757,26 @@ impl Host for ShelfHost {
                 }
                 None => std::fs::read(path).ok().map(Arc::from),
             }),
+            // (kpathsea's lookup: each name it tries in the project's
+            // directory, its `.`, then in Shelf's tree)
             Box::new(move |name, format| {
-                if let Some(p) = project(name) {
-                    return Some(p.to_string_lossy().into_owned());
+                let targets = phitex_live::xefonts::kpse_targets(name, format);
+                // (kpathsea's path of a name found under `.`: `./name`;
+                // an absolute name, or one from ./ or ../, as given)
+                if let Some(t) = targets.iter().find(|t| project(t).is_some()) {
+                    let given = t.starts_with('/') || t.starts_with("./") || t.starts_with("../");
+                    return Some(if given { t.clone() } else { format!("./{t}") });
                 }
-                let suffix = font_suffix(format);
-                let kind = match format {
-                    phitex_tex::KpseFormat::OpenType => "opentype",
-                    phitex_tex::KpseFormat::TrueType => "truetype",
-                    phitex_tex::KpseFormat::Type1 => "type1",
-                    phitex_tex::KpseFormat::MiscFonts => "misc",
-                };
-                if !suffix.is_empty()
-                    && !name.contains('.')
-                    && let Some((p, _)) = f2.find_in(&format!("{name}{suffix}"), kind)
-                {
-                    return Some(p);
-                }
-                f2.find_in(name, kind).map(|(p, _)| p)
+                let kind = phitex_live::xefonts::kpse_kind(format);
+                targets
+                    .iter()
+                    .find_map(|t| f2.find_in(t, kind))
+                    .map(|(p, _)| p)
             }),
             Some(ix),
-        ))
+        );
+        x.fonts_note = Some(Arc::from(phitex_live::xefonts::SHELF_FONTS_NOTE));
+        Some(x)
     }
 
     fn failure_report(

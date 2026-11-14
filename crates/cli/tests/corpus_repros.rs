@@ -9,6 +9,35 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The oracle's fontconfig (`scripts/xetex/fonts.conf`: TeX Live's
+/// OpenType and TrueType fonts, as `xelatex`'s references were made,
+/// `scripts/ci/manuals.py`'s `side_env`), its tree this TeX Live's: XeTeX
+/// finds fonts by name in fontconfig's list, the environment's.
+fn tl_fonts_conf() -> PathBuf {
+    static CONF: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CONF.get_or_init(|| {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/xetex/fonts.conf");
+        let text = std::fs::read_to_string(&src).unwrap_or_default();
+        let dist = Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "/usr/share/texmf-dist".to_owned());
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fontconfig");
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join(format!("fonts-{}.conf", std::process::id()));
+        let text = text.replace("/usr/share/texmf-dist", &dist).replace(
+            "/tmp/phitex-xetex-fc-cache",
+            &dir.join("cache").display().to_string(),
+        );
+        std::fs::write(&conf, text).expect("the fonts.conf");
+        conf
+    })
+    .clone()
+}
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../oracle/fixtures/corpus-repros")
 }
@@ -70,6 +99,7 @@ fn build_out_in(name: &str, tag: &str, threads: usize, ext: &str) -> (Vec<u8>, S
         ])
         .current_dir(&dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "1758800000")
         .env("FORCE_SOURCE_DATE", "1")
         .env("TZ", "UTC")

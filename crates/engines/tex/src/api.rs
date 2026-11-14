@@ -5297,6 +5297,16 @@ fn culprit(
     None
 }
 
+/// Whether `message` is an error of a font not found: fontspec's (`The
+/// font "X" cannot be found`), TeX's (`Font \\x="X" not loadable:
+/// Metric (TFM) file or installed font not found`), NFSS's (`Font
+/// TU/x/m/n/10 not found`).
+fn font_not_found(message: &str) -> bool {
+    (message.contains("font \"") && message.contains("cannot be found"))
+        || message.contains("installed font not found")
+        || (message.contains("LaTeX Error: Font ") && message.ends_with("not found."))
+}
+
 /// The first text `m` quotes TeX's way (`` `x' ``), else in double
 /// quotes (`LaTeX3`'s messages, fontspec's `The font "x" cannot be found`).
 fn quoted(m: &str) -> Option<&str> {
@@ -9397,6 +9407,7 @@ impl Build {
                 help: None,
             });
         }
+        self.fonts_note(&mut out);
         out.sort_by(|a, b| (&a.file, a.range.0).cmp(&(&b.file, b.range.0)));
         out
     }
@@ -9490,6 +9501,23 @@ impl Build {
         }
     }
 
+    /// A font not found, in a host whose fonts are its own
+    /// ([`crate::XeTeX::fonts_note`]): said which fonts it has, before
+    /// TeX's help.
+    fn fonts_note(&self, out: &mut [Diagnostic]) {
+        let Some(note) = self.g.ops.xe.get().and_then(|x| x.fonts_note.clone()) else {
+            return;
+        };
+        for d in out {
+            if d.severity == Severity::Error && font_not_found(&d.message) {
+                d.help = Some(match d.help.take() {
+                    Some(h) if !h.is_empty() => format!("{note}\n{h}"),
+                    _ => note.to_string(),
+                });
+            }
+        }
+    }
+
     /// The diagnostics at no place alone (the engine's own warnings and
     /// errors, the format's): what [`Build::diagnostics`] gives but the
     /// document's, without placing those.
@@ -9520,6 +9548,7 @@ impl Build {
                 .chain(&self.g.no_fixpoint)
                 .map(|m| at(Severity::Error, m)),
         );
+        self.fonts_note(&mut out);
         out
     }
 
