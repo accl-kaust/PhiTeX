@@ -268,7 +268,7 @@ fn hash_segs(segs: &[Seg]) -> u64 {
                 l.buf[l.loc.min(l.buf.len())..].hash(&mut h);
                 l.ends.hash(&mut h);
             }
-            Seg::File(_) => 3u8.hash(&mut h),
+            Seg::File(_) | Seg::Chunk(..) => 3u8.hash(&mut h),
         }
     }
     h.finish()
@@ -727,7 +727,7 @@ impl Run<'_, '_> {
                         .collect::<String>()
                 ),
                 Seg::Toks(t) => format!("toks {}", t.len()),
-                Seg::File(_) => "file".to_owned(),
+                Seg::File(_) | Seg::Chunk(..) => "file".to_owned(),
             })
             .collect();
         eprintln!(
@@ -907,7 +907,7 @@ impl Run<'_, '_> {
                 Seg::Line(l) => frames.extend(
                     crate::pages::line_frame(v, l).map(|f| rebase_frame(v, f, pic_base(body))),
                 ),
-                Seg::File(_) => {}
+                Seg::File(_) | Seg::Chunk(..) => {}
             }
         }
         v.list(frames)

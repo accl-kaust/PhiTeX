@@ -1135,6 +1135,17 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// [`Ctx::env`] through a path: the run depends only on the path's
+    /// answer (an element of a list the client gives; a change of another
+    /// element asks it nothing).
+    pub fn env_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        self.before_read(f);
+        let x = read::apply_path(self.eng, read::env_value(self.eng, f), p);
+        self.record(ReadKind::Env { f }, p, x);
+        Ok(x)
+    }
+
     pub fn define(&mut self, f: Field, x: ValueId) {
         self.define_with(f, x, Locality::Local);
     }

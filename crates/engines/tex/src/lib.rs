@@ -29,6 +29,7 @@ mod api;
 mod assemble;
 mod boxscope;
 mod build;
+mod chunks;
 mod collect;
 mod context;
 mod control;

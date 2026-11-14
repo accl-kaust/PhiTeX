@@ -1799,6 +1799,9 @@ impl Run<'_, '_> {
     /// its current line is done. The rest may be in the siblings that
     /// follow (a run's leftover input becomes children): they are pulled
     /// in until the file's end marker is reached.
+    // (out of line: its pruning's locals are no frame of `expand_other`,
+    // which every nested expansion holds, `phitex_defuse::WORKER_STACK`)
+    #[inline(never)]
     fn end_input(&mut self) -> R<()> {
         loop {
             if self.end_input_prune() || !self.pull()? {

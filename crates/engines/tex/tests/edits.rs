@@ -1873,3 +1873,69 @@ fn a_parshape_emptied_is_its_start_value() {
         "{text_runs} text runs after the edit (40 paragraphs after it): {by_op:?}"
     );
 }
+
+/// A text run without a format, read from its chunks
+/// (docs/spec-ini-chunks.md): the cli's `big` (plain.tex and its bodies
+/// four times over, 48 pages). A comment's edit runs the node that read
+/// its line, alone; a word's edit in the last part no more nodes than one
+/// in the first (a continuation names the line it resumes at, never the
+/// text after it: each one cut before the edit ran again, 70 nodes for a
+/// word of the third part; now 4 in the first part, 3 in the last, mc
+/// 86655, 2026-11-14); each edit's output a clean build's.
+#[test]
+fn a_format_texts_edit_runs_the_runs_that_read_it() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures();
+    let mut body = String::new();
+    for k in 0..4 {
+        for b in ["story", "pages", "display", "table", "hyphens"] {
+            let t = common::read(&fx.join(format!("plain/{b}.tex")));
+            let t = t.trim_end().strip_suffix("\\bye").unwrap_or(&t).to_owned();
+            let _ = write!(
+                body,
+                "\\message{{[part {k} {b}]}}\n% a comment of part {k} {b}\n{t}\n\n"
+            );
+        }
+    }
+    let src = format!("{}{body}\\bye\n", common::plain());
+    let opts = || common::options("./big.tex", "big", "", &fx.join("dvi"));
+    let runs = |what: &str, edited: &str| -> u64 {
+        let mut b = common::build(opts(), None, &src);
+        b.edit(edited);
+        let cold = common::build(opts(), None, edited);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(
+            d.is_none(),
+            "{what}: the edit's output is not a clean build's: {d:?}"
+        );
+        b.stats.nodes_run
+    };
+    let word = |k: usize| {
+        let at = src.find(&format!("[part {k} story]")).expect("the part");
+        let w = src[at..].find(" the ").expect("a word") + at;
+        format!("{} thy {}", &src[..w], &src[w + 5..])
+    };
+    let comment = runs(
+        "a comment",
+        &src.replacen(
+            "% a comment of part 2 story",
+            "% a comment of part 2 story, edited",
+            1,
+        ),
+    );
+    let (first, last) = (
+        runs("a word of part 0", &word(0)),
+        runs("a word of part 3", &word(3)),
+    );
+    eprintln!(
+        "nodes run: a comment's edit {comment}, a word's in part 0 {first}, in part 3 {last}"
+    );
+    assert_eq!(
+        comment, 1,
+        "a comment's edit ran more than its line's reader"
+    );
+    assert_eq!(
+        first, last,
+        "a word's edit ran more nodes in one part than in another"
+    );
+}
