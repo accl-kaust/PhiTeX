@@ -314,3 +314,47 @@ pdfTeX's at -j4 and -j8, three sweeps each. Test
 Looking at a run's reads more often cost more than it saved: every
 `reads / 1024` checks, Grail -j8 11.4 -> 20.6 s; in first runs only,
 16.3 s. Ctx::recheck stays at powers of two.
+
+## 8. pgf's arrow ids: an exact relation, worked out and not built (agent early, 2026-11-14)
+
+What pgf does (pgfcorearrows.code.tex:632-700):
+
+- `\pgfarrows@getid` does `\global\let\pgf@arrow@id\csname<fullname>\endcsname`,
+  then `\ifx\pgf@arrow@id\relax` calls `\pgf@arrows@instantiate`.
+- `\pgf@arrows@instantiate` sets `\pgfutil@tempcnta` to `\pgf@arrow@id@count`,
+  advances it by one, then `\xdef\pgf@arrow@id@count{\the\pgfutil@tempcnta}`.
+  It then does `\global\let\<fullname>` to the count, and defines globally
+  `pgf@ar@{saves,hull,ends,visual,inst@code,cache}@<id>`.
+- Every later use reaches the tip's data through
+  `\csname pgf@ar@...@\pgf@arrow@id\endcsname`.
+
+The id is the tip's rank among first instantiations in text order. Two
+pictures that first use the same tip define equal bodies under different
+names, and every tip after them shifts by one, so §5's equal-definitions
+check fails (§4.1, 1).
+
+An exact relation needs all three of these:
+
+1. **The count as a fold.** `\pgf@arrow@id@count` read only to be stepped
+   (`tempcnta := count; \advance by 1; \xdef count{\the tempcnta}`) becomes a
+   +1 relation on a macro that holds a decimal, its base unread, as
+   `State::add` does for count registers. The shape can be detected
+   without pgf's names.
+2. **The id as a symbol.** It is "the count at this node plus k"
+   (`crate::defer`'s `Sym`). The names built from it are derived names read
+   through the symbol (`Step::Derived`, as
+   `defer::a_name_built_from_a_stepped_counter_reads_through_the_name` does
+   for `\csname pg@\number\cn`). A picture's own definitions then stay put
+   when an earlier picture's instantiations come or go; only the symbol's
+   resolution moves.
+3. **§5's guarded contribution on top.** When an earlier picture first uses
+   the same tip, TeX's later picture skips the block and uses the earlier
+   id. A run that took the block made definitions TeX never makes and
+   stepped the count once too often. The block's definitions must equal the
+   first contributor's modulo the id symbol, and the step must count only
+   for the first.
+
+Three new mechanisms (a macro-number relation, symbolic csname ids in
+definitions, a guarded contribution with renaming) for about one re-ask a
+picture on Grail. Not built; `MT@font@list` (§2.2) comes first, and what
+is left is measured after it.

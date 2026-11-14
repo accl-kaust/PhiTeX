@@ -101,6 +101,11 @@ pub(crate) struct Shared {
     /// settling node's prediction at depth 0), by that node: queued when
     /// it commits, or at the quiet point.
     pub(crate) waiting: Mx<crate::values::FxHashMap<NodeId, Vec<NodeId>>>,
+    /// Runs that gave their worker to a node before them
+    /// (`Ctx::yield_to_prefix`), by that node: queued again once it is
+    /// taken to run (`release_yielders`), as well as at its commit
+    /// (`waiting`).
+    pub(crate) yielders: Mx<crate::values::FxHashMap<NodeId, Vec<NodeId>>>,
     /// Runs stopped at a read past the settling layer's frontier
     /// (`Ctx::set_frontier`): queued as it passes them, or at the quiet
     /// point.
@@ -637,8 +642,16 @@ impl Ready {
         Some(x)
     }
 
+    /// The first is a thief's too where a run gave its worker to it
+    /// (`Ctx::yield_to_prefix`, `Node::yielded_to`): that worker is the
+    /// thief it gave way for. Left to its owner, busy in a run of its own,
+    /// the yielder's worker stood idle and the node waited as before.
     fn take_as_thief(&self, q: &mut Queues, eng: &Engine, long: bool) -> Option<NodeId> {
-        if long { q.pop(eng) } else { q.pop_second(eng) }
+        let yielded = q.first(eng).is_some_and(|(k, _)| {
+            eng.placed_node(NodeId::from_raw(k.3))
+                .is_some_and(|n| n.yielded_to.load(Ordering::Acquire))
+        });
+        if long || yielded { q.pop(eng) } else { q.pop_second(eng) }
     }
 
     /// The node a `pop` takes next, if any: a peek.
@@ -799,6 +812,7 @@ impl Pool {
             collect_wanted: AtomicBool::new(false),
             deferred: Mx::new(Vec::new()),
             waiting: Mx::new(crate::values::FxHashMap::default()),
+            yielders: Mx::new(crate::values::FxHashMap::default()),
             frontier_waiting: Mx::new(Vec::new()),
             at_work: (0..n.max(1)).map(|_| AtomicU64::new(0)).collect(),
             long_run: (0..n.max(1)).map(|_| AtomicBool::new(false)).collect(),
@@ -2671,6 +2685,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         pool.shared.done_one();
         return Ok(());
     }
+    release_yielders(eng, w, node);
     // (a quiet point let it go: nothing it waited for will come first)
     let quiet = node.held.swap(false, Ordering::AcqRel);
     // (a long run waits for the nodes before it: `LONG_RUN_NS`)
@@ -2782,7 +2797,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Ok(Ok(_)) => "ok".to_owned(),
             Ok(Err(_)) if cx.wait_frontier => "held at the frontier".to_owned(),
             Ok(Err(_)) => match cx.wait_on {
-                Some(on) => format!("waits for {}", on.raw()),
+                Some(on) => format!("waits for {} ({})", on.raw(), cx.wait_why),
                 None => "stopped".to_owned(),
             },
             Err(_) => "panicked".to_owned(),
@@ -2956,8 +2971,12 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         }
         Ok(Err(_stop)) if cx.wait_on.is_some() => {
             let on = cx.wait_on.take();
+            let yielded = cx.yielded;
             drop(cx);
             park_waiting(eng, pool, w, node, on);
+            if yielded && let Some(x) = on {
+                park_yielder(eng, pool, w, node, x);
+            }
             Ok(())
         }
         Ok(Err(_stop)) => {
@@ -3209,6 +3228,54 @@ pub(crate) fn starved_by(eng: &Engine, w: &Worker, me: &Node) -> Option<NodeId> 
         }
     }
     best.map(|b| b.1)
+}
+
+/// A run that gave its worker to `x` (`Ctx::yield_to_prefix`), parked
+/// on `x`'s commit (`park_waiting`): queued again as soon as `x` is taken
+/// to run (`release_yielders`), or now where it has been. It gave its
+/// worker so that `x` gets one, not to wait for `x`'s answer: parked until
+/// `x` committed, a picture child yielding to a `\write18`'s child that
+/// waits for the settled prefix stood still for 3 s (Grail at -j8, its
+/// evaluation's first picture). Each order of the two threads: the yielder
+/// marks `x` under the lock and then looks at its state; `x`'s run sets
+/// its state and then takes the mark under the lock. Queued twice (here
+/// and at `x`'s commit), the later entry finds it run and counts itself
+/// done.
+fn park_yielder(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, x: NodeId) {
+    if node.state() != State::Dirty {
+        return;
+    }
+    let Some(xn) = eng.placed_node(x) else { return };
+    let mut m = pool.shared.yielders.lock();
+    xn.yielded_to.store(true, Ordering::SeqCst);
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if xn.state() == State::Dirty {
+        m.entry(x).or_default().push(node.id);
+        return;
+    }
+    drop(m);
+    if let Some(n) = eng.placed_node(node.id) {
+        requeue(eng, Some(w), n);
+    }
+}
+
+/// `x` taken to run: the runs that gave their worker to it are queued
+/// again (`park_yielder`).
+fn release_yielders(eng: &Engine, w: &Worker, x: &Node) {
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if !x.yielded_to.load(Ordering::SeqCst) {
+        return;
+    }
+    let ys = {
+        let mut m = w.shared.yielders.lock();
+        x.yielded_to.store(false, Ordering::SeqCst);
+        m.remove(&x.id)
+    };
+    for y in ys.into_iter().flatten() {
+        if let Some(n) = eng.placed_node(y).filter(|n| n.state() == State::Dirty) {
+            requeue(eng, Some(w), n);
+        }
+    }
 }
 
 fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<NodeId>) {

@@ -119,6 +119,9 @@ pub(crate) struct Ops {
     /// A picture of a figure's run as a child node of its own
     /// (`crate::pic`).
     pub pic: OpId,
+    /// A `\write18` a run hands to a child that calls it on the settled
+    /// prefix (`crate::shell::ShellChild`).
+    pub shell: OpId,
     /// The tools' settings ([`crate::Options::bibtex`]).
     pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).
@@ -1673,6 +1676,16 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cur.tok,
             lists.join(" | ")
         );
+        if crate::exec::obs_flag!("PHITEX_LOAD_TRACE_BT") {
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let fns: Vec<&str> = bt
+                .lines()
+                .filter(|l| l.contains("phitex_tex::") && !l.contains("load_trace"))
+                .map(str::trim)
+                .take(12)
+                .collect();
+            eprintln!("load-trace-bt: {}", fns.join(" <- "));
+        }
     }
 
     /// Integer register `loc` holds an alias definition's value (a
@@ -6155,8 +6168,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// conditional branch, or fetched only to be stored or matched, needs,
     /// read through the engine's step projection
     /// ([`crate::val::step_projection`]) where the run has not bound it
-    /// itself: a redefinition within the class leaves this run standing.
-    /// `None` where it is this run's own, or not defined (read in full).
+    /// itself: a redefinition within the class leaves this run standing,
+    /// and so does a first definition in class 0 of a name undefined
+    /// where the run read it (the projection's answer for no value, as
+    /// TeX's `undefined_cs` is stepped over: pgf's
+    /// `\pgfpositionnodelaterpath`, a macro argument in every picture,
+    /// first defined by the picture before, asked each picture again
+    /// once that one had run, Grail at -j8). `None` where it is this
+    /// run's own (read in full).
     #[inline(never)]
     fn step_lookup(&mut self, tok: Tok) -> R<Option<i64>> {
         let Some(l) = self.mean_loc(tok) else {
