@@ -330,6 +330,15 @@ export class Viewer {
 
   // ---- Link previews: a link hovered, the place it goes to shown in a small window on that page ----
 
+  /**
+   * The highlight's scroll margin, a share of the view's height (0 to 0.45): the
+   * highlight that follows the editor is kept at least this far from the view's top
+   * and bottom, the page scrolled just enough to bring it back to the band's edge
+   * (Emacs's scroll-margin); 0, as before: the page moves only once the highlight
+   * leaves the view, and then centres it.
+   */
+  margin = 0.2;
+
   /** Links previewed on hover (the host's setting). */
   peeks = true;
   /** Back and Forward after a jump (the pill, the history, the mouse's buttons): the host's setting. */
@@ -1426,7 +1435,8 @@ export class Viewer {
     const v = this.scroller;
     if (scroll) {
       const to: ScrollToOptions = { behavior: "smooth" };
-      if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) to.top = top - v.clientHeight / 2;
+      const y = marginScroll(top, s.el.offsetTop + (Math.max(...boxes.map(([, by, , bh]) => by + bh)) / h) * s.el.offsetHeight, v.scrollTop, v.clientHeight, this.margin);
+      if (y !== null) to.top = y;
       if (v.scrollWidth > v.clientWidth) {
         const [lx, , lw] = boxes[boxes.length - 1];
         const end = s.el.offsetLeft + ((lx + lw) / w) * s.el.offsetWidth;
@@ -1957,4 +1967,19 @@ function part(r: DOMRect, v: DOMRect): [number, number, number, number] | null {
   const fx = (x: number) => Math.min(1, Math.max(0, (x - r.left) / r.width));
   const fy = (y: number) => Math.min(1, Math.max(0, (y - r.top) / r.height));
   return [fx(v.left), fy(v.top), fx(v.right), fy(v.bottom)];
+}
+
+/**
+ * Where to scroll so that a highlight from `top` to `bottom` (pixels down the
+ * pages) sits in the band `margin` (a share of `height`) away from the view's
+ * edges, the view at `at`; null: it is in the band, no scroll. A highlight taller
+ * than the band keeps its top in it. `margin` 0: only once it leaves the view, and
+ * then to the middle (the behaviour before the margin).
+ */
+export function marginScroll(top: number, bottom: number, at: number, height: number, margin: number): number | null {
+  if (!(margin > 0)) return top < at + 20 || top > at + height - 40 ? top - height / 2 : null;
+  const m = Math.min(0.45, margin) * height;
+  if (top < at + m) return top - m;
+  if (bottom > at + height - m) return Math.min(bottom - (height - m), top - m);
+  return null;
 }

@@ -322,9 +322,11 @@ export interface PanelPrefs {
   /** How much of a line fades, 0 to 200: 100 the whole line (the default); less, the colour only toward its end; more, held flat over more of it. */
   waspLength: number;
   waspText: "body" | "all";
+  /** The highlight's scroll margin, % of the view's height (0 to 45): Viewer.margin. */
+  margin: number;
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body" };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -796,6 +798,7 @@ export class Panel {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.linksShown();
+      this.marginApply();
     });
   }
 
@@ -2473,6 +2476,11 @@ export class Panel {
       if (same) same.rows.push(...g.rows);
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
+    // (the margin beside the host's "Highlight follows", where there is one)
+    for (const g of groups) {
+      const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
+      if (m >= 0 && f >= 0) g.rows.splice(f + (f > m ? 0 : 1), 0, ...g.rows.splice(m, 1));
+    }
     this.settingRows.clear();
     this.tilesGone();
     // (one group at a time, by its tab: the last one shown, else the first)
@@ -2619,6 +2627,15 @@ export class Panel {
     const preview: SettingRow[] = [];
     if (this.mainFiles.names.length)
       preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview.push({
+      id: "margin",
+      label: "Keep a margin",
+      help: "The highlight that follows your editor stays at least this far from the top and bottom of the view; the page scrolls just enough to keep it there. 0: it scrolls only once the highlight leaves the view",
+      kind: "range",
+      max: 45,
+      value: String(this.prefs.margin),
+      set: (v) => ((this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0))), this.marginApply(), this.save()),
+    });
     const look: SettingRow[] = [];
     look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
@@ -2810,6 +2827,12 @@ export class Panel {
     ];
     if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (⌘ on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
     return rows;
+  }
+
+  /** The highlight's scroll margin as chosen, given to the viewer. */
+  private marginApply(): void {
+    const m = Number(this.prefs.margin);
+    this.viewer.margin = Number.isFinite(m) ? Math.max(0, Math.min(45, m)) / 100 : DEFAULTS.margin / 100;
   }
 
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */

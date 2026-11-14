@@ -577,6 +577,14 @@ var Viewer = class _Viewer {
         });
   }
   // ---- Link previews: a link hovered, the place it goes to shown in a small window on that page ----
+  /**
+   * The highlight's scroll margin, a share of the view's height (0 to 0.45): the
+   * highlight that follows the editor is kept at least this far from the view's top
+   * and bottom, the page scrolled just enough to bring it back to the band's edge
+   * (Emacs's scroll-margin); 0, as before: the page moves only once the highlight
+   * leaves the view, and then centres it.
+   */
+  margin = 0.2;
   /** Links previewed on hover (the host's setting). */
   peeks = true;
   /** Back and Forward after a jump (the pill, the history, the mouse's buttons): the host's setting. */
@@ -1525,7 +1533,8 @@ var Viewer = class _Viewer {
     const v = this.scroller;
     if (scroll) {
       const to = { behavior: "smooth" };
-      if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) to.top = top - v.clientHeight / 2;
+      const y = marginScroll(top, s.el.offsetTop + Math.max(...boxes2.map(([, by, , bh]) => by + bh)) / h * s.el.offsetHeight, v.scrollTop, v.clientHeight, this.margin);
+      if (y !== null) to.top = y;
       if (v.scrollWidth > v.clientWidth) {
         const [lx, , lw] = boxes2[boxes2.length - 1];
         const end = s.el.offsetLeft + (lx + lw) / w * s.el.offsetWidth;
@@ -1976,6 +1985,13 @@ function part(r, v) {
   const fx = (x) => Math.min(1, Math.max(0, (x - r.left) / r.width));
   const fy = (y) => Math.min(1, Math.max(0, (y - r.top) / r.height));
   return [fx(v.left), fy(v.top), fx(v.right), fy(v.bottom)];
+}
+function marginScroll(top, bottom, at, height, margin) {
+  if (!(margin > 0)) return top < at + 20 || top > at + height - 40 ? top - height / 2 : null;
+  const m = Math.min(0.45, margin) * height;
+  if (top < at + m) return top - m;
+  if (bottom > at + height - m) return Math.min(bottom - (height - m), top - m);
+  return null;
 }
 
 // viewer/src/print.ts
@@ -4952,7 +4968,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body" };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -5354,6 +5370,7 @@ var Panel = class {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.linksShown();
+      this.marginApply();
     });
   }
   /** The menus and popovers by their buttons. */
@@ -6800,6 +6817,10 @@ var Panel = class {
       if (same) same.rows.push(...g.rows);
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
+    for (const g of groups) {
+      const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
+      if (m >= 0 && f >= 0) g.rows.splice(f + (f > m ? 0 : 1), 0, ...g.rows.splice(m, 1));
+    }
     this.settingRows.clear();
     this.tilesGone();
     const shown = groups.filter((g) => g.rows.length);
@@ -6937,6 +6958,15 @@ var Panel = class {
     const preview2 = [];
     if (this.mainFiles.names.length)
       preview2.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview2.push({
+      id: "margin",
+      label: "Keep a margin",
+      help: "The highlight that follows your editor stays at least this far from the top and bottom of the view; the page scrolls just enough to keep it there. 0: it scrolls only once the highlight leaves the view",
+      kind: "range",
+      max: 45,
+      value: String(this.prefs.margin),
+      set: (v) => (this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0)), this.marginApply(), this.save())
+    });
     const look2 = [];
     look2.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
@@ -7114,6 +7144,11 @@ var Panel = class {
     ];
     if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (\u2318 on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
     return rows;
+  }
+  /** The highlight's scroll margin as chosen, given to the viewer. */
+  marginApply() {
+    const m = Number(this.prefs.margin);
+    this.viewer.margin = Number.isFinite(m) ? Math.max(0, Math.min(45, m)) / 100 : DEFAULTS.margin / 100;
   }
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p) {
