@@ -615,7 +615,7 @@ impl Run<'_, '_> {
                     // inb.txt` called on an inb.txt opened and closed with
                     // its line not yet written). A view the memo answers
                     // calls nothing: answered at once)
-                    if let Some(m) = self.shell_child(cmd, &files)? {
+                    if let Some(m) = self.shell_child(cmd, &files) {
                         m
                     } else {
                         self.cx.wait_settled()?;
@@ -673,7 +673,7 @@ impl Run<'_, '_> {
     /// its prefix settles. `None`: the call is made here, as before
     /// (one thread; a run that is no document piece; the prefix settled
     /// already, where a child would only add a run of mine).
-    fn shell_child(&mut self, cmd: &str, files: &[(String, String)]) -> R<Option<Arc<Made>>> {
+    fn shell_child(&mut self, cmd: &str, files: &[(String, String)]) -> Option<Arc<Made>> {
         let v = self.v;
         let op = self.cx.op();
         if !self.cx.has_other_threads()
@@ -682,7 +682,7 @@ impl Run<'_, '_> {
             || self.rec_load
             || self.pic_child.is_some()
         {
-            return Ok(None);
+            return None;
         }
         let args = vec![
             v.str(cmd),
@@ -694,7 +694,7 @@ impl Run<'_, '_> {
             ),
         ];
         if !self.cx.placed_before_ran(self.ops.shell, &args) && self.cx.settled_here() {
-            return Ok(None);
+            return None;
         }
         let i = self.cx.child_once(self.ops.shell, args);
         let ran = self.cx.placed_output_peek(i).is_some();
@@ -721,7 +721,7 @@ impl Run<'_, '_> {
                 }
             );
         }
-        Ok(Some(Arc::new(made_of(v, x))))
+        Some(Arc::new(made_of(v, x)))
     }
 
     /// A piped input's text (`\\input|cmd`, `\\openin`'s, web2c's
