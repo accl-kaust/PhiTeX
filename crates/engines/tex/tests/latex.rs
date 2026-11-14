@@ -2497,10 +2497,60 @@ fn latex_glyph_origins_of_input_files() {
     b.edit(&main);
     check(&b, &chap2, &inner, "after the edit");
     let cold = build(&main, 1);
-    assert_eq!(
-        b.all_page_origins(),
-        cold.all_page_origins(),
-        "the edit's origins are a cold build's"
+    let named = |b: &phitex_tex::Build| {
+        let files = b.origin_files();
+        b.all_page_origins()
+            .iter()
+            .map(|p| {
+                p.as_ref().map(|p| {
+                    (0..p.len())
+                        .map(|i| {
+                            (
+                                files.get(p.file[i] as usize).cloned(),
+                                p.start[i],
+                                p.end[i],
+                                p.synth[i],
+                                p.x[i].to_bits(),
+                                p.y[i].to_bits(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let (e, c) = (named(&b), named(&cold));
+    let first = e.iter().zip(&c).enumerate().find_map(|(k, (x, y))| {
+        if x == y {
+            return None;
+        }
+        let (Some(x), Some(y)) = (x, y) else {
+            return Some(format!(
+                "page {}: {:?} vs {:?}",
+                k + 1,
+                x.is_some(),
+                y.is_some()
+            ));
+        };
+        let i = x
+            .iter()
+            .zip(y)
+            .position(|(a, b)| a != b)
+            .unwrap_or(x.len().min(y.len()));
+        Some(format!(
+            "page {} code {i} of {}/{}: {:?} vs {:?}",
+            k + 1,
+            x.len(),
+            y.len(),
+            x.get(i),
+            y.get(i)
+        ))
+    });
+    assert!(
+        first.is_none() && e.len() == c.len(),
+        "the edit's origins are a cold build's: {first:?} pages {} vs {}",
+        e.len(),
+        c.len()
     );
 }
 
