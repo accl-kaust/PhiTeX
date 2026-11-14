@@ -2972,6 +2972,10 @@ struct Graph {
     /// ([`Graph::push_env`], spec-final §4.5).
     env_pushed: Vec<(Field, ValueId)>,
     absent_pushed: Vec<Field>,
+    /// The comments' entries among `env_pushed` ([`Marks::entries`], by
+    /// field): a change of the comments alone pushed as theirs
+    /// ([`Graph::push_marks`]).
+    marks_pushed: Vec<(Field, ValueId)>,
     pub(crate) env_calls: u64,
     /// The job's bindings (the format's state, the job's names and
     /// dates: [`job_env`]), pushed with the environment.
@@ -3455,6 +3459,7 @@ impl Graph {
             link,
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
+            marks_pushed: Vec::new(),
             env_calls: 0,
             job: Vec::new(),
             files_op,
@@ -3905,12 +3910,47 @@ impl Graph {
             self.env_calls += 1;
             self.env_pushed = env;
         }
+        self.marks_pushed = by_field(self.marks.entries(self.eng.values()));
         if absent != self.absent_pushed {
             let gone: Vec<(Field, Option<ValueId>)> = absent.iter().map(|&f| (f, None)).collect();
             self.eng.update_environment(&gone);
             self.env_calls += 1;
             self.absent_pushed = absent;
         }
+    }
+
+    /// The comments' entries pushed where they changed since the last
+    /// push ([`Graph::marks_pushed`]), the rest of the environment as it
+    /// is: an edit that changed the comments or moved their lines (and
+    /// nothing the provider gives) neither makes nor compares the whole
+    /// environment again. False where none was pushed yet.
+    fn push_marks(&mut self) -> bool {
+        if self.env_pushed.is_empty() {
+            return false;
+        }
+        let new = by_field(self.marks.entries(self.eng.values()));
+        let cs = env_changes(&self.marks_pushed, &new, true).unwrap_or_default();
+        if !cs.is_empty() {
+            self.eng.update_environment(&cs);
+            self.env_calls += 1;
+            for &(f, x) in &cs {
+                match (
+                    self.env_pushed
+                        .binary_search_by_key(&f.0.raw(), |e| e.0.0.raw()),
+                    x,
+                ) {
+                    (Ok(i), Some(x)) => self.env_pushed[i].1 = x,
+                    (Ok(i), None) => {
+                        self.env_pushed.remove(i);
+                    }
+                    (Err(i), Some(x)) => self.env_pushed.insert(i, (f, x)),
+                    (Err(_), None) => {}
+                }
+            }
+        }
+        self.marks_pushed = new;
+        crate::timeline::lap("env: the comments' entries pushed");
+        true
     }
 
     /// The commands' results of the last evaluation ([`crate::shell::OUTS`],
@@ -4089,7 +4129,7 @@ impl Graph {
             self.provide(finder);
             t_prov += tp.elapsed();
             // (the comments of a text applied before this evaluation)
-            if self.marks.dirty() {
+            if self.marks.dirty() && !self.push_marks() {
                 let env = self.environment(fixpoint);
                 env_trace(&self.eng, &env);
                 self.push_env(env);
@@ -8260,6 +8300,21 @@ impl Build {
     /// for a later session of the same document.
     #[must_use]
     pub fn export_made(&self) -> Vec<u8> {
+        made_bytes(self.g.eng.values(), &self.made_values())
+    }
+
+    /// What [`Build::export_made`] is made from: each made file's name
+    /// and value, hashed (the same, the same bytes: a value is never
+    /// changed in place).
+    #[must_use]
+    pub fn made_source(&self) -> u64 {
+        self.made_values().iter().fold(0x6d61_6465, |h, (n, x)| {
+            phitex_defuse::hash_words(phitex_defuse::hash_bytes(h, n.as_bytes()), &[x.raw()])
+        })
+    }
+
+    /// The files the tools made, by name: their values as defined.
+    fn made_values(&self) -> Vec<(String, ValueId)> {
         let v = self.g.eng.values();
         let mut made: Vec<(String, ValueId)> = Vec::new();
         for (input, _) in self.files_shared().iter() {
@@ -8276,7 +8331,7 @@ impl Build {
                 }
             }
         }
-        made_bytes(v, &made)
+        made
     }
 
     /// The key sets of the read-back files that only define,
