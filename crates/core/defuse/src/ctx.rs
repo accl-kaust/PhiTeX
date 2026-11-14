@@ -2505,11 +2505,23 @@ impl<'a> Ctx<'a> {
                 return false;
             }
             if let ReadKind::Placed { i, guess } = rd.kind() {
+                // (a guess, a child's output not taken (a picture gone on
+                // as if empty, its view moved): checked at the commit
+                // (`read::holds`), which files the view the child runs on
+                // next. Checked here against the output the child made on
+                // an older view, it moved on every check: the run stopped
+                // before its commit each time, the child never saw the new
+                // view, and the run went again for good (lie-hasse's diagram
+                // page, a resume stopped 28,096 times, 642 s of a -j1 build
+                // that took 539 s before)
+                if *guess {
+                    return false;
+                }
                 return match outs.get(i).copied().flatten() {
                     Some(o) => read::apply_path(self.eng, Some(o), rd.path()) != rd.seen(),
-                    // (no child of that key has run: a guess holds until
-                    // the child commits; a real read of none saw none)
-                    None => !guess && rd.seen().is_some(),
+                    // (no child of that key has run: a real read of none
+                    // saw none)
+                    None => rd.seen().is_some(),
                 };
             }
             if !scope_moved
