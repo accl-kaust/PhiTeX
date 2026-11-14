@@ -2957,6 +2957,106 @@ mod tests {
         }
     }
 
+    /// An edit whose node's products are the ones it made before (a
+    /// comment's words changed, spaces after a control word doubled) runs
+    /// that node and nothing after it: no reader asked again, no page
+    /// folded or written, no link (one run in all, or none), and the PDF
+    /// is a clean build's of the edited text. pdfTeX and XeTeX, -j1 and
+    /// -j8.
+    #[test]
+    fn an_edit_that_makes_what_it_made_runs_its_node_alone() {
+        let body = |note: &str, gap: &str| {
+            let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\parindent=0pt \\baselineskip=12pt \\topskip=10pt \\maxdepth=2pt \\output={\\shipout\\box255}\n".to_owned();
+            for i in 0..40 {
+                if i == 20 {
+                    t.push_str(&format!("% a note on the rules\n% {note}\n"));
+                }
+                let sep = if i == 30 { gap } else { " " };
+                t.push_str(&format!(
+                    "\\vrule width {}pt height 5pt depth 1pt\\par{sep}\\relax\n\n",
+                    10 + i
+                ));
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let dist = || {
+            let out = std::process::Command::new("kpsewhich")
+                .args(["-var-value", "TEXMFDIST"])
+                .output()
+                .expect("kpsewhich (TeX Live) on the test machine");
+            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+        };
+        let edits = [
+            (
+                "a comment's words",
+                body("the second one", " "),
+                body("the other one", " "),
+            ),
+            (
+                "spaces after a control word",
+                body("the second one", " "),
+                body("the second one", "    "),
+            ),
+        ];
+        for threads in [1, 8] {
+            for engine in ["pdftex", "xetex"] {
+                let host = || -> Arc<dyn Host> {
+                    if engine == "xetex" {
+                        Arc::new(XeHost {
+                            dist: dist(),
+                            index: None,
+                            read_face: Arc::default(),
+                        })
+                    } else {
+                        Arc::new(Files(HashMap::new()))
+                    }
+                };
+                let text = |t: &str| {
+                    if engine == "xetex" {
+                        t.to_owned()
+                    } else {
+                        format!("\\pdfoutput=1 \\pdfpagewidth=120pt \\pdfpageheight=120pt {t}")
+                    }
+                };
+                for (what, before, after) in &edits {
+                    let (mut d, _, _) = streaming(engine, &text(before), host(), threads);
+                    step(&mut d);
+                    d.push(Ask::SetFile {
+                        file: "doc.tex".into(),
+                        text: text(after),
+                    });
+                    step(&mut d);
+                    let runs = d.session().runs_by_op();
+                    let n: u64 = runs.iter().map(|x| x.1).sum();
+                    assert!(
+                        n <= 1,
+                        "{engine} -j{threads}, {what}: {n} runs, not the edited node's alone: {runs:?}"
+                    );
+                    let mut clean = Session::new(
+                        Job {
+                            engine: crate::tex::engine(engine).unwrap(),
+                            threads: Some(threads),
+                            ..job()
+                        },
+                        Arc::from(text(after).as_str()),
+                        host(),
+                        None,
+                        Arc::new(Memory::default()),
+                        Arc::new(Status::default()),
+                    );
+                    let r = clean.build();
+                    assert!(!r.out.pdf.is_empty(), "{engine} -j{threads}: a PDF");
+                    assert_eq!(
+                        d.output().map(|o| o.1.to_vec()),
+                        Some(r.out.pdf.to_vec()),
+                        "{engine} -j{threads}, {what}: the edit's PDF is the clean build's"
+                    );
+                }
+            }
+        }
+    }
+
     /// The PDF is the same whether the builds stream their pages or not:
     /// a clean build and its edits, streamed (every page an edit changed
     /// told), against the same builds of a session nothing listens to.
