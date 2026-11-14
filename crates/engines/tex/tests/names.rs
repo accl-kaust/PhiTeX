@@ -60,3 +60,86 @@ fn an_internal_name_numbered_past_its_range_is_still_frozen() {
     assert!(errors.is_empty(), "{errors:?}");
     assert!(!b.output().0.is_empty(), "no PDF");
 }
+
+/// A session's edits mint no control sequence names once their texts
+/// repeat: amsldoc built once, then the same one-word edits made again
+/// and again in one process (a watch's, the language server's). Names
+/// live as long as the process, so what a session interns must stop
+/// growing: a name minted per build for each deferred counter's symbol
+/// (`\u{10FFFE}sym…`, by register, node and steps) filled the internal
+/// names' range in a long run, and the alignments after it broke (#32).
+#[test]
+fn a_session_of_repeated_edits_interns_no_new_names() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../bench/amsldoc");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("amsldoc-session");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::copy(src_dir.join("amsldoc.tex"), dir.join("amsldoc.tex")).expect("the source");
+    let src = common::read(&dir.join("amsldoc.tex"));
+    let opts = Options {
+        threads: Some(4),
+        ..pdf_opts("amsldoc", &dir)
+    };
+    let mut b = common::build(opts, Some(&prelude(true)), &src);
+    // (one-word edits at a few places, each put back after)
+    let words = [
+        "pagebreak after a given line",
+        "the document class",
+        "a numbered equation",
+    ];
+    let edits: Vec<String> = words
+        .iter()
+        .filter(|w| src.contains(*w))
+        .map(|w| src.replacen(w, &w.replacen(' ', " wurds ", 1), 1))
+        .collect();
+    assert!(!edits.is_empty(), "no edit place found");
+    let round = |b: &mut phitex_tex::Build| {
+        for e in &edits {
+            b.edit(e);
+            b.edit(&src);
+        }
+    };
+    for _ in 0..3 {
+        round(&mut b);
+    }
+    let warm = phitex_tex::interned_names();
+    // (`PHITEX_SESSION_ROUNDS`: more rounds, a measure of a long session)
+    let rounds: usize = std::env::var("PHITEX_SESSION_ROUNDS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(20);
+    for _ in 0..rounds {
+        round(&mut b);
+    }
+    let after = phitex_tex::interned_names();
+    eprintln!(
+        "interned names (internal, other): after warm-up {warm:?}, after {} more edits {after:?}",
+        rounds * 2 * edits.len()
+    );
+    assert_eq!(
+        after.0, warm.0,
+        "internal names minted by edits that repeat"
+    );
+    // (and builds of it again from nothing, as a session opens it again:
+    // the symbols are numbered per engine, so a build adds names only
+    // where it numbers more symbols than any before it; a name per
+    // register, piece and steps added some 400 a build)
+    let mut cold = vec![after];
+    for threads in [8, 4, 8, 1, 8, 4, 8, 1, 8, 4] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts("amsldoc", &dir)
+        };
+        drop(common::build(opts, Some(&prelude(true)), &src));
+        cold.push(phitex_tex::interned_names());
+    }
+    eprintln!("interned names after cold builds at -j8/4/8/1/8/4/8/1/8/4: {cold:?}");
+    let later = cold[10].0 - cold[1].0;
+    assert!(
+        later < 256,
+        "the nine builds after the first added {later} internal names: {cold:?}"
+    );
+}

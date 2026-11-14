@@ -235,7 +235,7 @@ impl Run<'_, '_> {
         // where the number ends at it, §444: no digit after it, one
         // space taken; else its digits, as TeX's)
         if self.cur.cmd == cmd::SYM
-            && let Some(s) = crate::defer::sym_of(self.cur.tok)
+            && let Some(s) = crate::defer::sym_of(self.ops, self.cur.tok)
         {
             let t0 = self.cur.tok;
             self.get_x_token();
