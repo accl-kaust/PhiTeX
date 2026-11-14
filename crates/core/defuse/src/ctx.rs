@@ -146,6 +146,7 @@ impl<'a> Ctx<'a> {
                 on_park: false,
                 settle_now: false,
                 waits: Vec::new(),
+                looked: crate::FxHashMap::default(),
                 frontier: None,
                 parked_on: None,
                 stood: None,
@@ -1728,11 +1729,22 @@ impl<'a> Ctx<'a> {
             })
     }
 
+    /// The run's first look at its last run's placements, before any of
+    /// their states or outputs is read (every peek at one goes through
+    /// here): each one's [`crate::node::Node::commit_seq`] then, the
+    /// placed look a commit of a placement waited for is told apart by
+    /// (`commit::commit`'s check of a waited guess).
     fn placed_keys_built(&mut self) {
         if self.placed_keys.is_none() {
             let mut m: FxHashMap<(OpId, Arc<[ValueId]>), NodeId> = FxHashMap::default();
             for &c in self.last.as_ref().map_or(&[][..], |r| &r.placed[..]) {
                 if let Some(n) = self.eng.placed_node(c).filter(|n| n.state() != State::Gone) {
+                    // (before the state just read is used: a commit after
+                    // this load moves it, one before has left its record)
+                    self.product
+                        .looked
+                        .entry(c)
+                        .or_insert_with(|| n.commit_seq.load(std::sync::atomic::Ordering::SeqCst));
                     m.entry((n.op(), n.args())).or_insert(c);
                 }
             }

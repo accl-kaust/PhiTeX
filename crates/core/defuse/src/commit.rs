@@ -2099,6 +2099,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             &mut placed,
         );
         let old = node.last.lock().replace(rec.clone());
+        // (its record published: a placer that looked at it before this
+        // sees the sequence moved, or this commit's read of the placer's
+        // record below comes after the placer's, `waited_holds`)
+        seq_begin(node);
         if old.as_ref().is_some_and(|o| o.reads.len() > 0) {
             inner.replaced = inner.replaced.saturating_add(1);
         }
@@ -2565,8 +2569,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // this run again, `wake_waiting`; checked here against the output the
     // child had made before, the run was asked again at once and took that
     // stale output, then again once the child had run: lie-hasse's piece
-    // of diagrams, 30 s a run, twice per picture moved)
-    let waited: Vec<usize> = node.run_record().map(|r| r.waits.to_vec()).unwrap_or_default();
+    // of diagrams, 30 s a run, twice per picture moved. Not checked only
+    // where that commit is still to come, `waited_holds`: one that came
+    // during the run read this node's record before this one's, and its
+    // re-ask, if any, asked a running node only to check its reads, so
+    // skipped here the run stood on its guess (pgf-umlcd-manual, a
+    // picture empty under its \resizebox, about 1 build in 75 at -j4 on 4
+    // CPUs))
+    let waited: Vec<(usize, NodeId)> = node
+        .run_record()
+        .map(|r| r.waits.iter().filter_map(|&j| Some((j, *r.placed.get(j)?))).collect())
+        .unwrap_or_default();
     let refuted = refuted.or_else(|| {
         let mut memo = read::FoldMemo::new();
         // (siblings read in turn, checked in one pass)
@@ -2574,7 +2587,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         unchecked.into_iter().find(|&i| {
             let r = &reads[i];
             if let ReadKind::Placed { i: j, guess: true } = *r.kind()
-                && waited.contains(&j)
+                && waited
+                    .iter()
+                    .any(|&(k, c)| k == j && waited_holds(eng, c, p.looked.get(&c).copied()))
             {
                 return false;
             }
@@ -2929,6 +2944,10 @@ pub(crate) fn commit_stood(
         take_stops(&mut inner, node.id)
     };
     let mut st = CommitStats::default();
+    // (it stands, its record the last: a placer's look before this sees
+    // the sequence moved, or this commit's read of its record below
+    // comes after the placer's, `waited_holds`)
+    seq_begin(node);
     crate::sched::clear_front(eng, node);
     reask_stops(eng, ww, stops, node.id, &mut st);
     // (the fields a commit before it left unwalked: this run stands on
@@ -3238,6 +3257,62 @@ fn wake_waiting(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
     if r.waits.iter().any(|&j| r.placed.get(j) == Some(&child)) {
         ask_placer(eng, w, parent, child, st);
     }
+}
+
+/// Marks the start of `node`'s commit for its placer's check: odd from
+/// here (its record published, before its parent's record is read) to the
+/// end of the run (`seq_end`). Once a run: a stand that falls back to a
+/// full commit marks it once.
+pub(crate) fn seq_begin(node: &Node) {
+    if node.commit_seq.load(Ordering::SeqCst) & 1 == 0 {
+        node.commit_seq.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Marks the end of a committed run of `node`, its state left `Running`
+/// (`sched`'s `end_run`): even again.
+pub(crate) fn seq_end(node: &Node) {
+    if node.commit_seq.load(Ordering::SeqCst) & 1 == 1 {
+        node.commit_seq.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a commit's guess of placement `child`, a node its run waits
+/// for (`Ctx::placed_output_wait`), may stand unchecked: the child's next
+/// commit is sure to re-ask the placer, `wake_waiting` reading the record
+/// this commit has published (`looked`: the child's
+/// [`Node::commit_seq`] at the run's first look at it, `Ctx`'s
+/// `placed_keys_built`). Called after that record's publication under
+/// the placer's `last` lock.
+///
+/// The child's commit, C, publishes its record (`last` lock), then
+/// `seq_begin` (SeqCst), then reads the placer's record under the
+/// placer's `last` lock (`reask_parent`, `wake_waiting`), then its state
+/// leaves `Running`, then `seq_end` (SeqCst). The placer, P, loads the
+/// sequence at its look (SeqCst), then reads the child's state and
+/// output, runs on, publishes its record under its `last` lock, then
+/// loads the sequence again here (SeqCst). Each order of the two:
+/// - C's `seq_begin` before P's look: P's look is in C's tail (odd: not
+///   held, the guess checked against C's output now, C's record, so P runs
+///   again if it differs), or after C's `seq_end` (P read C's state and
+///   output as C left them: a C asked again since commits again, below).
+/// - C's `seq_begin` after P's look, seen here: the sequence moved, the
+///   guess checked against the output now, at least C's: P runs again if
+///   it differs.
+/// - C's `seq_begin` after P's look, not seen here: C's read of P's
+///   record comes after P's publication. Were C's lock section first,
+///   `seq_begin` (before it in C) would happen before P's publication
+///   (after it in the lock's order), so before this load, which would see
+///   it. So C reads this record, which waits for C: `wake_waiting` asks P
+///   (`ask_placer`), P then committing or done, never left on the guess.
+///
+/// A child placed new by this commit (no look): its first commit is
+/// after this commit made it, so after the record: held.
+fn waited_holds(eng: &Engine, child: NodeId, looked: Option<u32>) -> bool {
+    let Some(seen) = looked else {
+        return eng.node(child).run_record().is_none();
+    };
+    seen & 1 == 0 && eng.node(child).commit_seq.load(Ordering::SeqCst) == seen
 }
 
 /// Whether a placement of `parent` other than `child` that its last run
