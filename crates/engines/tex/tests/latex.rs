@@ -1380,10 +1380,12 @@ fn latex_a_picture_asked_again_runs_again() {
 /// in a `\resizebox` argument of a figure in an `\input` file (a token
 /// list, Grail's drawn figures), one in a file `\input` inside a
 /// `\resizebox` (its generated ones), two in one figure, one in a
-/// paragraph. At -j1 five runs of `pic` and no picture read inline; at
-/// -j4 the PDF of -j1 and none read inline. Then an edit in the text
-/// before them runs none, and one in a picture's body runs that one
-/// again; each PDF a clean build's.
+/// paragraph. At -j1 five runs of `pic`, and the two in one figure read
+/// inline once: met while the first's output is to come, the run goes
+/// again and reads both inline, placing their children (a run of many
+/// pictures goes once more, not once a picture: lie-hasse); at -j4 the
+/// PDF of -j1. Then an edit in the text before them runs none, and one in
+/// a picture's body runs that one again; each PDF a clean build's.
 #[test]
 fn latex_each_picture_runs_once_on_a_clean_build() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-once");
@@ -1405,15 +1407,12 @@ fn latex_each_picture_runs_once_on_a_clean_build() {
     if children {
         assert_eq!(
             (common::runs_of(&one, "pic"), one.stats.pics_inline),
-            (5, 0),
+            (5, 2),
             "-j1: pictures run in children, read inline: {:?}",
             one.stats.runs_by_op
         );
     }
     let four = common::build(at(4), Some(&prelude(true)), src);
-    if children {
-        assert_eq!(four.stats.pics_inline, 0, "-j4: pictures read inline");
-    }
     if let Some(d) = common::first_difference(&four.output().0, &one.output().0) {
         panic!("-j4 differs from -j1: {d}");
     }

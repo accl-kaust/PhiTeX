@@ -388,14 +388,21 @@ picture's work (fonts it loads first, pgf's counters, its items), so a
 child given it would run again once that output is in, and the pictures
 after it again for each: lie-hasse's page of 24 diagrams, one more right
 a pass (f940e759c). So in a run that went on as if empty at one picture,
-each later picture whose view moved goes on as if empty too, without
-handing its child new bindings: a child that has run keeps its view
-(the field defined with its last value), and one that has not is not
-placed. The run is asked again by the first one's output, and places the
-next then. Each picture runs once; the run's own text, cheap, runs once
-a picture.
+a later picture whose child has run and whose view moved goes on as if
+empty too, its child keeping the view it has. A later picture whose
+child has not run makes the run stop at once (`Ctx::run_again`, nothing
+filed) with the first picture marked as one of many (`pic::MANY`): its
+run again reads every picture with no output inline, as TeX does, and
+places their children for the runs after, as before §8. Two ways were
+measured and dropped: placing the later children one a run (each picture
+ran once, the run once a picture: lie-hasse's piece of about 37 s of its
+own text 24 times, -j1 860 -> 1356 s, mc 86456), and reading the later
+ones inline in that run with their children placed on views without the
+first's work (they ran again, view after view: past 2400 s, mc 86471).
+A figure of one picture, every one of Grail's, reads none inline.
 
-What is still read inline: a refused picture (§7.4), and a picture whose
+What is still read inline: the pictures of a run of many, with no output
+yet; a refused picture (§7.4), and a picture whose
 child is held for a panic (no commit of it comes). `Stats::pics_inline`
 counts them.
 
