@@ -642,8 +642,16 @@ impl Ready {
         Some(x)
     }
 
+    /// The first is a thief's too where a run gave its worker to it
+    /// (`Ctx::yield_to_prefix`, `Node::yielded_to`): that worker is the
+    /// thief it gave way for. Left to its owner, busy in a run of its own,
+    /// the yielder's worker stood idle and the node waited as before.
     fn take_as_thief(&self, q: &mut Queues, eng: &Engine, long: bool) -> Option<NodeId> {
-        if long { q.pop(eng) } else { q.pop_second(eng) }
+        let yielded = q.first(eng).is_some_and(|(k, _)| {
+            eng.placed_node(NodeId::from_raw(k.3))
+                .is_some_and(|n| n.yielded_to.load(Ordering::Acquire))
+        });
+        if long || yielded { q.pop(eng) } else { q.pop_second(eng) }
     }
 
     /// The node a `pop` takes next, if any: a peek.
@@ -2677,7 +2685,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         pool.shared.done_one();
         return Ok(());
     }
-    eprintln!("DBG work {} on w{}", node.id.raw(), w.ix);
     release_yielders(eng, w, node);
     // (a quiet point let it go: nothing it waited for will come first)
     let quiet = node.held.swap(false, Ordering::AcqRel);
@@ -2965,11 +2972,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         Ok(Err(_stop)) if cx.wait_on.is_some() => {
             let on = cx.wait_on.take();
             let yielded = cx.yielded;
-            eprintln!(
-                "DBG stop node {} on {:?} yielded {yielded}",
-                node.id.raw(),
-                on.map(|x| x.raw())
-            );
             drop(cx);
             park_waiting(eng, pool, w, node, on);
             if yielded && let Some(x) = on {
@@ -3244,12 +3246,6 @@ fn park_yielder(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, x: NodeId) {
         return;
     }
     let Some(xn) = eng.placed_node(x) else { return };
-    eprintln!(
-        "DBG park_yielder {} on {} state {:?}",
-        node.id.raw(),
-        x.raw(),
-        xn.state()
-    );
     let mut m = pool.shared.yielders.lock();
     xn.yielded_to.store(true, Ordering::SeqCst);
     std::sync::atomic::fence(Ordering::SeqCst);
@@ -3270,7 +3266,6 @@ fn release_yielders(eng: &Engine, w: &Worker, x: &Node) {
     if !x.yielded_to.load(Ordering::SeqCst) {
         return;
     }
-    eprintln!("DBG release_yielders {}", x.id.raw());
     let ys = {
         let mut m = w.shared.yielders.lock();
         x.yielded_to.store(false, Ordering::SeqCst);
