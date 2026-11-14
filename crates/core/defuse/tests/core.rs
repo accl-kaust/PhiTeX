@@ -606,11 +606,25 @@ fn an_environment_miss_is_answered_once() {
         spin(Duration::from_millis(50));
         Some(Some(v.int(9)))
     }));
+    // (each reader works a while before it reads, so that the workers
+    // start, and they all reach the read while its provider runs)
+    struct SlowGet;
+    impl Operation for SlowGet {
+        fn name(&self) -> &'static str {
+            "slow-get"
+        }
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            spin(Duration::from_millis(5));
+            Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+        }
+    }
+    let _ = o;
+    let get = e.register(Arc::new(SlowGet));
     let u = e.new_unit();
     let n = threads().clamp(2, 16);
-    let readers: Vec<NodeId> = (0..4 * n).map(|_| e.push(u, o.get, vec![en.0])).collect();
-    e.evaluate(n).unwrap();
-    assert!(readers.iter().all(|&r| int(&e, r) == 9));
+    let readers: Vec<NodeId> = (0..4 * n).map(|_| e.push(u, get, vec![en.0])).collect();
+    let r = e.evaluate(n).unwrap();
+    assert!(readers.iter().all(|&x| int(&e, x) == 9), "{r:?}");
     assert_eq!(asked.load(Ordering::SeqCst), 1, "the provider asked once for one field");
     assert!(e.check_invariants().is_empty());
 }
