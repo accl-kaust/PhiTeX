@@ -5,7 +5,7 @@
 
 import type { Link, PageImage } from "./types.ts";
 import type { CiteAnswer } from "./session.ts";
-import { LAYER_LINES } from "./text.ts";
+import { LAYER_LINES, ensureText, holdText, textPending } from "./text.ts";
 import { waspLength, waspOff, waspOn } from "./wasp.ts";
 
 export interface ViewerHost {
@@ -151,6 +151,7 @@ export class Viewer {
     // (the page in view, as the view scrolls: once a frame)
     let frame = 0;
     scroller.addEventListener("scroll", () => {
+      this.moved();
       if (!frame)
         frame = requestAnimationFrame(() => {
           frame = 0;
@@ -217,7 +218,19 @@ export class Viewer {
     });
     // (while a drag selects: told as it goes, at most once a frame, not only when the button is let go)
     let dragFrame = 0;
-    root.addEventListener("pointerdown", () => (told = ""));
+    root.addEventListener("pointerdown", () => {
+      told = "";
+      // (a selection begun: the text it may drag over there now, not when the view rests)
+      for (const k of this.visible) ensureText(this.slots[k]?.el);
+    });
+    // (the pointer moved onto a page: its text there before a press, which hit-tests what
+    // is there when it comes (a layer filled by the press itself selected nothing). Not the
+    // moves a browser makes up as the pages scroll under a pointer at rest: no movement)
+    root.addEventListener("pointermove", (e) => {
+      if (!e.movementX && !e.movementY) return;
+      const slot = (e.target as Element | null)?.closest?.(".slot");
+      if (slot && textPending(slot)) ensureText(slot);
+    }, { passive: true });
     root.addEventListener("pointermove", (e) => {
       if (!(e.buttons & 1) || dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
@@ -527,6 +540,7 @@ export class Viewer {
     if (!s) return "";
     const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
     const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    ensureText(s.el);
     for (const el of s.el.querySelectorAll<SVGTextElement>("text")) {
       const tr = el.getBoundingClientRect();
       if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
@@ -690,6 +704,7 @@ export class Viewer {
     const s = this.slots[k];
     if (!s) return [];
     const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
+    ensureText(s.el);
     return [...s.el.querySelectorAll("text")]
       .map((t) => {
         const r = t.getBoundingClientRect();
@@ -847,6 +862,7 @@ export class Viewer {
     if (!s) return null;
     const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
     const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    ensureText(s.el);
     for (const el of s.el.querySelectorAll<SVGTextElement>("text")) {
       const tr = el.getBoundingClientRect();
       if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
@@ -1021,6 +1037,7 @@ export class Viewer {
     // (the text layer's line nearest the view's top: what was being read)
     let words = "", far = Infinity;
     const y = v.top + 12;
+    ensureText(this.slots[at.k]?.el);
     for (const t of this.slots[at.k]?.el.querySelectorAll("text") ?? []) {
       const r = t.getBoundingClientRect();
       if (r.bottom < y - 4 || !t.textContent?.trim()) continue;
@@ -1078,6 +1095,7 @@ export class Viewer {
     const y0 = top ?? 0, b = s.el.getBoundingClientRect(), sy = this.size.h / b.height, sx = this.size.w / b.width;
     // (the lines that start within 30 points under the target, the first with any text: their box, in points)
     let box: [number, number, number, number] | null = exact ?? null;
+    if (!exact) ensureText(s.el);
     for (const t of exact ? [] : s.el.querySelectorAll("text")) {
       if (!t.textContent?.trim()) continue;
       const r = t.getBoundingClientRect(), ty = (r.top - b.top) * sy, tb = (r.bottom - b.top) * sy;
@@ -1265,6 +1283,7 @@ export class Viewer {
       const r = sel.getRangeAt(i);
       for (const s of this.slots) {
         if (!r.intersectsNode(s.el)) continue;
+        ensureText(s.el);
         for (const t of s.el.querySelectorAll("text")) {
           const l = LAYER_LINES.get(t);
           if (!l || !l.text || !r.intersectsNode(t)) continue;
@@ -1368,6 +1387,7 @@ export class Viewer {
       // pdflatex's draft \overfullrule; drawn here only, never in the PDF)
       if (rule && boxes.length) {
         const [x, y, bw, bh] = boxes[0];
+        ensureText(s.el);
         const lines = [...s.el.querySelectorAll("text")]
           .map((t) => LAYER_LINES.get(t))
           .filter((l): l is NonNullable<typeof l> => !!l && !!l.text)
@@ -1648,6 +1668,55 @@ export class Viewer {
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
 
+  // ---- The pages' text layers: filled once the view rests (text.ts's deferText) ----
+
+  /** The view's motion (a scroll, a zoom's frames) last seen, and the wait for it to rest. */
+  private restTimer: ReturnType<typeof setTimeout> | undefined;
+  private filling = 0;
+
+  /**
+   * The view moved (a scroll; a zoom gesture's frame, Panel.zoomLay): the
+   * pages' text layers still to fill wait until it rests 120 ms. A page's
+   * text built in the frame it came into view was the long frames of a
+   * scroll or a zoom (its SVG text made and laid out); read before then (a
+   * selection, a link's text, the reading aid), a layer is filled at once.
+   */
+  moved(): void {
+    this.waitText();
+  }
+
+  /** The text layers shown so far held out of the layout too, shown again a page a frame once the view rests (a zoom's end: text.ts's holdText). */
+  holdText(): void {
+    holdText(this.root);
+    this.waitText();
+  }
+
+  private waitText(): void {
+    cancelAnimationFrame(this.filling);
+    this.filling = 0;
+    clearTimeout(this.restTimer);
+    this.restTimer = setTimeout(() => ((this.restTimer = undefined), this.fillText()), 120);
+  }
+
+  /**
+   * The text layers still to fill or show, those in view first, a page a frame
+   * (its layout, after, is most of its cost), until a motion begins again.
+   */
+  private fillText(): void {
+    if (this.restTimer !== undefined || this.filling) return;
+    const step = () => {
+      this.filling = 0;
+      for (const k of [...this.visible, ...this.slots.keys()]) {
+        const el = this.slots[k]?.el;
+        if (!el || !textPending(el)) continue;
+        ensureText(el);
+        this.filling = requestAnimationFrame(step);
+        return;
+      }
+    };
+    this.filling = requestAnimationFrame(step);
+  }
+
   private toPaint = new Set<Slot>();
   private paintFrame = 0;
   private paintSome(): void {
@@ -1669,6 +1738,8 @@ export class Viewer {
     // (a box's bar placed by its line's text: drawn again once the page's text is there)
     if (this.culpritMarks.some((m) => m.rule && painted.some((s) => Number(s.el.dataset.k) === m.k))) this.culprits(this.culpritMarks);
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
+    // (their text: now, if the view is at rest, else once it rests)
+    this.fillText();
   }
 
   /** The format changed: every page is to be drawn again (as it comes into view). */
@@ -1880,19 +1951,31 @@ export class Viewer {
 
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n: number): void {
+    const to = this.turnTop(n);
+    if (to !== null) this.scroller.scrollTo({ top: to, behavior: "auto" });
+  }
+
+  /**
+   * Where `turn(n)` scrolls to (the scroller's scroll top), counted from scroll
+   * top `from` (by default where it is): from where a motion under way is
+   * going, a page key pressed again turns on from the page it was going to.
+   */
+  turnTop(n: number, from = this.scroller.scrollTop): number | null {
     const v = this.scroller.getBoundingClientRect();
     // (where each page's top is, in the scroller's coordinates: measured now)
     const top = (k: number) => this.slots[k].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
-    const at = this.scroller.scrollTop + 12;
+    const at = from + 12;
     let lo = 0, hi = this.slots.length - 1;
-    if (hi < 0) return;
+    if (hi < 0) return null;
     // (the last page whose top is at or above the view's top, with goTo's 12 px)
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
       if (top(mid) <= at + 1) lo = mid;
       else hi = mid - 1;
     }
-    this.goTo(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n);
+    const k = Math.max(0, Math.min(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n, this.slots.length - 1));
+    // (goTo's place: the page's top 12 px below the view's, within what the scroller can scroll)
+    return Math.max(0, Math.min(top(k) - 12, this.scroller.scrollHeight - this.scroller.clientHeight));
   }
 
   private seen(es: IntersectionObserverEntry[]): void {

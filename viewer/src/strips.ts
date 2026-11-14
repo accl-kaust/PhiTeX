@@ -7,7 +7,7 @@
 // keeps. The host gives the two calls (`StripSource`): the CLI's over
 // HTTP from the watch, the frontends' cores over their wasm calls.
 
-import { composeLine, type TextLine, LAYER_LINES } from "./text.ts";
+import { composeLine, type TextLine, LAYER_LINES, deferText } from "./text.ts";
 import type { Link } from "./types.ts";
 
 /**
@@ -112,7 +112,7 @@ export class Strips {
       const el = document.createElement("div");
       el.className = "phx-page";
       Object.assign(el.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
-      el.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
+      el.append(this.canvas(f), textLayer(f.text, f.w, f.h));
       return { el, w: f.w, h: f.h, links: f.links, hash: f.hash };
     }
     // (the part in view and half as much again each side, at most
@@ -140,7 +140,7 @@ export class Strips {
       width: `${(w / part.pw) * 100}%`,
       height: `${(h / part.ph) * 100}%`,
     });
-    el.append(this.canvas(base), tile, textLayer(base.text.map(composeLine), base.w, base.h));
+    el.append(this.canvas(base), tile, textLayer(base.text, base.w, base.h));
     // (its two frames of two builds: of neither, drawn again)
     return { el, w: base.w, h: base.h, links: base.links, hash: base.hash === part.hash ? base.hash : base.hash === undefined ? undefined : "" };
   }
@@ -250,15 +250,18 @@ export function textLayer(lines: TextLine[], w: number, h: number): SVGElement {
   svg.setAttribute("class", "phx-text");
   svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg.setAttribute("preserveAspectRatio", "none");
-  for (const l of lines) {
-    const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
-    t.setAttribute("y", String(l.y));
-    t.setAttribute("font-size", String(l.size));
-    t.textContent = l.text;
-    LAYER_LINES.set(t, l);
-    svg.append(t);
-  }
+  // (its lines when first needed: the view at rest, or a reader of them, text.ts's ensureText)
+  deferText(svg, () => {
+    for (const l of lines.map(composeLine)) {
+      const t = document.createElementNS(SVG, "text");
+      t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
+      t.setAttribute("y", String(l.y));
+      t.setAttribute("font-size", String(l.size));
+      t.textContent = l.text;
+      LAYER_LINES.set(t, l);
+      svg.append(t);
+    }
+  });
   return svg;
 }
 
