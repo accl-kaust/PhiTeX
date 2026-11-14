@@ -3105,11 +3105,6 @@ pub(crate) struct DocFile {
     /// the file; two slices with the same frames (a kept one's stale place
     /// a new one's now) have none: their runs fold the lines.
     dlines: FxHashMap<u64, i64>,
-    /// The same for the pieces of the file's rest that a run reading the
-    /// file's first lines itself cut ([`doc_file_rest_lines`]): the lines
-    /// before them that run read have numbers of their own, so a fold of
-    /// the lines the nodes before a piece began misses them.
-    rest_lines: FxHashMap<u64, i64>,
 }
 
 impl DocFile {
@@ -3162,25 +3157,26 @@ fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
             }
         }
     }
-    docs.locked().values().find_map(|d| {
-        let d = d.locked();
-        d.dlines.get(&n).or_else(|| d.rest_lines.get(&n)).copied()
-    })
+    docs.locked()
+        .values()
+        .find_map(|d| d.locked().dlines.get(&n).copied())
 }
 
-/// The pieces a run cut of the rest of document file `key` it read the
-/// first lines of itself (`Run::doc_file_regions`): the lines of `text`
-/// before each (`(frames, byte)`), given as `dline:<frames>` as a cut
-/// piece's are ([`DocFile::rest_lines`]).
-pub(crate) fn doc_file_rest_lines(docs: &DocFiles, key: &str, text: &str, pieces: &[(u64, usize)]) {
-    let Some(df) = docs.locked().get(key).cloned() else {
-        return;
-    };
+/// The lines before the pieces runs cut of the rest of a file they read
+/// the first lines of themselves ([`rest_lines`]), by the value of their
+/// frames, given as `dline:<frames>` as a cut file's pieces' are
+/// ([`DocFile::dlines`]): those lines, read by the run with numbers of
+/// their own, are in no fold of the lines the nodes before a piece began.
+/// (Keyed by the frames' value, kept alive by a collection, `crate::collect`.)
+pub(crate) type RestLines = Arc<std::sync::Mutex<FxHashMap<ValueId, i64>>>;
+
+/// [`RestLines`] for the pieces `(frames, byte)` cut of the rest of
+/// `text`: the lines of the text before each.
+pub(crate) fn rest_lines(rest: &RestLines, text: &str, pieces: &[(ValueId, usize)]) {
     let starts = line_starts(text);
-    let mut df = df.locked();
+    let mut m = rest.locked();
     for &(n, s) in pieces {
-        df.rest_lines
-            .entry(n)
+        m.entry(n)
             .or_insert_with(|| lines_before(&starts, text.len(), s));
     }
 }
@@ -3223,7 +3219,6 @@ fn cut_doc_file(
         placed: FxHashMap::default(),
         args: Vec::new(),
         dlines: FxHashMap::default(),
-        rest_lines: FxHashMap::default(),
     };
     docs.locked()
         .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
@@ -3476,6 +3471,7 @@ impl Graph {
             rec_ran: Arc::default(),
             pkg_loads: Arc::new(std::sync::RwLock::new(None)),
             docs: Arc::default(),
+            rest_lines: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
@@ -3665,6 +3661,7 @@ impl Graph {
         let cut_log = Arc::clone(&self.provided);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
         let docs = Arc::clone(&self.ops.docs);
+        let rest = Arc::clone(&self.ops.rest_lines);
         let finder_u = Arc::clone(&finder);
         let finder_t = Arc::clone(&finder);
         let tools = self.tool_finder.clone();
@@ -3727,7 +3724,12 @@ impl Graph {
             }
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
-                let k = doc_file_line(&docs, n.parse().ok()?);
+                let n = n.parse().ok()?;
+                let k = doc_file_line(&docs, n).or_else(|| {
+                    rest.locked()
+                        .iter()
+                        .find_map(|(f, &k)| (f.raw() == n).then_some(k))
+                });
                 return Some(k.map(|k| v.int(k)));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the

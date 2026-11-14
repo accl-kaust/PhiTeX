@@ -4136,6 +4136,7 @@ fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
 /// at one and eight threads.
 #[test]
 fn a_csname_bound_globally_at_once_reads_nothing() {
+    use std::fmt::Write as _;
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/csname-dead");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
@@ -4145,10 +4146,11 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
             s.push_str("First \\expandafter\\gdef\\csname kl@a\\endcsname{set} and \\csname kl@a\\endcsname.\n\n");
         }
         for i in 0..8 {
-            s.push_str(&format!(
+            let _ = write!(
+                s,
                 "Paragraph {i} \\expandafter\\global\\expandafter\\let\\csname kl@a\\endcsname\\empty \
                  \\expandafter\\global\\expandafter\\let\\csname kl@b{i}\\endcsname\\relax words.\n\n"
-            ));
+            );
         }
         s.push_str(
             "Tested: \\expandafter\\ifx\\csname kl@u\\endcsname\\relax relax\\else other\\fi; \
@@ -4199,7 +4201,7 @@ fn a_csname_bound_globally_at_once_reads_nothing() {
 /// moved runs on to "TeX capacity exceeded". Here 1500 calls, the
 /// argument 8 tokens longer a call: at least 8 * 1500 * 1499 / 2 tokens
 /// written, so at least that / 8192 ticks, where calls and commands
-/// alone make none. (Ctx::tick looks at a long run's reads at powers of
+/// alone make none. (`Ctx::tick` looks at a long run's reads at powers of
 /// two of its checks; counted in commands and calls only, Grail's
 /// recursion made too few to reach the next one.)
 #[test]

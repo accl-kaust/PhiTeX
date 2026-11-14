@@ -149,6 +149,9 @@ pub(crate) struct Ops {
     /// The document files the client cut (`api::DocFile`): a run reaching
     /// one places its slices as its pieces ([`Run::doc_file_regions`]).
     pub docs: crate::api::DocFiles,
+    /// The lines before the pieces runs cut of a file's rest
+    /// (`api::RestLines`).
+    pub rest_lines: crate::api::RestLines,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// What the last two finishers running each output routine defined,
@@ -5892,6 +5895,11 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (a `\\csname` look-up put off, its name met where its meaning is
+        // read: made first, [`Run::csname_defer`])
+        if !self.bare && self.csname_defer.is_some_and(|d| d.1 == tok) {
+            self.csname_force()?;
+        }
         self.set_cur_cs_rest(tok)
     }
 
@@ -5928,11 +5936,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 chr: 256,
             };
             return Ok(());
-        }
-        // (a `\\csname` look-up put off, its name met: made first,
-        // [`Run::csname_defer`])
-        if self.csname_defer.is_some_and(|d| d.1 == tok) {
-            self.csname_force()?;
         }
         // (a deferred read's symbol: its meaning is its name's,
         // `crate::defer`, nothing read)
@@ -6800,22 +6803,20 @@ impl<'c, 'a> Run<'c, 'a> {
             args.push(v.str(rec.as_deref().unwrap_or(&*own)));
             out.push(args);
         }
-        // (a document file the client cut, whose first lines this run read
-        // itself: its rest's pieces given their lines in the file as the
-        // client's pieces are, `api::doc_file_rest_lines`; folded, the
+        // (a file whose first lines this run read itself: its rest's
+        // pieces given their lines in the file as the client's pieces of a
+        // cut file are, `api::rest_lines`; folded, the
         // lines before them this run read, numbered as a file's, were
         // missed. Grail's appendix at -j1, its first paragraph read on
         // into from the file before it: every line two short)
-        if let Some(key) = f.cut {
-            let pieces: Vec<(u64, usize)> = t
-                .slices
-                .iter()
-                .filter(|&&(_, e)| e > f.off)
-                .zip(&out)
-                .map(|(&(s, _), a)| (a[0].raw(), s.max(f.off)))
-                .collect();
-            crate::api::doc_file_rest_lines(&self.ops.docs, &str_of(v, key), &text, &pieces);
-        }
+        let pieces: Vec<(ValueId, usize)> = t
+            .slices
+            .iter()
+            .filter(|&&(_, e)| e > f.off)
+            .zip(&out)
+            .map(|(&(s, _), a)| (a[0], s.max(f.off)))
+            .collect();
+        crate::api::rest_lines(&self.ops.rest_lines, &text, &pieces);
         out
     }
 
