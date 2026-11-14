@@ -3435,6 +3435,7 @@ impl Graph {
             rec_ran: Arc::default(),
             pkg_loads: Arc::new(std::sync::RwLock::new(None)),
             docs: Arc::default(),
+            syms: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),

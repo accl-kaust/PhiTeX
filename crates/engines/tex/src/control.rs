@@ -2798,7 +2798,7 @@ impl Run<'_, '_> {
         let mut s = String::new();
         let mut from = 0;
         for (i, &t) in expanded.iter().enumerate() {
-            let Some(sym) = crate::defer::reg_sym(t) else {
+            let Some(sym) = crate::defer::reg_sym(self.ops, t) else {
                 continue;
             };
             self.show_toks_into(&mut s, &expanded[from..i])?;

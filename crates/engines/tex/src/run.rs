@@ -149,6 +149,8 @@ pub(crate) struct Ops {
     /// The document files the client cut (`api::DocFile`): a run reaching
     /// one places its slices as its pieces ([`Run::doc_file_regions`]).
     pub docs: crate::api::DocFiles,
+    /// The deferred counters' symbols, by number (`crate::defer::SymTable`).
+    pub syms: std::sync::Arc<crate::defer::SymTable>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// What the last two finishers running each output routine defined,
