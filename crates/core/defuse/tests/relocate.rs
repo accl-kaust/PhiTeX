@@ -489,3 +489,108 @@ fn a_placement_moved_back_takes_what_stands_under_it() {
     );
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[key]`: places `OpenClaim [key]` and `Bracket [0]` (a close) as its
+/// children, in that order.
+struct Group {
+    ops: std::sync::OnceLock<(phitex_defuse::OpId, phitex_defuse::OpId)>,
+}
+
+impl Operation for Group {
+    fn name(&self) -> &'static str {
+        "group"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (open, bracket) = *self.ops.get().expect("registered");
+        let v = cx.values();
+        cx.child(open, vec![cx.args()[0]]);
+        cx.child(bracket, vec![v.int(0)]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[key]`: opens one scope after itself, defines `m` := key inside it
+/// and claims its next sibling: a piece that reads on into the piece
+/// after it, whose text closes a scope it never closes here.
+struct OpenClaim;
+
+impl Operation for OpenClaim {
+    fn name(&self) -> &'static str {
+        "open_claim"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> phitex_defuse::Effect {
+        phitex_defuse::Effect::Open
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        cx.define_with(v.field("m"), cx.args()[0], phitex_defuse::Locality::Scope);
+        let _ = cx.following(0);
+        cx.claim(1);
+        Ok(cx.args()[0])
+    }
+}
+
+/// A sibling taken by a claim has no brackets, and keeps none when its
+/// placer moves: `land` filed a moved node's brackets from its record or
+/// its operation's static effect whether or not a claim held it, so a
+/// close taken (its scope left open by the piece that read it) closed the
+/// scope again at its new place, and nothing took it back out (a taken
+/// node does not run). gerdoc at -j4, about 1 build in 7 on acclnode11:
+/// a paragraph's pieces moved; `\end{tabular}`, read by the
+/// `\begin{tabular}` piece's continuation, closed the quote it stood in,
+/// and the `\end{quote}` after read the document's `\@currenvir`
+/// ("\begin{document} ended by \end{quote}").
+#[test]
+fn a_taken_sibling_moved_with_its_placer_files_no_brackets() {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let open = e.register(Arc::new(OpenClaim));
+    let bracket = e.register(Arc::new(Bracket));
+    let gr = Arc::new(Group {
+        ops: std::sync::OnceLock::new(),
+    });
+    let group = e.register(gr.clone());
+    gr.ops.set((open, bracket)).ok();
+    let pl = Arc::new(Placer {
+        runs: AtomicU64::new(0),
+        mark: std::sync::Mutex::new(Some(group)),
+    });
+    let placer = e.register(pl);
+    let rd = Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    });
+    let reader = e.register(rd);
+    let u = e.new_unit();
+    let raw = |n: NodeId| v.int(i64::try_from(n.raw()).unwrap());
+    let a = e.push(u, def, vec![v.field("a").0, v.int(1)]);
+    let b = e.push(u, def, vec![v.field("b").0, v.int(2)]);
+    let p = e.push(u, placer, vec![raw(b), v.int(7)]);
+    let r = e.push(u, reader, vec![]);
+    let rep = e.evaluate(1).unwrap();
+    let g = e.placed_by(p);
+    assert_eq!(g.len(), 1, "{rep:?}");
+    let kids = e.placed_by(g[0]);
+    assert_eq!(kids.len(), 2, "{rep:?}");
+    assert_eq!(
+        e.output(r).and_then(|x| v.as_int(x)),
+        Some(7),
+        "the close is taken, the scope stays open: {rep:?}"
+    );
+    // the placer now places the group after A, back past B: it moves
+    // with its pieces, and the claim stays (its sibling stands after it)
+    e.replace(p, placer, vec![raw(a), v.int(7)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(e.placed_by(p), g, "the same node, relocated: {rep:?}");
+    assert_eq!(e.placed_by(g[0]), kids, "its pieces with it: {rep:?}");
+    assert!(e.before(kids[1], b), "the close stands before B now: {rep:?}");
+    assert_eq!(
+        e.output(r).and_then(|x| v.as_int(x)),
+        Some(7),
+        "the close moved, still taken, closes nothing: {rep:?}"
+    );
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

@@ -6172,7 +6172,7 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
 /// it there, `attached_end`, passing over `skip`), under that node's
 /// segment's lock; its record's definitions filed as predictions there
 /// (its record stays: its run diffs against it) and its brackets, its
-/// last run's. Its label and segment, the definitions filed, the
+/// last run's (none while a claim holds it). Its label and segment, the definitions filed, the
 /// brackets; None when the node it goes by is gone.
 #[allow(clippy::too_many_arguments)]
 fn land(
@@ -6249,6 +6249,15 @@ fn land(
             inner.holes += 1;
         }
         inner.by_op.entry(m.op()).or_default().push(m.id);
+        // (one a claim holds has none, as `file_effect` files for it: read
+        // under the lock a claim takes and gives back under. Its record's
+        // or its operation's, filed for a taken one, closed what the piece
+        // that read it left open, and stood: a taken node does not run,
+        // and `lift` had found none to take out. gerdoc at -j4, about 1
+        // build in 7 on acclnode11: a paragraph's pieces moved back, the
+        // taken `\end{tabular}` piece closed the quote it stood in, and
+        // `\end{quote}` read the document's `\@currenvir`)
+        let b = if m.taken() { Brackets::default() } else { b };
         if b.closes > 0 || b.opens > 0 {
             file_brackets(eng, &mut inner, m, p, b);
         }
