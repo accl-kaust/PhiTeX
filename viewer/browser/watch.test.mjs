@@ -48,7 +48,10 @@ test("Clean rebuild builds again from nothing; Rebuild reads the files again (it
   await t.click("#b-rec");
   await t.click("#r-clean");
   await waitBuild(w, 3);
-  assert.match(w.out, /3\s+asked: a cold build/);
+  // (a new session on the target resolved again, its first build a clean one: numbered from 1)
+  const again = w.out.split("a clean rebuild was asked: a new session\n");
+  assert.equal(again.length, 2, `the new session said: ${w.out}`);
+  assert.match(again[1], /^ok:\s+1\s+clean build/m);
   await w.stop();
 });
 
@@ -104,7 +107,10 @@ test("Next change goes to the page of that change; the style popover floats over
   await t.until(`+$("#pgn")?.textContent > 3`, "the pages");
   await t.click("#b-compare");
   await t.until(`$$("#phx-pick .row").length > 0`, "the commits");
+  // (the picker marks a range: the commit clicked is From, To the working tree; then Compare)
   await t.click("#phx-pick .row[data-i='0']");
+  await t.until(`!$("#phx-pick .ask .yes").disabled`, "the pair marked");
+  await t.click("#phx-pick .ask .yes");
   await t.until(`/3 changes/.test($("#diffbar").innerText)`, "the diff", 120000);
   const pages = [];
   for (let i = 0; i < 3; i++) {
@@ -302,7 +308,7 @@ test("a selection is one block a line; its text has its spaces, no space inside 
   await w.stop();
 });
 
-test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept in phitex.toml (item 1, kinds)", async () => {
+test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept for the document (item 1, kinds)", async () => {
   const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
   const body = "{\\hsize=2cm \\noindent Incomprehensibilities characteristically.\\par}\n\nThen \\nosuchcommandhere here.";
   const { w, t } = await open({ "main.tex": doc(body) }, { at: fresh });
@@ -317,13 +323,19 @@ test("the problems' kinds filter the list, the page's marks and the scrollbar's,
   assert.equal(await t.q(`$$(".slot .culprit.rule").length`), 0, "the bar gone from the page");
   assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /Overfull/, "gone from the list");
   assert.ok((await t.q(`$$("#smarks i").length`)) < marks0, "fewer scrollbar marks");
-  await sleep(500);
-  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"overfull"/);
+  // (the filters are this document's, kept in the browser: not the user's phitex.toml, 98d9b0888)
+  assert.match(await t.q(`JSON.stringify(Object.entries(localStorage).filter(([k]) => k.startsWith("phitex.kinds.hidden.")))`), /\\"overfull\\"/);
+  assert.ok(!existsSync(join(fresh, ".config", "phitex", "phitex.toml")) || !/problems-hidden/.test(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8")), "not in phitex.toml");
+  // (the same document reloaded: the choice held)
+  await t.go(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0`, "the pages after a reload");
+  await problems(t);
+  await t.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull still off");
   await w.stop();
-  // (another document: the choice held)
+  // (another document: its own filters, every kind shown)
   const { w: w2, t: t2 } = await open({ "main.tex": doc(body + "\n\nOther.") }, { at: fresh });
   await problems(t2);
-  await t2.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull still off");
+  await t2.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "true"`, "overfull shown in another document");
   await w2.stop();
 });
 
@@ -345,8 +357,7 @@ test("LaTeX's warnings are problems: an undefined \\ref and \\cite are warnings 
   await t.until(`$$(".slot .culprit.warning").length === 0`, "the warnings' underlines gone");
   assert.ok((await t.q(`$$(".slot .culprit.error").length`)) >= 1, "the error's underline stays");
   assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /undefined on page/, "gone from the list");
-  await sleep(500);
-  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"reference"/);
+  assert.match(await t.q(`JSON.stringify(Object.entries(localStorage).filter(([k]) => k.startsWith("phitex.kinds.hidden.")))`), /\\"reference\\"/, "kept for this document");
   // (the label defined: the warnings go, the underlines with them)
   await t.click("#diags [data-kind='reference']");
   w.write("main.tex", doc("See \\ref{lbl} here\\label{lbl} and \\cite{nosuchkey}.\n\nThen \\nosuchcommandhere here."));
