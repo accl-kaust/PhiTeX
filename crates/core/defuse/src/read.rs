@@ -442,11 +442,48 @@ pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -
     acc
 }
 
+thread_local! {
+    /// A `next` read checked as it was filed ([`as_filed`]): the node its
+    /// search ended at (None: the line's end), and whether that node is
+    /// the contribution it answers.
+    static AS_FILED: std::cell::Cell<Option<(Option<NodeId>, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// `f` with the `next` searches on this thread checked as a commit filed
+/// their reader (`commit`'s check of its own reads after its re-asks):
+/// a node before `to` (the search's end then: the contribution it
+/// answered, `item`, with it; None: the line's end) open now is taken as
+/// committed with what it contributed. It was not open when the reader
+/// was filed, so its commit, after the filing, asks the reader again if
+/// what it contributes moves the answer. Taken as a stop, it refuted the
+/// run on a change still to come: a node this commit had asked to run
+/// again, which read this one as its stop, became this one's stop in
+/// turn, each refuting the other's run for ever, one worker busy, the
+/// rest idle (review's next_readers_follow_their_stops_across_splits,
+/// hung at 16 threads on n11).
+pub(crate) fn as_filed<T>(to: Option<NodeId>, item: bool, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<(Option<NodeId>, bool)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            AS_FILED.set(self.0);
+        }
+    }
+    let _reset = Reset(AS_FILED.replace(Some((to, item))));
+    f()
+}
+
 /// The first contribution to `f` after `after` (None: the start), or the
 /// first node after it that has not committed yet and whose operation may
 /// contribute `f` (`Operation::contributes`): a contribution that may still
 /// come is not the first.
 pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>, me: NodeId) -> Next {
+    // (checked as filed, `as_filed`: the nodes up to the filed end, where
+    // it stands)
+    let settled = match AS_FILED.get() {
+        None => None,
+        Some((None, incl)) => Some((None, incl)),
+        Some((Some(n), incl)) => pos_of(eng, n).map(|p| (Some(p), incl)),
+    };
     let mut cur: Option<SegId> = match after {
         Some(p) => eng.seg_for_pos(p).map(|s| s.id).or_else(|| eng.order.first()),
         None => eng.order.first(),
@@ -469,7 +506,10 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>, me: 
                 }
                 // (a node to run, again or for the first time: its
                 // contribution is not known, the one it made last may go)
-                let open = eng.node(*id).is_open();
+                // (one before the search's filed end, open since, is
+                // taken as committed, `as_filed`)
+                let open = eng.node(*id).is_open()
+                    && !settled.is_some_and(|(end, incl)| end.is_none_or(|e| if incl { *p <= e } else { *p < e }));
                 if !open && let Some(&x) = inner.contribs.get(&f).and_then(|m| m.get(p)) {
                     hit = Some((
                         Next {

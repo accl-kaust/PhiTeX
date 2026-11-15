@@ -1361,6 +1361,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut ix = IndexOps::with_capacity(nd, nc, reads.len());
     let mut room: Option<Made> = None;
     let mut next_answers: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
+    // (where each `next` filed here ended: the node, and whether it is
+    // the contribution answered; its check after the re-asks is made as
+    // filed, `read::as_filed`)
+    let mut next_ends: FxHashMap<(Field, Option<NodeId>), (Option<NodeId>, bool)> = FxHashMap::default();
     let parks = rec.state.is_some();
     // (the readers filed, each once: a run asks one thing many times, a
     // `TikZ` picture whether microtype's font list holds a font at each
@@ -1457,6 +1461,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         next_contribution(eng, *f, from, node.id)
                     });
                     next_answers.insert(range_reads.len(), read::next_value(eng, &n));
+                    next_ends.insert((*f, *after), (n.stop, n.item.is_some()));
                     range_reads.push((
                         *f,
                         RangeReader {
@@ -2604,6 +2609,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let ReadKind::Following { i } = *r.kind() {
                 let n = read::following_on(eng, node, i, &mut follow_at);
                 return read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), r.path()) != r.seen();
+            }
+            // (a `next` filed here: checked as filed, `read::as_filed`)
+            if let ReadKind::Next { f, after } = *r.kind()
+                && let Some(&(to, item)) = next_ends.get(&(f, after))
+            {
+                return !read::as_filed(to, item, || read::holds(eng, node, r, &mut memo));
             }
             !read::holds(eng, node, r, &mut memo)
         })
