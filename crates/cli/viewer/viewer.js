@@ -8167,6 +8167,11 @@ var Panel = class {
    * settles and dives into the page beneath, and the sheet is gone.
    */
   sheetDown() {
+    if (!this.anim && !this.opened && !this.reopen) {
+      this.opened = true;
+      setTimeout(() => this.tips("unseen"), 600);
+      return;
+    }
     if (!this.anim || this.ending) return;
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;

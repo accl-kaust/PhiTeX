@@ -3243,7 +3243,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                     }
                                     Err(e) => {
                                         ui.error(&e);
-                                        why.push("asked: a cold build".to_owned());
+                                        why.push("asked: a clean build".to_owned());
                                         again = true;
                                     }
                                 }

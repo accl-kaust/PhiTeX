@@ -1825,6 +1825,15 @@ export class Panel {
    * settles and dives into the page beneath, and the sheet is gone.
    */
   private sheetDown(): void {
+    // (the first pages in with no sheet up, a document ready when the tab
+    // opened (no opening plays then): opened all the same, and the tips not
+    // seen yet offered as after an opening. A first visit to a document
+    // built at once offered none)
+    if (!this.anim && !this.opened && !this.reopen) {
+      this.opened = true;
+      setTimeout(() => this.tips("unseen"), 600);
+      return;
+    }
     if (!this.anim || this.ending) return;
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;
