@@ -149,8 +149,26 @@ def enabler(D, r):
     # the last wake before it began (after its last run began)
     lo = pr['t0'] if pr is not None else -1
     ws = D['wk'].get(n, [])
+    # (logs with the queueing lines: the last time the node was made
+    # runnable (enq) or told in its run that a read moved (rdirty, note))
+    qs = [w for w in ws if w[7] in ('enq', 'rdirty', 'note')]
+    if qs:
+        ws = qs
     j = bisect.bisect_right(ws, (r['t0'], 1 << 62)) - 1
-    if j >= 0 and ws[j][0] >= lo:
+    if qs and j >= 0 and ws[j][0] >= lo:
+        w = ws[j]
+        c = w[9]
+        h = w[10] if len(w) > 10 else -1
+        by = c if c >= 0 and c != n else (h if h >= 0 and h != n else -1)
+        if by >= 0:
+            x, _ = producing_run(D, by, w[0])
+            if x is not None:
+                tx = x['done'] or x['t1']
+                inflight = w[7] != 'enq' or c == n
+                cands.append((min(w[0], tx) if inflight else w[0], x, 'stale' if inflight else 'wake'))
+        else:
+            cands.append((w[0], None, 'quiet'))
+    elif j >= 0 and ws[j][0] >= lo:
         w = ws[j]
         c = w[9] if len(w) > 9 else -1
         h = w[10] if len(w) > 10 else -1

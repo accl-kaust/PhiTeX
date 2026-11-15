@@ -1904,6 +1904,9 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
             eng.movers_n.fetch_add(1, Ordering::Release);
         }
     }
+    // (`PHITEX_INTERMED_LOG`: the moment it is runnable, whatever path
+    // queued it)
+    im_wake(eng, n, &wake, "enq");
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) if defer(eng, &w.shared, n.id) => {}
@@ -2013,6 +2016,7 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
             if n.committing.load(Ordering::SeqCst) {
                 return mark_dirty_now(eng, w, n, wake);
             }
+            im_wake(eng, n, &wake, "note");
             note_stale(n, wake);
         }
         _ => {}
@@ -2230,6 +2234,7 @@ pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
             }
             State::Running => {
                 if n.cas_state(State::Running, State::RunningDirty) {
+                    im_wake(eng, n, &wake, "rdirty");
                     log_wake(eng, w, n, &wake);
                     *n.woke.lock() = Some(wake);
                     return true;
