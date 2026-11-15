@@ -129,13 +129,15 @@ fn a_moved_name_holding_another_value_runs_the_reader_again() {
         d.set(d.n, "n", 6);
         assert_eq!(d.eval(threads), 20, "threads {threads}");
         assert_eq!(d.runs(), 1, "threads {threads}");
-        // (and back: p@5 read again, through the read that run made)
+        // (and back: the run before the last stands, every read of it
+        // answering as it did, `Ctx::prior_run_stands`; no run)
         d.set(d.n, "n", 5);
         assert_eq!(d.eval(threads), 10, "threads {threads}");
-        assert_eq!(d.runs(), 2, "threads {threads}");
+        assert_eq!(d.runs(), 1, "threads {threads}");
+        // (p@5 read again, through the read that record made)
         d.set(d.d5, "p@5", 11);
         assert_eq!(d.eval(threads), 11, "threads {threads}");
-        assert_eq!(d.runs(), 3, "threads {threads}");
+        assert_eq!(d.runs(), 2, "threads {threads}");
     }
 }
 
