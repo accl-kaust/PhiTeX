@@ -452,3 +452,70 @@ anything is built:
   on it is reported by class.
 - The replay's delay does not credit the freed CPU; the measured holds
   are the better guide to what waiting does to the wall time.
+
+## 8. The -j8 critical path, attributed (2026-11-16, agent jcpu-loc)
+
+The walk of §1 followed a re-ask that a commit's check of its own reads
+made (no `by`, Structure, Range, Changed with no site) into the node's
+own refuted run, and never saw the paths that queue a node without a
+walk's wake. The log now carries, all under `profile` and
+`PHITEX_INTERMED_LOG` only:
+
+- `imw` lines for every moment a node becomes runnable (`enq`: waiters
+  and pullers re-asked, freed siblings, created nodes, releases) and
+  every running node told a read moved (`rdirty`, `note`), with the
+  definer of a re-ask that has no node of its own (the field's or the
+  line's structure's last mover, `obs::im_changed`), the node publishing
+  as it goes (`im_committing` over the run) and the place outside a run
+  or commit (quiet point, an idle worker's release, an edit taken);
+- `imp` lines for parks (frontier, wait, yield, with the node waited for)
+  and a `quiet:` line at every quiet point;
+- on `imr`, how the node was taken (own heap, block, dealt, keep,
+  injector, steal of the first or the second, block steal) and from
+  whose queue.
+
+`classify.critical_path` then splits the path into run time (kept and
+thrown away), queue, commit (a link queued during its definer's commit
+waits for the rest of it), quiet points, and stale (a definer's change
+reached a run in flight: the rest of that run and its own commit).
+mc (mcnode42, 8 cores of one L3, profile build, logs on), clean builds:
+
+| doc      | end ms | run (kept) | queue | commit | quiet | stale | path links | hop on path |
+|----------|-------:|-----------:|------:|-------:|------:|------:|-----------:|------------:|
+| amsldoc  | 2944   | 1907 (1059)|  389  |  476   |   94  |   77  |   746      | 19 %        |
+| acm      | 3084   | 2155 (1213)|  141  |  291   |  183  |  314  |   341      | 12 %        |
+| Grail    | 13505  | 11126 (4971)| 824  | 1033   |  236  |  282  |   702      |  7 %        |
+| para4000 | 856    |  537 (537) |   35  |  156   |  128  |    0  |  1399      | 10 %        |
+
+(A second build of each: amsldoc 2976 = 1826 run, 345 queue, 452
+commit; Grail 13416 with one picture run in flight 6.8 s after its read
+moved, `stale` 6776.)
+
+Hops. Over every kept link 34-46 % run on another worker than the
+commit that let them go (para4000 10 %), but on the critical path only
+7-20 %; most of the others are the right thing (para4000's finishers
+taken off the page chain). On amsldoc's path the hopping links are
+re-asks in flight that rerun on their node's own worker (48), frontier
+releases by an idle worker (24), steals of the second node (30) and of
+the first (2). Their kept runs cost 1.39x their -j1 time (226 ns per
+1000 instructions, 2.49 GHz, IPC 1.78) against 1.15x for links that stay
+(187 ns, 2.86 GHz, IPC 1.87; -j1 154-163 ns, 3.10 GHz): moving every
+hop of amsldoc's path home would save about 35 ms of 2944, acm's about
+20 ms, Grail's nothing. The remaining per-instruction excess of links
+that stay is the clock (2.5-2.9 GHz on the path against 3.10 at -j1).
+
+Measured: a thief taking the node after the first only once that node
+had been queued `offer_ns` (the queue's own `since` counts from when it
+last went non-empty, so a node pushed onto a queue that never emptied was
+a thief's at once) moved neither the hop rate nor the time (n11, local
+disk, 4-5 interleaved: amsldoc -j8 2.07 -> 2.12 s, acm 2.22 -> 2.25,
+Grail 9.20 -> 9.31, para4000 0.67 -> 0.65); reverted.
+
+Where the path's time is instead: runs thrown away on it (amsldoc 848
+ms, acm 942, Grail 6155), commits (amsldoc 476 ms, 16 %), and queue,
+which on amsldoc is mostly links waiting on a worker free of runs while
+the others idle (125 ms over 316 links: the wake's latency) and on
+Grail links waiting through a busy worker's heap while others idle (380
+ms over 31 links). Tools: bench/intermed (parse, classify), and in the
+agent's scratchpad cpq.py (path split), hop2.py (hop classes), qd.py
+(queue gaps), cpcost.py (path runs against -j1).
