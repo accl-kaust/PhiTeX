@@ -38,7 +38,10 @@ export class Watch {
     this.out = "";
     this.home = home;
     const bin = process.env.PHITEX_BIN ?? "phitex";
-    this.proc = spawn(bin, ["watch", ...args, ...(file ? [file] : [])], {
+    // (a machine with no TeX Live, a CI runner's: TeX's files from Shelf,
+    // PHITEX_BROWSER_SHELF=1; the homes are the tests' own, no config there)
+    const shelf = process.env.PHITEX_BROWSER_SHELF === "1" ? ["--shelf"] : [];
+    this.proc = spawn(bin, ["watch", ...shelf, ...args, ...(file ? [file] : [])], {
       cwd: dir,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...(home ? { HOME: home, XDG_CONFIG_HOME: join(home, ".config") } : {}), BROWSER: "true", ...env },

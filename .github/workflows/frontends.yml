@@ -104,6 +104,8 @@ jobs:
         env:
           PHITEX_BIN: ${{ github.workspace }}/bin/phitex
           CHROMIUM: google-chrome
+          # (the runner has no TeX Live: TeX's files from Shelf)
+          PHITEX_BROWSER_SHELF: "1"
         run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs
   browsers:
     runs-on: ubuntu-24.04
