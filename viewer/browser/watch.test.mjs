@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Browser, Watch, project, sleep, git } from "./lib.mjs";
+import { Browser, SHELF, Watch, project, sleep, git } from "./lib.mjs";
 
 // (the PDFs dated alike: an edited one compared with a full build)
 process.env.SOURCE_DATE_EPOCH = "0";
@@ -211,7 +211,7 @@ async function coldPdf(dir, main = "main.tex") {
   const { spawnSync } = await import("node:child_process");
   const copy = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-cold-"));
   cpSync(dir, copy, { recursive: true, filter: (p) => !/\.(pdf|log|aux|synctex\.gz)$/.test(p) || /fig/.test(p) });
-  const r = spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", "--no-synctex", main], { cwd: copy, env: { ...process.env, HOME: home } });
+  const r = spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", ...SHELF, "--no-synctex", main], { cwd: copy, env: { ...process.env, HOME: home } });
   if (r.status !== 0) throw new Error(`cold build: ${r.stderr}`);
   return readFileSync(join(copy, main.replace(/\.tex$/, ".pdf")));
 }
@@ -219,14 +219,19 @@ async function coldPdf(dir, main = "main.tex") {
 test("a figure or a file of any extension replaced on disk rebuilds, as a full build makes it (images, unlisted extensions)", async () => {
   const { spawnSync } = await import("node:child_process");
   const { writeFileSync, copyFileSync } = await import("node:fs");
-  const magick = (args, out) => spawnSync("magick", [...args, out]);
+  // (ImageMagick 7's magick, else 6's convert: an Ubuntu runner has only convert)
+  const im = spawnSync("magick", ["-version"]).status === 0 ? "magick" : "convert";
+  const magick = (args, out) => {
+    const r = spawnSync(im, [...args, out]);
+    if (r.status !== 0) throw new Error(`${im} failed: ${r.error ?? r.stderr}`);
+  };
   const tex = doc("Figures.\n\n\\includegraphics{figpng}\n\\includegraphics{figjpg}\n\\includegraphics[width=3cm]{figpdf}\n\n\\input{notes.md}", "\\usepackage{graphicx}\n");
   const dir = project({ "main.tex": tex, "notes.md": "Notes one.\n" });
   // (the PDF figure made elsewhere, copied in: its own build's files stay out of the project)
   const side = project({ "inc.tex": doc("Inner text A.") });
   const figure = (text) => {
     writeFileSync(join(side, "inc.tex"), doc(text));
-    spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", "--no-synctex", "inc.tex"], { cwd: side, env: { ...process.env, HOME: home } });
+    spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", ...SHELF, "--no-synctex", "inc.tex"], { cwd: side, env: { ...process.env, HOME: home } });
     copyFileSync(join(side, "inc.pdf"), join(dir, "figpdf.pdf"));
   };
   magick(["-size", "40x30", "xc:red"], join(dir, "figpng.png"));

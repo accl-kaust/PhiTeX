@@ -31,6 +31,13 @@ export function git(dir, ...args) {
   return r.stdout;
 }
 
+/**
+ * A machine with no TeX Live, a CI runner's: TeX's files from Shelf for every
+ * phitex the tests start (PHITEX_BROWSER_SHELF=1); the homes are the tests'
+ * own, with no config in them.
+ */
+export const SHELF = process.env.PHITEX_BROWSER_SHELF === "1" ? ["--shelf"] : [];
+
 /** A `phitex watch` in `dir`; `home` (config and cache) kept apart from the user's. */
 export class Watch {
   constructor(dir, { file = "main.tex", args = [], home, pipe = true, env = {} } = {}) {
@@ -38,10 +45,7 @@ export class Watch {
     this.out = "";
     this.home = home;
     const bin = process.env.PHITEX_BIN ?? "phitex";
-    // (a machine with no TeX Live, a CI runner's: TeX's files from Shelf,
-    // PHITEX_BROWSER_SHELF=1; the homes are the tests' own, no config there)
-    const shelf = process.env.PHITEX_BROWSER_SHELF === "1" ? ["--shelf"] : [];
-    this.proc = spawn(bin, ["watch", ...shelf, ...args, ...(file ? [file] : [])], {
+    this.proc = spawn(bin, ["watch", ...SHELF, ...args, ...(file ? [file] : [])], {
       cwd: dir,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...(home ? { HOME: home, XDG_CONFIG_HOME: join(home, ".config") } : {}), BROWSER: "true", ...env },
