@@ -146,6 +146,7 @@ impl<'a> Ctx<'a> {
                 on_park: false,
                 settle_now: false,
                 waits: Vec::new(),
+                looked: crate::FxHashMap::default(),
                 frontier: None,
                 parked_on: None,
                 stood: None,
@@ -1135,6 +1136,17 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// [`Ctx::env`] through a path: the run depends only on the path's
+    /// answer (an element of a list the client gives; a change of another
+    /// element asks it nothing).
+    pub fn env_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        self.before_read(f);
+        let x = read::apply_path(self.eng, read::env_value(self.eng, f), p);
+        self.record(ReadKind::Env { f }, p, x);
+        Ok(x)
+    }
+
     pub fn define(&mut self, f: Field, x: ValueId) {
         self.define_with(f, x, Locality::Local);
     }
@@ -1539,6 +1551,26 @@ impl<'a> Ctx<'a> {
         x
     }
 
+    /// Stops my run, nothing filed, my last run's products standing, and
+    /// runs me again at once: a run that finds it went a way its next run
+    /// must not (the client noted why, and the run again takes the other).
+    pub fn run_again(&mut self) -> Stop {
+        self.wait_on = None;
+        stop()
+    }
+
+    /// My run goes on on `guess` for the output of the node my `i`-th
+    /// placement of this run stands for, whatever output it has now (one
+    /// of inputs this run moves: a picture child whose placer hands it
+    /// other bindings): recorded as that read of the guess, so my commit,
+    /// finding an output that is not the guess, asks me again at once,
+    /// and that node's next commit with another asks me again too. With
+    /// [`Ctx::placed_output_wait`], a run that goes on without that output
+    /// and is never left standing on the guess.
+    pub fn placed_output_guessed(&mut self, i: usize, guess: ValueId) {
+        self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(guess));
+    }
+
     /// [`Ctx::placed_output_or`] through path `p`: the answer of `p` on
     /// the output of the node my `i`-th placement of this run stands for,
     /// if it has run, else on the output `guess` gives (asked only then,
@@ -1617,18 +1649,113 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// The output of the node my `i`-th placement of this run stands for
-    /// (my last run's of the same operation and arguments), if it has run.
-    fn placed_child_output(&mut self, i: usize) -> Option<ValueId> {
+    /// How long my longest run that committed took, ns (0: none yet).
+    #[must_use]
+    pub fn longest_run_ns(&self) -> u64 {
+        self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How long the longest committed run of the node my `i`-th placement
+    /// stands for took, ns (0: none, or no such node).
+    pub fn placed_longest_run_ns(&mut self, i: usize) -> u64 {
+        self.placed_node_id(i).map_or(0, |c| {
+            self.eng.node(c).full_ns.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    /// Whether the node my `i`-th placement stands for is to run again
+    /// (asked again, not run since): its output is of what it read
+    /// before. Not recorded, a peek.
+    pub fn placed_pending(&mut self, i: usize) -> bool {
+        self.placed_node_id(i).is_some_and(|c| {
+            matches!(
+                self.eng.node(c).state(),
+                crate::node::State::Dirty | crate::node::State::Running | crate::node::State::RunningDirty
+            )
+        })
+    }
+
+    /// Whether every read the last run of the node my `i`-th placement
+    /// stands for made of field `f` gives what it gave with `f` defined
+    /// as `x`: the walk my commit of that definition makes would re-ask
+    /// it for none of them (a child's reads of the bindings its placer
+    /// hands it, which the placer defines anew where only keys the child
+    /// never read moved). False where that node has not run, or where a
+    /// read of `f` is not a path on its value alone (a derived or guarded
+    /// read, answered with another field). Not recorded, a peek.
+    pub fn placed_reads_hold(&mut self, i: usize, f: Field, x: ValueId) -> bool {
+        let Some(c) = self.placed_node_id(i) else {
+            return false;
+        };
+        let n = self.eng.node(c);
+        let Some(r) = n.run_record() else {
+            return false;
+        };
+        let eng = self.eng;
+        let plain = |p: PathId| {
+            p == PathId::WHOLE
+                || eng
+                    .path_steps(p)
+                    .is_some_and(|s| !s.iter().any(|x| matches!(x, Step::Derived(_) | Step::Member(_))))
+        };
+        r.reads.of_field(f).all(|rd| {
+            matches!(rd.kind(), ReadKind::Field { .. })
+                && plain(rd.path())
+                && read::apply_path(eng, Some(x), rd.path()) == rd.seen()
+        })
+    }
+
+    /// The node my `i`-th placement of this run stands for (my last run's
+    /// of the same operation and arguments), if one does.
+    fn placed_node_id(&mut self, i: usize) -> Option<NodeId> {
+        self.placed_keys_built();
+        let (op, args) = self.product.placements.get(i)?.key();
+        let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
+        (self.eng.node(c).state() != State::Gone).then_some(c)
+    }
+
+    /// Whether my last run placed a node of `op` on `args` that stands
+    /// and has run: a placement of it now would have an output to read
+    /// ([`Ctx::placed_output_peek`]). Not recorded, a peek, and no
+    /// placement.
+    pub fn placed_before_ran(&mut self, op: OpId, args: &[ValueId]) -> bool {
+        self.placed_keys_built();
+        self.placed_keys
+            .as_ref()
+            .and_then(|m| m.get(&(op, Arc::from(args))))
+            .is_some_and(|&c| {
+                let n = self.eng.node(c);
+                n.state() != State::Gone && n.run_record().is_some()
+            })
+    }
+
+    /// The run's first look at its last run's placements, before any of
+    /// their states or outputs is read (every peek at one goes through
+    /// here): each one's [`crate::node::Node::commit_seq`] then, the
+    /// placed look a commit of a placement waited for is told apart by
+    /// (`commit::commit`'s check of a waited guess).
+    fn placed_keys_built(&mut self) {
         if self.placed_keys.is_none() {
             let mut m: FxHashMap<(OpId, Arc<[ValueId]>), NodeId> = FxHashMap::default();
             for &c in self.last.as_ref().map_or(&[][..], |r| &r.placed[..]) {
                 if let Some(n) = self.eng.placed_node(c).filter(|n| n.state() != State::Gone) {
+                    // (before the state just read is used: a commit after
+                    // this load moves it, one before has left its record)
+                    self.product
+                        .looked
+                        .entry(c)
+                        .or_insert_with(|| n.commit_seq.load(std::sync::atomic::Ordering::SeqCst));
                     m.entry((n.op(), n.args())).or_insert(c);
                 }
             }
             self.placed_keys = Some(m);
         }
+    }
+
+    /// The output of the node my `i`-th placement of this run stands for
+    /// (my last run's of the same operation and arguments), if it has run.
+    fn placed_child_output(&mut self, i: usize) -> Option<ValueId> {
+        self.placed_keys_built();
         self.product.placements.get(i).and_then(|p| {
             let (op, args) = p.key();
             let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
@@ -2422,16 +2549,28 @@ impl<'a> Ctx<'a> {
                 e.insert(self.placed_child_output(i));
             }
         }
-        let moved = self.product.reads.iter().any(|rd| {
+        let moved = self.product.reads.iter().position(|rd| {
             if matches!(rd.kind(), ReadKind::Following { .. }) {
                 return false;
             }
             if let ReadKind::Placed { i, guess } = rd.kind() {
+                // (a guess, a child's output not taken (a picture gone on
+                // as if empty, its view moved): checked at the commit
+                // (`read::holds`), which files the view the child runs on
+                // next. Checked here against the output the child made on
+                // an older view, it moved on every check: the run stopped
+                // before its commit each time, the child never saw the new
+                // view, and the run went again for good (lie-hasse's diagram
+                // page, a resume stopped 28,096 times, 642 s of a -j1 build
+                // that took 539 s before)
+                if *guess {
+                    return false;
+                }
                 return match outs.get(i).copied().flatten() {
                     Some(o) => read::apply_path(self.eng, Some(o), rd.path()) != rd.seen(),
-                    // (no child of that key has run: a guess holds until
-                    // the child commits; a real read of none saw none)
-                    None => !guess && rd.seen().is_some(),
+                    // (no child of that key has run: a real read of none
+                    // saw none)
+                    None => rd.seen().is_some(),
                 };
             }
             if !scope_moved
@@ -2442,8 +2581,20 @@ impl<'a> Ctx<'a> {
             }
             !crate::read::holds(self.eng, self.me, rd, &mut memo)
         });
-        if !moved {
+        let Some(at) = moved else {
             return Ok(());
+        };
+        // (`PHITEX_RUN_LOG`, profile: which read stopped the run)
+        if crate::sched::run_log() {
+            let rd = &self.product.reads[at];
+            eprintln!(
+                "recheck: node {} read {at} of {} moved: {}",
+                self.me.id.raw(),
+                self.product.reads.len(),
+                rd.kind()
+                    .field()
+                    .map_or_else(|| format!("{:?}", rd.kind()), |f| self.values().render(f.0))
+            );
         }
         match wake {
             Some(wake) => {

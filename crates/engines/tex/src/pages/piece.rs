@@ -1773,12 +1773,28 @@ impl Run<'_, '_> {
                 _ => frames.extend(file_frames(v, self.input.file(*l))),
             }
         }
+        // (a format's text read from chunks: named by the chunk and line
+        // it goes on at, never by its text, `crate::chunks`)
+        let chunk_rest = if with_frames {
+            crate::chunks::chunk_at(self.input.text_rest())
+        } else {
+            None
+        };
+        let mut chunked = false;
         for s in if with_frames {
             self.input.text_rest()
         } else {
             &[]
         } {
+            if crate::chunks::from_chunk(s) {
+                if !chunked && let Some((id, k)) = chunk_rest {
+                    frames.push(crate::chunks::frame(v, id, k));
+                }
+                chunked = true;
+                continue;
+            }
             match s {
+                Seg::Chunk(..) => {}
                 Seg::Line(l) => {
                     if let Some(f) = line_frame(v, l) {
                         frames.push(f);

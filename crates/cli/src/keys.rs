@@ -205,6 +205,99 @@ pub fn suspend() {
     }
 }
 
+/// What a signal that ends the watch does ([`take_signals`]): the
+/// watch's way out, as `q` takes it. None yet: the signal's own end.
+type OnQuit = Box<dyn Fn() + Send + Sync>;
+
+static ON_QUIT: std::sync::Mutex<Option<OnQuit>> = std::sync::Mutex::new(None);
+
+/// The signal that ends the watch, once one came (0: none).
+static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// The signal that is ending the watch, if one is ([`take_signals`]).
+pub fn signalled() -> Option<i32> {
+    match SIGNALLED.load(Ordering::SeqCst) {
+        0 => None,
+        s => Some(s),
+    }
+}
+
+/// The watch's way out for a signal that ends it ([`take_signals`]).
+pub fn on_quit_signal(f: OnQuit) {
+    *ON_QUIT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(f);
+}
+
+/// SIGINT, SIGTERM and SIGHUP from now on taken by a thread of their
+/// own, not by a handler (blocked in this thread, before any other is
+/// started, and so in every thread it starts): the first ends the watch
+/// as `q` does, through its way out ([`on_quit_signal`]: its files
+/// written whole, the PDF file exact, the SyncTeX file of it), with the
+/// signal's exit status (128 + the signal, as a shell reports it); a
+/// second while that runs, or one before the watch has a way out, ends
+/// the process at once (the terminal put back, then the signal's own
+/// end). A program the watch starts gets them unblocked (`std::process`
+/// resets the mask).
+#[allow(
+    unsafe_code,
+    reason = "the signals blocked and waited for: libc, no safe wrapper"
+)]
+#[cfg(unix)]
+pub fn take_signals() {
+    // SAFETY: a sigset_t is plain data, filled by sigemptyset.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `set` is a valid sigset_t; the signals are valid.
+    unsafe {
+        libc::sigemptyset(&raw mut set);
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::sigaddset(&raw mut set, sig);
+        }
+        libc::pthread_sigmask(libc::SIG_BLOCK, &raw const set, std::ptr::null_mut());
+    }
+    let _ = std::thread::Builder::new()
+        .name("phitex-signals".into())
+        .spawn(move || {
+            loop {
+                let mut sig: libc::c_int = 0;
+                // SAFETY: `set` is a valid sigset_t, `sig` an int.
+                if unsafe { libc::sigwait(&raw const set, &raw mut sig) } != 0 {
+                    continue;
+                }
+                let first = SIGNALLED
+                    .compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok();
+                let quit = ON_QUIT
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if first && let Some(q) = quit.as_ref() {
+                    q();
+                    continue;
+                }
+                drop(quit);
+                // (at once: the terminal put back, then the signal's own
+                // end, raised at this thread, the one that has it
+                // unblocked)
+                restore();
+                // SAFETY: the signal's default action restored, unblocked
+                // in this thread and raised at it.
+                unsafe {
+                    libc::signal(sig, libc::SIG_DFL);
+                    let mut one: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&raw mut one);
+                    libc::sigaddset(&raw mut one, sig);
+                    libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const one, std::ptr::null_mut());
+                    libc::raise(sig);
+                }
+                std::process::exit(128 + sig);
+            }
+        });
+}
+
+/// Elsewhere: the signals' own ends.
+#[cfg(not(unix))]
+pub fn take_signals() {}
+
 /// Whether the terminal came back from a suspension since last asked.
 pub fn resumed() -> bool {
     RESUMED.swap(false, Ordering::SeqCst)

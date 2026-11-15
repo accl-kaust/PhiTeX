@@ -514,6 +514,70 @@ fn xelatex_glyph_origins() {
     assert!(failed.is_empty(), "failed: {failed:?}");
 }
 
+/// Right-to-left Arabic in a left-to-right paragraph, Arabic repeated
+/// (a word in its segment, a paragraph whole), and an undefined control
+/// sequence after Arabic on its line, the file's text held as the CLI and
+/// the browser's core hold it (a character a byte): the error is at the
+/// name's bytes on its line, and each word's glyphs at their own
+/// occurrence. The error was at the document's first line (its column
+/// counted XeTeX's characters as bytes, a place inside a character), and
+/// the segment's words matched the wrong way round, the repeated
+/// paragraphs both the first.
+#[test]
+fn right_to_left_places_and_origins() {
+    let dir = common::fixtures().join("xetex/ini");
+    let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\TeXXeTstate=1\n\\hsize=300pt \\vsize=600pt \\parindent=0pt \\baselineskip=18pt \\tolerance=10000\n\\parfillskip=0pt plus 1fil\n\\font\\ar=\"[Amiri-Regular.ttf]:script=arab\" at 12pt\n\\font\\la=\"[lmroman10-regular]\" at 10pt\n\\la word \\beginR\\ar كلمة أخرى كلمة\\endR\\ word.\\par\n\\beginR\\ar يكتب الحاسوب الصفحة\\endR\\par\n\\beginR\\ar يكتب الحاسوب الصفحة\\endR\\par\n\\beginR\\ar يكتب \\undefinedcs الحاسوب\\endR\\par\n\\end\n";
+    let opts = Options {
+        epoch: Some(0),
+        threads: Some(1),
+        xetex: Some(xetex()),
+        origins: true,
+        ..common::options("./rtl.tex", "rtl", "", &dir)
+    };
+    let b = common::build(opts, None, &common::held(text));
+    let src = text.as_bytes();
+    let ds = b.diagnostics();
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .unwrap_or_else(|| panic!("the error: {ds:#?}"));
+    let at = text.find("\\undefinedcs").expect("the name");
+    assert_eq!(
+        (d.line, d.range),
+        (9, (at, at + "\\undefinedcs".len())),
+        "{d:#?}"
+    );
+    assert!(
+        d.context.starts_with("l.9 \\beginR\\ar يكتب \\undefinedcs"),
+        "{}",
+        d.context
+    );
+    let w = |t: &str, k: usize| {
+        (
+            text.match_indices(t).nth(k).expect("the word").0,
+            t.to_owned(),
+        )
+    };
+    assert_eq!(
+        common::page_words(&b, 0, src, "rtl.tex"),
+        [
+            w("word", 0),
+            w("كلمة", 1),
+            w("أخرى", 0),
+            w("كلمة", 0),
+            w("word.", 0),
+            w("الصفحة", 0),
+            w("الحاسوب", 0),
+            w("يكتب", 0),
+            w("الصفحة", 1),
+            w("الحاسوب", 1),
+            w("يكتب", 1),
+            w("الحاسوب", 2),
+            w("يكتب", 2),
+        ]
+    );
+}
+
 /// The native runner of `\write18`'s commands, as the CLI has it.
 /// (the tests use part of it: what only the CLI calls is not dead code)
 #[allow(dead_code)]

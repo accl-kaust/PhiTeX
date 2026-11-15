@@ -51,6 +51,12 @@ pub trait Host: Send + Sync {
     /// as a diagnostic names it); none: not readable.
     fn read(&self, path: &Path) -> Option<Vec<u8>>;
 
+    /// The session gave the engine `bytes` as the file at `path` (an
+    /// editor's buffer or the disk's, through the finder): what a build
+    /// read, for a watch's exact `wait` (docs/spec-editor-protocol.md
+    /// §9.2). Nothing by default.
+    fn fed(&self, _path: &Path, _bytes: &[u8]) {}
+
     /// A key of the file at `path` that changes when its bytes do, read
     /// without reading them (the CLI's: its size, modification time and
     /// inode, [`phitex_tex::file_stat_key`]); none: the host has none, and
@@ -307,7 +313,28 @@ impl Records {
 
 /// Where the session's outputs go (the CLI's output directory), by name
 /// in it. Each answers where the file is (a path, as the host names it).
+/// A SyncTeX file's bytes, made when asked ([`Sink::synctex_due`]).
+pub type SynctexMaker = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
+
+/// What a host holds while a write of a build's outputs goes on
+/// ([`Sink::hold`]): anything, dropped at the write's end.
+pub trait Held {}
+
+impl<T> Held for T {}
+
 pub trait Sink: Send + Sync {
+    /// A write of a build's outputs begins: what the host holds until it
+    /// ends (a way out that does not wait for the build waits for a write
+    /// begun, and none begins after it).
+    fn hold(&self) -> Box<dyn Held + '_> {
+        Box::new(())
+    }
+
+    /// The SyncTeX file `name` of the outputs written last, left for
+    /// later (a watch's, written when idle), made by `make` when asked;
+    /// none: the file written is theirs.
+    fn synctex_due(&self, _name: &str, _make: Option<SynctexMaker>) {}
+
     /// The output directory made, before a write.
     ///
     /// # Errors

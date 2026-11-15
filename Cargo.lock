@@ -2064,7 +2064,7 @@ version = "0.0.0"
 
 [[package]]
 name = "phitex-cli"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "annotate-snippets",
  "bytesize",

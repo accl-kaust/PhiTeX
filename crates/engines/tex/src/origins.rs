@@ -33,7 +33,8 @@ use crate::exec::LockWait as _;
 pub(crate) const GLYPH: u8 = 0;
 /// A code no character node made.
 pub(crate) const NONE: u8 = 1;
-/// A form or an included page drawn: its codes counted from the PDF.
+/// A form or an included page drawn ([`Code::lig`]: its object), its
+/// codes as the writer told them ([`PageGlyphs::xcodes`]).
 pub(crate) const XOBJECT: u8 = 2;
 
 /// One entry of a page's own content stream ([`PageGlyphs`]).
@@ -52,6 +53,12 @@ pub(crate) struct Code {
     pub v: Scaled,
     pub w: Scaled,
     pub size: Scaled,
+    /// Its reversal level ([`phitex_pdf::GlyphTap::level`]: odd in
+    /// right-to-left text, which the page shows in the reverse of its
+    /// reading order) and the context it is in (the codes between two
+    /// returns to level 0 are read again in their order together).
+    pub level: u8,
+    pub context: u32,
 }
 
 /// A page's codes as its writer showed them.
@@ -59,6 +66,9 @@ pub(crate) struct Code {
 pub(crate) struct PageGlyphs {
     pub codes: Vec<Code>,
     pub lig: Vec<u16>,
+    /// The codes each object drawn shows ([`XOBJECT`]): its object and
+    /// count, as the writer told them.
+    pub xcodes: Vec<(u32, usize)>,
 }
 
 impl PageGlyphs {
@@ -87,6 +97,9 @@ fn glyph_char(c: u16) -> char {
 pub(crate) struct Recorder {
     g: PageGlyphs,
     out: Arc<Mutex<Option<PageGlyphs>>>,
+    /// The reversal level now, and its context ([`Code::level`]).
+    level: u8,
+    context: u32,
 }
 
 impl Recorder {
@@ -96,6 +109,8 @@ impl Recorder {
             Recorder {
                 g: PageGlyphs::default(),
                 out: out.clone(),
+                level: 0,
+                context: 0,
             },
             out,
         )
@@ -139,43 +154,48 @@ impl GlyphTap for Recorder {
             v,
             w,
             size,
+            level: self.level,
+            context: self.context,
         });
+    }
+
+    fn level(&mut self, level: u8) {
+        if self.level == 0 && level > 0 {
+            self.context += 1;
+        }
+        self.level = level;
     }
 
     fn none(&mut self, n: usize) {
         for _ in 0..n {
             self.g.codes.push(Code {
                 kind: NONE,
+                level: self.level,
+                context: self.context,
                 ..Code::default()
             });
         }
     }
 
     fn literal(&mut self, bytes: &[u8]) {
-        struct Count(usize);
-        impl phitex_codecs::pdftext::Text for Count {
-            fn font(&mut self, _: &[u8]) -> phitex_codecs::pdftext::Font {
-                phitex_codecs::pdftext::Font::default()
-            }
-            fn code(&mut self, _: &[u8], _: u32, _: f64, _: f64) {
-                self.0 += 1;
-            }
-            fn draw(&mut self, _: &[u8], _: &phitex_codecs::pdftext::State) {}
-        }
-        // (a literal showing text: rare; most set colours)
-        if !bytes.iter().any(|&b| b == b'T' || b == b'\'' || b == b'"') {
-            return;
-        }
-        let mut c = Count(0);
-        phitex_codecs::pdftext::walk(bytes, &mut c);
-        self.none(c.0);
+        self.none(phitex_pdf::literal_codes(bytes));
     }
 
-    fn xobject(&mut self) {
+    fn xobject(&mut self, obj: usize) {
         self.g.codes.push(Code {
             kind: XOBJECT,
+            lig: u32::try_from(obj).unwrap_or(u32::MAX),
+            level: self.level,
+            context: self.context,
             ..Code::default()
         });
+    }
+
+    fn xobject_codes(&mut self, obj: usize, codes: usize) {
+        let obj = u32::try_from(obj).unwrap_or(u32::MAX);
+        if !self.g.xcodes.iter().any(|&(o, _)| o == obj) {
+            self.g.xcodes.push((obj, codes));
+        }
     }
 
     /// A native word's glyphs: the first carries the word's text (as a
@@ -200,6 +220,8 @@ impl GlyphTap for Recorder {
                     v,
                     w,
                     size,
+                    level: self.level,
+                    context: self.context,
                     ..Code::default()
                 });
             }
@@ -224,14 +246,17 @@ impl GlyphTap for Recorder {
                 v,
                 w,
                 size,
+                level: self.level,
+                context: self.context,
             });
         }
     }
 }
 
 /// The pages' glyphs by the value store and the page's identity in the
-/// link (`crate::pdfout::Linked::shown`).
-type GlyphMemo = Mutex<FxHashMap<(u64, u64), Arc<PageGlyphs>>>;
+/// link (`crate::pdfout::Linked::shown`), and whether the link's own
+/// writer showed them ([`keep_shipped`]).
+type GlyphMemo = Mutex<FxHashMap<(u64, u64), (Arc<PageGlyphs>, bool)>>;
 
 fn glyph_memo() -> &'static GlyphMemo {
     static M: OnceLock<GlyphMemo> = OnceLock::new();
@@ -261,25 +286,95 @@ pub(crate) fn keep_pieces(inst: u64, id: u64, pieces: &[i64]) {
     m.insert((inst, id), Arc::from(pieces));
 }
 
-/// Page `id`'s glyphs (value store `inst`), kept.
+/// Page `id`'s glyphs (value store `inst`), kept, as the writer the page
+/// was written apart on showed them: unless the link's own are kept.
 pub(crate) fn keep(inst: u64, id: u64, g: PageGlyphs) {
+    put(inst, id, g, false);
+}
+
+/// Page `id`'s glyphs (value store `inst`) as the link's writer showed
+/// them, where it shipped the page again: kept over the page's own
+/// (the forms and images the page draws are the link's, not known to
+/// the writer it was written apart on).
+pub(crate) fn keep_shipped(inst: u64, id: u64, g: PageGlyphs) {
+    put(inst, id, g, true);
+}
+
+/// The codes of the forms and images a page's record left to the link
+/// (`phitex_pdf::PdfState::hole_codes`), by the value store and the
+/// page's identity: told the page's glyphs, kept or to come.
+type HoleMemo = Mutex<FxHashMap<(u64, u64), Arc<[Option<usize>]>>>;
+
+fn hole_memo() -> &'static HoleMemo {
+    static M: OnceLock<HoleMemo> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// Page `id`'s glyphs told the codes of its objects drawn, in order
+/// (the page written apart did not know them: they are the link's).
+fn told_holes(g: &mut PageGlyphs, holes: &[Option<usize>]) {
+    let objs: Vec<u32> = g
+        .codes
+        .iter()
+        .filter(|c| c.kind == XOBJECT)
+        .map(|c| c.lig)
+        .collect();
+    for (o, n) in objs.into_iter().zip(holes) {
+        if let Some(n) = *n
+            && !g.xcodes.iter().any(|&(x, _)| x == o)
+        {
+            g.xcodes.push((o, n));
+        }
+    }
+}
+
+/// Page `id`'s objects' codes as the link placed them (value store
+/// `inst`): its glyphs told them, those kept now and those kept later.
+pub(crate) fn keep_holes(inst: u64, id: u64, holes: Vec<Option<usize>>) {
+    let holes: Arc<[Option<usize>]> = Arc::from(holes);
+    {
+        let mut h = hole_memo().locked();
+        if h.get(&(inst, id)).is_some_and(|x| **x == *holes) {
+            return;
+        }
+        if h.len() > 1 << 16 {
+            h.clear();
+        }
+        h.insert((inst, id), holes.clone());
+    }
     let mut m = glyph_memo().locked();
+    if let Some(e) = m.get_mut(&(inst, id)) {
+        let mut g = (*e.0).clone();
+        told_holes(&mut g, &holes);
+        e.0 = Arc::new(g);
+    }
+}
+
+fn put(inst: u64, id: u64, mut g: PageGlyphs, shipped: bool) {
+    if let Some(h) = hole_memo().locked().get(&(inst, id)).cloned() {
+        told_holes(&mut g, &h);
+    }
+    let mut m = glyph_memo().locked();
+    if !shipped && m.get(&(inst, id)).is_some_and(|e| e.1) {
+        return;
+    }
     // (the pages of builds gone: dropped wholesale past a bound, made
     // again where a page's writer runs)
     if m.len() > 1 << 16 {
         m.clear();
     }
-    m.insert((inst, id), Arc::new(g));
+    m.insert((inst, id), (Arc::new(g), shipped));
 }
 
 /// Page `id`'s glyphs (value store `inst`) dropped: its record is gone.
 pub(crate) fn forget(inst: u64, id: u64) {
     glyph_memo().locked().remove(&(inst, id));
+    hole_memo().locked().remove(&(inst, id));
 }
 
 /// Page `id`'s glyphs (value store `inst`), if kept.
 pub(crate) fn kept(inst: u64, id: u64) -> Option<Arc<PageGlyphs>> {
-    glyph_memo().locked().get(&(inst, id)).cloned()
+    glyph_memo().locked().get(&(inst, id)).map(|e| e.0.clone())
 }
 
 /// Whether page `id` (value store `inst`) has its glyphs kept.
@@ -666,6 +761,61 @@ struct Glyph {
     v: Scaled,
     w: Scaled,
     size: Scaled,
+    /// Its reversal level ([`Code::level`]): odd, read right to left.
+    level: u8,
+}
+
+/// The page's codes (indices) in their reading order: as the page shows
+/// them, but for right-to-left text, which TeX--XeT's writer shows in the
+/// reverse of its reading order ([`Code::level`]). Each context's codes
+/// put back as the bidi algorithm's reordering (rule L2, its own inverse)
+/// puts them: from its highest level down to 1, every run at that level
+/// or higher reversed. A node's codes stay together, in their order (a
+/// native word's glyphs, a virtual font's character's codes).
+fn reading_order(codes: &[Code]) -> Vec<usize> {
+    if codes.iter().all(|c| c.level == 0) {
+        return (0..codes.len()).collect();
+    }
+    // (a node's codes: its first and its further ones)
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in codes.iter().enumerate() {
+        match units.last_mut() {
+            Some(u) if c.kind == GLYPH && !c.first => u.1 = i + 1,
+            _ => units.push((i, i + 1)),
+        }
+    }
+    let level = |u: &(usize, usize)| codes[u.0].level;
+    let context = |u: &(usize, usize)| codes[u.0].context;
+    let mut k = 0;
+    while k < units.len() {
+        if level(&units[k]) == 0 {
+            k += 1;
+            continue;
+        }
+        let mut e = k;
+        while e < units.len() && level(&units[e]) > 0 && context(&units[e]) == context(&units[k]) {
+            e += 1;
+        }
+        let run = &mut units[k..e];
+        let top = run.iter().map(level).max().unwrap_or(0);
+        for l in (1..=top).rev() {
+            let mut i = 0;
+            while i < run.len() {
+                if level(&run[i]) < l {
+                    i += 1;
+                    continue;
+                }
+                let mut j = i;
+                while j < run.len() && level(&run[j]) >= l {
+                    j += 1;
+                }
+                run[i..j].reverse();
+                i = j;
+            }
+        }
+        k = e;
+    }
+    units.into_iter().flat_map(|(a, b)| a..b).collect()
 }
 
 /// A word's character, folded.
@@ -712,18 +862,22 @@ pub(crate) fn match_page_until(
     let mut atoms: Vec<Atom> = Vec::new();
     // (each glyph's atoms: a range)
     let mut glyph_atoms: Vec<(u32, u32)> = Vec::new();
-    for (i, c) in g.codes.iter().enumerate() {
+    // (in the reading order: right-to-left text as it is read, not as the
+    // page shows it, [`reading_order`])
+    for i in reading_order(&g.codes) {
+        let c = &g.codes[i];
         if c.kind != GLYPH {
             continue;
         }
-        // (a node's further codes: its extent to their end, a native
-        // word's glyphs after its first)
+        // (a node's further codes: its extent to theirs, a native
+        // word's glyphs after its first, on either side of it)
         if !c.first {
             if let Some(gl) = glyphs.last_mut()
                 && c.v == gl.v
-                && c.h + c.w > gl.h + gl.w
             {
-                gl.w = c.h + c.w - gl.h;
+                let end = (gl.h + gl.w).max(c.h + c.w);
+                gl.h = gl.h.min(c.h);
+                gl.w = end - gl.h;
             }
             continue;
         }
@@ -738,6 +892,7 @@ pub(crate) fn match_page_until(
             v: c.v,
             w: c.w,
             size: c.size,
+            level: c.level,
         });
     }
     // the page's words: atom lists, a hyphen at a line's end joining
@@ -748,7 +903,15 @@ pub(crate) fn match_page_until(
         if k > 0 {
             let p = &glyphs[k - 1];
             let line = (gl.v - p.v).abs() > p.size.max(gl.size) / 4;
-            let gap = gl.h > p.h + p.w + p.size.max(1) / 6 || gl.h < p.h - p.size.max(1) / 2;
+            // (a space between them, or a step back, in their direction:
+            // right-to-left text read from its right; a change of
+            // direction ends a word)
+            let s = p.size.max(1);
+            let gap = match (p.level % 2, gl.level % 2) {
+                (0, 0) => gl.h > p.h + p.w + s / 6 || gl.h < p.h - s / 2,
+                (1, 1) => gl.h + gl.w < p.h - s / 6 || gl.h + gl.w > p.h + p.w + s / 2,
+                _ => true,
+            };
             if line || gap {
                 // (the next line's: just below, not a page's foot)
                 // (a glyph that is a hyphen alone: not a dash, read as
@@ -839,6 +1002,11 @@ pub(crate) fn match_page_until(
     }
     let mut matched_atoms: Vec<Option<(u32, u32, u32)>> = vec![None; atoms.len()];
     let mut word_done = vec![false; words.len()];
+    // (a word the first pass matched outside a run of three in a row:
+    // a later pass's run of three or more takes it over (a footnote's
+    // common words, "from the same", paired one by one with the text
+    // after its mark, where the run of its own node is)
+    let mut alone = vec![false; words.len()];
     let mut src_used: phitex_defuse::FxHashSet<(u32, u32)> = phitex_defuse::FxHashSet::default();
     // (the heaviest cluster with every word of the page; then it and the
     // other clusters again with the runs of words left: floats,
@@ -886,7 +1054,9 @@ pub(crate) fn match_page_until(
         }
         // (the page's words not matched yet: all of them first, then the
         // runs of three or more left)
-        let free: Vec<usize> = (0..words.len()).filter(|&i| !word_done[i]).collect();
+        let free: Vec<usize> = (0..words.len())
+            .filter(|&i| !word_done[i] || (round > 0 && alone[i]))
+            .collect();
         if free.is_empty() {
             break;
         }
@@ -940,8 +1110,26 @@ pub(crate) fn match_page_until(
         if round > 0 && !pairs.is_empty() {
             passes.insert(round + 1, ci);
         }
-        for &(i, j) in &pairs {
+        // (each pair's run: the pairs in a row on both sides around it)
+        let mut run = vec![1usize; pairs.len()];
+        let mut k = 0;
+        while k < pairs.len() {
+            let mut e = k + 1;
+            while e < pairs.len()
+                && free[pairs[e].0] == free[pairs[e - 1].0] + 1
+                && pairs[e].1 == pairs[e - 1].1 + 1
+            {
+                e += 1;
+            }
+            run[k..e].iter_mut().for_each(|r| *r = e - k);
+            k = e;
+        }
+        for (&(i, j), &r) in pairs.iter().zip(&run) {
             let wi = free[i];
+            if round > 0 && word_done[wi] && !alone[wi] {
+                continue;
+            }
+            alone[wi] = round == 0 && r < 3;
             word_done[wi] = true;
             src_used.insert(src.words[j]);
             let (n, cs) = src.cands(j);
@@ -1093,26 +1281,27 @@ pub(crate) fn match_page_until(
         return None;
     }
     synthesize(&glyphs, &mut gorg, ix);
+    // (each glyph's origin its node's codes': its first and those after
+    // it that are not a node's first)
     let mut orgs = vec![Org::NONE; g.codes.len()];
-    let mut cur = Org::NONE;
-    let mut gi = 0usize;
-    for (i, c) in g.codes.iter().enumerate() {
-        if c.kind != GLYPH {
-            continue;
-        }
-        if c.first {
-            cur = gorg.get(gi).copied().unwrap_or(Org::NONE);
-            debug_assert_eq!(glyphs.get(gi).map(|x| x.code), Some(i));
-            gi += 1;
-        }
-        orgs[i] = if cur.node == NO_NODE {
+    for (gl, &o) in glyphs.iter().zip(&gorg) {
+        let o = if o.node == NO_NODE {
             Org::NONE
         } else {
             Org {
-                node: local(cur.node),
-                ..cur
+                node: local(o.node),
+                ..o
             }
         };
+        orgs[gl.code] = o;
+        for (x, c) in orgs.iter_mut().zip(&g.codes).skip(gl.code + 1) {
+            if c.kind == GLYPH && c.first {
+                break;
+            }
+            if c.kind == GLYPH {
+                *x = o;
+            }
+        }
     }
     Some(Matched {
         nodes: used
@@ -1633,17 +1822,27 @@ pub(crate) struct Input<'a> {
     /// The text nodes: raw id, file (none: the document) and its text,
     /// byte range, the document node it is under.
     #[allow(clippy::type_complexity)]
-    pub spans: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)>,
+    pub spans: Arc<[SpanRow]>,
     /// The document's name and the text its nodes hold (its canonical
     /// text where `doc_raw` is the text given).
     pub doc_name: String,
     pub doc_text: &'a str,
     pub doc_raw: Option<&'a str>,
+    /// The pages' glyphs, by place in `shown`, where they were taken
+    /// with the rest ([`OriginsCapture`]); none: the kept ones.
+    pub glyphs: Option<&'a [Option<Arc<PageGlyphs>>]>,
+    /// Which state of the Build this is (`crate::Build::origins_key`):
+    /// the same key, the same spans, texts and pages; 0: not known, made
+    /// afresh.
+    pub key: u64,
 }
 
 /// A text node as placed: its file (index into the files) and start.
 #[derive(Clone, Copy)]
 struct Span {
+    /// The node whose text it is (a file a node read inline: that
+    /// node's, the span's own id another).
+    of: u64,
     file: u32,
     s: u32,
     len: u32,
@@ -1653,16 +1852,36 @@ struct Span {
     hash: u64,
 }
 
+/// A text node's span ([`crate::Build::spans_named`]): its raw id, its
+/// file's name and text (`None`: the document's own), its bytes there,
+/// the index of the document node it is under, and the node whose text
+/// it is.
+pub(crate) type SpanRow = (u64, Option<(String, Arc<str>)>, usize, usize, usize, u64);
+
 /// What an answer is made with: the index, the spans by raw id, each
 /// file's text (as held, and how offsets in it become the file's bytes).
 struct Ctx<'a> {
     inp: Input<'a>,
+    m: Arc<Made>,
+}
+
+/// What a [`Ctx`] is made of, made once for the Build's state an
+/// [`Input::key`] names and kept: each page asked of that state answered
+/// from it, not from a look at every node again.
+struct Made {
     index: Arc<Index>,
     spans: FxHashMap<u64, Span>,
     /// Per file (by index): its text as the nodes hold it.
     texts: Vec<Option<Arc<str>>>,
     bytes: Mutex<FxHashMap<u32, Arc<Bytes>>>,
     canon: OnceLock<(Vec<u32>, Vec<u32>)>,
+}
+
+impl std::ops::Deref for Ctx<'_> {
+    type Target = Made;
+    fn deref(&self) -> &Made {
+        &self.m
+    }
 }
 
 /// The Build's origins memos: the nodes' scans, the index, the pages'
@@ -1680,6 +1899,8 @@ pub(crate) struct State {
     /// The PDF a DVI or XDV build's file became, as its client made it
     /// ([`crate::Build::set_origins_pdf`]): its forms' codes.
     pdf: Mutex<Option<Arc<Vec<u8>>>>,
+    /// The last [`Made`], by the [`Input::key`] it was made for.
+    made: Mutex<Option<(u64, Arc<Made>)>>,
 }
 
 /// A page's match and the glyphs it was made from.
@@ -1738,6 +1959,18 @@ impl State {
     /// hundred nodes: a keystroke waits for none of it).
     #[allow(clippy::too_many_lines)]
     fn ctx_until<'a>(&self, inp: Input<'a>, stop: &dyn Fn(bool) -> bool) -> Option<Ctx<'a>> {
+        // (made already for this state of the Build: a page's answer looks
+        // at its own nodes only)
+        if inp.key != 0
+            && let Some(m) = self
+                .made
+                .locked()
+                .as_ref()
+                .filter(|x| x.0 == inp.key)
+                .map(|x| x.1.clone())
+        {
+            return Some(Ctx { inp, m });
+        }
         let doc = self.file_index(&inp.doc_name);
         let mut texts: Vec<Option<Arc<str>>> = Vec::new();
         let mut spans: FxHashMap<u64, Span> = FxHashMap::default();
@@ -1769,7 +2002,7 @@ impl State {
             if n % 256 == 255 && stop(false) {
                 return None;
             }
-            let (raw, f, s, e, _) = &inp.spans[i];
+            let (raw, f, s, e, _, of) = &inp.spans[i];
             let name = f.as_ref().map(|x| x.0.clone());
             if let Some((n, end)) = &reach
                 && *n == name
@@ -1806,6 +2039,7 @@ impl State {
             spans.insert(
                 *raw,
                 Span {
+                    of: *of,
                     file: fi,
                     s: u32::try_from(*s).unwrap_or(u32::MAX),
                     len: u32::try_from(t.len()).unwrap_or(u32::MAX),
@@ -1851,14 +2085,17 @@ impl State {
         });
         // (the document's own text, as given: where the nodes hold its
         // canonical text, offsets go over by line and column)
-        Some(Ctx {
-            inp,
+        let m = Arc::new(Made {
             index,
             spans,
             texts,
             bytes: Mutex::new(FxHashMap::default()),
             canon: OnceLock::new(),
-        })
+        });
+        if inp.key != 0 {
+            *self.made.locked() = Some((inp.key, m.clone()));
+        }
+        Some(Ctx { inp, m })
     }
 
     /// Page `k`'s match, kept while its glyphs are the same and every
@@ -1996,7 +2233,11 @@ fn answer_until(
     let Some(&id) = cx.inp.shown.get(k) else {
         return Ok(None);
     };
-    let Some(g) = kept(cx.inp.inst, id) else {
+    let g = match cx.inp.glyphs {
+        Some(gs) => gs.get(k).cloned().flatten(),
+        None => kept(cx.inp.inst, id),
+    };
+    let Some(g) = g else {
         return Ok(None);
     };
     let Some(m) = st.matched(cx, id, &g, stop) else {
@@ -2122,7 +2363,14 @@ fn answer_fresh(
     nodes: &[Option<(Span, bool)>],
     pdf: &dyn Fn() -> Arc<Vec<u8>>,
 ) -> (PageOrigins, Vec<u32>) {
-    let counts = if g.codes.iter().any(|c| c.kind == XOBJECT) {
+    let told = |c: &Code| g.xcodes.iter().find(|&&(o, _)| o == c.lig).map(|&(_, n)| n);
+    // (an object whose codes the writer did not tell, XeTeX's pictures
+    // drawn by xdvipdfmx: counted in the PDF made)
+    let counts = if g
+        .codes
+        .iter()
+        .any(|c| c.kind == XOBJECT && told(c).is_none())
+    {
         xobject_counts(&pdf(), k)
     } else {
         Vec::new()
@@ -2147,7 +2395,8 @@ fn answer_fresh(
                 }
             }
             XOBJECT => {
-                for _ in 0..forms.next().copied().unwrap_or(0) {
+                let pdf_n = forms.next().copied();
+                for _ in 0..told(c).or(pdf_n).unwrap_or(0) {
                     out.push(u32::MAX, 0, 0, false, x, y, 0.0, 0.0);
                     of.push(u32::MAX);
                 }
@@ -2159,6 +2408,43 @@ fn answer_fresh(
         }
     }
     (out, of)
+}
+
+/// [`crate::Build::pages_of_source`] of the state `cx` is made of.
+fn pages_of(st: &State, cx: &Ctx<'_>, file: &str, at: u32) -> Vec<usize> {
+    let file = file.trim_start_matches("./");
+    let names = st.files.locked().clone();
+    let Some(fi) = names
+        .iter()
+        .position(|n| n == file || format!("{n}.tex") == file)
+        .and_then(|i| u32::try_from(i).ok())
+    else {
+        return Vec::new();
+    };
+    let raws: phitex_defuse::FxHashSet<i64> = cx
+        .spans
+        .iter()
+        .filter(|(_, sp)| {
+            sp.file == fi
+                && cx.place(sp.file, sp.doc, sp.s) <= at
+                && at < cx.place(sp.file, sp.doc, sp.s + sp.len).max(1)
+        })
+        .map(|(_, sp)| sp.of.cast_signed())
+        .collect();
+    if raws.is_empty() {
+        return Vec::new();
+    }
+    let memo = piece_memo().locked();
+    cx.inp
+        .shown
+        .iter()
+        .enumerate()
+        .filter(|&(_, &id)| {
+            memo.get(&(cx.inp.inst, id))
+                .is_some_and(|ps| ps.iter().any(|p| raws.contains(p)))
+        })
+        .map(|(k, _)| k)
+        .collect()
 }
 
 impl crate::Build {
@@ -2190,6 +2476,20 @@ impl crate::Build {
         let st = self.origins_state();
         let cx = st.ctx(self.origins_input());
         answer(st, &cx, k, &|| self.origins_pdf())
+    }
+
+    /// [`Self::page_origins`], given up (`None`) once `stop` says so,
+    /// between a few hundred nodes of the sources' look or while the page
+    /// is matched: a watch's save waits for none of it (a page's origins
+    /// asked by a browser after an edit took 135 ms of the loop).
+    pub fn page_origins_until(
+        &self,
+        k: usize,
+        stop: &dyn Fn(bool) -> bool,
+    ) -> Option<Option<Arc<PageOrigins>>> {
+        let st = self.origins_state();
+        let cx = st.ctx_until(self.origins_input(), stop)?;
+        answer_until(st, &cx, k, &|| self.origins_pdf(), stop).ok()
     }
 
     /// Every page's origins ([`Self::page_origins`]), made with one
@@ -2229,46 +2529,47 @@ impl crate::Build {
     /// says so (`None`; the pages answered so far kept, the next call
     /// goes on from them).
     pub fn origins_snapshot_until(&self, stop: &dyn Fn(bool) -> bool) -> Option<OriginsSnapshot> {
+        snapshot_until(
+            self.origins_state(),
+            self.origins_input(),
+            &|| self.origins_pdf(),
+            stop,
+        )
+    }
+
+    /// What [`Self::origins_snapshot`] of the Build as it is now is made
+    /// from, taken apart from it ([`OriginsCapture`]): its snapshot made
+    /// later, on any thread, is this one whatever the Build has become
+    /// meanwhile (a watch's way out writes the `.synctex.gz` of the PDF
+    /// file it wrote while the next edit's build runs).
+    #[must_use]
+    pub fn origins_capture(&self) -> OriginsCapture {
         let t0 = std::time::Instant::now();
-        let st = self.origins_state();
         let inp = self.origins_input();
-        let t1 = t0.elapsed();
-        let cx = st.ctx_until(inp, stop)?;
-        let t2 = t0.elapsed();
-        let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
-        let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
-        let mut pages = Vec::with_capacity(cx.inp.shown.len());
-        for k in 0..cx.inp.shown.len() {
-            if stop(true) {
-                return None;
-            }
-            pages.push(answer_until(st, &cx, k, &get, stop).ok()?);
+        crate::timeline::note("origins: the input (the nodes' spans)", t0.elapsed());
+        let t0 = std::time::Instant::now();
+        let glyphs = inp.shown.iter().map(|&id| kept(inp.inst, id)).collect();
+        crate::timeline::note("origins: the pages' glyphs", t0.elapsed());
+        OriginsCapture {
+            st: self.origins_shared(),
+            inst: inp.inst,
+            shown: inp.shown,
+            spans: inp.spans,
+            doc_name: inp.doc_name,
+            doc_text: Arc::from(inp.doc_text),
+            doc_raw: inp.doc_raw.map(Arc::from),
+            glyphs,
+            pdf: self.origins_pdf_later(),
+            key: inp.key,
         }
-        let t3 = t0.elapsed();
-        let files = st.files.locked().clone();
-        let texts = (0..files.len())
-            .map(|i| {
-                cx.texts
-                    .get(i)
-                    .and_then(Option::as_ref)
-                    .map(|t| file_bytes(t))
-            })
-            .collect();
-        if crate::exec::env_flag!("PHITEX_ORIGINS_TIME") {
-            eprintln!(
-                "origins: input {t1:?} (spans {}), sources {:?} (nodes {}), pages {:?}, texts {:?}",
-                cx.inp.spans.len(),
-                t2.saturating_sub(t1),
-                cx.index.nodes.len(),
-                t3.saturating_sub(t2),
-                t0.elapsed().saturating_sub(t3)
-            );
+    }
+
+    /// [`Self::origins_pdf`], made when asked from what it is now.
+    fn origins_pdf_later(&self) -> Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync> {
+        if let Some(p) = self.origins_state().pdf.locked().clone() {
+            return Arc::new(move || p.clone());
         }
-        Some(OriginsSnapshot {
-            pages,
-            files,
-            texts,
-        })
+        self.output_bytes_later()
     }
 
     /// The pages (0 the first) whose sealed lines came from the nodes
@@ -2279,40 +2580,7 @@ impl crate::Build {
     #[must_use]
     pub fn pages_of_source(&self, file: &str, at: u32) -> Vec<usize> {
         let st = self.origins_state();
-        let cx = st.ctx(self.origins_input());
-        let file = file.trim_start_matches("./");
-        let names = st.files.locked().clone();
-        let Some(fi) = names
-            .iter()
-            .position(|n| n == file || format!("{n}.tex") == file)
-            .and_then(|i| u32::try_from(i).ok())
-        else {
-            return Vec::new();
-        };
-        let raws: phitex_defuse::FxHashSet<i64> = cx
-            .spans
-            .iter()
-            .filter(|(_, sp)| {
-                sp.file == fi
-                    && cx.place(sp.file, sp.doc, sp.s) <= at
-                    && at < cx.place(sp.file, sp.doc, sp.s + sp.len).max(1)
-            })
-            .map(|(&raw, _)| raw.cast_signed())
-            .collect();
-        if raws.is_empty() {
-            return Vec::new();
-        }
-        let memo = piece_memo().locked();
-        cx.inp
-            .shown
-            .iter()
-            .enumerate()
-            .filter(|&(_, &id)| {
-                memo.get(&(cx.inp.inst, id))
-                    .is_some_and(|ps| ps.iter().any(|p| raws.contains(p)))
-            })
-            .map(|(k, _)| k)
-            .collect()
+        pages_of(st, &st.ctx(self.origins_input()), file, at)
     }
 
     /// The files origins name, by their index in [`PageOrigins::file`]:
@@ -2381,7 +2649,7 @@ impl crate::Build {
                 file_bytes(inp.doc_raw.unwrap_or(inp.doc_text)),
             )];
             let mut seen: phitex_defuse::FxHashSet<String> = phitex_defuse::FxHashSet::default();
-            for (_, f, ..) in &inp.spans {
+            for (_, f, ..) in inp.spans.iter() {
                 if let Some((n, t)) = f
                     && seen.insert(n.clone())
                 {
@@ -2500,6 +2768,123 @@ impl crate::Build {
     }
 }
 
+/// What [`crate::Build::origins_snapshot`] is made from, taken apart from
+/// the Build ([`crate::Build::origins_capture`]): the origins' memos
+/// (shared, each kept by what it was made from), the pages, the nodes'
+/// texts and places, the pages' glyphs, and the PDF their codes are
+/// counted in as it was.
+pub struct OriginsCapture {
+    st: Arc<State>,
+    inst: u64,
+    shown: Vec<u64>,
+    #[allow(clippy::type_complexity)]
+    spans: Arc<[SpanRow]>,
+    doc_name: String,
+    doc_text: Arc<str>,
+    doc_raw: Option<Arc<str>>,
+    glyphs: Vec<Option<Arc<PageGlyphs>>>,
+    pdf: Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync>,
+    key: u64,
+}
+
+impl OriginsCapture {
+    /// The input it was taken of.
+    fn input(&self) -> Input<'_> {
+        Input {
+            inst: self.inst,
+            shown: self.shown.clone(),
+            spans: self.spans.clone(),
+            doc_name: self.doc_name.clone(),
+            doc_text: &self.doc_text,
+            doc_raw: self.doc_raw.as_deref(),
+            glyphs: Some(&self.glyphs),
+            key: self.key,
+        }
+    }
+
+    /// The Build's [`crate::Build::page_origins`] of page `k` when it was
+    /// taken, made on any thread whatever the Build has become.
+    #[must_use]
+    pub fn page(&self, k: usize) -> Option<Arc<PageOrigins>> {
+        let cx = self.st.ctx(self.input());
+        answer(&self.st, &cx, k, &|| (self.pdf)())
+    }
+
+    /// The Build's [`crate::Build::pages_of_source`] when it was taken.
+    #[must_use]
+    pub fn pages_of_source(&self, file: &str, at: u32) -> Vec<usize> {
+        let cx = self.st.ctx(self.input());
+        pages_of(&self.st, &cx, file, at)
+    }
+
+    /// The files origins name ([`crate::Build::origin_files`]).
+    #[must_use]
+    pub fn files(&self) -> Vec<String> {
+        self.st.files.locked().clone()
+    }
+
+    /// The Build's [`crate::Build::origins_snapshot`] when it was taken.
+    #[must_use]
+    pub fn snapshot(&self) -> OriginsSnapshot {
+        let inp = self.input();
+        snapshot_until(&self.st, inp, &|| (self.pdf)(), &|_| false).unwrap_or_else(|| {
+            OriginsSnapshot {
+                pages: Vec::new(),
+                files: Vec::new(),
+                texts: Vec::new(),
+            }
+        })
+    }
+}
+
+/// [`crate::Build::origins_snapshot_until`] of input `inp` with memos
+/// `st`, the PDF the codes are counted in from `pdf_of`.
+fn snapshot_until(
+    st: &State,
+    inp: Input<'_>,
+    pdf_of: &dyn Fn() -> Arc<Vec<u8>>,
+    stop: &dyn Fn(bool) -> bool,
+) -> Option<OriginsSnapshot> {
+    let t0 = std::time::Instant::now();
+    let t1 = t0.elapsed();
+    let cx = st.ctx_until(inp, stop)?;
+    let t2 = t0.elapsed();
+    let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
+    let get = || pdf.get_or_init(pdf_of).clone();
+    let mut pages = Vec::with_capacity(cx.inp.shown.len());
+    for k in 0..cx.inp.shown.len() {
+        if stop(true) {
+            return None;
+        }
+        pages.push(answer_until(st, &cx, k, &get, stop).ok()?);
+    }
+    let t3 = t0.elapsed();
+    let files = st.files.locked().clone();
+    let texts = (0..files.len())
+        .map(|i| {
+            cx.texts
+                .get(i)
+                .and_then(Option::as_ref)
+                .map(|t| file_bytes(t))
+        })
+        .collect();
+    if crate::exec::env_flag!("PHITEX_ORIGINS_TIME") {
+        eprintln!(
+            "origins: input {t1:?} (spans {}), sources {:?} (nodes {}), pages {:?}, texts {:?}",
+            cx.inp.spans.len(),
+            t2.saturating_sub(t1),
+            cx.index.nodes.len(),
+            t3.saturating_sub(t2),
+            t0.elapsed().saturating_sub(t3)
+        );
+    }
+    Some(OriginsSnapshot {
+        pages,
+        files,
+        texts,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2528,6 +2913,134 @@ mod tests {
         let mut out = Vec::new();
         diff(&a, &b, 0, a.len(), 0, b.len(), &mut out, 0, false, false);
         assert_eq!(out, [(0, 1), (1, 2), (2, 3), (4, 4), (5, 6)]);
+    }
+
+    /// A text as a `Build` holds its file: one character a byte.
+    fn held(t: &str) -> String {
+        t.bytes().map(char::from).collect()
+    }
+
+    /// Native words told the tap as XeTeX's XDV writer tells them, each
+    /// `(text, left edge)` at `v`, one glyph a character, 5 pt each.
+    fn natives(r: &mut Recorder, ws: &[(&str, Scaled)], v: Scaled) {
+        const PT: Scaled = 65536;
+        for &(t, h) in ws {
+            let text: Vec<u16> = t.encode_utf16().collect();
+            let n = Scaled::try_from(t.chars().count()).unwrap_or(1);
+            // (a right-to-left word's glyphs as the page shows them)
+            let gs: Vec<(Scaled, Scaled, Scaled)> =
+                (0..n).map(|k| (h + k * 5 * PT, v, 5 * PT)).collect();
+            r.native(0, &text, &gs, 10 * PT);
+        }
+    }
+
+    /// The source range (offsets in its node's text) of each glyph of
+    /// `g` placed, not synthesized, in the page's order of its glyphs.
+    fn placed(g: &PageGlyphs, ix: &Index) -> Vec<(u32, u32)> {
+        let m = match_page(g, ix);
+        m.orgs
+            .iter()
+            .zip(&g.codes)
+            .filter(|(o, c)| c.first && o.node != NO_NODE && !o.synth)
+            .map(|(o, _)| (o.from, o.to))
+            .collect()
+    }
+
+    /// Right-to-left text, shown by TeX--XeT's writer in the reverse of
+    /// its reading order (the tap's level 1): each word of the page is
+    /// matched to its own occurrence in the source, the repeated word
+    /// too. Read in the page's order, the leftmost word (the last one
+    /// read) took the source's first.
+    #[test]
+    fn right_to_left_words_match_their_own_occurrence() {
+        const PT: Scaled = 65536;
+        let src = held("Before \\textlang{arabic}{كلمة أخرى كلمة} after.");
+        let ix = Index::update(
+            vec![Node {
+                raw: 1,
+                scan: Arc::new(scan(&src)),
+            }],
+            Arc::default(),
+        );
+        let (mut r, out) = Recorder::new();
+        natives(&mut r, &[("Before", 0)], 0);
+        r.level(1);
+        // (the page's order: the last word read is leftmost)
+        natives(
+            &mut r,
+            &[("كلمة", 40 * PT), ("أخرى", 65 * PT), ("كلمة", 90 * PT)],
+            0,
+        );
+        r.level(0);
+        natives(&mut r, &[("after.", 120 * PT)], 0);
+        drop(r);
+        let g = out.lock().unwrap().take().unwrap();
+        let word = |w: &str, k: usize| {
+            let w = held(w);
+            let at = src.match_indices(&w).nth(k).unwrap().0;
+            (
+                u32::try_from(at).unwrap(),
+                u32::try_from(at + w.len()).unwrap(),
+            )
+        };
+        // (in the page's order: the second كلمة, أخرى, the first كلمة)
+        assert_eq!(
+            placed(&g, &ix),
+            [
+                word("Before", 0),
+                word("كلمة", 1),
+                word("أخرى", 0),
+                word("كلمة", 0),
+                word("after.", 0),
+            ]
+        );
+    }
+
+    /// Two paragraphs of the same right-to-left sentence, each a line of
+    /// its own (a context each): each line matched to its own paragraph.
+    #[test]
+    fn repeated_right_to_left_paragraphs_match_their_own() {
+        const PT: Scaled = 65536;
+        let para = "يكتب الحاسوب الصفحة";
+        let texts = [held(&format!("{para}\n")), held(&format!("{para}\n"))];
+        let ix = Index::update(
+            texts
+                .iter()
+                .enumerate()
+                .map(|(k, t)| Node {
+                    raw: k as u64 + 1,
+                    scan: Arc::new(scan(t)),
+                })
+                .collect(),
+            Arc::default(),
+        );
+        let (mut r, out) = Recorder::new();
+        for line in 0..2 {
+            r.level(1);
+            let v = line * 12 * PT;
+            natives(
+                &mut r,
+                &[("الصفحة", 0), ("الحاسوب", 40 * PT), ("يكتب", 80 * PT)],
+                v,
+            );
+            r.level(0);
+        }
+        drop(r);
+        let g = out.lock().unwrap().take().unwrap();
+        let m = match_page(&g, &ix);
+        let nodes: Vec<u64> = m
+            .orgs
+            .iter()
+            .zip(&g.codes)
+            .filter(|(o, c)| c.first && o.node != NO_NODE)
+            .map(|(o, _)| m.nodes[o.node as usize].0)
+            .collect();
+        assert_eq!(nodes, [1, 1, 1, 2, 2, 2], "{:?}", m.orgs);
+        // (each line read from its right: the page's first word, leftmost,
+        // is the paragraph's last)
+        let first = m.orgs[0];
+        let t = &texts[0];
+        assert_eq!(&t[first.from as usize..first.to as usize], held("الصفحة"));
     }
 
     #[test]

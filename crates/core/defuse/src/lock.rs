@@ -8,6 +8,7 @@
 //! | a field-index shard (`index::FieldIndex`: definitions, contributions, readers) | a read's or a commit's skip | one set lookup or insert |
 //! | a range-index shard (`index::RangeIndex`: by field, the range readers by interval, the `At::Final` readers, the environment's readers) | a commit filing its ranges, loop-back and environment reads; a changed contribution asking which hold its label; a loop-back value read, marked, or published at a quiet point; an environment change; a rebalance widening intervals | one commit's ranges of one field; a few map ranges; one list; one value; one shard's intervals |
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
+//! | the environment's misses being answered (`engine::Env::asking`) | an environment read that missed (`read::env_value`) | one entry taken or removed; the provider runs outside it, a second asker of the same field waiting on that field's answer alone |
 //! | paths and their extensions, monoids, environment values, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a view's step; a push or an edit outside an evaluation | one map operation |
 //! | the settling layer's fields (`engine::Engine::settle_exact`) | a settling node's commit or prediction marking a field it has not marked; a read whose field's bit is set | one insert; one lookup |
 //! | a node's `last`, `woke`, `text`, `stopped`, `bounded` and `foreign` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it; a range reader bounded by it filed or taken; a reader anchored at it filed (under its segment's lock) or its removal; a walk asking its record or its foreign readers (`guard::readers_at`, under its segment's lock) | a swap; a clone; a push; a look-up in a record |
@@ -303,6 +304,12 @@ pub(crate) fn ns(t: Instant) -> u64 {
 pub(crate) fn waited(ns: u64) {
     WAIT_NS.with(|c| c.set(c.get().saturating_add(ns)));
     WAIT_MAX_NS.with(|c| c.set(c.get().max(ns)));
+}
+
+/// (`PHITEX_RUN_LOG`) The thread's lock waits since its last take, summed,
+/// not reset.
+pub(crate) fn wait_so_far() -> u64 {
+    WAIT_NS.with(Cell::get)
 }
 
 /// The thread's lock waits since the last take, (summed, longest), reset.

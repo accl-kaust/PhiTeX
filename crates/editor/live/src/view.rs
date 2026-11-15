@@ -66,6 +66,11 @@ pub type PrefsFn =
 /// other fields), ...; `None`: not here ([`Viewer::on_info`]).
 pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
 
+/// The host's answer to a review op (`review_*`: notes and changes,
+/// docs/spec-editor-protocol.md §9.5), the op's name and the request
+/// given ([`Viewer::on_review`]).
+pub type ReviewFn = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -177,6 +182,13 @@ pub enum Ask {
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
+    /// The exact PDF of the last build written now, `JOB.pdf` in the
+    /// output folder or `to` (`phitex session pdf`), its .synctex.gz beside
+    /// it with `synctex`: done by the session's owner, which says when.
+    WritePdf {
+        to: Option<String>,
+        synctex: bool,
+    },
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.
@@ -297,6 +309,8 @@ pub struct Viewer {
     cache: Mutex<Option<CacheFn>>,
     prefs: Mutex<Option<PrefsFn>>,
     info: Mutex<Option<InfoFn>>,
+    /// The review ops' host (none: no notes here).
+    review: Mutex<Option<Arc<ReviewFn>>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -329,14 +343,11 @@ struct Streamed {
     /// The pages whose files draw them otherwise than the build's file will
     /// ([`phitex_tex::StreamedPage::exact`]: what they lack left out).
     inexact: std::collections::BTreeSet<usize>,
-    /// The bytes of the files kept ([`STREAM_KEEP`]).
-    bytes: usize,
 }
 
 impl Streamed {
     /// Page `k` streamed ([`Viewer::stream_page`]'s arguments): kept, and
-    /// the `page` event to tell (none: nothing new to tell, or past
-    /// [`STREAM_KEEP`]).
+    /// the `page` event to tell (none: nothing new to tell).
     fn put(
         &mut self,
         k: usize,
@@ -353,16 +364,10 @@ impl Streamed {
         } else if pdf.is_empty() {
             return None;
         } else {
-            let old = self.pdfs.get(&k).map_or(0, |p| p.len());
-            let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
-            if !first && self.bytes - old + pdf.len() > STREAM_KEEP {
-                return None;
-            }
             if self.hashes.len() <= k {
                 self.hashes.resize(k + 1, None);
             }
             self.hashes[k] = Some(h);
-            self.bytes = self.bytes - old + pdf.len();
             self.pdfs.insert(k, Arc::from(pdf));
             if exact {
                 self.inexact.remove(&k);
@@ -393,11 +398,6 @@ impl Streamed {
     }
 }
 
-/// The most bytes of streamed pages' files kept until the build is in (a
-/// wasm core's memory is the document's too): a page past it is not
-/// streamed, but for the first [`crate::progress::STREAM_FIRST`].
-pub const STREAM_KEEP: usize = 64 << 20;
-
 /// What a streamed page's identity has in it (xor): no page the build
 /// settles with is named so, and each streamed page is drawn again from
 /// the build's file when it is in. A streamed page is the page as a pass
@@ -425,6 +425,7 @@ impl Default for Viewer {
             cache: Mutex::new(None),
             prefs: Mutex::new(None),
             info: Mutex::new(None),
+            review: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -545,9 +546,20 @@ impl Viewer {
                 lock(&self.streamed).pdfs.get(&k).cloned()
             }
         };
-        let (pdf, at) = match streamed {
-            Some(p) => (p, 0),
-            None => (self.pdf()?, k),
+        // (the page's identity with the file it is drawn from, read with
+        // it: a frame asked as a build came in is said to be the last
+        // build's page, which the viewer draws again, not the new one's)
+        let (pdf, at, hash) = if let Some(p) = streamed {
+            (p, 0, lock(&self.streamed).hashes.get(k).copied().flatten())
+        } else {
+            let d = lock(&self.diff);
+            if d.shown {
+                (d.pdf.clone()?, k, d.hashes.get(k).copied())
+            } else {
+                drop(d);
+                let p = lock(&self.pages);
+                (p.pdf.clone()?, k, p.hashes.get(k).copied())
+            }
         };
         let t = std::time::Instant::now();
         let f = lock(&self.strips).frame_in(&pdf, at, scale, win)?;
@@ -577,6 +589,7 @@ impl Viewer {
             "pw": f.pw, "ph": f.ph, "w": f.w, "h": f.h,
             "bands": bands, "text": lines_json(&f.text), "links": links,
             "drawn": f.drawn, "kept": f.kept, "win": f.win,
+            "hash": hash.map(|h| format!("{h:016x}")),
             "us": {"open": f.open_us, "probe": f.probe_us, "draw": f.draw_us, "all": us},
         }))
     }
@@ -798,6 +811,17 @@ impl Viewer {
         *lock(&self.info) = Some(info);
     }
 
+    /// The review ops (`review_*`) answered by `review` ([`ReviewFn`]).
+    pub fn on_review(&self, review: ReviewFn) {
+        *lock(&self.review) = Some(Arc::new(review));
+    }
+
+    /// An event of the host's own (`v`, with its `event`) to every viewer:
+    /// the review's state (§9.5).
+    pub fn event(&self, v: &Value) {
+        self.emit(&v.to_string());
+    }
+
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
         *lock(&self.log) = Some(log);
     }
@@ -832,6 +856,10 @@ impl Viewer {
     /// is given them with the pages ([`Viewer::diff_shown`]'s `settled`).
     pub fn diff_stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
         let mut d = lock(&self.diff);
+        // (a page the diff's build in already has: as `stream_page`)
+        if d.hashes.get(k) == Some(&hash) {
+            return;
+        }
         let told = d.streamed.put(k, hash, pdf, pages, exact);
         let shown = d.shown;
         drop(d);
@@ -1008,6 +1036,13 @@ impl Viewer {
     /// pages are the ones shown, not the diff's ([`Viewer::diff_shown`]
     /// gives them to the viewer when they are again).
     pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
+        // (a page the build in already has, as it is: its file made beside
+        // the evaluation came after the build was in. Kept, it took the
+        // build's page over, the viewer drew it again from a file of its
+        // own, blank meanwhile, as a view scrolled over it)
+        if lock(&self.pages).hashes.get(k) == Some(&hash) {
+            return;
+        }
         let told = lock(&self.streamed).put(k, hash, pdf, pages, exact);
         if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
             self.emit(&e);
@@ -1265,6 +1300,9 @@ impl Viewer {
                     // viewer read it as a part out of fuel)
                     "pending": 0,
                     "undefined_names": [],
+                    // (a build running now: a tab that joins mid-build
+                    // missed its `building` event)
+                    "building": s.building.load(Ordering::Relaxed),
                 }))
             }
             "pages" => {
@@ -1440,6 +1478,16 @@ impl Viewer {
                 match lock(&s.info).as_ref().and_then(|f| f(&what, req)) {
                     Some(v) => ok(v),
                     None => fail(&format!("no {what:?} here")),
+                }
+            }
+            o if o.starts_with("review_") => {
+                // (the host answers on this thread, the lock let go first:
+                // an answer may emit the review's event)
+                let f = lock(&s.review).clone();
+                match f.map(|f| f(o, req)) {
+                    Some(Ok(v)) => ok(v),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no notes here"),
                 }
             }
             "diff" => ok(lock(&s.diff).state.clone()),
@@ -1764,6 +1812,47 @@ mod tests {
         assert_eq!(pages(&v), json!([named(9)]));
         v.stream_page(1, 10, vec![4; 10], 2, true);
         assert_eq!(take().last().unwrap()["event"], "page");
+    }
+
+    #[test]
+    fn a_page_streamed_after_its_build_is_in_takes_nothing_over() {
+        let v = Viewer::default();
+        let got: Arc<Mutex<Vec<Value>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| {
+                lock(&got).push(serde_json::from_str(t).unwrap());
+            }));
+        }
+        let take = || std::mem::take(&mut *lock(&got));
+        let pages = |v: &Viewer| -> Value {
+            serde_json::from_str::<Value>(&v.answer(&json!({"id": 1, "op": "pages"}))).unwrap()
+                ["json"]["pages"]
+                .clone()
+        };
+        v.built(&Built {
+            pdf: None,
+            hashes: vec![0x21, 0x22],
+            history: 0,
+            ms: 0.0,
+            diagnostics: Some(Vec::new()),
+            since_ms: None,
+            origins: None,
+            changed: None,
+            parts: serde_json::Map::new(),
+        });
+        take();
+        // (page 2's file, made beside the evaluation, after its build came
+        // in, as the build has it: nothing told, the build's page kept)
+        v.stream_page(1, 0x22, vec![5; 10], 2, true);
+        assert_eq!(take(), Vec::<Value>::new());
+        assert_eq!(pages(&v), json!(["0000000000000021", "0000000000000022"]));
+        assert_eq!(v.streamed_hashes(), Vec::<Option<u64>>::new());
+        // (a page the next build changes: streamed as before)
+        v.stream_page(1, 0x23, vec![6; 10], 2, true);
+        let e = take();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0]["event"], "page");
     }
 
     #[test]

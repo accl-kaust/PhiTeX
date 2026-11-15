@@ -121,7 +121,8 @@ Grouped by where they land:
     already compares them with XeTeX.
   - The primitives are thin: `prims.rs` entries reading a font's field.
 - **Font loading.** `\font` with a native name goes through
-  `find_native_font` over the persisted font index. It is a read-time
+  `find_native_font` over the persisted font index (the lookup rules and
+  each host's index: §3.1). It is a read-time
   definition like a TFM load, with the font's fields defined once.
 - **Text and modes.** These are parameters, read where XeTeX reads
   them:
@@ -152,6 +153,138 @@ Grouped by where they land:
 - **Characters.** `\Uchar` and `\Ucharcat` make a character token of
   any code (and any category for `\Ucharcat`). This is expansion
   (`expand.rs`).
+
+### 3.1 Finding a native font, as `xelatex` finds it
+
+Read from TeX Live 2026's `texk/web2c/xetexdir` (`XeTeX_ext.c`
+`findnativefont`, `XeTeXFontMgr.cpp` `findFont`, `XeTeXFontMgr_FC.cpp`).
+PhiTeX follows these rules; the index and the file lookups are the host's.
+
+**Splitting the name** (`splitFontName`). The name is `\font\x="…"`'s
+string, or fontspec's.
+- `[file]`: the file name runs to `]`. A `:N` inside the brackets is the
+  face index in a collection. After `]` come the variant (`/…`) and the
+  features (`:…`).
+- Any other name: the name runs to the first `/` (the variant) or `:`
+  (the features). The features run to the end.
+
+**A `[file]` name** never goes to fontconfig.
+- The path is kpathsea's `kpse_find_file(file, format, 0)`. The formats
+  are tried in order: `opentype fonts`, then `truetype fonts`, then
+  `type1 fonts`. The first hit wins.
+- In each format, kpathsea tries every directory of the format's path in
+  order (TeX Live's `OPENTYPEFONTS` is `.;$TEXMF/fonts/{opentype,truetype}//;$OSFONTDIR//`).
+  In each directory it tries the name with each of the format's suffixes,
+  unless the name already ends in one (`try_std_extension_first`), then
+  the name as is:
+  - OpenType: `.otf`, `.OTF`. Its suffixed names only, so `[Foo]` is
+    never looked up as `Foo`.
+  - TrueType: `.ttf`, `.ttc`, `.TTF`, `.TTC`, `.dfont`, then the name.
+  - Type 1: `.pfa`, `.pfb`, then the name.
+  - An absolute name, or one starting with `./` or `../`, is not
+    searched for: it is opened as given.
+- So the current directory (the project) comes first, then the TeX
+  trees, then `OSFONTDIR` (the system's font directories where
+  `texmf.cnf` sets it; `/usr/share/fonts` on the CI image).
+  `~/.local/share/fonts` is not in any of these paths: a font that is
+  only there loads by family name, not by file name.
+- fontspec's `Path=fonts/` makes the name `[fonts/X.otf]`, which is
+  searched like any other (found under `.`, the document's directory).
+  `Extension=.otf` with a bare name gives `[X.otf]`.
+- The variant only picks the engine (`/AAT`, `/OT`, `/ICU`, `/GR`).
+  `/B` and `/I` mean nothing for a file.
+- `\tracingfonts` prints `-> path`, kpathsea's path.
+- Nothing found: `! Font \x="[…]" not loadable: Metric (TFM) file or
+  installed font not found.` (fontspec turns this into `The font "…"
+  cannot be found`).
+
+**Any other name** goes to `findFontByName`, which is the font manager's
+`findFont`. It works over fontconfig's list:
+- `FcInit` reads the default configuration: `FONTCONFIG_FILE` when set,
+  else `fonts.conf` in fontconfig's configuration directory, with its
+  `conf.d`. That covers the system's directories, the user's
+  (`$XDG_DATA_HOME/fonts`, `~/.fonts`) and any `<dir>`.
+- `FcFontList(":outline=true")` gives the list, with the objects family,
+  style, file, index, full name, weight, width, slant and format. The
+  list's order decides every tie below.
+- fontconfig does not list the current directory. A font that is only in
+  the project is not found by family name, in xelatex and in PhiTeX alike.
+
+Up to two passes, each trying in order:
+1. a full name (`name_to_font`);
+2. `Family-Style`, split at the first `-` that is neither first nor last
+   (`name_to_family`, then the family's style map);
+3. a PostScript name;
+4. a family:
+   - its single face with the OS/2 "regular" bit; if none, or more than
+     one, the style named `Regular`, `Plain`, `Normal` or `Roman`, in
+     that order;
+   - else the face closest to weight 80, width 100, slant 0 by `styleDiff`.
+
+Between the passes, `searchForHostPlatformFonts(name)` caches every
+listed face whose fontconfig full name is the name, or whose family is
+the name, the part before a `-` (as in 2), or `family + " " + style`. It
+also caches every member of the families of the faces it cached. If no
+face matched, it caches every face.
+- The caching is stateful, per run. The first face cached under a full
+  name, a PostScript name, or a family's style keeps that name.
+- So both the list order and what earlier `\font`s looked up decide which
+  of two faces with one name a later lookup finds. PhiTeX keeps one
+  manager per job for this reason.
+
+The variant (`/B`, `/I`, `/BI`, `/S=size`, `/AAT`, `/OT`, `/GR`, `/ICU`)
+is applied after the face is found:
+- italic by `slant` toward the family's maximum (or minimum);
+- bold by weight halfway to the family's maximum;
+- `S=` sets the size (then the optical-size face nearest it).
+- `:` features are the loader's (`loadOTfont`). They play no part in
+  finding the face.
+
+Nothing found (`fontRef == 0`): the same "not loadable" error as above.
+
+**The index each host gives** (`XeTeX::font_index`) differs:
+- **CLI over TeX Live** (`crates/cli/src/xefonts.rs`):
+  - fontconfig's full list, from `fc-list` in the process's environment
+    (`FONTCONFIG_FILE` honoured), in its order.
+  - After it, TeX Live's `fonts/opentype` and `fonts/truetype` faces that
+    the list lacks, in the order fontconfig lists those two trees by
+    themselves.
+  - The reason: TeX Live's installation (its `texlive-fontconfig.conf`,
+    which distributions ship as `09-texlive*.conf`) puts its trees into
+    fontconfig. That is the xelatex people run, and documents that name
+    TeX Live's fonts work there and in PhiTeX today. A machine without it
+    (the CI image's bare fontconfig lists no font) is an artifact of the
+    install. On a configured system the union *is* fontconfig's list, so
+    PhiTeX matches xelatex.
+  - The CI's oracles and tests set `FONTCONFIG_FILE=scripts/xetex/fonts.conf`
+    (TeX Live's two trees only) for both sides.
+- **Caching that index.** The index is kept in the cache under a key of
+  fontconfig's configuration as fontconfig's own cache checks it:
+  - the configuration files read, from `FONTCONFIG_FILE`/`FONTCONFIG_PATH`
+    through every `<include>`, and the `conf.d` directories;
+  - every `<dir>` (with `prefix="xdg"`, `~`, `prefix="relative"`
+    expanded) and its subdirectories, by path and modification time;
+  - TeX Live's two trees;
+  - any directory the list showed that the configuration did not name;
+  - the environment fontconfig reads, and `fc-list`'s file.
+
+  A font added to `~/.local/share/fonts` changes its directory's time, so
+  the next process lists again. A warm start with nothing changed runs no
+  `fc-list`: it stats the directories and reads the index. A running
+  watch keeps the index it started with.
+- **Shelf host (CLI `files = "shelf"`) and the browser and VS Code
+  builtin core** (`crates/cli/src/shelf.rs`, `crates/wasm/live/src/live.rs`):
+  - The index is the release's (`fonts/misc/partex/fontindex.pxfi`):
+    TeX Live's two trees as the oracle's fontconfig lists them. It has no
+    system fonts and no user fonts.
+  - A `[file]` name tries kpathsea's names above. The project's files
+    come first (kpathsea's `.`: the CLI's directory; the core's files
+    given by the host). Then Shelf's tree. The core then asks its host
+    for a project file it was not given.
+  - A font error in these hosts carries a note
+    (`phitex_live::xefonts::SHELF_FONTS_NOTE`, the diagnostic's help):
+    which fonts the host has, and that a font of one's own is used by
+    putting its file in the project and loading it by file name.
 
 ## 4. Native words in the typesetter
 

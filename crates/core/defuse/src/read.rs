@@ -58,14 +58,27 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
     if let Some(x) = eng.env.values.read().get(&f) {
         return *x;
     }
-    let x = eng
-        .env
-        .provider
-        .read()
-        .as_ref()
-        .and_then(|p| p(eng.values(), f))
-        .flatten();
-    eng.env.values.write().entry(f).or_insert(x);
+    // (asked once: a miss being answered is waited for, not answered
+    // again beside it. A clean build's first paragraphs, one a worker, all
+    // asked the format's hyphenation patterns at once and each built the
+    // whole value, its every list interned on the same shards: amsldoc at
+    // -j8, 8 runs of 300 ms on the CPU for 45 ms of work at -j1)
+    let cell = Arc::clone(eng.env.asking.lock().entry(f).or_default());
+    let x = *cell.get_or_init(|| {
+        if let Some(x) = eng.env.values.read().get(&f) {
+            return *x;
+        }
+        let x = eng
+            .env
+            .provider
+            .read()
+            .as_ref()
+            .and_then(|p| p(eng.values(), f))
+            .flatten();
+        eng.env.values.write().entry(f).or_insert(x);
+        x
+    });
+    eng.env.asking.lock().remove(&f);
     x
 }
 
@@ -2410,6 +2423,57 @@ mod tests {
     use crate::engine::Engine;
     use crate::node::ReadKind;
     use crate::values::{Field, ValueId};
+
+    /// An environment miss is answered once: threads asking the same
+    /// field while its provider runs wait for that answer, the provider not
+    /// asked again beside it (a clean build's first paragraphs, one a
+    /// worker, each built the format's hyphenation patterns at once), and
+    /// a provider that panics leaves the field to the next asker.
+    #[test]
+    fn an_environment_miss_is_answered_once() {
+        use std::sync::atomic::AtomicUsize;
+        let eng = Engine::new();
+        let f = eng.values().field("slow");
+        let g = eng.values().field("fails");
+        let asked = Arc::new(AtomicUsize::new(0));
+        let k = Arc::clone(&asked);
+        let failed = Arc::new(AtomicBool::new(false));
+        let once = Arc::clone(&failed);
+        eng.set_env_provider(Box::new(move |v, x| {
+            if x == g {
+                assert!(once.swap(true, Ordering::SeqCst), "the first answer fails");
+                return Some(Some(v.int(3)));
+            }
+            k.fetch_add(1, Ordering::SeqCst);
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_millis(50) {
+                std::hint::spin_loop();
+            }
+            Some(Some(v.int(9)))
+        }));
+        let n = 8;
+        let go = std::sync::Barrier::new(n);
+        let got: Vec<Option<ValueId>> = std::thread::scope(|s| {
+            let hs: Vec<_> = (0..n)
+                .map(|_| {
+                    s.spawn(|| {
+                        go.wait();
+                        super::env_value(&eng, f)
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().expect("an asker")).collect()
+        });
+        assert!(got.iter().all(|&x| x == Some(eng.values().int(9))));
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "the provider asked once for one field");
+        let first = std::thread::scope(|s| s.spawn(|| super::env_value(&eng, g)).join());
+        assert!(first.is_err(), "the first answer panicked");
+        assert_eq!(
+            super::env_value(&eng, g),
+            Some(eng.values().int(3)),
+            "the next asker answers"
+        );
+    }
 
     /// Nothing holds no key: `Has` on no value is false, as `Present`, so
     /// a client that noted a key missing from a list it looked at (`Ctx::

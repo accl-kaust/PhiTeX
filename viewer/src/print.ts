@@ -286,16 +286,38 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
+/* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
+   white), darken on Dark PDF's (its light ink takes a light colour, the grey stays); a stop "wi" leaves the ink as it is; the
+   colours the panel's variables (Panel.waspApply: the preset or the user's, at the strength chosen), Classic's at full without them */
+.phx-wasp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: lighten; }
+.phx-wasp .wi { stop-color: #000; }
+.phx-wasp .w0 { stop-color: var(--ph-wasp0, #1747d6); }
+.phx-wasp .w1 { stop-color: var(--ph-wasp1, #d0202a); }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
-.zooming .phx-text { display: none; }
+.zooming .phx-text, .phx-text[data-hold] { display: none; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 /* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
 .peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: default; font: var(--ph-size)/1.4 var(--ph-font); }
-.peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
-.peek .pv canvas { display: block; }
+.peek .pv { position: relative; height: 250px; overflow: auto; overscroll-behavior: contain; background: #fff; touch-action: pan-x pan-y; }
+.peek .pv canvas { display: block; position: absolute; left: 0; top: 0; }
+.peek .pv .pz { pointer-events: none; }
+.peek.zoomed .pv { cursor: grab; }
+.peek.zoomed .pv.grabbing { cursor: grabbing; }
+.peek .pf .zm { display: inline-flex; align-items: center; gap: 1px; margin-left: auto; }
+.peek .pf .zm button { all: unset; cursor: pointer; display: inline-grid; place-items: center; min-width: 20px; height: 20px; border-radius: var(--ph-radius); color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.peek .pf .zm button svg { width: 14px; height: 14px; }
+.peek .pf .zm .zl { min-width: 38px; font-size: 11.5px; }
+.peek .pf .zm button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg); }
+.peek .pf .zm button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.peek.cite .pf .zm, .peek.url .pf .zm, .peek.wait .pf .zm { display: none; }
+.peek .pf .zm + .go { margin-left: 4px; }
 .peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
 .peek.wait .pv canvas, .peek.wait .pv .at { visibility: hidden; }
 .peek .pu { display: none; padding: 8px 10px 0; word-break: break-all; color: var(--ph-link, var(--ph-accent)); }
@@ -394,6 +416,8 @@ header:active { cursor: grabbing; }
 .smarks i:hover { transform: scale(1.5, 2); }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
+.smarks i.rv-highlight { background: #c9a800; } .smarks i.rv-note { background: #2f6fd1; } .smarks i.rv-comment { background: #e08a1e; }
+.smarks i.rv-change { background: #1a7f37; } .smarks i.rv-dim { opacity: .4; }
 .phx-card[data-key] { cursor: pointer; }
 /* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
    amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
@@ -659,6 +683,28 @@ header:active { cursor: grabbing; }
 .settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
 .settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
 .settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+/* Colour lines' tab: the presets as swatches, the strength's slider, Custom's two pickers, the sample */
+.settings .srow.swatches { grid-template-areas: "lab lab" "help help" "picks picks" "err err"; }
+.settings .swatches .tiles { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+.settings .sw { all: unset; cursor: pointer; display: grid; gap: 5px; justify-items: center; font-size: 12px; color: var(--ph-fg2); }
+.settings .sw .art { display: grid; gap: 3px; width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: var(--ph-radius); background: #fff; box-shadow: 0 0 0 1px var(--ph-border); }
+.settings .sw .art.dark { background: ${DARK_PAGE}; }
+.settings .sw .art i { display: block; height: 4px; border-radius: 2px; }
+.settings .sw .art i:last-child { width: 60%; }
+.settings .sw[aria-pressed="true"] { color: var(--ph-fg); font-weight: 600; }
+.settings .sw[aria-pressed="true"] .art { box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .sw:focus-visible .art { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.settings .sw:disabled { cursor: default; opacity: .55; }
+.settings input[type="range"] { width: 180px; accent-color: var(--ph-accent); }
+.settings .cols { display: inline-flex; gap: 8px; }
+.settings .cols input { width: 34px; height: 24px; padding: 0 2px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); background: var(--ph-menu); cursor: pointer; }
+.settings .srow.custom { grid-template-areas: "lab lab" "help help" "picks picks"; }
+.settings .wsample { grid-area: picks; margin-top: 8px; padding: 12px 16px; border-radius: var(--ph-radius); box-shadow: 0 0 0 1px var(--ph-border); background: #fff; color: #000; isolation: isolate; overflow: hidden; text-align: left; font: 13px/1.45 Georgia, "Times New Roman", serif; }
+.settings .wsample.dark { background: #282828; color: #e1e1e1; }
+.settings .wsample span { position: relative; display: block; width: fit-content; white-space: nowrap; }
+.settings .wsample span.h { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.settings .wsample span i { position: absolute; inset: 0 -2px; mix-blend-mode: lighten; pointer-events: none; }
+.settings .wsample.dark span i { mix-blend-mode: darken; }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
 .settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
 .settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }

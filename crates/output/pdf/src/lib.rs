@@ -102,6 +102,8 @@ mod marks;
 #[doc(hidden)]
 pub mod num;
 mod objects;
+mod stream;
+pub use stream::StreamMemo;
 /// (measure) `PHITEX_TEX_TIME`: per-thread phase clocks a finisher
 /// reads out (the engine's phases and the writer's).
 pub mod phase {
@@ -148,7 +150,7 @@ pub mod t1;
 mod t3;
 pub use t3::{fixed_pk_resolution, magstep_fix, pk_dpi, pk_file_name, pk_request};
 mod tap;
-pub use tap::GlyphTap;
+pub use tap::{GlyphTap, literal_codes};
 mod tounicode;
 mod ttf;
 mod vf;
@@ -931,6 +933,12 @@ pub struct PdfState {
     /// of the digest.
     pub(crate) font_reads: Vec<(i64, Option<Vec<u8>>)>,
     last_arg_other_subr3: i32,
+    /// A page's file of its own ([`PdfState::stream_with`]): its fonts'
+    /// programs and images' streams from this memo.
+    stream_memo: Option<Arc<StreamMemo>>,
+    /// Where a PNG's streams are kept, made once a build: the pages'
+    /// files' memo, which the build's link reads too.
+    png_memo: Option<Arc<StreamMemo>>,
     // `\pdfinfo` and friends, concatenated
     info_toks: Option<digest::Toks>,
     catalog_toks: Option<digest::Toks>,
@@ -1069,6 +1077,8 @@ impl PdfState {
             font_files: Vec::new(),
             font_reads: Vec::new(),
             last_arg_other_subr3: 3,
+            stream_memo: None,
+            png_memo: None,
             info_toks: None,
             catalog_toks: None,
             catalog_openaction: 0,
@@ -1437,6 +1447,13 @@ pub(crate) fn compress_resumed(data: &[u8], level: i32) -> Vec<u8> {
         );
     }
     z
+}
+
+/// The compression of the cross-reference stream of a page's file of its
+/// own (`crate::stream`): not resumed from the link's state, which the
+/// next link resumes from ([`compress_resumed`]).
+pub(crate) fn compress_xref_alone(data: &[u8], level: i32) -> Vec<u8> {
+    phitex_codecs::deflate::compress(data, level)
 }
 
 /// `substr_of_str(s, t)`: whether `s` occurs in `t` (not at its very

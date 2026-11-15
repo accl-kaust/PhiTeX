@@ -179,6 +179,8 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      # (bench.yml started: a release made with this token starts no workflow by its event)
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -217,3 +219,9 @@ jobs:
           awk -v v="## ${GITHUB_REF_NAME#v} " '/^## / {on = index($0, v) == 1; next} on' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "PhiTeX $GITHUB_REF_NAME" > notes.md
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "PhiTeX $GITHUB_REF_NAME" --notes-file notes.md dist/*
+      # (the proof page's numbers for this release, phitex.org/measured: bench.yml.
+      # A release made with GITHUB_TOKEN starts no `release` workflow; a dispatch does)
+      - name: the benchmark started
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bench.yml --ref "$GITHUB_REF_NAME" -f tag="$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"

@@ -39,6 +39,34 @@ pub struct State {
     /// `aglmap`: read only once loaded, so shared by a session's
     /// snapshots (`Session::snapshot`), not copied for each.
     pub aglmap: alloc::sync::Arc<HtTable<AglName>>,
+    /// The map as `agl_init_map` read it last and the list files' bytes
+    /// it read it from ([`Read`]).
+    pub read: Read,
+}
+
+/// The map `agl_init_map` read from the list files' bytes, with those
+/// bytes: a memo, not the session's state (equal to any other), kept by
+/// its snapshots and handed on (`Session::adopt_memos`); a map read from
+/// the same bytes is the same map, so `agl_init_map` takes it in place
+/// of reading them again (a page's file of its own opens its document
+/// once a page: the lists were read for each, 21M instructions).
+#[derive(Clone, Default)]
+pub struct Read(pub Option<(Vec<Option<Arc<[u8]>>>, Arc<HtTable<AglName>>)>);
+
+impl PartialEq for Read {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl core::fmt::Debug for Read {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Read(..)"
+        } else {
+            "Read(-)"
+        })
+    }
 }
 
 /// `modifiers` (static; without the C terminator).
@@ -412,16 +440,42 @@ fn put_unicode_glyph(name: &[u8], dst: &mut [u8], dstp: &mut usize) -> i32 {
 }
 
 impl Dpx {
-    /// `agl_init_map`.
+    /// `agl_init_map` (the map read from the same bytes before taken,
+    /// [`Read`]).
     pub fn agl_init_map(&mut self) -> Result<()> {
+        let mut fps = Vec::with_capacity(3);
+        for f in [
+            AGL_EXTRA_LISTFILE,
+            AGL_PREDEF_LISTFILE,
+            AGL_DEFAULT_LISTFILE,
+        ] {
+            fps.push(self.dpx_open_file(f, crate::dpxfile::ResType::Agl)?);
+        }
+        let src: Vec<Option<Arc<[u8]>>> = fps
+            .iter()
+            .map(|f| f.as_ref().map(|m| m.data.clone()))
+            .collect();
+        if let Some((was, map)) = &self.agl.read.0
+            && was.len() == src.len()
+            && was.iter().zip(&src).all(|(a, b)| match (a, b) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a[..] == b[..],
+                (None, None) => true,
+                _ => false,
+            })
+        {
+            self.agl.aglmap = map.clone();
+            return Ok(());
+        }
         self.agl.aglmap = alloc::sync::Arc::new(HtTable::ht_init_table());
-        self.agl_load_listfile(AGL_EXTRA_LISTFILE, 0)?;
-        if self.agl_load_listfile(AGL_PREDEF_LISTFILE, 1)? < 0 {
+        let mut fps = fps.into_iter();
+        self.agl_load_listfile(fps.next().flatten(), 0);
+        if self.agl_load_listfile(fps.next().flatten(), 1) < 0 {
             warn!("Failed to load AGL file \"pdfglyphlist.txt\"...");
         }
-        if self.agl_load_listfile(AGL_DEFAULT_LISTFILE, 0)? < 0 {
+        if self.agl_load_listfile(fps.next().flatten(), 0) < 0 {
             warn!("Failed to load AGL file \"glyphlist.txt\"...");
         }
+        self.agl.read = Read(Some((src, self.agl.aglmap.clone())));
         Ok(())
     }
 
@@ -430,12 +484,13 @@ impl Dpx {
         alloc::sync::Arc::make_mut(&mut self.agl.aglmap).ht_clear_table();
     }
 
-    /// `agl_load_listfile` (static): the number of entries read, or -1.
-    fn agl_load_listfile(&mut self, filename: &[u8], is_predef: i32) -> Result<i32> {
+    /// `agl_load_listfile` (static) on the file opened (`fp`): the
+    /// number of entries read, or -1.
+    fn agl_load_listfile(&mut self, fp: Option<crate::stream::MemFile>, is_predef: i32) -> i32 {
         use crate::parse::{parse_ident, skip_white};
         let mut count = 0;
-        let Some(mut fp) = self.dpx_open_file(filename, crate::dpxfile::ResType::Agl)? else {
-            return Ok(-1);
+        let Some(mut fp) = fp else {
+            return -1;
         };
         while let Some(mut line) = fp.mfgets(WBUF_SIZE) {
             // C works on the NUL-terminated buffer.
@@ -501,7 +556,7 @@ impl Dpx {
             }
             count += 1;
         }
-        Ok(count)
+        count
     }
 
     /// `agl_lookup_list`: a copy of the entry (with its `alternate` chain).

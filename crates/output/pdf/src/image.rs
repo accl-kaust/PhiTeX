@@ -153,6 +153,23 @@ impl Image {
         }
     }
 
+    /// The codes the image shows where it is drawn: an included page's
+    /// text's (its forms' counted), none for a picture.
+    fn codes(&self) -> usize {
+        let Kind::Pdf(p) = &self.kind else {
+            return 0;
+        };
+        let Ok(doc) = open_doc(&self.data) else {
+            return 0;
+        };
+        usize::try_from(p.page)
+            .ok()
+            .and_then(|k| doc.page(k))
+            .map_or(0, |page| {
+                phitex_codecs::pdftext::page_codes(&doc, &page).len()
+            })
+    }
+
     /// `img_width`, `img_height` as the page is shown.
     fn shown(&self) -> (i32, i32) {
         if matches!(self.rotate(), 90 | 270) {
@@ -905,54 +922,106 @@ impl PdfState {
 
     // ---- on the page ----
 
-    /// `out_image` (pdfTeX §1620).
-    pub(crate) fn out_image(&mut self, n: usize, width: Scaled, height: Scaled, depth: Scaled) {
-        let Some(x) = self.aux.ximages.get(&n) else {
+    /// `out_image` (pdfTeX §1620) at (`h`, `v`) ([`PdfState::xobject_ops`]):
+    /// an image without its picture shows nothing.
+    pub(crate) fn out_image(&mut self, n: usize, vertical: bool, h: Scaled, v: Scaled) {
+        let Some((pdf, png, group_ref)) = self.aux.ximages.get(&n).and_then(|x| {
+            let i = x.image.as_ref()?;
+            Some((
+                matches!(i.kind, Kind::Pdf(_)),
+                matches!(i.kind, Kind::Png),
+                x.group_ref,
+            ))
+        }) else {
             return;
         };
-        let Some(image) = x.image.clone() else {
-            return;
-        };
-        let group_ref = x.group_ref;
-        let (img_w, img_h) = image.shown();
         self.end_text();
-        self.print_ln(b"q");
         if !self.ximage_list.contains(&n) {
             self.ximage_list.push(n);
         }
-        let px = self.cur_h - self.origin_h;
-        let py = self.origin_v - self.cur_v;
-        let total = height + depth;
-        if let Kind::Pdf(p) = &image.kind {
+        if pdf {
             self.show_ximage_group(n);
-            self.print_real(ext_xn_over_d(width, TEN_POW[6], i64::from(img_w)), 6);
-            self.print(b" 0 0 ");
-            self.print_real(ext_xn_over_d(total, TEN_POW[6], i64::from(img_h)), 6);
-            self.pdf_out(b' ');
-            self.print_bp(px - ext_xn_over_d(width, i64::from(p.orig_x), i64::from(img_w)));
-            self.pdf_out(b' ');
-            self.print_bp(py - ext_xn_over_d(total, i64::from(p.orig_y), i64::from(img_h)));
-        } else {
-            if matches!(image.kind, Kind::Png) && group_ref > 0 && self.page_group_val == 0 {
-                self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
-            }
-            let hb = i64::from(ONE_HUNDRED_BP);
-            self.print_real(ext_xn_over_d(width, TEN_POW[6], hb), 4);
-            self.print(b" 0 0 ");
-            self.print_real(ext_xn_over_d(total, TEN_POW[6], hb), 4);
-            self.pdf_out(b' ');
-            self.print_bp(px);
-            self.pdf_out(b' ');
-            self.print_bp(py);
+        } else if png && group_ref > 0 && self.page_group_val == 0 {
+            self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
         }
-        self.print_ln(b" cm");
-        self.print(b"/Im");
-        self.print_int(self.objs[n].info);
-        self.print_ln(b" Do");
+        if let Some(ops) = self.xobject_ops(n, false, vertical, h, v) {
+            self.print(&ops);
+        }
+        self.tap_image(n);
+    }
+
+    /// The codes image `n` shows where it is drawn, where its picture is
+    /// read.
+    pub(crate) fn ximage_codes(&self, n: usize) -> Option<usize> {
+        self.aux
+            .ximages
+            .get(&n)
+            .and_then(|x| x.image.as_ref())
+            .map(Image::codes)
+    }
+
+    /// Tells the tap image `n` drawn, and its codes where its picture is
+    /// read.
+    pub(crate) fn tap_image(&mut self, n: usize) {
+        if !self.tap.on() {
+            return;
+        }
+        let codes = self.ximage_codes(n);
         if let Some(t) = self.tap.sink.as_mut() {
-            t.xobject();
+            t.xobject(n);
+            if let Some(c) = codes {
+                t.xobject_codes(n, c);
+            }
         }
-        self.print_ln(b"Q");
+    }
+
+    /// Image `n`'s matrix ([`PdfState::xobject_ops`]), on `o`: its box
+    /// placed `h` right of the origin and `v` below it (a vlist's top,
+    /// `vertical`: down by its height and depth; else the baseline: down
+    /// by its depth).
+    pub(crate) fn image_ops(
+        &self,
+        n: usize,
+        vertical: bool,
+        h: Scaled,
+        v: Scaled,
+        o: &mut Vec<u8>,
+    ) -> Option<()> {
+        let x = self.aux.ximages.get(&n)?;
+        let image = x.image.as_ref()?;
+        let (width, height, depth) = (x.width, x.height, x.depth);
+        let (img_w, img_h) = image.shown();
+        let px = h;
+        let py = v - if vertical { height + depth } else { depth };
+        let total = height + depth;
+        let dd = self.dd;
+        if let Kind::Pdf(p) = &image.kind {
+            crate::num::real(o, ext_xn_over_d(width, TEN_POW[6], i64::from(img_w)), 6);
+            o.extend_from_slice(b" 0 0 ");
+            crate::num::real(o, ext_xn_over_d(total, TEN_POW[6], i64::from(img_h)), 6);
+            o.push(b' ');
+            crate::num::bp(
+                o,
+                px - ext_xn_over_d(width, i64::from(p.orig_x), i64::from(img_w)),
+                dd,
+            );
+            o.push(b' ');
+            crate::num::bp(
+                o,
+                py - ext_xn_over_d(total, i64::from(p.orig_y), i64::from(img_h)),
+                dd,
+            );
+        } else {
+            let hb = i64::from(ONE_HUNDRED_BP);
+            crate::num::real(o, ext_xn_over_d(width, TEN_POW[6], hb), 4);
+            o.extend_from_slice(b" 0 0 ");
+            crate::num::real(o, ext_xn_over_d(total, TEN_POW[6], hb), 4);
+            o.push(b' ');
+            crate::num::bp(o, px, dd);
+            o.push(b' ');
+            crate::num::bp(o, py, dd);
+        }
+        Some(())
     }
 
     // ---- writing ----
@@ -1093,11 +1162,70 @@ impl PdfState {
             self.png_device(image.colorspace_ref, color_type == png::COLOR_GRAY);
             return self.copy_png(image, &info, bit_depth);
         }
-        let img = png::read_image(&image.data, &info, t)
-            .map_err(|_| fail(name, "libpng: internal error"))?;
-        let rows = &img.rows;
+        // (the streams of the object, in their order: the rows, or the
+        // colours and the soft mask apart, then the palette; a page's
+        // file of its own takes them decoded and compressed once,
+        // `crate::stream`)
+        let hicolor = self.fixed_image_hicolor;
+        let alpha_split = major > 1 || minor >= 4;
+        let decode = || -> Result<(u8, u8, Vec<Vec<u8>>), PdfError> {
+            let img = png::read_image(&image.data, &info, t)
+                .map_err(|_| fail(name, "libpng: internal error"))?;
+            let streams = match img.color_type {
+                png::COLOR_PALETTE => {
+                    let bytes: Vec<u8> = info.palette.iter().flatten().copied().collect();
+                    vec![img.rows, bytes]
+                }
+                png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA if alpha_split => {
+                    let gray = img.color_type == png::COLOR_GRAY_ALPHA;
+                    let wide = img.bit_depth == 16 && hicolor != 0;
+                    let (n, alpha_from) = match (gray, wide) {
+                        (true, true) => (4, 2),
+                        (true, false) => (2, 1),
+                        (false, true) => (8, 6),
+                        (false, false) => (4, 3),
+                    };
+                    let mut color = Vec::with_capacity(img.rows.len());
+                    let mut smask = Vec::new();
+                    for row in img.rows.chunks(img.rowbytes.max(1)) {
+                        for piece in row.chunks(16384) {
+                            for (j, &b) in piece.iter().enumerate() {
+                                if j % n < alpha_from {
+                                    color.push(b);
+                                } else {
+                                    smask.push(b);
+                                }
+                            }
+                        }
+                    }
+                    let mask: Vec<u8> = if img.bit_depth == 16 {
+                        smask.iter().step_by(2).copied().collect()
+                    } else {
+                        smask
+                    };
+                    vec![color, mask]
+                }
+                _ => vec![img.rows],
+            };
+            Ok((img.color_type, img.bit_depth, streams))
+        };
+        let memo = self.png_memo.clone();
+        let (made, raw) = match &memo {
+            Some(m) => (Some(self.stream_png(m, &image.data, decode)?), None),
+            None => (None, Some(decode()?)),
+        };
+        let (color_type, depth) = match (&made, &raw) {
+            (Some(m), _) => (m.color_type, m.bit_depth),
+            (_, Some((c, d, _))) => (*c, *d),
+            _ => (0, 0),
+        };
+        let put = |st: &mut Self, k: usize| match (&made, &raw) {
+            (Some(m), _) => st.put_made_stream(m.streams.get(k).map_or(&[][..], |b| &b[..])),
+            (_, Some((_, _, s))) => st.png_stream(s.get(k).map_or(&[][..], |b| &b[..])),
+            _ => {}
+        };
         let mut needs_group = false;
-        match img.color_type {
+        match color_type {
             png::COLOR_PALETTE => {
                 let palette_objnum = self.new_objnum_();
                 if image.colorspace_ref != 0 {
@@ -1111,42 +1239,20 @@ impl PdfState {
                         .as_bytes(),
                     );
                 }
-                self.png_stream(rows);
+                put(self, 0);
                 self.begin_dict(palette_objnum, 0);
-                let bytes: Vec<u8> = info.palette.iter().flatten().copied().collect();
-                self.png_stream(&bytes);
+                put(self, 1);
             }
             png::COLOR_GRAY | png::COLOR_RGB => {
-                self.png_device(image.colorspace_ref, img.color_type == png::COLOR_GRAY);
-                self.png_stream(rows);
+                self.png_device(image.colorspace_ref, color_type == png::COLOR_GRAY);
+                put(self, 0);
             }
-            png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA if major > 1 || minor >= 4 => {
-                let gray = img.color_type == png::COLOR_GRAY_ALPHA;
+            png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA if alpha_split => {
+                let gray = color_type == png::COLOR_GRAY_ALPHA;
                 self.png_device(image.colorspace_ref, gray);
                 let smask_objnum = self.new_objnum_();
                 self.print(format!("/SMask {smask_objnum} 0 R\n").as_bytes());
-                let wide = img.bit_depth == 16 && self.fixed_image_hicolor != 0;
-                let (n, alpha_from) = match (gray, wide) {
-                    (true, true) => (4, 2),
-                    (true, false) => (2, 1),
-                    (false, true) => (8, 6),
-                    (false, false) => (4, 3),
-                };
-                let mut color = Vec::with_capacity(rows.len());
-                let mut smask = Vec::new();
-                for row in rows.chunks(img.rowbytes.max(1)) {
-                    for piece in row.chunks(16384) {
-                        for (j, &b) in piece.iter().enumerate() {
-                            if j % n < alpha_from {
-                                color.push(b);
-                            } else {
-                                smask.push(b);
-                            }
-                        }
-                    }
-                }
-                self.png_stream(&color);
-                let depth = img.bit_depth;
+                put(self, 0);
                 self.begin_dict(smask_objnum, 0);
                 self.print(b"/Type /XObject\n/Subtype /Image\n");
                 self.print(
@@ -1159,20 +1265,12 @@ impl PdfState {
                     .as_bytes(),
                 );
                 self.print(b"/ColorSpace /DeviceGray\n");
-                let mask: Vec<u8> = if depth == 16 {
-                    smask.iter().step_by(2).copied().collect()
-                } else {
-                    smask
-                };
-                self.png_stream(&mask);
+                put(self, 1);
                 needs_group = true;
             }
             png::COLOR_GRAY_ALPHA | png::COLOR_RGB_ALPHA => {
-                self.png_device(
-                    image.colorspace_ref,
-                    img.color_type == png::COLOR_GRAY_ALPHA,
-                );
-                self.png_stream(rows);
+                self.png_device(image.colorspace_ref, color_type == png::COLOR_GRAY_ALPHA);
+                put(self, 0);
             }
             t => return Err(fail(name, &format!("unsupported type of color_type <{t}>"))),
         }

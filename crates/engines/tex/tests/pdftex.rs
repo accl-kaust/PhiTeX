@@ -186,6 +186,29 @@ fn find(h: &[u8], n: &[u8]) -> Option<usize> {
     h.windows(n.len()).position(|w| w == n)
 }
 
+/// Pages showing forms and images TeX made before them (`xobjpages`,
+/// pdfTeX's PDF its oracle, [`pdf_documents`]): the link places each as
+/// its own writer wrote it, the forms' and images' operators made where
+/// it places them (`PdfState::replay_page`), an image not written yet
+/// written there, but for a page showing a form not written yet, whose
+/// walk writes it: the first page (`\\f`) and the first showing `\\v`.
+#[test]
+fn pages_showing_forms_and_images_are_placed() {
+    let dir = common::fixtures().join("pdf");
+    let src = common::read(&dir.join("xobjpages.tex"));
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        ..common::options("./xobjpages.tex", "xobjpages", "", &dir)
+    };
+    let b = common::build(opts, None, &src);
+    let (placed, shipped) = b.link_pages();
+    assert!(placed > 2, "{placed} pages placed");
+    assert_eq!(
+        shipped, 2,
+        "only the pages writing a form shipped again ({placed} placed)"
+    );
+}
+
 /// The documents that do not pass yet: un-ignored as they are fixed.
 const PENDING: &[&str] = &[];
 
@@ -309,6 +332,13 @@ fn pdf_edits() {
         ),
         ("linkbreak", &[("several", "sevral"), ("Then", "Thn")]),
         ("png", &[("{png-gray.png}", "{png-rgba.png}")]),
+        (
+            "xobjpages",
+            &[
+                ("Line \\the", "Lines \\the"),
+                ("\\count1>20", "\\count1>25"),
+            ],
+        ),
     ];
     let only = std::env::var("PHITEX_GATE").ok();
     let mut failed = Vec::new();
@@ -678,6 +708,104 @@ fn glyph_origins_plain() {
     );
     let f = common::origin_failures(&b, &new2, "orig.tex");
     assert!(f.is_empty(), "origins after the edits:\n{}", f.join("\n"));
+}
+
+/// Right-to-left text (TeX--XeT's `\beginR`...`\endR`), which the
+/// page shows in the reverse of its reading order: each glyph's origin is
+/// its own occurrence in the source, a word repeated in the segment and
+/// a paragraph repeated whole too. Read in the page's order, the
+/// segment's words matched the source's the wrong way round (its first
+/// `gamma` took the second's bytes) and a repeated paragraph's lines
+/// both took the first's: the editor's cursor on one marked both or
+/// neither.
+#[test]
+fn right_to_left_glyph_origins_are_their_own_occurrence() {
+    let src = "\\pdfoutput=1 \\TeXXeTstate=1\nalpha \\beginR gamma delta gamma\\endR\\ omega.\n\n\\beginR one two three\\endR\n\n\\beginR one two three\\endR\n\\bye\n";
+    let b = origins_build(src, 1, true);
+    let f = common::origin_failures(&b, src, "orig.tex");
+    assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
+    let at = |w: &str, k: usize| {
+        (
+            src.match_indices(w).nth(k).expect("the word").0,
+            w.to_owned(),
+        )
+    };
+    assert_eq!(
+        common::page_words(&b, 0, src.as_bytes(), "orig.tex"),
+        [
+            at("alpha", 0),
+            at("gamma", 1),
+            at("delta", 0),
+            at("gamma", 0),
+            at("omega.", 0),
+            at("three", 0),
+            at("two", 0),
+            at("one", 0),
+            at("three", 1),
+            at("two", 1),
+            at("one", 1),
+        ]
+    );
+}
+
+/// [`origins_doc`] with forms and included pages drawn among its
+/// paragraphs: a `\pdfxform` of words, a form in a form, and a page of
+/// `hello.pdf` (its words), each drawn on several pages.
+fn origins_forms_doc() -> String {
+    let body = origins_doc();
+    let head = "\\setbox0\\hbox{Form words here}\\pdfxform0 \\edef\\fa{\\the\\pdflastxform}\n\\setbox0\\hbox{Outer \\pdfrefxform\\fa\\ words}\\pdfxform0 \\edef\\fb{\\the\\pdflastxform}\n\\pdfximage{hello.pdf}\\edef\\im{\\the\\pdflastximage}\n";
+    let mut s = String::new();
+    let mut k = 0;
+    for (i, par) in body.split("\n\n").enumerate() {
+        if i == 0 {
+            s.push_str(&par.replacen("\\medskip\n", &format!("\\medskip\n{head}"), 1));
+        } else {
+            s.push_str(par);
+        }
+        s.push_str("\n\n");
+        if i > 0 && i % 3 == 0 && !par.contains("\\bye") {
+            s.push_str(match k % 3 {
+                0 => "\\noindent Before the form \\pdfrefxform\\fa\\ after the form.\n\n",
+                1 => "\\noindent Before the nested \\pdfrefxform\\fb\\ after the nested.\n\n",
+                _ => "\\noindent Before the page \\pdfrefximage\\im\\ after the page.\n\n",
+            });
+            k += 1;
+        }
+    }
+    s.trim_end().to_owned() + "\n"
+}
+
+/// Glyph origins of pages that draw forms and included pages: every
+/// page's codes have one each (a form's and an included page's codes
+/// counted where they are drawn), the same at -j1 and -j8; after a word's
+/// edit the answers are a cold build's.
+#[test]
+fn glyph_origins_forms_and_pages() {
+    let src = origins_forms_doc();
+    let b = origins_build(&src, 1, true);
+    assert!(b.pages().len() >= 3, "pages: {}", b.pages().len());
+    let f = common::origin_failures(&b, &src, "orig.tex");
+    assert!(f.is_empty(), "origins:\n{}", f.join("\n"));
+    let b8 = origins_build(&src, 8, true);
+    assert_eq!(
+        b8.all_page_origins(),
+        b.all_page_origins(),
+        "-j8's origins are -j1's"
+    );
+    let mut b = b;
+    let at = src
+        .find("Ligatures like office")
+        .expect("the ligature line");
+    let new1 = format!("{}Lagatures{}", &src[..at], &src[at + "Ligatures".len()..]);
+    b.edit(&new1);
+    let cold = origins_build(&new1, 1, true);
+    assert_eq!(
+        b.all_page_origins(),
+        cold.all_page_origins(),
+        "the edit's origins are a cold build's"
+    );
+    let f = common::origin_failures(&b, &new1, "orig.tex");
+    assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
 }
 
 /// `\pdffilemoddate` of a file the job opened with `\openout` before

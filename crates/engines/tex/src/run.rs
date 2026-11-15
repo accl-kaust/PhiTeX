@@ -149,6 +149,8 @@ pub(crate) struct Ops {
     /// The document files the client cut (`api::DocFile`): a run reaching
     /// one places its slices as its pieces ([`Run::doc_file_regions`]).
     pub docs: crate::api::DocFiles,
+    /// The deferred counters' symbols, by number (`crate::defer::SymTable`).
+    pub syms: std::sync::Arc<crate::defer::SymTable>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
     pub out_ok: std::sync::Arc<std::sync::Mutex<Option<crate::api::OutNameOk>>>,
     /// What the last two finishers running each output routine defined,
@@ -194,6 +196,9 @@ pub(crate) struct Ops {
     /// Runs that ended at their text's end with a continuation
     /// (`crate::cut`; `Stats::text_cuts`).
     pub text_cuts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Pictures a run read inline where a child was placed or refused
+    /// (`crate::pic`; `Stats::pics_inline`).
+    pub pic_inline: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The commands a run does before it may be cut at its text's end
     /// ([`crate::Options::cut_min`], `crate::cut`).
     pub cut_min: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -299,7 +304,7 @@ pub(crate) struct Ops {
     /// What each node's last run published and read of the state, by
     /// node ([`NodeAudit`]): the state model's tests ask it
     /// (`Build::definitions_by_op`, `Build::reads_by_op`,
-    /// `Stats::relations_by_op`).
+    /// `Build::relations_by_op`).
     pub audit: std::sync::Arc<std::sync::Mutex<crate::FxHashMap<u64, NodeAudit>>>,
 }
 
@@ -539,6 +544,7 @@ impl FileRest {
             lineno: line,
             owner: None,
             src: None,
+            chunk: None,
             rescanned: false,
             chars: false,
         };
@@ -625,7 +631,10 @@ pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
 /// Where a diagnostic is ([`Run::diag_place`]): the line's file, its
 /// start in that file (-1: not a document's line), its unit, its text,
 /// the column, and whose text the line is ([`crate::input::Line::owner`]:
-/// a cut file's piece's frames, a document node).
+/// a cut file's piece's frames, a document node). A line of a format's
+/// text read from its chunks: [`crate::chunks::PLACE`] for its file, its
+/// line in the chunk for its start, the chunk's name for its unit (the
+/// build places it by its chunks as they are, `crate::chunks`).
 pub(crate) type DiagPlace = (ValueId, i64, ValueId, String, usize, Option<u64>);
 
 /// Whether `line`, the first of a text written to the log, begins a
@@ -780,6 +789,13 @@ pub(crate) struct Run<'c, 'a> {
     pub pic_stop: bool,
     /// The hashes of the pictures this run met, in order.
     pub pic_seen: Vec<u64>,
+    /// A picture of this run went on as if empty, its child's output to
+    /// come (`crate::pic`): the pictures after it in the run are given a
+    /// state without that one's work, so none is placed anew.
+    pub pic_pending: Option<u64>,
+    /// A picture of this run was read inline as one of many in a run
+    /// (`crate::pic`): the pictures after it with no output are too.
+    pub pic_many: bool,
     pub pic_child: Option<crate::pic::PicChild>,
     /// The child's output, in place of the run's ([`Run::finish`]).
     pub pic_out: Option<ValueId>,
@@ -1386,6 +1402,8 @@ impl<'c, 'a> Run<'c, 'a> {
             pic_on: false,
             pic_stop: false,
             pic_seen: Vec::new(),
+            pic_pending: None,
+            pic_many: false,
             pic_child: None,
             pic_out: None,
             pic_void: false,
@@ -4914,6 +4932,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 lineno: 0,
                 owner: None,
                 src: None,
+                chunk: None,
                 rescanned: true,
                 chars: false,
             }));
@@ -5394,6 +5413,30 @@ impl<'c, 'a> Run<'c, 'a> {
                 .and_then(char::from_u32)
                 .and_then(|c| text.split(c).next())
                 .unwrap_or(text);
+            // (a message whose first line is its header alone, as
+            // LaTeX3's `\msg_error:nnn` writes every one, fontspec's
+            // "Package fontspec Error: " then `(fontspec) The font
+            // "IPAexMincho" cannot be found; ...`: its lines after it,
+            // their `(fontspec)` prefixes left out, are the message. It
+            // was the header alone: an error that named no font)
+            let whole;
+            let first = match u32::try_from(nl).ok().and_then(char::from_u32) {
+                Some(c) if first.trim_end().ends_with("Error:") => {
+                    let rest: Vec<&str> = text
+                        .split(c)
+                        .skip(1)
+                        .map(continuation)
+                        .filter(|l| !l.is_empty() && !l.starts_with("For immediate help type H"))
+                        .collect();
+                    whole = format!("{} {}", first.trim_end(), rest.join(" "));
+                    if rest.is_empty() {
+                        first
+                    } else {
+                        whole.as_str()
+                    }
+                }
+                _ => first,
+            };
             self.diag(true, first);
         }
         if kind == "error" {
@@ -5534,7 +5577,33 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Where a diagnostic made now is: the input line being read (its
     /// file, the line's start in it, its unit, its text and the column).
+    #[inline(never)]
     pub(crate) fn diag_place(&self) -> DiagPlace {
+        // (a format's text read from its chunks: the line not reached yet
+        // where no line is on the stack, named by its chunk and line)
+        let reached = self
+            .input
+            .levels
+            .iter()
+            .any(|l| l.kind == crate::input::kind::LINE);
+        if !reached
+            && let Some(first) = self
+                .input
+                .text_rest()
+                .iter()
+                .find(|s| matches!(s, Seg::Line(_) | Seg::Chunk(..)))
+            && let &Seg::Chunk(id, k) = first
+        {
+            let v = self.v;
+            return (
+                v.str(crate::chunks::PLACE),
+                i64::from(k),
+                crate::chunks::id_value(v, id),
+                String::new(),
+                0,
+                None,
+            );
+        }
         let src = self
             .input
             .levels
@@ -5575,9 +5644,17 @@ impl<'c, 'a> Run<'c, 'a> {
                 // piece's lines, whose place moves with that piece, not
                 // with the running node's, [`crate::input::Line::owner`])
                 let owner = s.owner.map(|o| o.0);
-                match s.origin {
-                    Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc, owner),
-                    None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc, owner),
+                match (s.origin, s.chunk) {
+                    (Some((n, a, u)), _) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc, owner),
+                    (None, Some((id, k))) => (
+                        self.v.str(crate::chunks::PLACE),
+                        i64::from(k),
+                        crate::chunks::id_value(self.v, id),
+                        seg,
+                        loc,
+                        owner,
+                    ),
+                    (None, None) => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc, owner),
                 }
             }
             None => (ValueId::UNIT, -1, ValueId::UNIT, String::new(), 0, None),
@@ -6541,7 +6618,24 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             }
         }
+        // (a format's text read from chunks: the rest of it one node, from
+        // the chunk and line it goes on at, `crate::chunks`)
+        let mut chunked = false;
         for s in self.input.text_rest() {
+            if crate::chunks::from_chunk(s) {
+                if !chunked && let Some((id, k)) = crate::chunks::chunk_at(std::slice::from_ref(s))
+                {
+                    if !run.is_empty() {
+                        out.push(node(std::mem::take(&mut run)));
+                    }
+                    out.push(vec![
+                        v.list(vec![crate::chunks::frame(v, id, k)]),
+                        v.int(kind),
+                    ]);
+                }
+                chunked = true;
+                continue;
+            }
             match s {
                 Seg::Toks(t) => toks_left(t, &mut out, &mut run),
                 Seg::Line(l) => {
@@ -6550,6 +6644,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     line_left(l, &mut out);
                 }
+                Seg::Chunk(..) => {}
                 Seg::File(f) => {
                     if !run.is_empty() {
                         out.push(node(std::mem::take(&mut run)));
@@ -7829,7 +7924,18 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                         _ => None,
                     },
                     src: Some(f),
+                    chunk: None,
                 }));
+            }
+            Some("j") => {
+                // (a format's text from a line of a chunk on, read from
+                // the chunks where the run reaches it, [`Run::read_chunk`])
+                if let (Some(&id), Some(&k)) = (xs.get(1), xs.get(2)) {
+                    out = Some(Seg::Chunk(
+                        u64::from_ne_bytes(int_of(v, id).to_ne_bytes()),
+                        u32::try_from(int_of(v, k)).unwrap_or(0),
+                    ));
+                }
             }
             _ => {}
         }
@@ -7997,7 +8103,7 @@ impl Run<'_, '_> {
         let parked = self.input.text_at..self.parked_levels.min(self.input.text.len());
         for s in self.input.text.get(parked).unwrap_or_default() {
             match s {
-                Seg::Toks(_) => {}
+                Seg::Toks(_) | Seg::Chunk(..) => {}
                 Seg::Line(l) => {
                     if let Some(x) = line_of(l) {
                         return Some(x);

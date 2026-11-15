@@ -131,6 +131,8 @@ impl Session {
             written: Mutex::new(BTreeMap::new()),
             last_main: Mutex::new(None),
             updates: Mutex::new(None),
+            writing: Mutex::new(()),
+            synctex: Mutex::new(None),
         });
         (store, out)
     }
@@ -148,6 +150,12 @@ impl Session {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The session's output files for a way out that does not wait for
+    /// the build ([`WayOut`]).
+    pub fn way_out(&self) -> WayOut {
+        WayOut(self.out.clone())
     }
 
     /// The PDF file written as update sections from now on (`u`), or
@@ -183,6 +191,11 @@ impl Host for Machine {
 
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
         std::fs::read(path).ok()
+    }
+
+    /// A watch's exact `wait`: the project's files the engine was given.
+    fn fed(&self, path: &Path, bytes: &[u8]) {
+        crate::review::fed(path, bytes);
     }
 
     /// Its size, modification and change times and inode
@@ -378,9 +391,23 @@ struct Out {
     last_main: Mutex<Option<(PathBuf, Arc<Vec<u8>>)>>,
     /// The PDF file written as update sections, if it is.
     updates: Mutex<Option<Arc<Mutex<UpdateFile>>>>,
+    /// Held while a build's outputs are written ([`Sink::hold`]).
+    writing: Mutex<()>,
+    /// The SyncTeX file of the outputs written last, left for idle and
+    /// not written yet: its name and how it is made.
+    synctex: Mutex<Option<(String, phitex_live::host::SynctexMaker)>>,
 }
 
 impl Sink for Out {
+    fn hold(&self) -> Box<dyn phitex_live::host::Held + '_> {
+        Box::new(self.writing.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn synctex_due(&self, name: &str, make: Option<phitex_live::host::SynctexMaker>) {
+        *self.synctex.lock().unwrap_or_else(PoisonError::into_inner) =
+            make.map(|m| (name.to_owned(), m));
+    }
+
     fn begin(&self) -> Result<(), String> {
         let dir = &self.dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))
@@ -565,6 +592,8 @@ pub struct UpdateFile {
     pub exact: bool,
     /// Its writes so far (a compaction of an older state is dropped).
     pub writes: u64,
+    /// The temporary files of the compactions running ([`compact`]).
+    tmps: Vec<PathBuf>,
 }
 
 impl UpdateFile {
@@ -575,14 +604,6 @@ impl UpdateFile {
     }
 }
 
-/// The exact file of what `f` holds written over it, through a
-/// temporary file renamed (atomic), unless it is written already or
-/// another write came meanwhile: whether it was written. The exact
-/// bytes are made and written without the lock: a section an edit
-/// appends meanwhile wins, and the next idle writes the exact file.
-///
-/// # Errors
-/// The file system's.
 /// A file's key on disk for `r` in a watch ([`phitex_live::host::Host::stamp`]):
 /// its size, modification time and inode ([`phitex_tex::file_stat_key`]),
 /// and its change time. The change time moves at every write and no
@@ -668,27 +689,148 @@ pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
     (!k.is_empty()).then_some(k)
 }
 
+/// The exact file of what `f` holds written over it, through a
+/// temporary file renamed (atomic), unless it is written already or
+/// another write came meanwhile: whether it was written. The exact
+/// bytes are made and written without the lock: a section an edit
+/// appends meanwhile wins, and the next idle writes the exact file.
+///
+/// # Errors
+/// The file system's.
 pub fn compact(f: &Mutex<UpdateFile>) -> Result<bool, String> {
-    let (p, layout, writes) = {
-        let g = f.lock().unwrap_or_else(PoisonError::into_inner);
-        match &g.at {
-            Some((p, u)) if !g.exact => (p.clone(), u.held().clone(), g.writes),
+    let (p, layout, writes, tmp) = {
+        let mut g = f.lock().unwrap_or_else(PoisonError::into_inner);
+        let (p, layout) = match &g.at {
+            Some((p, u)) if !g.exact => (p.clone(), u.held().clone()),
             _ => return Ok(false),
+        };
+        let tmp = exact_tmp(&p);
+        g.tmps.push(tmp.clone());
+        (p, layout, g.writes, tmp)
+    };
+    let gone = |g: &mut UpdateFile| {
+        let _ = std::fs::remove_file(&tmp);
+        g.tmps.retain(|t| *t != tmp);
+    };
+    let exact = match layout.exact() {
+        Ok(b) => b,
+        Err(e) => {
+            gone(&mut f.lock().unwrap_or_else(PoisonError::into_inner));
+            return Err(format!("{e}"));
         }
     };
-    let exact = layout.exact().map_err(|e| format!("{e}"))?;
+    let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
+    let w = std::fs::write(&tmp, exact.as_slice()).map_err(err);
+    let mut g = f.lock().unwrap_or_else(PoisonError::into_inner);
+    if w.is_err() || g.writes != writes {
+        gone(&mut g);
+        return w.map(|()| false);
+    }
+    let r = std::fs::rename(&tmp, &p).map_err(err);
+    g.tmps.retain(|t| *t != tmp);
+    r?;
+    g.at = Some((p, phitex_pdf::Updater::after_exact(layout, &exact)));
+    g.exact = true;
+    g.writes += 1;
+    Ok(true)
+}
+
+/// A temporary file of its own beside `p` for one compaction: two at
+/// once (the idle's on its thread, the way out's) never write or rename
+/// the other's.
+fn exact_tmp(p: &Path) -> PathBuf {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = p
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let tmp = p.with_file_name(format!(".{name}.phitex-exact"));
-    let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
-    std::fs::write(&tmp, exact.as_slice()).map_err(err)?;
-    let mut g = f.lock().unwrap_or_else(PoisonError::into_inner);
-    if g.writes != writes {
-        let _ = std::fs::remove_file(&tmp);
-        return Ok(false);
+    p.with_file_name(format!(".{name}.phitex-exact-{n}"))
+}
+
+/// The session's output files as a way out that does not wait for the
+/// build sees them ([`Session::way_out`]): a quit while a build or the
+/// watch's loop works.
+#[derive(Clone)]
+pub struct WayOut(Arc<Out>);
+
+impl WayOut {
+    /// The process ended with exit status `status` (an error writing a
+    /// file said by `error` first), the files the session wrote whole and
+    /// as every other way out leaves them: a write of a build's outputs
+    /// in flight ends first and none begins after (the locks its writes
+    /// take are held until the process ends); the PDF file the exact one
+    /// of what it holds (its update sections compacted, the temporary
+    /// files of compactions still running removed); its SyncTeX file, if
+    /// left for idle, that of the outputs written (made from what they
+    /// were made from, whatever the build has become since).
+    pub fn end(&self, status: i32, mut error: impl FnMut(&str)) -> ! {
+        let _writing = self
+            .0
+            .writing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let _main = self
+            .0
+            .last_main
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let u = self
+            .0
+            .updates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut g = u
+            .as_ref()
+            .map(|u| u.lock().unwrap_or_else(PoisonError::into_inner));
+        if let Some(g) = g.as_deref_mut() {
+            for t in std::mem::take(&mut g.tmps) {
+                let _ = std::fs::remove_file(t);
+            }
+            if let Err(e) = compact_held(g) {
+                error(&e);
+            }
+        }
+        let _written = self
+            .0
+            .written
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let due = self
+            .0
+            .synctex
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((name, make)) = due
+            && let Some(gz) = make()
+        {
+            let p = self.0.dir.join(&name);
+            let tmp = p.with_file_name(format!(".{name}.phitex-out"));
+            if let Err(e) = std::fs::write(&tmp, &gz).and_then(|()| std::fs::rename(&tmp, &p)) {
+                let _ = std::fs::remove_file(&tmp);
+                error(&format!("can't write {}: {e}", p.display()));
+            }
+        }
+        std::process::exit(status)
     }
-    std::fs::rename(&tmp, &p).map_err(err)?;
+}
+
+/// [`compact`] with the lock held throughout.
+fn compact_held(g: &mut UpdateFile) -> Result<bool, String> {
+    let (p, layout) = match &g.at {
+        Some((p, u)) if !g.exact => (p.clone(), u.held().clone()),
+        _ => return Ok(false),
+    };
+    let exact = layout.exact().map_err(|e| format!("{e}"))?;
+    let tmp = exact_tmp(&p);
+    let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
+    std::fs::write(&tmp, exact.as_slice())
+        .and_then(|()| std::fs::rename(&tmp, &p))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            err(e)
+        })?;
     g.at = Some((p, phitex_pdf::Updater::after_exact(layout, &exact)));
     g.exact = true;
     g.writes += 1;

@@ -603,18 +603,23 @@ impl Operation for ToolRun {
             );
             let entries: Vec<Arc<Outcome>> =
                 outcomes().locked().get(&k).cloned().unwrap_or_default();
-            'entries: for e in entries {
-                if e.input != input_key {
-                    continue;
-                }
-                for (n, h) in &e.read {
-                    let x = look_up(cx, n, streams)?;
-                    if content_key(tool, n, x.as_ref()) != *h {
-                        continue 'entries;
-                    }
-                }
+            let found = kept_outcome(&entries, input_key, &mut |n| {
+                Ok(content_key(tool, n, look_up(cx, n, streams)?.as_ref()))
+            })?;
+            if let Some(e) = found {
                 if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                     eprintln!("tool {} for {output}: the kept run's outcome", tool.name());
+                }
+                if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+                    eprintln!(
+                        "tool {} for {output}: kept outcome, input {input_key:x}, made {:?}",
+                        tool.name(),
+                        e.out
+                            .as_ref()
+                            .ok()
+                            .and_then(|o| o.0.as_ref())
+                            .map(|m| (m.len(), phitex_defuse::hash_bytes(0, m)))
+                    );
                 }
                 return Ok(outcome_value(v, tool, &output, &e.out));
             }
@@ -697,10 +702,12 @@ impl Operation for ToolRun {
         }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && fail.is_none() {
             eprintln!(
-                "tool {} for {output}: read {:?}, made {:?} bytes",
+                "tool {} for {output}: ran, input {:x}, read {:?}, made {:?}",
                 tool.name(),
+                phitex_defuse::hash_bytes(0, &text),
                 served.got.keys().collect::<Vec<_>>(),
-                made.as_ref().map(Vec::len)
+                made.as_ref()
+                    .map(|m| (m.len(), phitex_defuse::hash_bytes(0, m)))
             );
         }
         let out = match fail {
@@ -764,6 +771,27 @@ fn outcomes() -> &'static std::sync::Mutex<crate::FxHashMap<u64, Vec<Arc<Outcome
     static M: std::sync::OnceLock<std::sync::Mutex<crate::FxHashMap<u64, Vec<Arc<Outcome>>>>> =
         std::sync::OnceLock::new();
     M.get_or_init(Default::default)
+}
+
+/// Of the runs kept (`entries`), one on an input of key `input` whose
+/// every other file read has, now, the content key it had then (`now`).
+fn kept_outcome<E>(
+    entries: &[Arc<Outcome>],
+    input: u64,
+    now: &mut dyn FnMut(&Need) -> Result<u64, E>,
+) -> Result<Option<Arc<Outcome>>, E> {
+    'entries: for e in entries {
+        if e.input != input {
+            continue;
+        }
+        for (n, h) in &e.read {
+            if now(n)? != *h {
+                continue 'entries;
+            }
+        }
+        return Ok(Some(e.clone()));
+    }
+    Ok(None)
 }
 
 /// What a run of `tool` depends on beyond the files it reads: the tool,
@@ -1032,6 +1060,54 @@ impl Operation for ToolNode {
 
 #[cfg(test)]
 mod tests {
+    /// Two rounds of a tool on inputs of other contents, or reading a file
+    /// of other contents, each get their own run's outcome from the runs
+    /// kept, never the other's (`latexmk_biber`: was a round's `.bbl`
+    /// served from another's run?).
+    #[test]
+    fn a_kept_outcome_is_only_one_of_the_same_inputs() {
+        use super::{Need, Outcome, Tool, content_key, kept_outcome};
+        use std::sync::Arc;
+        let bcf = |t: &str| {
+            content_key(
+                Tool::Biber,
+                &Need::File("doc.bcf".into()),
+                Some(&("./doc.bcf".into(), t.as_bytes().to_vec())),
+            )
+        };
+        let bib = Need::Data(super::ToolSearch::BibData, "refs.bib".into());
+        let bibk = |t: &str| {
+            content_key(
+                Tool::Biber,
+                &bib,
+                Some(&("refs.bib".into(), t.as_bytes().to_vec())),
+            )
+        };
+        let run = |input: u64, b: &str, out: &str| {
+            Arc::new(Outcome {
+                input,
+                read: vec![(bib.clone(), bibk(b))],
+                out: Ok((Some(out.as_bytes().to_vec()), Vec::new())),
+            })
+        };
+        let kept = vec![
+            run(bcf("round 2"), "A", "bbl 2"),
+            run(bcf("round 1"), "A", "bbl 1"),
+        ];
+        let got = |input: u64, b: &str| -> Option<String> {
+            kept_outcome::<()>(&kept, input, &mut |_| Ok(bibk(b)))
+                .unwrap()
+                .and_then(|o| o.out.clone().ok()?.0)
+                .map(|m| String::from_utf8(m).unwrap())
+        };
+        assert_eq!(got(bcf("round 1"), "A").as_deref(), Some("bbl 1"));
+        assert_eq!(got(bcf("round 2"), "A").as_deref(), Some("bbl 2"));
+        assert_eq!(got(bcf("round 3"), "A"), None, "an input not kept");
+        assert_eq!(got(bcf("round 1"), "B"), None, "a file read changed");
+        // (a name read the same with other bytes: the content key differs)
+        assert_ne!(bcf("x"), bcf("y"));
+    }
+
     use super::bibtex_lines;
 
     struct Mem(Vec<(&'static [u8], Vec<u8>)>);

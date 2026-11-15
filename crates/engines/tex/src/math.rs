@@ -1386,11 +1386,18 @@ impl Run<'_, '_> {
         let lhm = Self::norm_min(self.ipar(Par::lefthyphenmin)?);
         let rhm = Self::norm_min(self.ipar(Par::righthyphenmin)?);
         let packed = (lhm * 64 + rhm) * 65536 + lang;
-        // §1200: a new paragraph (push_nest, mode hmode)
+        // §1200: a new paragraph (push_nest, mode hmode), begun where the
+        // display ends (§216: push_nest's `mode_line:=line`): its box
+        // reports are "in paragraph at lines" from here, and its
+        // diagnostics placed here, not where it ends
         self.push_list(102, 0, Vec::new());
+        let line = self.line_mark();
+        let place = self.diag_place();
         if let Some(l) = self.top_mut() {
             l.par = Some((lang, packed));
             l.clang = lang;
+            l.mode_line = Some(line);
+            l.mode_place = Some(place);
         }
         // §443: an optional space (a picture's `\begin` put back
         // unexpanded: the command loop places it as a child, `crate::pic`)

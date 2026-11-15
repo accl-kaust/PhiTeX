@@ -4290,7 +4290,9 @@ impl Walk<'_> {
         let mut edge = h;
         while let Some(it) = q.pop_front() {
             match it {
-                Lr::Edge { dir, width, dist } => {
+                Lr::Edge {
+                    dir, width, dist, ..
+                } => {
                     h += width;
                     edge = h + dist;
                     self.dir = dir;
@@ -4312,6 +4314,7 @@ impl Walk<'_> {
                                 dir: self.dir,
                                 width: 0,
                                 dist: 0,
+                                open: false,
                             };
                             let mut rev = reverse(
                                 &mut WalkWidths {
@@ -4329,6 +4332,7 @@ impl Walk<'_> {
                                 dir,
                                 width: w,
                                 dist: seg,
+                                open: true,
                             });
                             q = rev;
                             continue;

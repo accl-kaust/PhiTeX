@@ -317,6 +317,23 @@ impl Files {
         }
     }
 
+    /// A font file of the project's as kpathsea's `.` finds `name` (a
+    /// `[file]` font name, `fonts/MyFont.otf` from fontspec's `Path=`):
+    /// given by the host, under the name or without its `./`. `ask`: a
+    /// name not given is asked of the host (a host that gives its
+    /// binary files when asked, not before the build).
+    pub fn project_font(self: &Arc<Self>, name: &str, ask: bool) -> Option<String> {
+        let plain = name.strip_prefix("./").unwrap_or(name);
+        if let Some(p) = self.given(plain) {
+            return Some(p);
+        }
+        if !ask || plain.starts_with('/') {
+            return None;
+        }
+        let s = self.lock();
+        self.by_name(s, plain).map(|(p, _)| p)
+    }
+
     /// Shelf's file `name` (a name, or a path in TeX Live's tree) for
     /// `engine`, in kpathsea format `format` (none: its suffix's), its pack
     /// fetched as any file's: XeTeX's faces and font index
@@ -500,6 +517,42 @@ mod tests {
         f.provide("a.png", None);
         assert_eq!(f.stamp("./a.png"), None);
         assert_eq!(f.read("./a.png"), None);
+    }
+
+    /// A project's font file as kpathsea's `.` finds it: given, by its
+    /// name or with `./` (fontspec's `Path=./fonts/`); one not given,
+    /// asked of the host only when asked for (after Shelf's tree).
+    #[test]
+    fn a_project_font_is_found_given_or_asked() {
+        let host: &'static Now = Box::leak(Box::new(Now {
+            files: OnceLock::new(),
+            has: Mutex::new(vec!["late.otf".to_owned()]),
+        }));
+        let f = Arc::new(Files::default());
+        let _ = host.files.set(f.clone());
+        f.set_host(host);
+        f.provide(
+            "fonts/My.otf",
+            Some(("./fonts/My.otf".to_owned(), b"otf".to_vec())),
+        );
+        assert_eq!(
+            f.project_font("fonts/My.otf", false).as_deref(),
+            Some("./fonts/My.otf")
+        );
+        assert_eq!(
+            f.project_font("./fonts/My.otf", false).as_deref(),
+            Some("./fonts/My.otf")
+        );
+        assert_eq!(f.project_font("late.otf", false), None);
+        assert_eq!(
+            f.project_font("late.otf", true).as_deref(),
+            Some("./late.otf")
+        );
+        assert_eq!(f.project_font("/abs/late.otf", true), None);
+        assert_eq!(
+            f.read("./fonts/My.otf").as_deref().map(Vec::as_slice),
+            Some(&b"otf"[..])
+        );
     }
 
     /// A host that answers within the call, from the names it has now.

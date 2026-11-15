@@ -1438,7 +1438,7 @@ pub(crate) fn units_of<'t>(
     text: &'t str,
     defs: &crate::hints::Defs,
 ) -> (ValueId, Vec<(String, &'t str)>) {
-    let (ends, sliceable) = unit_ends(name, text, defs);
+    let (ends, sliceable) = unit_ends(v.instance(), name, text, defs);
     let mut seen: FxHashMap<u64, u32> = FxHashMap::default();
     let mut entries = Vec::with_capacity(ends.len());
     let mut units = Vec::with_capacity(ends.len());
@@ -1479,20 +1479,28 @@ pub(crate) fn units_of<'t>(
 /// the text and the definitions, kept by both (a file a round writes
 /// as the round before wrote it is not analysed again: amsldoc's index
 /// file, 40 kB, 125 ms).
-fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>, bool) {
+fn unit_ends(
+    store: u64,
+    name: &str,
+    text: &str,
+    defs: &crate::hints::Defs,
+) -> (Arc<[usize]>, bool) {
     type Kept = (
         std::sync::Weak<phitex_source::pass::Definitions>,
         Arc<[usize]>,
         bool,
     );
-    type Last = std::sync::Mutex<FxHashMap<String, (Arc<str>, Kept)>>;
+    type Last = std::sync::Mutex<FxHashMap<(u64, String), (Arc<str>, Kept)>>;
     // (by the text's hash and the definitions' address, the text kept to
     // compare whole on a hit)
     type Memo = std::sync::Mutex<FxHashMap<(u64, usize), (Arc<str>, Kept)>>;
     static MEMO: std::sync::OnceLock<Memo> = std::sync::OnceLock::new();
     // (the file's text the last time it was cut, with its cuts: the part
     // of the text an edit left keeps its units, the rest is cut again,
-    // [`units_again`])
+    // [`units_again`]; by the document's store and the file's name: by the
+    // name alone, two documents of one process writing a file of the same
+    // name, `latexmk_biber_j1` and `_j8`'s `biber.bbl`, cut each from the
+    // other's)
     static LAST: std::sync::OnceLock<Last> = std::sync::OnceLock::new();
     let memo = MEMO.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let key = (
@@ -1508,7 +1516,7 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
     let last = LAST.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let before = last
         .locked()
-        .get(name)
+        .get(&(store, name.to_owned()))
         .cloned()
         .filter(|(_, (d, _, _))| d.upgrade().is_some_and(|d| Arc::ptr_eq(&d, defs)));
     let cut = |t: &str| -> Vec<usize> {
@@ -1526,7 +1534,7 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
             text,
             &ends,
             before.is_some(),
-            last.locked().contains_key(name),
+            last.locked().contains_key(&(store, name.to_owned())),
             t_cut.elapsed(),
         );
     }
@@ -1568,7 +1576,7 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
     );
     drop(m);
     last.locked().insert(
-        name.to_owned(),
+        (store, name.to_owned()),
         (t, (Arc::downgrade(defs), ends.clone(), sliceable)),
     );
     (ends, sliceable)

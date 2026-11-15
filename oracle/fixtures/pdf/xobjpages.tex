@@ -1,0 +1,13 @@
+\catcode`\{=1 \catcode`\}=2 \catcode`\#=6 \pdfoutput=1 \pdfcompresslevel=9
+\font\r=cmr10 \r \hsize=200pt \vsize=100pt \parfillskip=0pt plus 1fil \parindent=0pt \baselineskip=12pt \topskip=10pt
+\setbox0\hbox{F\vrule width 5pt height 3pt depth 1pt}\pdfxform0 \edef\f{\the\pdflastxform}
+\setbox0\vbox{\hrule width 20pt height 2pt\hbox{V}}\pdfxform0 \edef\v{\the\pdflastxform}
+\pdfximage height 8pt {png-gray.png}\edef\g{\the\pdflastximage}
+\pdfximage height 8pt {jpg-exif.jpg}\edef\j{\the\pdflastximage}
+\pdfximage height 8pt {example-image.pdf}\edef\e{\the\pdflastximage}
+\count1=1
+\def\l{Line \the\count1\ \pdfrefxform\f\ text \pdfrefximage\g\ifodd\count1 \ \pdfrefximage\j\fi\par
+  \ifnum\count1>20 \pdfrefxform\v\fi \ifnum\count1=33 \pdfrefximage\e\fi
+  \advance\count1 by 1 \ifnum\count1<41 \expandafter\l\fi}
+\l
+\end

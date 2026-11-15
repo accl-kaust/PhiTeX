@@ -209,3 +209,97 @@ fn a_run_knows_whether_a_node_still_stands() {
     e.evaluate(2).unwrap();
     assert_eq!(e.output(p).and_then(|x| v.as_int(x)), Some(0));
 }
+
+/// `[x]`: defines field `x` as its argument.
+struct Setter;
+
+impl Operation for Setter {
+    fn name(&self) -> &'static str {
+        "setter"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let f = cx.values().field("x");
+        let x = cx.args()[0];
+        cx.define(f, x);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[k]`: outputs field `x` plus `k`.
+struct Reader;
+
+impl Operation for Reader {
+    fn name(&self) -> &'static str {
+        "reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let x = cx.read(v.field("x"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        Ok(v.int(x + v.as_int(cx.args()[0]).unwrap_or(0)))
+    }
+}
+
+/// `[n]`: places `n` readers and sums their outputs, each read on 0
+/// while it has not run. Counts its runs.
+struct Many {
+    reader: std::sync::OnceLock<phitex_defuse::OpId>,
+    runs: AtomicU64,
+}
+
+impl Operation for Many {
+    fn name(&self) -> &'static str {
+        "many"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::Relaxed);
+        let v = cx.values();
+        let n = v.as_int(cx.args()[0]).unwrap_or(0);
+        let reader = *self.reader.get().unwrap();
+        let zero = v.int(0);
+        let mut sum = 0;
+        for k in 0..n {
+            let i = cx.child(reader, vec![v.int(k)]);
+            sum += v.as_int(cx.placed_output_or(i, zero)).unwrap_or(0);
+        }
+        Ok(v.int(sum))
+    }
+}
+
+/// A placer whose placements all change (each reads a field an edit
+/// before it changes) runs once, taking all their new outputs, once
+/// the last of them has committed: not once per placement, each run
+/// taking one new output and the others' old ones (lie-hasse's
+/// paragraph of diagrams).
+#[test]
+fn placements_that_all_change_ask_their_placer_once() {
+    for threads in [1, 4] {
+        let e = Engine::new();
+        let v = e.values();
+        let setter = e.register(Arc::new(Setter));
+        let reader = e.register(Arc::new(Reader));
+        let p = Arc::new(Many {
+            reader: std::sync::OnceLock::new(),
+            runs: AtomicU64::new(0),
+        });
+        p.reader.set(reader).unwrap();
+        let op = e.register(p.clone());
+        let u = e.new_unit();
+        let s = e.push(u, setter, vec![v.int(100)]);
+        let n = e.push(u, op, vec![v.int(5)]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(510));
+        p.runs.store(0, Ordering::Relaxed);
+        e.replace(s, setter, vec![v.int(200)]);
+        let r = e.evaluate(threads).unwrap();
+        assert_eq!(e.output(n).and_then(|x| v.as_int(x)), Some(1010), "-j{threads}: {r:?}");
+        let runs = p.runs.load(Ordering::Relaxed);
+        assert!(
+            runs == 1 || (threads > 1 && runs <= 2),
+            "-j{threads}: the placer ran {runs} times for its 5 placements' new outputs: {r:?}"
+        );
+        assert!(e.check_invariants().is_empty());
+    }
+}

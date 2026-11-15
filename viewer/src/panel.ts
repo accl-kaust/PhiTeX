@@ -25,15 +25,22 @@ import { charOffset } from "./edits.ts";
 import { html, rich } from "./html.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
+import { zoomAnchor } from "./glide.ts";
 import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, ready as lookReady, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor, keyed } from "./hints.ts";
+import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./sheetline.ts";
+import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
+import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
+
 /** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
 const MAKING = "Making the format, once per PhiTeX update";
+/** A burst of packages after the first page ends once none is asked for in this long (ms): the next asked for as the last arrives is the same burst, its note kept up. */
+const PKG_QUIET = 600;
 
 /** The diff bar's state (Panel.diffBar). */
 export interface DiffBar {
@@ -83,7 +90,7 @@ export interface ViewState {
 }
 
 /** A mark along the pages' scrollbar: a problem's place (`p`, its first box `box`) or a diff's change. */
-type ScrollMark = { k: number; y: number; cls: string; title: string; p?: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"]; severity: "error" | "warning" }; box?: [number, number, number, number] };
+type ScrollMark = { k: number; y: number; cls: string; title: string; go?: () => void; p?: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"]; severity: "error" | "warning" }; box?: [number, number, number, number] };
 
 /** What each kind of problem is, under its switch in Settings. */
 const KIND_HELP: Record<Kind, string> = {
@@ -101,8 +108,16 @@ export interface SettingRow {
   label: string;
   /** A line under the label: what it does, where it is kept. */
   help?: string;
-  /** toggle: on or off; choice: a few buttons; select: a list; picks: any of `options`, as tiles (`value` those picked, comma separated); action: a button (`button` its label); info: `value` shown. */
-  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info";
+  /**
+   * toggle: on or off; choice: a few buttons; select: a list; picks: any of
+   * `options`, as tiles (`value` those picked, comma separated); action: a
+   * button (`button` its label); info: `value` shown; swatches: one of
+   * `options` as tiles; range: a slider from 0 to `max` (`value` its
+   * number as text), set as it moves; colors: two
+   * colour pickers (`value` "#rrggbb,#rrggbb"), set as they move; custom:
+   * `make`'s element under the help.
+   */
+  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info" | "swatches" | "range" | "colors" | "custom";
   /** A choice's or a list's values and labels. */
   options?: [value: string, label: string][];
   value?: boolean | string;
@@ -111,6 +126,10 @@ export interface SettingRow {
   disabled?: string;
   /** A picks tile's picture, played in `box` while the tile is on screen: stopped by what it returns. */
   tile?(v: string, box: HTMLElement): () => void;
+  /** A range's top (its bottom 0; absent: 100). */
+  max?: number;
+  /** A custom row's element. */
+  make?(): HTMLElement;
   /** It set (a toggle's on, a choice's value; an action: nothing): the host's error text if it could not. */
   set?(v?: boolean | string): Promise<string | void> | string | void;
 }
@@ -273,6 +292,8 @@ export interface PanelOptions {
   header?: boolean;
   /** The panel's footer (false: the host has its own status bar, the CLI's). */
   footer?: boolean;
+  /** Notes on the pages and the agent's changes under review (review.ts): where the host keeps them (the watch). */
+  review?: ReviewHost;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -294,11 +315,25 @@ export interface PanelPrefs {
   backs: boolean;
   flashes: boolean;
   newTabs: boolean;
-  /** The documents built in this panel before (a hash of the page's address and the main file's name, then the looks chosen then), newest first: opened again with the same looks chosen, no opening plays. */
-  built: string[];
+  /**
+   * The reading aid (wasp.ts, Settings' Colour lines): each line of text
+   * coloured by a gradient, alternating; its colours (a
+   * preset, or Custom's two), how strong (0 to 200), which
+   * text (the body's lines, or every line but display maths).
+   */
+  wasp: boolean;
+  waspColours: WaspColours;
+  waspCustom: [string, string];
+  /** 0 to 200, 100 the default (wasp.ts's WaspLook / 100). */
+  waspStrength: number;
+  /** How much of a line fades, 0 to 200: 100 the whole line (the default); less, the colour only toward its end; more, held flat over more of it. */
+  waspLength: number;
+  waspText: "body" | "all";
+  /** The highlight's scroll margin, % of the view's height (0 to 45): Viewer.margin. */
+  margin: number;
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -339,6 +374,7 @@ const PATHS: Record<string, string> = {
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z",
 };
 /** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
@@ -374,7 +410,6 @@ const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"]
 
 /** A page's lines in a tip's demo, as wide as given (%). */
 /** Bytes fetched so far, as the sheet says them (" · 3.8 MB"; nothing before any). */
-const mb = (b?: number) => (b ? ` · ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "");
 
 /** A duration as it reads best: 0.7 ms, 42 ms, 2.6 s, 14 s. */
 const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
@@ -533,7 +568,7 @@ export class Panel {
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
       html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -547,6 +582,7 @@ export class Panel {
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -564,6 +600,7 @@ export class Panel {
       ${item("x-pdf", "download", "Download PDF")}
       ${item("x-log", "log", "View log")}
       ${item("x-contents", "toc", "Contents", "t")}
+      ${item("x-review", "rate_review", "Notes and changes", "m")}
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item("x-compare", "compare", "Compare…", "", "narrow")}
       <hr>
@@ -577,7 +614,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -612,6 +649,7 @@ export class Panel {
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
+    offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -670,6 +708,7 @@ export class Panel {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     this.$("#settings").onclick = (e) => void this.settingClicked(e);
     this.$("#settings").onchange = (e) => void this.settingClicked(e);
+    this.$("#settings").oninput = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
       // (a problem's Copy for an AI assistant)
@@ -710,7 +749,7 @@ export class Panel {
       }
     });
     // (a zoom gesture over the opening's whole page: the zoom it starts from made the user's, the sheet's ease stopped first)
-    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && this.ownZoom(), { capture: true, passive: true });
+    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && !(e.target as Element).closest?.(".peek") && this.ownZoom(), { capture: true, passive: true });
     this.drag();
     this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
       need: (k) => ev.onNeed?.(k),
@@ -724,18 +763,41 @@ export class Panel {
       box: (d, w) => pageBox(d, w),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange!(file, pos, pos, true) : undefined,
-      selected: (sel) => ev.onSelectPage?.(sel),
+      selected: (sel) => (ev.onSelectPage?.(sel), this.review?.selected(sel)),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
       // (the engine's reading of a citation: the session's, given by it (citesBy); none yet, the pages')
       cites: (k, x, y) => this.citesAsk?.(k, x, y) ?? Promise.resolve(null),
+      // (a link's window zoomed in: the session's drawing of that part, sharp (zoomBy); none, the pages' bitmaps enlarged)
+      zoomed: (k, scale, view) => this.zoomAsk?.(k, scale, view) ?? Promise.resolve(null),
       openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt!(k, top) : undefined,
       // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
       // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : undefined,
     });
     this.extras(opts);
+    if (opts.review) {
+      const rv = (this.review = new Review(
+        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), scrollMarks: (m) => ((this.noteMarks = m), this.drawScrollMarks()), laidOut: () => requestAnimationFrame(() => ((this.stageSize = null), this.redraw())) },
+        opts.review,
+      ));
+      const b = this.$("#b-review");
+      // (shown only while the review is on: the user's Experimental switch)
+      rv.onEnabled((on) => offer("#x-review, #b-review", on));
+      b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
+      rv.counts((open, pending) => {
+        const n = open + pending;
+        this.$("#rvcount").textContent = n ? String(n) : "";
+        b.title = `Notes and changes (m): ${open} open note${open === 1 ? "" : "s"}, ${pending} change${pending === 1 ? "" : "s"} to review`;
+      });
+      new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+      window.addEventListener("keydown", (e) => {
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e) || !rv.enabled) return;
+        e.preventDefault();
+        rv.open();
+      });
+    }
     this.darkPdf("off");
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
@@ -769,11 +831,14 @@ export class Panel {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.linksShown();
+      this.marginApply();
     });
   }
 
   /** The menus and popovers by their buttons. */
   private menus: [string, string][] = [];
+  /** Notes and changes (opts.review). */
+  review?: Review;
 
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   private menu(m: string | null): void {
@@ -803,9 +868,12 @@ export class Panel {
     if (this.ending) this.stopSheet();
     this.reopen = true;
     this.typesetting = false;
-    // (the new build's packages counted from none: the sheet says its own, not the last document's)
-    this.loadPct = 0;
+    // (the new build's packages counted from none: the sheet says its own, not the last document's;
+    // its steps from the first again, said at once)
     this.loadDone = -1;
+    this.tally.reset();
+    this.line.reset();
+    this.lineNow = undefined;
     // (its first page is a first build's, "First build · 5.4 s", not a keystroke's)
     this.paints = 0;
     this.walk = null;
@@ -899,7 +967,7 @@ export class Panel {
     // waits for a build's own step (the host reading the files, packages fetched, its
     // phases, typesetting). Put up here, it played while the panel connected to a document
     // already built (the watch's last build), the pages a moment away)
-    if (on && !this.last) this.step(this.firstStep(), undefined, "", false);
+    if (on && !this.last) this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
   }
   private wasShown?: boolean;
 
@@ -955,7 +1023,9 @@ export class Panel {
   }
 
   /** Packages on their way after the first page, and a build running on: said in the bar, or in the corner. */
-  private pkgNow?: { names: string[]; done: number; total: number; pct: number; source: string; failed: { name: string; error: string }[] };
+  private pkgNow?: { fetched: Fetched; source: string; quiet: number };
+  /** The packages' note, drawn calmly (sheetline.ts): at most four times a second, the latest. */
+  private toastLine = new Calm<{ title: string; detail: string }>((t) => this.toast("pkgs", { ...t, pct: undefined, icon: "download" }));
   private buildSince = 0;
   private actTick: ReturnType<typeof setInterval> | undefined;
 
@@ -975,7 +1045,7 @@ export class Panel {
   streaming(s: { pages: number; phase: string } | null): void {
     this.streamed = s ? s.pages : undefined;
     this.making = s?.phase === "format";
-    if (s && this.firstPending()) (this.typesetting = true), this.step(this.words.steps[2], undefined, this.making ? MAKING : `Page ${s.pages + 1}`);
+    if (s && this.firstPending()) (this.typesetting = true), this.sayTypesetting();
     this.activity();
   }
 
@@ -986,8 +1056,10 @@ export class Panel {
 
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
   private activity(): void {
-    const p = this.pkgNow;
     const now = performance.now();
+    // (a burst's end: nothing asked for in PKG_QUIET ms)
+    if (this.pkgNow?.quiet && now - this.pkgNow.quiet > PKG_QUIET) this.pkgNow = undefined;
+    const p = this.pkgNow;
     const prep = !!this.prepSince && now - this.prepSince > 400;
     const long = (!!this.buildSince && now - this.buildSince > 400) || prep;
     if (long || this.buildSince || this.prepSince || p) this.actTick ??= setInterval(() => this.activity(), 250);
@@ -995,10 +1067,9 @@ export class Panel {
     this.renderStatus();
     // (before any page, the sheet says it all)
     if (!this.last && this.viewer.pages === 0) return;
-    if (p) {
-      const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
-      return this.toast("pkgs", { title: `Fetching ${names}`, detail: `${p.done} of ${p.total} files${known(p.source) ? ` · from ${p.source}` : ""}`, pct: p.pct, icon: "download" });
-    }
+    // (one shape, as the sheet's: "Fetching packages from Shelf", "3 fetched · 120 KB · tikz-cd")
+    if (p) return this.toastLine.set({ title: `Fetching packages${known(p.source) ? ` from ${p.source}` : ""}`, detail: fetchedLine(p.fetched) });
+    this.toastLine.reset();
     if (this.toastKind === "pkgs") this.toast("pkgs", null);
     // (no bar: the rest of a long build in the corner, quietly; with the bar its status says it)
     if (this.ownBar) return;
@@ -1020,7 +1091,7 @@ export class Panel {
     if (this.offline) (t = "Disconnected"), (err = true);
     // (an opening up: its step (loading the compiler, fetching, typesetting), not "Building…")
     else if (this.firstPending() && this.stepNow) t = this.stepNow;
-    else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.done} of ${this.pkgNow.total}`);
+    else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.fetched.done} fetched`);
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1000;
       t = this.making ? `${MAKING}…` : this.streamed ? `Typesetting page ${this.streamed + 1}…` : "Typesetting…";
@@ -1195,6 +1266,8 @@ export class Panel {
   /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
   private problemMarks: ScrollMark[] = [];
   private changeMarks: ScrollMark[] = [];
+  /** The review's notes and pending changes (review.ts), beside the scrollbar too. */
+  private noteMarks: ScrollMark[] = [];
 
   /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
   diffMarks(changes: { k: number; y: number; title: string }[]): void {
@@ -1210,7 +1283,7 @@ export class Panel {
    */
   private drawScrollMarks(): void {
     const el = this.$("#smarks");
-    const marks = [...this.problemMarks, ...this.changeMarks];
+    const marks = [...this.problemMarks, ...this.changeMarks, ...this.noteMarks];
     el.replaceChildren();
     el.hidden = !marks.length;
     if (!marks.length) return;
@@ -1225,6 +1298,7 @@ export class Panel {
       t.onmouseleave = () => (this.$("#ctip").hidden = true);
       t.onclick = () => {
         this.$("#ctip").hidden = true;
+        if (m.go) return m.go();
         this.viewer.scrollToPlace(m.k, m.y);
         if (m.box) this.viewer.mark(m.k, [m.box], false);
       };
@@ -1255,6 +1329,8 @@ export class Panel {
   origins(): void {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
+    // (the notes' and changes' marks looked up again in the new origins)
+    this.review?.refresh();
   }
 
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
@@ -1502,33 +1578,19 @@ export class Panel {
     }
   }
 
-  /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
-  private readNow: { h: string; detail?: string; done?: number; total?: number; pct?: number } | undefined;
-  private readDrawn = 0;
-  private readTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The packages fetched so far: the first page's (since the opening began), and after it a burst's (one note in the corner). */
   private loadDone = -1;
-  private loadPct = 0;
+  private tally = new Tally();
+  private burst = new Tally();
 
   /**
    * Reading the project, before the packages: what is happening (the
    * download from Overleaf, each file unpacked, each figure handed to the
    * engine), the file in hand and how far, so the first seconds read as work.
+   * (said as often as the host says it: the sheet's line draws it calmly, sheetline.ts)
    */
   reading(r: { h: string; detail?: string; done?: number; total?: number; pct?: number }): void {
     if (this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readNow = r;
-    const wait = 50 - (performance.now() - this.readDrawn);
-    if (wait > 0) {
-      this.readTimer ??= setTimeout(() => ((this.readTimer = undefined), this.drawReading()), wait);
-      return;
-    }
-    this.drawReading();
-  }
-
-  private drawReading(): void {
-    const r = this.readNow;
-    if (!r || this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readDrawn = performance.now();
     const pct = r.pct ?? (r.total ? Math.round((100 * (r.done ?? 0)) / r.total) : undefined);
     const count = r.total ? `${r.done ?? 0} of ${r.total}` : "";
     this.step(r.h, pct, [r.detail, count].filter(Boolean).join(" · "));
@@ -1541,12 +1603,14 @@ export class Panel {
     if (p.loading.length && d.since === undefined) d.since = now;
     else if (!p.loading.length && d.since !== undefined) (d.ms += now - d.since), (d.since = undefined);
     (d.n = done), (d.bytes = p.bytes ?? 0);
-    const total = done + p.loading.length;
-    if (done !== this.loadDone) this.loadDone = done;
-    // (never backwards: a build asking for more grows the total)
-    const pct = (this.loadPct = Math.max(this.loadPct, total ? Math.round((100 * done) / total) : 100));
-    // (before the first page, or a rebuild's or another document's opening: the sheet's step)
+    this.loadDone = done;
+    // (before the first page, or a rebuild's or another document's opening: the sheet's step.
+    // One shape all through, "12 fetched · 2.8 MB · l3kernel": the count never back, the name
+    // kept between two fetches (a cold open's packs come one after the other, 70 ms apart, and
+    // the line had jumped between "pdfescape · 25 of 26" and "26 of 26" a dozen times a
+    // second). The bar not known: a pack read asks for the next, the total is never known)
     if (this.firstPending()) {
+      const f = this.tally.update({ done, bytes: p.bytes, loading: p.loading, missing: p.unavailable.length });
       if (!p.loading.length && !p.building) {
         // (done: the build's own state says the rest. Files not found are optional ones LaTeX
         // only checks for (amsart.cfg, …): the problems list them, and an error says when one was needed)
@@ -1554,26 +1618,40 @@ export class Panel {
         if (this.stopped()) return;
         // (between two downloads, the build not yet begun: still fetching, not typesetting;
         // nothing downloaded at all (all kept on this machine): the step as it is)
-        if (this.typesetting) this.step(this.words.steps[2], undefined, downloaded(done, p.bytes));
-        else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
+        if (this.typesetting) this.sayTypesetting();
+        else if (f.done) this.step(this.words.steps[1], undefined, fetchedLine(f));
         return;
       }
       this.pkgBusy = true;
-      if (p.loading.length) {
-        const name = p.loading[0];
-        const what = `${name} · ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` · ${p.unavailable.length} not found` : ""}`;
-        // (typesetting under way asks for a package as it reads: said under its step, not a step back to fetching and on again)
-        if (this.typesetting) this.step(this.words.steps[2], undefined, `fetching ${what}`);
-        else this.step(this.words.steps[1], pct, what);
-      } else (this.typesetting = true), this.step(this.words.steps[2], undefined, downloaded(done, p.bytes));
+      // (typesetting under way asks for a package as it reads: its count under its step, not a step back to fetching and on again)
+      if (p.loading.length && !this.typesetting) this.step(this.words.steps[1], undefined, fetchedLine(f));
+      else (this.typesetting = true), this.sayTypesetting();
       return;
     }
-    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : undefined;
+    // (after it: one note while packages come, counted from the burst's first; a gap between
+    // two fetches, the next asked for as the last arrives, is the same burst, the note kept up)
     if (p.failed?.length && !p.loading.length) {
+      this.pkgNow = undefined;
+      this.toastLine.reset();
       const f = p.failed[0];
-      this.toast("pkgs", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      this.toast("pkgfail", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      return this.activity();
+    }
+    if (p.loading.length) {
+      if (!this.pkgNow) this.burst.reset({ done, bytes: p.bytes });
+      this.pkgNow = { fetched: this.burst.update({ done, bytes: p.bytes, loading: p.loading, missing: 0 }), source: p.source, quiet: 0 };
+    } else if (this.pkgNow) {
+      this.pkgNow.fetched = this.burst.update({ done, bytes: p.bytes, loading: [], missing: 0 });
+      this.pkgNow.quiet ||= now;
     }
     this.activity();
+  }
+
+  /** Typesetting's detail, one shape: the page it is on (or the format made first), then the packages fetched for it. */
+  private sayTypesetting(): void {
+    const f = this.tally.now;
+    const page = this.making ? MAKING : this.streamed !== undefined ? `Page ${this.streamed + 1}` : "";
+    this.step(this.words.steps[2], undefined, [page, f.done ? fetchedLine(f, false) : ""].filter(Boolean).join(" · "));
   }
 
   /**
@@ -1624,23 +1702,39 @@ export class Panel {
     this.hintTimer = setTimeout(show, 2000);
   }
 
-  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  /**
+   * The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said
+   * only (the panel shown, nothing built yet). Every writer says it here, and the line
+   * (sheetline.ts) draws it calmly: at most four times a second, the latest, and the step
+   * forward only (the project, the packages, typesetting) until the opening begins again.
+   */
   private step(what: string, pct: number | undefined, detail = "", raise = true): void {
     if (!this.firstPending()) return;
+    // (the panel shown before any build's step: a first word, never ahead of one said)
+    const k = !raise ? 0 : what === this.words.steps[2] ? 2 : what === this.words.steps[1] ? 1 : 0;
+    if (!this.line.say(k, { what, pct, detail })) return;
     this.walkTo(what);
     if (raise) this.sheetUp();
     // (the hints with the sheet: none while a first open waits to put it up)
     if (this.anim) this.hints(true);
+  }
+
+  /** The line said now (the step, the bar, the detail): an opening put up later says it too. */
+  private lineNow: Said | undefined;
+  private drawLine(s: Said): void {
+    if (!this.firstPending()) return;
+    this.lineNow = s;
     const el = this.$("#opening");
-    this.stepNow = what;
-    el.querySelector(".what")!.textContent = what;
-    el.querySelector(".detail")!.textContent = detail;
+    this.stepNow = s.what;
+    el.querySelector(".what")!.textContent = s.what;
+    el.querySelector(".detail")!.textContent = s.detail;
     const track = el.querySelector<HTMLElement>(".track")!;
-    track.classList.toggle("unknown", pct === undefined);
-    track.querySelector("i")!.style.width = pct === undefined ? "" : `${pct}%`;
-    this.anim?.step?.(what, pct, detail);
+    track.classList.toggle("unknown", s.pct === undefined);
+    track.querySelector("i")!.style.width = s.pct === undefined ? "" : `${s.pct}%`;
+    this.anim?.step?.(s.what, s.pct, s.detail);
     this.renderStatus();
   }
+  private line = new SheetLine((s) => this.drawLine(s));
 
   /**
    * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
@@ -1668,23 +1762,25 @@ export class Panel {
     const sheet = el.querySelector<HTMLElement>(".sheet")!;
     // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
     const first = !this.seenIds.has("opening");
-    // (a document built here before, opened again (a reload, the editor reopened): its steps
-    // on a still sheet, no opening played: the animation is for a document's first build.
-    // A Rebuild asked for plays it)
-    // (unless the looks chosen changed since this document was last opened: the new choice
-    // plays once, the next open's. Picked and the document opened again, it played nothing)
-    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
-    const warm = !now && was !== undefined && (!was.includes(" ") || was.split(" ")[1] === this.look);
-    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
-    this.anim = anim;
-    if (!warm) this.lastLook = id;
-    if (id !== "off") this.seen(["opening"]);
-    // (one that says the steps itself: the sheet's own not shown)
-    el.classList.toggle("owns", !!anim.step);
-    // (and the step the sheet says now, a rebuild's first: the watch says no other)
-    if (anim.step) anim.step(this.firstStep(), undefined, "");
-    this.animSince = performance.now();
+    // (no page to show, a build running: the looks chosen play, whether this document was
+    // built here before or not; a document whose pages are ready shows them, no sheet: the
+    // sheet goes up only at a build's own step, and a page within 400 ms takes it down at once)
+    this.playOn(sheet, this.look, first, dark);
     this.hints(true);
+  }
+
+  /** The opening for `look` played on `sheet`, in place of one playing there. */
+  private playOn(sheet: HTMLElement, look: OpeningLook, first: boolean, dark: boolean): void {
+    this.anim?.stop();
+    sheet.replaceChildren();
+    const { id, anim } = play(look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    this.anim = anim;
+    if (id !== "off") (this.lastLook = id), this.seen(["opening"]);
+    // (one that says the steps itself: the sheet's own not shown)
+    this.$("#opening").classList.toggle("owns", !!anim.step);
+    // (and the step the sheet says now, a rebuild's first: the watch says no other)
+    if (anim.step) anim.step(this.stepNow || this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "");
+    this.animSince = performance.now();
   }
 
   /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
@@ -1694,15 +1790,6 @@ export class Panel {
     let h = 0x811c9dc5;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
     return (h >>> 0).toString(36);
-  }
-
-  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
-  private builtHere(): void {
-    // (each "key looks": the looks chosen when it was opened, so that a new choice plays once)
-    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
-    if (was[0] === e) return;
-    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
-    this.save();
   }
 
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
@@ -1794,7 +1881,6 @@ export class Panel {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
-      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -1814,7 +1900,7 @@ export class Panel {
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
 
   /** A note in the corner, of `kind` (a later one replaces it), or that kind's gone (null). */
-  private toast(kind: string, t: { title: string; detail?: string; pct: number | null; icon?: string; err?: boolean; ms?: number } | null): void {
+  private toast(kind: string, t: { title: string; detail?: string; pct: number | null | undefined; icon?: string; err?: boolean; ms?: number } | null): void {
     const el = this.$("#toast");
     if (!t) {
       if (this.toastKind !== kind) return;
@@ -1828,7 +1914,7 @@ export class Panel {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : t.pct === undefined ? html`<div class="track unknown"><i></i></div>` : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span")!.textContent = t.title;
     el.querySelector(".d")!.textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -2000,6 +2086,12 @@ export class Panel {
     this.citesAsk = ask;
   }
 
+  /** The session's drawing of part of a page at a zoom of its own (PreviewSink.zoomBy), for a link's window zoomed in. */
+  private zoomAsk?: (k: number, scale: number, view: [number, number, number, number]) => Promise<PageImage | null>;
+  zoomBy(ask: (k: number, scale: number, view: [number, number, number, number]) => Promise<PageImage | null>): void {
+    this.zoomAsk = ask;
+  }
+
   outline(items: Entry[]): void {
     this.contents?.set(items);
     this.contents?.at(this.at);
@@ -2105,6 +2197,22 @@ export class Panel {
       turn: (n) => this.viewer.turn(n),
       scroller: stage,
       zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      zoomBy: (f, ease) => {
+        // (at the pointer over the pages, else the view's centre; the place kept is the gesture's first)
+        const [x, y] = zoomAnchor(stage.getBoundingClientRect(), this.pointer);
+        this.zoomAt(f, x, y, ease);
+      },
+      scrollBy: (dx, dy) => {
+        // (while a zoom runs, the gesture's: its frames keep a place, see zoomScroll)
+        if (this.gesture) return this.zoomScroll(this.gesture, dx, dy, false), [dx, dy];
+        const moved = (d: number, was: number, max: number) => (was + d < 0 ? -was : was + d > max ? max - was : d);
+        const mx = moved(dx, stage.scrollLeft, stage.scrollWidth - stage.clientWidth);
+        const my = moved(dy, stage.scrollTop, stage.scrollHeight - stage.clientHeight);
+        if (mx) stage.scrollLeft += mx;
+        if (my) stage.scrollTop += my;
+        return [Math.round(mx), Math.round(my)];
+      },
+      turnTop: (n, from) => this.viewer.turnTop(n, from) ?? from,
       fitWidth: () => this.zoomTo("fit"),
       fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
       help: (show) => {
@@ -2220,7 +2328,22 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; goal: number; last: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout> }
+    | {
+        from: number;
+        f: number;
+        goal: number;
+        last: number;
+        x: number;
+        y: number;
+        at: { k: number; fx: number; fy: number } | null;
+        frame: number;
+        end?: ReturnType<typeof setTimeout>;
+        /** A scroll while it zooms, still to make: eased (a wheel's), and at the next frame (the keys', eased already). */
+        sx: number;
+        sy: number;
+        ix: number;
+        iy: number;
+      }
     | undefined;
 
   /**
@@ -2238,21 +2361,46 @@ export class Panel {
     if (!g) {
       const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, sx: 0, sy: 0, ix: 0, iy: 0 };
     }
     if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
     if (!ease) g.f = g.goal;
-    const gg = g;
-    const step = (t: number) => {
-      gg.frame = 0;
-      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
-      gg.last = t;
-      this.zoomLay(gg);
-      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-    };
-    if (!g.frame) g.frame = requestAnimationFrame((t) => ((gg.last = t - 16), step(t)));
+    this.zoomRun(g);
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
+  }
+
+  /**
+   * A scroll (pixels) while a zoom gesture runs, made in the gesture's frames: each frame
+   * keeps the place under the pointer there (keepAt sets the scroll), which undid a scroll
+   * made apart from it (the browser's smooth scroll of a wheel, a key's glide), the pages
+   * not scrolling until the zoom rested. `ease`: eased as a browser's smooth scroll (a
+   * wheel's notch); else all of it at the next frame (the keys', eased already).
+   */
+  private zoomScroll(g: NonNullable<Panel["gesture"]>, dx: number, dy: number, ease: boolean): void {
+    if (ease) (g.sx += dx), (g.sy += dy);
+    else (g.ix += dx), (g.iy += dy);
+    this.zoomRun(g);
+  }
+
+  /** The gesture's frames, until its zoom is at its goal and its scroll all made. */
+  private zoomRun(g: NonNullable<Panel["gesture"]>): void {
+    const step = (t: number) => {
+      g.frame = 0;
+      const dt = t - g.last;
+      g.f = zoomToward(g.f, g.goal, dt);
+      g.last = t;
+      // (most of the way in 150 ms, as a browser's smooth scroll; the last pixel at once)
+      const k = 1 - Math.exp(-Math.max(0, dt) / 50);
+      const tx = (Math.abs(g.sx) < 1 ? g.sx : g.sx * k) + g.ix;
+      const ty = (Math.abs(g.sy) < 1 ? g.sy : g.sy * k) + g.iy;
+      g.sx -= tx - g.ix;
+      g.sy -= ty - g.iy;
+      g.ix = g.iy = 0;
+      this.zoomLay(g, false, tx, ty);
+      if (g.f !== g.goal || g.sx || g.sy) g.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => ((g.last = t - 16), step(t)));
   }
 
   /**
@@ -2264,7 +2412,7 @@ export class Panel {
    * not what the layout made of them (a narrow page is centred, the gaps between pages
    * keep their size, pages come into view as it zooms out): they jumped when it rested.
    */
-  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false): void {
+  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false, dx = 0, dy = 0): void {
     this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const st = this.$("#stage");
@@ -2272,8 +2420,14 @@ export class Panel {
     // (the pages' text, for selection and find, out of the layout until the gesture rests:
     // SVG text, its glyphs laid out again at each size, was most of each frame's layout)
     st.classList.toggle("zooming", !final);
+    // (the pages' text layers still to fill wait for the zoom to rest, Viewer.moved; at its
+    // end, those shown before held out of the layout too, shown again a page a frame)
+    if (final) this.viewer.holdText();
+    else this.viewer.moved();
     this.viewer.redraw(true);
-    if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
+    // (scrolled by `dx`, `dy` too: the place kept moved by them, then the one under the pointer kept)
+    if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
+    if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
   }
 
@@ -2282,7 +2436,7 @@ export class Panel {
     const g = this.gesture;
     if (!g) return;
     // (still easing toward its goal: ended once there, not cut short by a jump)
-    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal || g.sx || g.sy || g.ix || g.iy) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = undefined;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);
@@ -2298,6 +2452,8 @@ export class Panel {
   private findTimer: ReturnType<typeof setTimeout> | undefined;
   /** The pointer over the panel (in a host's page, its keys only then). */
   private hover = false;
+  /** The pointer's last place over the pages (client pixels): where the zoom keys zoom. */
+  private pointer: { x: number; y: number } | null = null;
 
   /** The find field opened (its text selected) or closed (the marks gone). */
   find(on: boolean): void {
@@ -2358,11 +2514,21 @@ export class Panel {
   private findAndZoom(all: boolean): void {
     const stage = this.$("#stage");
     this.win.addEventListener("pointerenter", () => (this.hover = true));
+    stage.addEventListener("pointermove", (e) => (this.pointer = { x: e.clientX, y: e.clientY }), { passive: true });
+    stage.addEventListener("pointerleave", () => (this.pointer = null));
     this.win.addEventListener("pointerleave", () => (this.hover = false));
     // (Ctrl+wheel, a trackpad's pinch too: the pages zoom at the pointer, not the browser's page)
     stage.addEventListener(
       "wheel",
       (e) => {
+        const g = this.gesture;
+        if (!e.ctrlKey && g) {
+          // (a scroll while it zooms: the gesture's, see zoomScroll)
+          e.preventDefault();
+          const u = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
+          const x = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, y = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+          return this.zoomScroll(g, x * u, y * u, !matchMedia("(prefers-reduced-motion: reduce)").matches);
+        }
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();
@@ -2393,7 +2559,11 @@ export class Panel {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        // (the element the key went to, inside the panel's shadow root: a window's
+        // listener sees `e.target` retargeted to the shadow host, so a "/" typed
+        // in a note's text box opened the search)
+        const into = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+        const typing = !!into && into !== q && (into.isContentEditable || !!into.closest?.("input, textarea, select, [contenteditable=true], [contenteditable=\"\"]"));
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);
@@ -2454,6 +2624,11 @@ export class Panel {
       if (same) same.rows.push(...g.rows);
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
+    // (the margin beside the host's "Highlight follows", where there is one)
+    for (const g of groups) {
+      const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
+      if (m >= 0 && f >= 0) g.rows.splice(f + (f > m ? 0 : 1), 0, ...g.rows.splice(m, 1));
+    }
     this.settingRows.clear();
     this.tilesGone();
     // (one group at a time, by its tab: the last one shown, else the first)
@@ -2509,6 +2684,17 @@ export class Panel {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
       row.querySelector(".help")!.after(grid);
       if (r.tile) for (const b of row.querySelectorAll<HTMLElement>(".pick")) this.tileShown(b.querySelector(".lk")!, (box) => r.tile!(b.dataset.v!, box));
+    } else if (r.kind === "swatches") {
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
+      row.querySelector(".help")!.after(grid);
+      for (const t of row.querySelectorAll<HTMLElement>(".sw")) this.waspSwatch(t, t.dataset.v as WaspColours);
+    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
+    else if (r.kind === "colors") {
+      const [a, b] = String(r.value ?? "").split(",");
+      ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
+    } else if (r.kind === "custom") {
+      const made = r.make?.();
+      if (made) row.querySelector(".help")!.after(made);
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, (ctl.querySelector(".val")!.textContent = String(r.value ?? ""));
     return row;
@@ -2524,6 +2710,9 @@ export class Panel {
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
     else if (r.kind === "select" && e.type === "change") v = (t as HTMLSelectElement).value;
+    else if (r.kind === "swatches" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
+    else if (r.kind === "range" && e.type === "input") v = (t as HTMLInputElement).value;
+    else if (r.kind === "colors" && e.type === "input") v = [...row.querySelectorAll<HTMLInputElement>("input")].map((i) => i.value).join(",");
     else if (r.kind === "picks" && e.type === "click") {
       const all = t.closest<HTMLElement>("[data-all]")?.dataset.all, one = t.closest<HTMLElement>(".pick")?.dataset.v;
       const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
@@ -2541,7 +2730,7 @@ export class Panel {
     if (why) return;
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch")!.setAttribute("aria-checked", String(v === true));
-    if (r.kind === "choice") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "choice" || r.kind === "swatches") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
     if (r.kind === "picks") {
       const on = new Set(String(v).split(","));
       row.querySelectorAll<HTMLElement>(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v!))));
@@ -2586,6 +2775,15 @@ export class Panel {
     const preview: SettingRow[] = [];
     if (this.mainFiles.names.length)
       preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview.push({
+      id: "margin",
+      label: "Keep a margin",
+      help: "The highlight that follows your editor stays at least this far from the top and bottom of the view; the page scrolls just enough to keep it there. 0: it scrolls only once the highlight leaves the view",
+      kind: "range",
+      max: 45,
+      value: String(this.prefs.margin),
+      set: (v) => ((this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0))), this.marginApply(), this.save()),
+    });
     const look: SettingRow[] = [];
     look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
@@ -2629,6 +2827,7 @@ export class Panel {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look },
+      { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build },
@@ -2642,11 +2841,124 @@ export class Panel {
     this.viewer.startAt(k, top);
   }
 
-  /** The links' switches (PanelPrefs) given to the viewer. */
+  /** The links' switches and the reading aid (PanelPrefs) given to the viewer. */
   private linksShown(): void {
     const v = this.viewer, p = this.prefs;
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
+    this.waspApply();
+  }
+
+  // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
+
+  /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
+  private waspLook(): WaspLook {
+    const p = this.prefs;
+    const hex = (c: unknown, d: string) => (typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c : d);
+    const custom = Array.isArray(p.waspCustom) ? p.waspCustom : [];
+    return {
+      on: p.wasp === true,
+      colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
+      custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
+      // (0 to 200, 100 the default: the first scale's 0 to 100 the same numbers)
+      strength: Number.isFinite(p.waspStrength) ? Math.min(200, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(200, Math.max(0, p.waspLength)) / 100 : 1,
+      text: p.waspText === "all" ? "all" : "body",
+    };
+  }
+
+  /** The sample in the tab (null: the tab not drawn). */
+  private waspSample: HTMLElement | null = null;
+
+  /**
+   * The aid as chosen: the viewer told (on, which text), the colours put
+   * in the panel's variables (print.ts's bands read them: nothing drawn
+   * again for a colour or the strength), the tab's sample and Custom's
+   * swatch shown with them.
+   */
+  private waspApply(): void {
+    const l = this.waspLook();
+    const c = waspColours(l);
+    const st = this.win.style;
+    st.setProperty("--ph-wasp0", c.light[0]);
+    st.setProperty("--ph-wasp1", c.light[1]);
+    st.setProperty("--ph-wasp0-dark", c.dark[0]);
+    st.setProperty("--ph-wasp1-dark", c.dark[1]);
+    this.viewer.waspShown(l.on, l.text === "all", l.length);
+    const box = this.waspSample;
+    if (box?.isConnected) {
+      const dark = this.sheetDark();
+      box.classList.toggle("dark", dark);
+      const [a, b] = dark ? c.dark : c.light, ink = dark ? "#ffffff" : "#000000";
+      // (the heading a line of its own only for All text, as on the pages)
+      const all = l.text === "all";
+      box.querySelectorAll("i").forEach((band, k) => {
+        const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
+        const [i, k2] = stopsAt(n % 2 ? 1 : 0, l.length).map((x) => `${(x * 100).toFixed(1)}%`);
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col} ${k2}, ${ink} ${i}` : `${ink} ${i}, ${col} ${k2}`})` : "none";
+      });
+    }
+    this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v as WaspColours));
+  }
+
+  /** A swatches tile's art: two lines of each colour's fade, as on the pages (Dark PDF's, the pages dark). */
+  private waspSwatch(tile: HTMLElement, id: WaspColours): void {
+    const art = tile.querySelector<HTMLElement>(".art");
+    if (!art) return;
+    const dark = this.sheetDark();
+    const c = waspColours({ ...this.waspLook(), colours: id, strength: 1 });
+    const [a, b] = dark ? c.dark : c.light, ink = dark ? "#e1e1e1" : "#202020";
+    art.classList.toggle("dark", dark);
+    const fades = [`${ink}, ${a}`, `${a}, ${ink}`, `${ink}, ${b}`, `${b}, ${ink}`];
+    art.querySelectorAll("i").forEach((line, n) => (line.style.background = `linear-gradient(to right, ${fades[n]})`));
+  }
+
+  /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
+  private waspRows(): SettingRow[] {
+    const p = this.prefs, l = this.waspLook();
+    const kept = <K extends keyof PanelPrefs>(k: K, v: PanelPrefs[K]) => {
+      p[k] = v;
+      this.waspApply();
+      this.save();
+    };
+    const colours: [string, string][] = [...WASP_PRESETS.map((x): [string, string] => [x.id, x.name]), ["custom", "Custom"]];
+    const sample = () => {
+      // (a paragraph's lines, as a page sets them: the text's ink, a band over each)
+      const box = html`<div class="wsample" aria-hidden="true"><span class="h">1 Introduction<i></i></span><span>Each line of the text fades into a colour at its end,<i></i></span><span>and the next line starts with that same colour, so the<i></i></span><span>eye, going back across the page, lands on the right<i></i></span><span>line. The colour changes every two lines.<i></i></span></div>`.firstElementChild as HTMLElement;
+      this.waspSample = box;
+      // (its bands drawn in waspApply)
+      queueMicrotask(() => this.waspApply());
+      return box;
+    };
+    return [
+      { id: "wasp", label: "Colour lines", help: "A reading aid: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
+      {
+        id: "wasp-colours",
+        label: "Colours",
+        help: "Each pair of lines fades into one colour, the next pair into the other",
+        kind: "swatches",
+        options: colours,
+        value: l.colours,
+        set: (v) => kept("waspColours", String(v) as WaspColours),
+      },
+      { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
+      { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
+      { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
+      { id: "wasp-sample", label: "Sample", kind: "custom", make: sample },
+    ];
+  }
+
+  /** Custom's colours picked: kept, and Custom chosen (its swatch ticked). */
+  private waspCustomSet(v: string): void {
+    const [a, b] = v.split(",");
+    this.prefs.waspCustom = [a, b];
+    this.prefs.waspColours = "custom";
+    const row = this.settingRows.get("wasp-colours");
+    if (row) row.value = "custom";
+    this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    this.waspApply();
+    this.save();
   }
 
   /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
@@ -2663,6 +2975,12 @@ export class Panel {
     ];
     if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (⌘ on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
     return rows;
+  }
+
+  /** The highlight's scroll margin as chosen, given to the viewer. */
+  private marginApply(): void {
+    const m = Number(this.prefs.margin);
+    this.viewer.margin = Number.isFinite(m) ? Math.max(0, Math.min(45, m)) / 100 : DEFAULTS.margin / 100;
   }
 
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
@@ -2743,6 +3061,8 @@ export class Panel {
 
   private applyDark(): void {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || (this.dark === "theme" && this.hostDark()));
+    // (Colour lines' sample and swatches, open in Settings: as the pages are now)
+    if (this.waspSample?.isConnected) this.waspApply();
   }
 
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
@@ -3345,8 +3665,6 @@ export class Panel {
     // (a view with no layout yet: this page's slots, up to it)
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => (i === k && hash) || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
-    // (a page drawn: this document is built here, with or without a sheet over it)
-    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();
@@ -3356,7 +3674,6 @@ export class Panel {
 export type DarkPdf = "off" | "on" | "theme";
 
 /** The packages a first build downloaded, said under its step ("" when all were kept on this machine: none to count). */
-const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
 export type { OpeningLook } from "./openings/index.ts";

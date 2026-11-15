@@ -24,6 +24,7 @@ import { Strips, type Frame, type StripSource } from "../../../viewer/src/strips
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
 import type { DiffLook, SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
+import type { ReviewHost, ReviewState } from "../../../viewer/src/review.ts";
 
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
@@ -36,6 +37,17 @@ class Socket implements CoreTransport {
   private events: ((e: CoreEvent) => void)[] = [];
   onOpen: () => void = () => {};
   onClose: () => void = () => {};
+  /**
+   * Called on every open, beside `onOpen` (which later code assigns over:
+   * a listener chained into it was dropped by that, so the notes were asked
+   * for on no open, and a reloaded tab showed none until the next build).
+   */
+  private opens: (() => void)[] = [];
+  /** `f` on every open from now on, and now if it is open. */
+  onOpened(f: () => void): void {
+    this.opens.push(f);
+    if (this.ws?.readyState === WebSocket.OPEN) f();
+  }
 
   /**
    * Join the watch: first asked over HTTP whether it is there, so a tab
@@ -45,14 +57,24 @@ class Socket implements CoreTransport {
    */
   async connect(): Promise<void> {
     // (a tab in the background asks too, over HTTP first: the watch then sees it and opens no second tab)
-    if (!(await this.there())) return this.again();
+    const there = await this.there();
+    if (!there) return this.again();
+    // (another phitex's watch at this address, its viewer not this page's: the
+    // tab is told to reload, its pages kept as they are, and talks to it no more)
+    if (there !== true && ownViewer() && there !== ownViewer()) return this.onStale();
     this.open();
   }
 
-  /** Whether the watch answers HTTP here. */
-  async there(): Promise<boolean> {
+  /** A watch serving another viewer than this page's (`ping`'s `viewer` line): the tab must be reloaded. */
+  onStale: () => void = () => {};
+
+  /** Whether the watch answers HTTP here: false, else the viewer it serves (`ping`), true where it says none. */
+  async there(): Promise<string | boolean> {
     try {
-      return (await fetch(new URL("ping", location.href), { cache: "no-store" })).ok;
+      const r = await fetch(new URL("ping", location.href), { cache: "no-store" });
+      if (!r.ok) return false;
+      const m = /^viewer (\S+)$/m.exec(await r.text());
+      return m ? m[1] : true;
     } catch {
       return false;
     }
@@ -67,7 +89,11 @@ class Socket implements CoreTransport {
     const url = new URL("ws", location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.ws = new WebSocket(url);
-    this.ws.onopen = () => ((this.wait = 1000), this.onOpen());
+    this.ws.onopen = () => {
+      this.wait = 1000;
+      this.onOpen();
+      for (const f of this.opens) f();
+    };
     this.ws.onmessage = (m) => {
       const r = JSON.parse(m.data as string);
       if (r.event) return this.events.forEach((f) => f(r));
@@ -87,7 +113,7 @@ class Socket implements CoreTransport {
     const id = this.next++;
     return new Promise((ok) => {
       this.waiting.set(id, ok);
-      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ ...op, id }));
       else (this.waiting.delete(id), ok({ ok: false, error: "not connected" } as CoreRes));
     });
   }
@@ -103,16 +129,39 @@ class Socket implements CoreTransport {
  * `outline` and every other request asked of the watch.
  */
 /** The watch's `settled` event: the build's time and parts (a failed build: since_ms, ms and history only). */
-type Settled = { since_ms?: number | null; ms?: number; history?: number; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number };
+type Settled = {
+  since_ms?: number | null; ms?: number; history?: number; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number;
+  /** The change's wait before its build, by what the watch did meanwhile (the last build, the viewer's asks, …; "reaching the watch": nothing). */
+  waited?: [string, number][];
+};
 
 const dur = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
 
-/** The timing popover's line and parts for a build (panel.latency: one part a line, its name and value two spaces apart). */
-function timing(s: Settled): [string, string] {
+/** A sum's parts as the popover's bars read them ("= waiting 5.2 + build 0.6"): names of letters and spaces, then ms. */
+const sum = (parts: [string, number][]) => parts.filter(([, ms]) => ms >= 0.05).map(([k, ms]) => `${k.replace(/[^a-z ]/gi, "")} ${ms.toFixed(1)}`).join(" + ");
+
+/**
+ * The timing popover's line and parts for a build (panel.latency: one part a
+ * line, its name and value two spaces apart): from the save to the page, its
+ * parts adding up to it (the wait before the build, by what the watch did
+ * meanwhile; the build; the files and the viewer told; the drawing, `drawn`,
+ * once the page is on the screen).
+ */
+function timing(s: Settled, drawn?: number): [string, string] {
   const ms = s.ms ?? 0;
+  const waited = s.waited ?? [];
+  const wait = waited.reduce((a, [, x]) => a + x, 0);
+  const since = typeof s.since_ms === "number" ? s.since_ms : null;
+  // (after the build: its files written, the viewer and the editor told)
+  const after = since === null ? 0 : Math.max(0, since - wait - ms);
+  const total = since === null ? null : since + (drawn ?? 0);
   const parts: [string, string | null][] = [
+    [
+      drawn === undefined ? "save to built" : "keystroke→page",
+      total === null ? null : `${total.toFixed(1)} ms = ${sum([["queued", wait], ["build", ms], ["files and viewer", after], ...(drawn === undefined ? [] : [["paint", drawn] as [string, number]])])}`,
+    ],
+    ["before the build", wait >= 1 ? `${wait.toFixed(1)} ms = ${sum(waited)}` : null],
     [s.cold ? "first build" : "build", `${dur(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
-    ["save to build", typeof s.since_ms === "number" ? dur(s.since_ms) : null],
     ["LaTeX runs", s.passes === undefined ? null : String(s.passes)],
     ["steps", s.ran === undefined ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
     ["packages fetched", s.fetched ? String(s.fetched) : null],
@@ -174,6 +223,8 @@ class Pages implements CoreTransport {
   private sock: Socket;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   private change: { since: number; at: number } | null = null;
+  /** The last build's `settled` event, for its parts once its page is drawn. */
+  private settled: Settled | null = null;
   /** Every page's text, for finding (asked again after each build). */
   private texts: Promise<TextLine[][]> | null = null;
 
@@ -187,18 +238,21 @@ class Pages implements CoreTransport {
       // (a cold build has no save before it: its first page is timed from the build's start, "First build · 14.9 s")
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
+      this.settled = s;
       if (typeof s.ms === "number") panel.latency(...timing(s));
       // (the bars' times: the session's, from the same event)
     });
   }
 
   async request(op: object): Promise<CoreRes> {
-    const o = op as { op: string; page?: number };
+    const o = op as { op: string; page?: number; scale?: number; view?: [number, number, number, number] };
     if (o.op === "png") {
-      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
+      // (a link's window zoomed in: its own scale and part of the page, not the pages' zoom, and no repaint to time)
+      const zoom = typeof o.scale === "number" && o.scale > 0;
+      const p = await strips.page(o.page ?? 0, zoom ? o.scale! : panel.pixelsPerPoint(), zoom ? (o.view ?? null) : panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
-      this.painted();
-      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
+      if (!zoom) this.painted();
+      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links, ...(p.hash !== undefined && p.hash !== null ? { json: { hash: p.hash } } : {}) };
     }
     return this.sock.request(op);
   }
@@ -213,6 +267,9 @@ class Pages implements CoreTransport {
     this.change = null;
     requestAnimationFrame(() => {
       const ms = c.since + performance.now() - c.at;
+      // (the parts again, the drawing among them: they add up to the head's time)
+      const s = this.settled;
+      if (s && typeof s.ms === "number") panel.latency(...timing(s, ms - c.since));
       panel.painted(ms);
       void this.sock.request({ op: "painted", ms });
     });
@@ -273,6 +330,7 @@ if (location.hash === "#debug") {
 
 const strips = new Strips(stripSource, chip ?? null);
 const sock = new Socket();
+sock.onStale = staleBar;
 const pages = new Pages(sock);
 /** A place in a file (1-based line and column): the watch opens it in the editor (`--editor`). */
 /** The watch's cache (TeX Live's packs, the formats): its size asked first, emptied on a yes, as `phitex clean --all`. */
@@ -287,6 +345,30 @@ async function clearCache(): Promise<void> {
 }
 
 const source = (file: string, line: number, col = 1) => void sock.request({ op: "source", file, line, col });
+
+/**
+ * Notes and changes (review.ts, docs/spec-editor-protocol.md §9): kept by
+ * the watch (`.phitex/notes.json`, the baseline), its `review_*` ops and
+ * its `review` event; the pages' places from the session's glyphs.
+ */
+const review: ReviewHost = {
+  request: (op, params) => sock.request({ op, ...params }),
+  onState(cb) {
+    sock.onEvent((e: any) => e.event === "review" && cb(e as ReviewState));
+    // (asked at every open: a tab opened or reloaded, or joined again after
+    // the watch restarted)
+    sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState)));
+  },
+  boxes: (file, start, end) => session.boxesOf(file, start, end),
+  source: (sel) => session.sourceOf(sel),
+  spot: (k, x, y) => session.spotOf(k, x, y),
+  goto: (file, line) => source(file, line),
+  showChanges(on, git, proposal) {
+    if (!on) return controls.stop();
+    if (proposal) return void controls.start({ from: "now", to: `proposal:${proposal}` }, `Proposal ${proposal}`, "against your files as they are");
+    void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
+  },
+};
 
 const panel = new Panel(
   {
@@ -364,6 +446,7 @@ const panel = new Panel(
   {
     host: "watch",
     outline: true,
+    review,
     keys: true,
     header: true,
     footer: false,
@@ -396,6 +479,38 @@ const panel = new Panel(
  * which played the default's while the socket connected. The `prefs` op
  * answers them again once it is open.
  */
+/** The viewer this page was served for (`<meta name="phitex-viewer">`, a hash of viewer.js, crates/cli/src/view.rs). */
+function ownViewer(): string {
+  return document.querySelector<HTMLMetaElement>('meta[name="phitex-viewer"]')?.content ?? "";
+}
+
+/**
+ * The tab told that phitex was updated (`Socket.onStale`): a bar across the top it can't
+ * close, with Reload; the pages shown stay, and nothing more is asked of the watch.
+ */
+function staleBar(): void {
+  if (document.getElementById("phitex-stale")) return;
+  const bar = document.createElement("div");
+  bar.id = "phitex-stale";
+  bar.setAttribute("role", "alert");
+  Object.assign(bar.style, {
+    position: "fixed", top: "0", left: "0", right: "0", zIndex: "2147483647",
+    display: "flex", gap: "12px", alignItems: "center", justifyContent: "center",
+    padding: "10px 16px", font: "14px system-ui, sans-serif",
+    background: "#1d3e72", color: "#ffffff", boxShadow: "0 2px 8px rgba(0,0,0,.25)",
+  });
+  const text = document.createElement("span");
+  text.textContent = "phitex was updated: reload this tab to use the new viewer.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Reload";
+  Object.assign(button.style, { font: "inherit", padding: "4px 14px", borderRadius: "6px", border: "0", background: "#ffffff", color: "#1d3e72", cursor: "pointer" });
+  button.onclick = () => location.reload();
+  bar.append(text, button);
+  document.body.append(bar);
+  button.focus();
+}
+
 const PAGE_PREFS = ((): any => {
   try {
     return JSON.parse(document.getElementById("phitex-prefs")?.textContent ?? "null");
@@ -889,7 +1004,7 @@ const setPref = async (k: string, v: unknown): Promise<string | undefined> => {
 
 /** The watch's rows of the Settings dialog: the user's file's (set here) and the project's (shown: its phitex.toml's, or the command line's). */
 async function watchSettings(): Promise<SettingsGroup[]> {
-  const [r, info, cache] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" })]);
+  const [r, info, cache, rv] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" }), sock.request({ op: "review_state" })]);
   if (!r.ok) return [{ title: "Preview", rows: [{ id: "prefs", label: "Your settings", kind: "info", value: "", disabled: `Couldn't read them: ${r.error ?? "not available"}` }] }];
   const p = r.json ?? {}, at = info.ok ? (info.json ?? {}) : {};
   const file = String(p.file ?? "phitex.toml");
@@ -918,6 +1033,7 @@ async function watchSettings(): Promise<SettingsGroup[]> {
       title: "Build",
       rows: [
         toggle("watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does. From the next phitex watch on."),
+        toggle("watch-ask-write", "Ask at quit whether to write the PDF", "When nothing was written while watching, quitting asks whether to write the PDF here. Off: it writes nothing and asks nothing."),
         toggle("synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."),
         {
           id: "threads",
@@ -946,6 +1062,36 @@ async function watchSettings(): Promise<SettingsGroup[]> {
         },
       ],
     },
+    {
+      title: "Experimental",
+      rows: [
+        {
+          id: "experimental-review",
+          label: "Review your agent's edits",
+          help: "Its edits to your files shown here change by change, to accept, reject or comment on (the Changes tab beside the pages). Off: nothing of it is shown or kept. For this watch now, and from the next on.",
+          kind: "toggle",
+          value: !!p["experimental-review"],
+          set: async (v) => {
+            const r = await sock.request({ op: "review_changes", on: !!v });
+            if (!r.ok) return r.error ?? "not changed";
+            return (await setPref("experimental-review", !!v)) ?? undefined;
+          },
+        },
+        {
+          id: "review-mode",
+          label: "Your agent's changes",
+          help: "Edits: it edits the files, its changes show on the pages and wait for you. Proposes: they are kept apart until you accept them (the agent writes in .phitex/work/). For this watch now, and your default from the next.",
+          kind: "choice",
+          options: [["direct", "Edits"], ["propose", "Proposes"]],
+          value: String(rv.json?.mode ?? p["review-mode"] ?? "direct"),
+          set: async (v) => {
+            const r = await sock.request({ op: "review_mode", mode: v });
+            if (!r.ok) return r.error ?? "not changed";
+            return (await setPref("review-mode", v)) ?? undefined;
+          },
+        },
+      ],
+    },
     { title: "Updates and tips", rows: [toggle("update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal.")] },
     { title: "Where", rows: [{ id: "w-file", label: "Your settings", help: "Every document and port: `phitex config` lists them all", kind: "info", value: file }] },
   ];
@@ -965,3 +1111,5 @@ const prefs = async () => {
 const opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();
+
+

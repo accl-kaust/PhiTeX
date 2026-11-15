@@ -436,6 +436,48 @@ impl Report {
     }
 }
 
+/// A build's answers to the viewer's reads, taken apart from the session
+/// ([`Session::reads`]): made on a thread of their own, never on the
+/// one that builds. The default: no build, nothing to answer with.
+#[derive(Default)]
+pub struct Reads {
+    origins: Option<Arc<phitex_tex::OriginsCapture>>,
+    aux: String,
+}
+
+impl Reads {
+    /// [`Session::page_origins_until`]'s answer, made from the build
+    /// this was taken of.
+    #[must_use]
+    pub fn page_origins(&self, k: usize) -> (Vec<String>, Option<Arc<phitex_tex::PageOrigins>>) {
+        match &self.origins {
+            Some(c) => {
+                let page = c.page(k);
+                (c.files(), page)
+            }
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// [`Session::pages_of_source`] of the build this was taken of.
+    #[must_use]
+    pub fn pages_of_source(&self, file: &str, at: usize) -> Vec<usize> {
+        self.origins
+            .as_ref()
+            .map(|c| c.pages_of_source(file, u32::try_from(at).unwrap_or(u32::MAX)))
+            .unwrap_or_default()
+    }
+
+    /// [`Session::cite_labels`] of the build this was taken of.
+    #[must_use]
+    pub fn cite_labels(&self) -> (HashMap<String, String>, HashMap<String, String>) {
+        (
+            crate::cites::bibcites(&self.aux),
+            crate::cites::bibnumbers(&self.aux),
+        )
+    }
+}
+
 /// What the builds read ([`Session::watched`]).
 #[derive(Clone, Debug, Default)]
 pub struct Watched {
@@ -492,7 +534,7 @@ pub struct Session {
     )>,
     /// What the tools made, as last stored in the cache
     /// ([`Session::store_made`]).
-    made_stored: Mutex<Option<Vec<u8>>>,
+    made_stored: Mutex<Option<(u64, Vec<u8>)>>,
     /// What the written keys and names last stored were made from
     /// ([`Build::wkeys_source`]): the same, nothing to make or store.
     wkeys_from: Mutex<Option<u64>>,
@@ -508,12 +550,20 @@ pub struct Session {
     /// ([`Build::reads`] is the last evaluation's only), and the file
     /// the host found for it, looked up once, when the name came (or
     /// when it was first found): an edit compares names, not lookups.
-    inputs: Vec<(String, bool, Option<PathBuf>)>,
+    /// With each file found, whether it is the project's, not the
+    /// distribution's ([`Session::watched`]), told once, when found.
+    inputs: Vec<(String, bool, Option<PathBuf>, bool)>,
     /// The host's key of each file the finder read from disk
     /// ([`Host::stamp`]), taken before the read: the bytes the build holds
     /// are at most that new. Empty: read twice under two keys (changed
     /// while a build read it), unknown.
     stamps: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+    /// [`Session::inputs`] by name, and by the names a change of each
+    /// comes as.
+    inputs_by: InputIndex,
+    /// The evaluation the last report was made of
+    /// ([`Build::settled_key`]): the records made of it stored then.
+    reported: Option<(u64, u64)>,
     /// Whether the package loads' and the document nodes' records
     /// changed since last stored ([`Session::flush_records`], called when
     /// a build settles: a no-op unless a load changed them).
@@ -660,6 +710,8 @@ impl Session {
             buffers: Arc::default(),
             changed: Vec::new(),
             inputs: Vec::new(),
+            reported: None,
+            inputs_by: InputIndex::default(),
             stamps: Arc::default(),
             records_dirty: false,
             absorb: Absorb::default(),
@@ -679,6 +731,24 @@ impl Session {
         if let Some(r) = &mut self.store {
             *r = r.restamped(stamp);
         }
+    }
+
+    /// Waits until the pages' files the last build asked are made (they
+    /// are made beside its evaluations, which do not wait for them:
+    /// `phitex_tex::Progress::wait_streamed`).
+    pub fn wait_streamed(&self) {
+        if let Some(b) = &self.build {
+            b.progress().wait_streamed();
+        }
+    }
+
+    /// The last build's runs by operation (its engine's
+    /// `Stats::runs_by_op`): what an edit ran again.
+    pub fn runs_by_op(&self) -> Vec<(&'static str, u64)> {
+        self.build
+            .as_ref()
+            .map(|b| b.stats.runs_by_op.clone())
+            .unwrap_or_default()
     }
 
     /// The host: the files the build reads, the services it calls.
@@ -726,34 +796,82 @@ impl Session {
     }
 
     /// Every file the builds read is to be read again from disk at the
-    /// next build (`r` in watch: a change made outside, unseen).
-    pub fn reread_all(&mut self) {
+    /// next build (`r` in watch: a change made outside, unseen): those
+    /// whose key moved, or not found then and found now. How many were
+    /// checked, and how many are to be read again.
+    pub fn reread_all(&mut self) -> (usize, usize) {
+        let r = self.reread_all_timed();
+        (r.checked, r.changed)
+    }
+
+    /// [`Session::reread_all`], with what its check cost by kind: the
+    /// keys of the files found, the lookups of the names not found.
+    pub fn reread_all_timed(&mut self) -> Reread {
         // (a file found whose key is the one it had when the build read
         // it: unchanged, not read again; one not found is looked up again,
-        // one read from an editor's buffer or with no key is read again.
-        // Every file read and turned into a value of its whole text, the
-        // XeTeX job's fonts and pictures too, made `r` cost what all of
-        // them cost, not what changed)
+        // and read only if the host finds it now; one read from an
+        // editor's buffer or with no key is read again. Every file read
+        // and turned into a value of its whole text, the XeTeX job's fonts
+        // and pictures too, made `r` cost what all of them cost, not what
+        // changed; every name not found staged to be looked up again cost
+        // Grail's `r` 98 stagings of nothing, 3 ms)
+        for (n, ..) in self.inputs.iter().filter(|(_, found, ..)| !found) {
+            self.host.look_again(n);
+        }
+        let trace = phitex_tex::OBSERVE && std::env::var_os("PHITEX_REREAD_TRACE").is_some();
         let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+        let (mut keys, mut lookups, mut looked_up) = (Duration::ZERO, Duration::ZERO, 0);
         let stale: Vec<String> = self
             .inputs
             .iter()
-            .filter(|(_, found, p)| match (found, p) {
-                (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
-                    (Some(a), Some(b)) => a.is_empty() || *a != b,
-                    _ => true,
-                },
-                _ => true,
+            .filter(|(n, found, p, _)| {
+                let t = Instant::now();
+                let (stale, why) = match (found, p) {
+                    (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
+                        (Some(a), Some(_)) if a.is_empty() => (true, "read under two keys"),
+                        (Some(a), Some(b)) => (*a != b, "its key"),
+                        (None, _) => (true, "no key kept"),
+                        (_, None) => (true, "no key now"),
+                    },
+                    (true, None) => (true, "found nowhere now"),
+                    // (found now where the job wrote it, its key the
+                    // one it was written with: the build's own)
+                    (false, _) => match self.host.locate_key(n) {
+                        None => (false, "not found then, nor now"),
+                        Some(p) => match (stamps.get(&p), self.host.stamp(&p)) {
+                            (Some(a), Some(b)) if !a.is_empty() && *a == b => {
+                                (false, "written by the job")
+                            }
+                            _ => (true, "not found then, found now"),
+                        },
+                    },
+                };
+                if *found {
+                    keys += t.elapsed();
+                } else {
+                    lookups += t.elapsed();
+                    looked_up += 1;
+                }
+                if trace {
+                    eprintln!(
+                        "reread: {n}: {why}: {}",
+                        if stale { "read again" } else { "kept" }
+                    );
+                }
+                stale
             })
             .map(|(n, ..)| plain_name(n))
             .collect();
         drop(stamps);
-        // (a name not found: the host's lookup made again, not its last
-        // answer taken, a file the host has since given found)
-        for (n, ..) in self.inputs.iter().filter(|(_, found, _)| !found) {
-            self.host.look_again(n);
-        }
+        let r = Reread {
+            checked: self.inputs.len(),
+            changed: stale.len(),
+            looked_up,
+            keys,
+            lookups,
+        };
         self.changed.extend(stale);
+        r
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -854,6 +972,10 @@ impl Session {
             if let Some(b) = &mut self.build {
                 let progress = b.progress();
                 self.status.meter().build_begins(progress.evaluation());
+                // (an edit's pages streamed as they are made, where a
+                // viewer shows them, as the clean build's: those it
+                // changed, `phitex_tex::Progress::stream_page`)
+                progress.set_streaming(self.status.meter().streams());
                 self.status.set_live(Some(live(progress)));
                 self.status.set("typesetting");
                 // (evaluated with the text, one evaluation: its stats
@@ -861,7 +983,7 @@ impl Session {
                 // (their keys taken again as they are read now)
                 {
                     let mut m = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
-                    for (n, _, p) in &self.inputs {
+                    for (n, _, p, _) in &self.inputs {
                         if let Some(p) = p
                             && reread.contains(n)
                         {
@@ -912,10 +1034,9 @@ impl Session {
                 self.status.meter().build_begins(0);
                 self.status.meter().watch(&progress);
                 // (its pages streamed as they ship, where a viewer shows
-                // them, `Meter::on_streamed`: the cold build only, never an
-                // edit's, whose pages come in at once)
+                // them, `Meter::on_streamed`: every one of them, and then
+                // each edit's, the pages it changed)
                 progress.set_streaming(self.status.meter().streams());
-                let streaming = progress.clone();
                 {
                     let (status, name) = (self.status.clone(), self.job.engine.name);
                     let making = std::sync::atomic::AtomicBool::new(false);
@@ -1072,7 +1193,6 @@ impl Session {
                 };
                 phitex_tex::timeline::lap("session: the options (records read)");
                 let b = Build::with(opts, prelude.as_deref(), &text);
-                streaming.set_streaming(false);
                 phitex_tex::timeline::lap("engine: the build returned");
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
                 phitex_tex::timeline::lap("session: the format stored (when new)");
@@ -1109,16 +1229,28 @@ impl Session {
                     b.set_stuck_after(Some((t0.elapsed() * 5).max(Duration::from_secs(60))));
                 }
                 self.inputs.clear();
+                self.inputs_by = InputIndex::default();
             }
+            // (each name looked up by the index, not compared with every
+            // input: every build's reads against every input was
+            // quadratic, Grail's 335 inputs)
             for (n, found) in b.reads() {
-                if let Some(e) = self.inputs.iter_mut().find(|(m, ..)| *m == n) {
+                if let Some(&i) = self.inputs_by.name.get(&n) {
+                    let e = &mut self.inputs[i];
                     if found && e.2.is_none() {
                         e.2 = self.host.locate_key(&n);
+                        if let Some(p) = &e.2 {
+                            e.3 = !self.host.distribution(p);
+                            self.inputs_by.key(plain_name(&p.to_string_lossy()), i);
+                        }
                     }
                     e.1 = found;
                 } else {
                     let p = found.then(|| self.host.locate_key(&n)).flatten();
-                    self.inputs.push((n, found, p));
+                    let i = self.inputs.len();
+                    self.inputs_by.add(&n, p.as_deref(), i);
+                    let ours = p.as_ref().is_some_and(|p| !self.host.distribution(p));
+                    self.inputs.push((n, found, p, ours));
                 }
             }
         }
@@ -1145,7 +1277,12 @@ impl Session {
             phitex_tex::timeline::lap(&format!("session: {name}"));
             tp = Instant::now();
         };
-        if let Some(b) = &self.build {
+        // (an evaluation that had nothing to do, `r` or a save with
+        // nothing changed: what follows is made from the build's state,
+        // as it was at the last report, stored then)
+        let evaluated = self.build.as_ref().map(Build::settled_key);
+        let fresh = std::mem::replace(&mut self.reported, evaluated) != evaluated;
+        if let Some(b) = self.build.as_ref().filter(|_| fresh) {
             // (both made from the written files' accumulator: the same
             // as last stored, nothing to make or store)
             let from = b.wkeys_source();
@@ -1158,10 +1295,12 @@ impl Session {
                 *last = from;
                 same
             };
+            phitex_tex::timeline::lap("session: the written files' source");
             if !same {
                 self.store_wkeys(b);
                 self.store_wnames(b);
             }
+            phitex_tex::timeline::lap("session: written keys and names stored");
             // (what the tools made follows their other inputs too, a
             // `.bib`: stored whether or not the written files changed)
             self.store_made(b);
@@ -1236,6 +1375,7 @@ impl Session {
         } else {
             b.diagnostics()
         };
+        crate::failure::engine_needed(&mut diagnostics, self.job.engine.name);
         if let Some(d) = self.format_unpublished() {
             diagnostics.push(d);
         }
@@ -1566,6 +1706,29 @@ impl Session {
         (crate::cites::bibcites(&aux), crate::cites::bibnumbers(&aux))
     }
 
+    /// What the viewer's reads of this build are answered from, taken
+    /// now and answered on any thread whatever the session becomes
+    /// ([`Reads`]): the pages' origins and the places on them, the
+    /// citations' labels. None without a build.
+    #[must_use]
+    pub fn reads(&self) -> Option<Reads> {
+        let b = self.build.as_ref()?;
+        let origins = (self.job.origins || self.job.synctex).then(|| Arc::new(b.origins_capture()));
+        let name = format!("{}.aux", self.job.jobname);
+        let aux = b
+            .files_shared()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| t.clone())
+            .or_else(|| {
+                self.sink
+                    .get(&name)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })
+            .unwrap_or_default();
+        Some(Reads { origins, aux })
+    }
+
     /// Page `k`'s glyph origins (0 the first), made for that page alone
     /// (its answer kept while its nodes are, shifted where they only
     /// moved), and the files origins name: none without origins or a
@@ -1583,15 +1746,37 @@ impl Session {
         Some((b.origin_files(), page))
     }
 
+    /// [`Session::page_origins`] (none: no origins kept, as an empty
+    /// answer), given up (`None`) once `stop` says so
+    /// ([`phitex_tex::Build::page_origins_until`]).
+    pub fn page_origins_until(
+        &self,
+        k: usize,
+        stop: &dyn Fn(bool) -> bool,
+    ) -> Option<(Vec<String>, Option<Arc<phitex_tex::PageOrigins>>)> {
+        let Some(b) = self
+            .build
+            .as_ref()
+            .filter(|_| self.job.origins || self.job.synctex)
+        else {
+            return Some((Vec::new(), None));
+        };
+        let page = b.page_origins_until(k, stop)?;
+        Some((b.origin_files(), page))
+    }
+
     /// The main text with the editor's buffer for it, if there is one.
     /// The last build's diagnostics at their places (TeX's errors and
     /// warnings, the engine's), made now: an edit's report leaves them
     /// for when the editing pauses ([`Report::diagnostics_pending`]).
     pub fn diagnostics_now(&self) -> Vec<phitex_tex::Diagnostic> {
-        self.build
+        let mut ds = self
+            .build
             .as_ref()
             .map(phitex_tex::Build::diagnostics)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        crate::failure::engine_needed(&mut ds, self.job.engine.name);
+        ds
     }
 
     fn text_now(&self) -> Arc<str> {
@@ -1802,25 +1987,33 @@ impl Session {
         let Some(c) = &self.store else {
             return;
         };
-        let out = b.export_made();
+        // (made from the same values as last stored: the same bytes, none
+        // made or compared: Grail's .bbl, 0.4 ms an edit)
+        let from = b.made_source();
+        phitex_tex::timeline::lap("session: the made files' source");
         let mut last = self
             .made_stored
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if last.as_deref() == Some(out.as_slice()) {
+        if last.as_ref().is_some_and(|(f, _)| *f == from) {
+            return;
+        }
+        let out = b.export_made();
+        if last.as_ref().is_some_and(|(_, o)| *o == out) {
+            last.as_mut().expect("compared").0 = from;
             return;
         }
         if c.get(Key::Doc("toolmade")).as_deref() != Some(out.as_slice()) {
             c.put(Key::Doc("toolmade"), &out);
         }
-        *last = Some(out);
+        *last = Some((from, out));
     }
 
     fn store_wnames(&self, b: &Build) {
         let Some(c) = &self.store else {
             return;
         };
-        let names: Vec<String> = b.files().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = b.files_shared().iter().map(|(n, _)| n.clone()).collect();
         let out = wnames_bytes(&names);
         let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
         if last.2.as_deref() == Some(out.as_bytes()) {
@@ -1932,9 +2125,9 @@ impl Session {
         // (wherever found, in any folder, but the distribution's files:
         // TeX Live's or Shelf's, which no one edits)
         let ours = |p: &Path| !self.host.distribution(p);
-        for (n, _, p) in &self.inputs {
+        for (n, _, p, mine) in &self.inputs {
             w.names.push(plain_name(n));
-            if let Some(p) = p.as_ref().filter(|p| ours(p)) {
+            if let Some(p) = p.as_ref().filter(|_| *mine) {
                 w.paths.push(p.clone());
             }
         }
@@ -1962,26 +2155,7 @@ impl Session {
         if changed.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        let found: Vec<Option<String>> = self
-            .inputs
-            .iter()
-            .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
-            .collect();
         let mut hit = vec![false; self.inputs.len()];
-        // (each input by the names a change of it comes as: its name, with
-        // `.tex`, the file found; looked up, not compared with every input
-        // for every change, `r` changing every input: 10 ms for Grail's)
-        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, (n, ..)) in self.inputs.iter().enumerate() {
-            let n = plain_name(n);
-            let mut keys = vec![format!("{n}.tex"), n];
-            keys.extend(found[i].clone());
-            keys.sort();
-            keys.dedup();
-            for k in keys {
-                by_name.entry(k).or_default().push(i);
-            }
-        }
         // (a changed file TeX did not read: staged too, for a tool that
         // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
         // engine stages only what one of its runs read, else nothing)
@@ -1994,7 +2168,7 @@ impl Session {
         let base_is = |p: &str, base: Option<&std::ffi::OsStr>| Path::new(p).file_name() == base;
         for c in changed {
             let mut any = false;
-            for &i in by_name.get(c).into_iter().flatten() {
+            for &i in self.inputs_by.change.get(c).into_iter().flatten() {
                 hit[i] = true;
                 any = true;
             }
@@ -2002,10 +2176,10 @@ impl Session {
                 continue;
             }
             let base = Path::new(c).file_name();
-            for (i, f) in found.iter().enumerate() {
+            for (i, (_, _, f, _)) in self.inputs.iter().enumerate() {
                 if let Some(f) = f
-                    && Path::new(f).file_name() == base
-                    && self.host.same_file(f, c)
+                    && f.file_name() == base
+                    && self.host.same_file(&plain_name(&f.to_string_lossy()), c)
                 {
                     hit[i] = true;
                     any = true;
@@ -2109,6 +2283,7 @@ impl Session {
                 }
                 b
             };
+            host.fed(&p, &bytes);
             Some((shown, bytes))
         })
     }
@@ -2122,10 +2297,12 @@ impl Session {
         let (host, buffers) = (self.host.clone(), self.buffers.clone());
         Some(Arc::new(move |s: phitex_tex::ToolSearch, name: &str| {
             let (p, bytes) = search(s, name)?;
-            match buffered(&*host, &buffers, &p) {
-                Some(t) => Some((p, tex::bytes(&t))),
-                None => Some((p, bytes)),
-            }
+            let bytes = match buffered(&*host, &buffers, &p) {
+                Some(t) => tex::bytes(&t),
+                None => bytes,
+            };
+            host.fed(Path::new(&p), &bytes);
+            Some((p, bytes))
         }))
     }
 
@@ -2134,6 +2311,7 @@ impl Session {
     /// the host's sink.
     pub fn write(&self, r: &Report, main_too: bool) -> Result<Written, String> {
         let sink = &self.sink;
+        let _held = sink.hold();
         sink.begin()?;
         phitex_tex::timeline::lap("write: the output directory");
         let mut files = Vec::new();
@@ -2173,6 +2351,7 @@ impl Session {
             files.push((p.clone(), h));
             Ok(p)
         };
+        let mut ours: Vec<(&str, PathBuf)> = Vec::new();
         for (n, t) in &r.out.writes {
             // (TeX Live's `openout_any = p`: never outside the output
             // directory, never a dot file; a document can't overwrite
@@ -2181,7 +2360,35 @@ impl Session {
                 eprintln!("phitex: not writing to {n} (openout_any = p)");
                 continue;
             }
-            put(n, &tex::bytes(t))?;
+            let p = put(n, &tex::bytes(t))?;
+            ours.push((n.as_str(), p));
+        }
+        // (a file the job writes and reads back, `.aux`, `.out`: what it
+        // wrote is what the build holds of it, its read-back, so its key
+        // is the written file's from now on, one not found when the build
+        // began too. Kept as read, the watch's own write was a change
+        // made outside to the next `r`, which read it again and evaluated
+        // it: Grail's first `r` 4 ms of a round that ran no node)
+        {
+            let mut m = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+            for (n, written) in ours {
+                let Some(p) = self.host.locate_key(n) else {
+                    continue;
+                };
+                let kept = m.contains_key(&p)
+                    || self
+                        .inputs
+                        .iter()
+                        .any(|(i, found, ..)| !found && plain_name(i) == plain_name(n));
+                if kept
+                    && self
+                        .host
+                        .same_file(&p.to_string_lossy(), &written.to_string_lossy())
+                    && let Some(now) = self.host.stamp(&p)
+                {
+                    m.insert(p, now);
+                }
+            }
         }
         for (n, b) in &r.out.shell_files {
             if !out_name_ok(n) {
@@ -2209,10 +2416,23 @@ impl Session {
         // the main file's directory)
         // (a watch's at idle, [`Session::write_synctex`]: the pages'
         // origins matched off the typing path)
-        if self.job.synctex && self.build.is_some() {
+        if self.job.synctex
+            && let Some(b) = &self.build
+        {
             if self.watching {
                 self.synctex_due
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // (what it is made from taken now, for a way out that
+                // writes it while the next edit's build runs: the file of
+                // the PDF file written, not of what the Build became)
+                let cap = b.origins_capture();
+                let root = self.synctex_root();
+                sink.synctex_due(
+                    &format!("{}.synctex.gz", self.job.jobname),
+                    Some(Arc::new(move || {
+                        crate::synctex::Writer::default().write_capture(&cap, &root)
+                    })),
+                );
             } else if let Some(Some(gz)) = self.synctex_bytes(&|_| false) {
                 put(&format!("{}.synctex.gz", self.job.jobname), &gz)?;
                 phitex_tex::timeline::lap("write: the SyncTeX file");
@@ -2229,15 +2449,21 @@ impl Session {
         let Some(b) = self.build.as_ref() else {
             return Some(None);
         };
-        let root = match self.job.path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let root = self.host.canonical(&root);
+        let root = self.synctex_root();
         self.synctex
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .write_until(b, &root, stop)
+    }
+
+    /// The directory `JOB.synctex.gz` names the files from: the main
+    /// file's.
+    fn synctex_root(&self) -> PathBuf {
+        let root = match self.job.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        self.host.canonical(&root)
     }
 
     /// Whether a watch's `JOB.synctex.gz` waits for idle.
@@ -2287,15 +2513,26 @@ impl Session {
         Some(gz)
     }
 
+    /// The last build's `JOB.synctex.gz` made now from its pages' glyph
+    /// origins, whatever was made before (`phitex session pdf`); none
+    /// without a build or its origins.
+    pub fn synctex_now(&self) -> Option<Vec<u8>> {
+        let b = self.build.as_ref()?;
+        if !(self.job.origins || self.job.synctex) {
+            return None;
+        }
+        crate::synctex::Writer::default().write_capture(&b.origins_capture(), &self.synctex_root())
+    }
+
     /// `JOB.synctex.gz` written: the file and its bytes' hash.
     ///
     /// # Errors
     /// The sink's.
     pub fn put_synctex(&self, gz: &[u8]) -> Result<(PathBuf, u64), String> {
         let h = tex::fingerprint(gz);
-        let p = self
-            .sink
-            .put(&format!("{}.synctex.gz", self.job.jobname), gz, h)?;
+        let name = format!("{}.synctex.gz", self.job.jobname);
+        let p = self.sink.put(&name, gz, h)?;
+        self.sink.synctex_due(&name, None);
         phitex_tex::timeline::lap("idle: the SyncTeX file");
         Ok((p, h))
     }
@@ -2333,7 +2570,7 @@ impl Session {
         s.push_str(&format!("PWD {}\n", cwd.display()));
         s.push_str(&format!("INPUT {}\n", self.job.path.display()));
         if self.build.is_some() {
-            for (_, found, p) in &self.inputs {
+            for (_, found, p, _) in &self.inputs {
                 if let Some(p) = p.as_ref().filter(|_| *found) {
                     s.push_str(&format!("INPUT {}\n", p.display()));
                 }
@@ -2417,6 +2654,36 @@ fn out_name_ok(name: &str) -> bool {
 }
 
 /// A file's name without a leading `./`.
+/// The session's inputs by name ([`Session::inputs`]' places), and by
+/// each name a change of one comes as: its name, with `.tex`, the file
+/// found ([`Session::reads_of`]).
+#[derive(Default)]
+struct InputIndex {
+    name: HashMap<String, usize>,
+    change: HashMap<String, Vec<usize>>,
+}
+
+impl InputIndex {
+    /// Input `i`, named `n`, found at `p`.
+    fn add(&mut self, n: &str, p: Option<&Path>, i: usize) {
+        self.name.insert(n.to_owned(), i);
+        let plain = plain_name(n);
+        self.key(format!("{plain}.tex"), i);
+        self.key(plain, i);
+        if let Some(p) = p {
+            self.key(plain_name(&p.to_string_lossy()), i);
+        }
+    }
+
+    /// A change of `k` is one of input `i`.
+    fn key(&mut self, k: String, i: usize) {
+        let v = self.change.entry(k).or_default();
+        if !v.contains(&i) {
+            v.push(i);
+        }
+    }
+}
+
 fn plain_name(n: &str) -> String {
     n.strip_prefix("./").unwrap_or(n).to_owned()
 }
@@ -2703,4 +2970,19 @@ mod out_name_tests {
             assert!(!out_name_ok(bad), "{bad}");
         }
     }
+}
+
+/// What `r`'s check of the files did ([`Session::reread_all_timed`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Reread {
+    /// The files and names checked.
+    pub checked: usize,
+    /// Those to be read again.
+    pub changed: usize,
+    /// Of those checked, the names not found, looked up again.
+    pub looked_up: usize,
+    /// The time the keys of the files found took (a stat each).
+    pub keys: Duration,
+    /// The time the lookups of the names not found took.
+    pub lookups: Duration,
 }

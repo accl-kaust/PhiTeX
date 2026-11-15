@@ -29,6 +29,7 @@ mod api;
 mod assemble;
 mod boxscope;
 mod build;
+mod chunks;
 mod collect;
 mod context;
 mod control;
@@ -95,7 +96,21 @@ pub use native::NativeFonts;
 pub fn boxscope_on() -> bool {
     boxscope::on()
 }
-pub use origins::{OriginsSnapshot, PageOrigins};
+/// How many control sequence names this process has interned: the
+/// internal ones (`\u{10FFFE}…`) numbered as such, and the others.
+/// Names live as long as the process (a watch, the language server), so
+/// what a session interns must stop growing once its names repeat.
+#[must_use]
+pub fn interned_names() -> (u32, u32) {
+    val::cs_counts()
+}
+/// Interns control sequence `name` in this process's table, as a build
+/// meeting it would (a test's way to fill the table first).
+#[doc(hidden)]
+pub fn intern_name(name: &str) {
+    let _ = val::Tok::cs(name);
+}
+pub use origins::{OriginsCapture, OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};

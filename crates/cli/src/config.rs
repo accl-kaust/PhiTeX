@@ -64,6 +64,21 @@ pub struct Config {
     /// and the aux files into the folder after each build (off: nothing
     /// there, the pages in the viewer; `--write` asks for it once).
     pub watch_write: Option<bool>,
+    /// Whether `phitex watch`, quitting at a terminal with nothing written,
+    /// asks whether to write the PDF (on, the default; off: it writes
+    /// nothing and asks nothing; `-y` writes, unasked).
+    pub watch_ask_write: Option<bool>,
+    /// Whether a watch takes changes that appear on disk (not typed in an
+    /// attached editor) as accepted, rather than pending review
+    /// (docs/spec-editor-protocol.md §9.4).
+    pub review_accept_disk: Option<bool>,
+    /// Reviewing an agent's edits in the viewer (docs/spec-editor-protocol.md
+    /// §9.4): experimental, off by default; yours only.
+    pub experimental_review: Option<bool>,
+    /// How the agent's changes are reviewed (docs/spec-editor-protocol.md
+    /// §9.6): `direct` (it edits the files; its changes wait as hunks) or
+    /// `propose` (kept as proposals until accepted).
+    pub review_mode: Option<String>,
     /// The viewer's feature tips seen (yours only, set by the viewer).
     pub tips_seen: Option<Vec<String>>,
     /// The engine's threads (yours only: a machine's, not a document's; 0:
@@ -117,6 +132,10 @@ const KEYS: &[&str] = &[
     "update-check",
     "update-channel",
     "watch-write",
+    "watch-ask-write",
+    "review-accept-disk",
+    "experimental-review",
+    "review-mode",
     "tips-seen",
     "threads",
     "follow",
@@ -130,6 +149,7 @@ const KEYS: &[&str] = &[
 /// The viewer's settings that are one of a few names: each key, its names.
 pub const CHOICES: &[(&str, &[&str])] = &[
     ("follow", &["cursor", "selection", "dblclick"]),
+    ("review-mode", &["direct", "propose"]),
     ("dark-pdf", &["off", "on", "theme"]),
     (
         "opening",
@@ -522,7 +542,15 @@ const RETIRED: &[&str] = &["problems-hidden"];
 /// user's file; never a command, which a page could make run: `editor`,
 /// `viewer` are the terminal's to set, as are `shell-escape` and
 /// `update-channel`). Its others: [`CHOICES`], `threads`, `cache-limit`.
-pub const SWITCHES: &[&str] = &["watch-write", "synctex", "update-check", "underline"];
+pub const SWITCHES: &[&str] = &[
+    "experimental-review",
+    "watch-write",
+    "watch-ask-write",
+    "synctex",
+    "update-check",
+    "underline",
+    "review-accept-disk",
+];
 
 /// The viewer's preferences (`set`: those keys set first, each a list of
 /// names, in the user's file, its other lines kept), as JSON.
@@ -600,6 +628,10 @@ pub fn prefs(
     Ok(serde_json::json!({
         "tips-seen": c.tips_seen.unwrap_or_default(),
         "watch-write": c.watch_write.unwrap_or(false),
+        "watch-ask-write": c.watch_ask_write.unwrap_or(true),
+        "review-accept-disk": c.review_accept_disk.unwrap_or(false),
+        "experimental-review": c.experimental_review.unwrap_or(false),
+        "review-mode": c.review_mode.clone().unwrap_or_else(|| "direct".to_owned()),
         "synctex": c.synctex,
         "update-check": c.update_check.unwrap_or(false),
         "underline": c.underline.unwrap_or(true),
@@ -701,6 +733,26 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "phitex watch writes the PDF (with its .synctex.gz) and the aux files here after each build",
     ),
     (
+        "watch-ask-write",
+        "on",
+        "phitex watch asks at quit whether to write the PDF, when nothing was written (off: never asks, writes nothing)",
+    ),
+    (
+        "experimental-review",
+        "off",
+        "experimental: your agent's edits reviewed in the viewer, change by change (accept, reject, comment) (yours only)",
+    ),
+    (
+        "review-accept-disk",
+        "off",
+        "changes that appear on disk, not typed in an attached editor, count as accepted (else they wait for review in the viewer)",
+    ),
+    (
+        "review-mode",
+        "direct",
+        "how an agent's changes are reviewed: direct (it edits the files, its changes wait as hunks) or propose (kept apart as proposals until you accept them)",
+    ),
+    (
         "threads",
         "0: one thread",
         "the engine's threads, -j over it (yours only)",
@@ -754,6 +806,10 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("update-check", "true"),
     ("update-channel", "\"stable\""),
     ("watch-write", "false"),
+    ("watch-ask-write", "true"),
+    ("review-accept-disk", "false"),
+    ("experimental-review", "false"),
+    ("review-mode", "\"direct\""),
     ("threads", "0"),
     ("follow", "\"cursor\""),
     ("dark-pdf", "\"off\""),
@@ -1073,6 +1129,7 @@ const USERS_ALONE: &[&str] = &[
     "dark-pdf",
     "opening",
     "underline",
+    "experimental-review",
 ];
 /// Keys a project may set: what its build is, none naming anything to run
 /// (`engine` is one of PhiTeX's own, `tex::engine`, nothing started; the
@@ -1092,6 +1149,9 @@ const PROJECTS_TOO: &[&str] = &[
     "files",
     "phitex",
     "watch-write",
+    "watch-ask-write",
+    "review-accept-disk",
+    "review-mode",
     "latexmk",
     "inputs",
 ];
@@ -1283,6 +1343,10 @@ impl Config {
             update_check: self.update_check.or(under.update_check),
             update_channel: self.update_channel.or(under.update_channel),
             watch_write: self.watch_write.or(under.watch_write),
+            watch_ask_write: self.watch_ask_write.or(under.watch_ask_write),
+            review_accept_disk: self.review_accept_disk.or(under.review_accept_disk),
+            experimental_review: self.experimental_review.or(under.experimental_review),
+            review_mode: self.review_mode.or(under.review_mode),
             tips_seen: self.tips_seen.or(under.tips_seen),
             threads: self.threads.or(under.threads),
             follow: self.follow.or(under.follow),
@@ -1352,26 +1416,9 @@ pub fn default_engine(text: &str) -> &'static str {
     }
 }
 
-/// The packages that run only under XeTeX or LuaTeX, and the engine each
-/// asks for (fontspec and unicode-math run under both: XeTeX's is the one
-/// PhiTeX runs). LuaTeX's come first: a document with luacode and fontspec
-/// needs LuaTeX.
-const NATIVE_PACKAGES: [(&str, &str); 14] = [
-    ("luacode", "luatex"),
-    ("luatexja", "luatex"),
-    ("luatexja-fontspec", "luatex"),
-    ("luaotfload", "luatex"),
-    ("luamplib", "luatex"),
-    ("fontspec", "xetex"),
-    ("unicode-math", "xetex"),
-    ("polyglossia", "xetex"),
-    ("xeCJK", "xetex"),
-    ("xltxtra", "xetex"),
-    ("xunicode", "xetex"),
-    ("mathspec", "xetex"),
-    ("xgreek", "xetex"),
-    ("bidi", "xetex"),
-];
+/// The packages that run only under XeTeX or LuaTeX (the engine checks'
+/// help names them too).
+use phitex_live::failure::NATIVE_PACKAGES;
 
 /// The commands that exist only under XeTeX or LuaTeX (fontspec's, in a
 /// file a shared preamble or class loads it for).
@@ -1651,6 +1698,10 @@ mod tests {
                 update_check: None,
                 update_channel: None,
                 watch_write: None,
+                watch_ask_write: None,
+                review_accept_disk: None,
+                experimental_review: None,
+                review_mode: None,
                 tips_seen: None,
                 threads: None,
                 follow: None,

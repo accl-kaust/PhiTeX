@@ -118,7 +118,15 @@ Where the writer calls it:
   switch on and off);
 - `insert_interword_space`, `insert_fake_space`: `tap.none(1)`;
 - `literal`: `tap.literal(body)`;
-- `out_form`, `out_image`: `tap.xobject(name)`.
+- `out_form`, `out_image`: `tap.xobject(name)`;
+- `hlist_lr` and `vlist_out` (the PDF writer's and the DVI writer's):
+  `tap.level(l)`, TeX--XeT's reversal level (as the bidi algorithm's
+  embedding levels: 0 outside reversed text, odd in a right-to-left
+  segment, the next even in left-to-right text inside it; a list
+  reversed whole outside reversed text one level in; a box of lines
+  read at level 0 again). The writer shows a reversed segment's codes
+  in the reverse of their reading order; the level is the tap's to undo
+  that (2.2), the bytes are the same.
 
 The engine's tap (`crates/engines/tex/src/origins.rs`) keeps a
 `PageGlyphs`: per code its font, character (or ligature originals),
@@ -136,7 +144,20 @@ Input: the page's glyph list; the text nodes (`node_spans`). Output:
 per glyph `(node, offset in the node's text, length, synthesized)`, or
 none.
 
-1. **Glyph text.** A code's character is its code point (TeX text
+1. **Glyph text.** The page's codes are read in their reading order:
+   each run of codes at a level above 0 (between two returns to level
+   0, so a line, never two) put back as rule L2 of the bidi algorithm
+   puts text (its own inverse): from its highest level down to 1, each
+   stretch at that level or higher reversed, a node's codes (a native
+   word's glyphs) kept together. Read in the page's order, the words of
+   a right-to-left segment (Arabic in `\textlang`, polyglossia's
+   `\beginR`...`\endR`) matched the source's the wrong way round: a
+   word repeated in it took its other occurrence's bytes, and a
+   paragraph of such text repeated took the first's, so the editor's
+   cursor on one marked both or neither. In a right-to-left run a word
+   ends where the next glyph read is more than a fifth of an em to the
+   left of the last one's start (the mirror of the left-to-right test),
+   and a change of direction ends one. A code's character is its code point (TeX text
    fonts: ASCII letters, digits and most punctuation at their codes;
    T1's upper half is Latin-1); a ligature is its `original`
    characters (`fi` is `f i`, `--` is `- -`, ` `` ` is `` ` ` ``).

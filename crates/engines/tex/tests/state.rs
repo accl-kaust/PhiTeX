@@ -211,7 +211,7 @@ fn a_counter_step_without_a_read_is_a_relation() {
         "a relation, not a value"
     );
     assert!(
-        b.stats.relations_by_op("exec", "count:7") >= 1,
+        b.relations_by_op("exec", "count:7") >= 1,
         "the step is filed as a relation"
     );
 }

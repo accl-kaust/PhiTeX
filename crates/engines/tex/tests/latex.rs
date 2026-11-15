@@ -363,7 +363,7 @@ fn hello(pdf: bool) -> Build {
     {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
         if let Some(bytes) = b.export_prelude() {
-            let _ = std::fs::write(&cache, bytes);
+            common::write_whole(&cache, &bytes);
         }
     }
     let (out, log) = b.output();
@@ -427,7 +427,7 @@ fn latex_loop_rounds() {
                 && let Some(bytes) = b.export_prelude()
             {
                 let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
-                let _ = std::fs::write(&cache, bytes);
+                common::write_whole(&cache, &bytes);
             }
             let cold = (b.stats.loop_rounds, b.stats.rounds, b.stats.nodes_run);
             let keys = b.wkeys();
@@ -493,7 +493,7 @@ fn cold_nodes(name: &str, dir: &Path, src: &str) -> (Build, u64) {
     if !cached {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
         if let Some(bytes) = b.export_prelude() {
-            let _ = std::fs::write(&cache, bytes);
+            common::write_whole(&cache, &bytes);
         }
     }
     let regions = b.stats.nodes_text_frames;
@@ -1332,6 +1332,54 @@ fn latex_pictures_in_a_paragraph_are_children() {
     }
 }
 
+/// A paragraph of several pictures that all change in the second pass
+/// (each shows a `\ref` to a label at the document's end): its run takes
+/// all their new outputs in one run once their children have run, not
+/// one run per picture (lie-hasse's piece of diagrams ran once per
+/// picture moved, and again for its own guess). Counted against the
+/// same document whose pictures do not change; the PDF the same at -j1
+/// and -j8.
+#[test]
+fn latex_pictures_that_all_change_take_one_run() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-change");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |inside: &str| {
+        let pic = format!(
+            "\\begin{{tikzpicture}}\\foreach \\i in {{1,...,12}}{{\\draw (\\i*0.3,0) circle (0.1);}}\\node at (1,0.5) {{{inside}}};\\end{{tikzpicture}}"
+        );
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\usepackage{{refcount}}\n\\begin{{document}}\n\\xdef\\lastref{{\\getrefnumber{{last}}}}First words, a paragraph of its own.\n\nWords {pic} and {pic} then {pic} and {pic} end the paragraph.\n\n\\section{{One}}\\section{{Two}}Last words.\\label{{last}}\n\\end{{document}}\n"
+        )
+    };
+    let runs = |b: &phitex_tex::Build| common::runs_of(b, "exec") + common::runs_of(b, "resume");
+    let mut out = Vec::new();
+    for threads in [1, 8] {
+        let opts = |name: &str| Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let moving = doc("see \\lastref");
+        let still = doc("see one");
+        std::fs::write(dir.join("moving.tex"), &moving).expect("write");
+        std::fs::write(dir.join("still.tex"), &still).expect("write");
+        let a = common::build(opts("moving"), Some(&prelude(true)), &moving);
+        let b = common::build(opts("still"), Some(&prelude(true)), &still);
+        let (ra, rb) = (runs(&a), runs(&b));
+        eprintln!(
+            "-j{threads}: paragraph runs {ra} (pictures moved) vs {rb}; pic runs {} vs {}",
+            common::runs_of(&a, "pic"),
+            common::runs_of(&b, "pic")
+        );
+        assert!(
+            ra <= rb + 1,
+            "-j{threads}: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
+            a.stats.runs_by_op
+        );
+        out.push(a.output().0);
+    }
+    assert!(out[0] == out[1], "-j8's PDF is not -j1's");
+}
+
 /// A picture asked again for a read late in its run (the definition of
 /// `\mymark` before it deleted: the picture, in a figure of its own
 /// file, defines it at its end now, as a first use does; put back; its
@@ -1371,6 +1419,83 @@ fn latex_a_picture_asked_again_runs_again() {
         }
     }
     let _ = std::fs::write(dir.join("picck.tex"), src);
+}
+
+/// Each picture of a clean build runs once, in its child: a figure's
+/// run goes on as if its picture were empty, and takes the child's output
+/// when it has run, never reading the picture inline as well (Grail ran
+/// each of its pictures twice, 6.1 s of 19.3 s at -j1). The pictures: one
+/// in a `\resizebox` argument of a figure in an `\input` file (a token
+/// list, Grail's drawn figures), one in a file `\input` inside a
+/// `\resizebox` (its generated ones), two in one figure, one in a
+/// paragraph. At -j1 five runs of `pic`, and the two in one figure read
+/// inline once: met while the first's output is to come, the run goes
+/// again and reads both inline, placing their children (a run of many
+/// pictures goes once more, not once a picture: lie-hasse); at -j4 the
+/// PDF of -j1. Then an edit in the text before them runs none, and one in
+/// a picture's body runs that one again; each PDF a clean build's.
+#[test]
+fn latex_each_picture_runs_once_on_a_clean_build() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-once");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{graphicx}\n\\usepackage{tikz}\n\\begin{document}\nFirst words, before the figures.\n\n\\input{picdrawn}\n\nWords between the figures.\n\n\\begin{figure}\n\\centering\n\\resizebox{0.5\\columnwidth}{!}{\\input{picgen}}\n\\caption{A generated picture.}\n\\end{figure}\n\n\\begin{figure}\n\\centering\n\\begin{tikzpicture}\\draw (0,0) rectangle (1,1); \\node at (0.5,0.5) {\\small one};\\end{tikzpicture}\n\\hfill\n\\begin{tikzpicture}\\draw (0,0) circle (0.5); \\node at (0,0) {\\footnotesize two};\\end{tikzpicture}\n\\caption{Two pictures.}\n\\end{figure}\n\nA paragraph \\begin{tikzpicture}\\draw (0,0) -- (1,0.2);\\end{tikzpicture} with a picture in it.\n\nLast words.\n\\end{document}\n";
+    let drawn = "\\begin{figure}[t]\n\\centering\n\\resizebox{\\columnwidth}{!}{%\n\\begin{tikzpicture}[x=0.5cm,y=0.5cm]\n\\foreach \\i in {1,...,12}{\\draw (\\i,0) circle (0.3); \\node at (\\i,1) {\\scriptsize \\i};}\n\\end{tikzpicture}%\n}\n\\caption{A drawn picture.}\n\\end{figure}\n";
+    let generated = "% generated\n\\begin{tikzpicture}\n\\foreach \\i in {1,...,8}{\\fill (\\i*0.4,0) rectangle +(0.3,\\i*0.2);}\n\\node at (2,-0.5) {\\sffamily bars};\n\\end{tikzpicture}%\n";
+    std::fs::write(dir.join("piconce.tex"), src).expect("write");
+    std::fs::write(dir.join("picdrawn.tex"), drawn).expect("write");
+    std::fs::write(dir.join("picgen.tex"), generated).expect("write");
+    let at = |threads: usize| Options {
+        threads: Some(threads),
+        ..pdf_opts("piconce", &dir)
+    };
+    let one = common::build(at(1), Some(&prelude(true)), src);
+    // (with lists left open, `phitex_tex::boxscope_on`, a picture is no
+    // child: its statements are nodes; the PDFs are the check)
+    let children = !phitex_tex::boxscope_on();
+    if children {
+        assert_eq!(
+            (common::runs_of(&one, "pic"), one.stats.pics_inline),
+            (5, 2),
+            "-j1: pictures run in children, read inline: {:?}",
+            one.stats.runs_by_op
+        );
+    }
+    let four = common::build(at(4), Some(&prelude(true)), src);
+    if let Some(d) = common::first_difference(&four.output().0, &one.output().0) {
+        panic!("-j4 differs from -j1: {d}");
+    }
+    let mut b = one;
+    let before = b.pages();
+    let word = src.replace("First words", "Some first words");
+    b.edit(&word);
+    if children {
+        assert_eq!(
+            common::runs_of(&b, "pic"),
+            0,
+            "a word edit before the pictures ran one"
+        );
+    }
+    std::fs::write(dir.join("piconce.tex"), &word).expect("write");
+    let cold = common::build(at(1), Some(&prelude(true)), &word);
+    assert_eq!(b.pages().len(), before.len());
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("the word edit differs from a clean build: {d}");
+    }
+    let drawn2 = drawn.replace("circle (0.3)", "circle (0.25)");
+    std::fs::write(dir.join("picdrawn.tex"), &drawn2).expect("write");
+    b.edit_file("picdrawn.tex", Some(drawn2.as_bytes()));
+    if children {
+        assert!(
+            common::runs_of(&b, "pic") >= 1,
+            "the drawing edited, its picture did not run again"
+        );
+    }
+    let cold = common::build(at(1), Some(&prelude(true)), &word);
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("the drawing's edit differs from a clean build: {d}");
+    }
+    let _ = std::fs::write(dir.join("piconce.tex"), src);
+    let _ = std::fs::write(dir.join("picdrawn.tex"), drawn);
 }
 
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
@@ -1616,6 +1741,55 @@ fn latexmk_cold(name: &str, threads: usize) {
         "{name} -j {threads}: {} rounds, latexmk ran pdflatex {runs} times",
         b.stats.loop_rounds
     );
+}
+
+/// The biber document edited (a citation taken out, then put back, then
+/// another taken out) as a watch edits it, each round's `.bbl` written
+/// and read back: each edit's PDF the PDF a cold build of its text makes.
+/// A written file's units are cut again from its last cut where the
+/// text changed (`ops::units_again`): the cuts decide how it is read
+/// back in pieces, never what is read.
+#[test]
+fn biber_edits_equal_cold_builds() {
+    let fx = common::fixtures().join("latexmk");
+    let src_dir = fx.join("biber");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join("biber-edits");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for e in std::fs::read_dir(&src_dir).expect("the sources").flatten() {
+        std::fs::copy(e.path(), dir.join(e.file_name())).expect("a source");
+    }
+    let src = common::read(&dir.join("biber.tex"));
+    let opts = |threads: usize| Options {
+        fixpoint: true,
+        threads: Some(threads),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("biber", &dir)
+    };
+    let two = "described by Lamport~\\cite{lamport94}, ";
+    assert!(src.contains("~\\cite{mittelbach04}") && src.contains(two));
+    let texts = [
+        src.replace("~\\cite{mittelbach04}", ""),
+        src.clone(),
+        src.replace(two, "described by Lamport, "),
+        src.replace("~\\cite{mittelbach04}", "")
+            .replace(two, "described by Lamport, "),
+        src.clone(),
+    ];
+    for threads in [1, 8] {
+        let mut b = common::build(opts(threads), Some(&prelude(true)), &src);
+        let mut failed = Vec::new();
+        for (k, t) in texts.iter().enumerate() {
+            b.edit(t);
+            let cold = common::build(opts(threads), Some(&prelude(true)), t);
+            if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+                failed.push(format!("edit {k}: {d}"));
+            }
+        }
+        assert!(failed.is_empty(), "-j{threads}: {failed:?}");
+    }
 }
 
 macro_rules! latexmk_tests {
@@ -2298,6 +2472,240 @@ fn latex_glyph_origins() {
     );
     let f = common::origin_failures(&b, &new, "envs.tex");
     assert!(f.is_empty(), "origins after the edit:\n{}", f.join("\n"));
+}
+
+/// Glyph origins of a document made of the files `files` (name, text)
+/// that main text `main` reads (`\\input`, `\\include`): every glyph
+/// from a file maps to that file's bytes, not to the command that read
+/// it nor another file's; every page's codes have one each, the same at
+/// -j1 and -j8; after `edit` (file, a word and its replacement), a cold
+/// build's answers.
+#[allow(clippy::too_many_lines)]
+fn input_origins(case: &str, main: &str, files: &[(&str, String)], edit: (&str, &str, &str)) {
+    let dir = common::scratch(&format!("origins-input-{case}"));
+    let main =
+        format!("\\documentclass{{article}}\n\\begin{{document}}\n{main}\\end{{document}}\n");
+    std::fs::write(dir.join("main.tex"), &main).expect("main.tex");
+    for (name, text) in files {
+        let p = dir.join(name);
+        std::fs::create_dir_all(p.parent().expect("a directory")).expect("its directory");
+        std::fs::write(p, text).expect("a file");
+    }
+    let build = |threads: usize| {
+        let opts = Options {
+            threads: Some(threads),
+            origins: true,
+            ..pdf_opts("main", &dir)
+        };
+        common::build(opts, Some(&prelude(true)), &main)
+    };
+    let check = |b: &phitex_tex::Build, files: &[(&str, String)], when: &str| {
+        let pdf = b.output_bytes();
+        let mut fails = Vec::new();
+        for (file, text) in std::iter::once(("main.tex", main.as_str()))
+            .chain(files.iter().map(|(n, t)| (*n, t.as_str())))
+        {
+            fails.extend(
+                common::origin_failures_in(b, &pdf, text, file, true, true)
+                    .into_iter()
+                    .map(|f| format!("{file}: {f}")),
+            );
+        }
+        assert!(
+            fails.is_empty(),
+            "{case} {when}: origins:\n{}",
+            fails.join("\n")
+        );
+    };
+    let mut b = build(1);
+    check(&b, files, "-j1");
+    let b8 = build(8);
+    check(&b8, files, "-j8");
+    let named = |b: &phitex_tex::Build| {
+        let pages = b.all_page_origins();
+        let files = b.origin_files();
+        pages
+            .iter()
+            .map(|p| {
+                p.as_ref().map(|p| {
+                    (0..p.len())
+                        .map(|i| {
+                            (
+                                files.get(p.file[i] as usize).cloned(),
+                                p.start[i],
+                                p.end[i],
+                                p.is_synth(i),
+                                p.x[i].to_bits(),
+                                p.y[i].to_bits(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let same = |x: &phitex_tex::Build, y: &phitex_tex::Build, what: &str| {
+        let (e, c) = (named(x), named(y));
+        let first = e.iter().zip(&c).enumerate().find_map(|(k, (x, y))| {
+            if x == y {
+                return None;
+            }
+            let (Some(x), Some(y)) = (x, y) else {
+                return Some(format!(
+                    "page {}: {:?} vs {:?}",
+                    k + 1,
+                    x.is_some(),
+                    y.is_some()
+                ));
+            };
+            let i = x
+                .iter()
+                .zip(y)
+                .position(|(a, b)| a != b)
+                .unwrap_or(x.len().min(y.len()));
+            Some(format!(
+                "page {} code {i} of {}/{}: {:?} vs {:?}",
+                k + 1,
+                x.len(),
+                y.len(),
+                x.get(i),
+                y.get(i)
+            ))
+        });
+        assert!(
+            first.is_none() && e.len() == c.len(),
+            "{case}: {what}: {first:?} pages {} vs {}",
+            e.len(),
+            c.len()
+        );
+    };
+    same(&b8, &b, "-j8's origins are -j1's");
+    let (ef, from, to) = edit;
+    let files2: Vec<(&str, String)> = files
+        .iter()
+        .map(|(n, t)| {
+            (
+                *n,
+                if *n == ef {
+                    t.replacen(from, to, 1)
+                } else {
+                    t.clone()
+                },
+            )
+        })
+        .collect();
+    let new = &files2
+        .iter()
+        .find(|(n, _)| *n == ef)
+        .expect("the edited file")
+        .1;
+    assert_ne!(
+        Some(new),
+        files.iter().find(|(n, _)| *n == ef).map(|x| &x.1)
+    );
+    std::fs::write(dir.join(ef), new).expect("the edit");
+    b.stage_file(ef, Some(new.as_bytes()));
+    b.edit(&main);
+    check(&b, &files2, "after the edit");
+    let cold = build(1);
+    same(&b, &cold, "the edit's origins are a cold build's");
+}
+
+fn input_para(k: usize, what: &str) -> String {
+    format!(
+        "Paragraph {k} of the {what} speaks of rivers and gardens, of letters written \\emph{{slowly}} and pages turned, of a window open on the morning.\n\n"
+    )
+}
+
+/// A file of the review's: a heading and one line of eight sentences.
+fn input_file(head: &str, tag: &str) -> String {
+    let s: Vec<String> = (1..=8)
+        .map(|i| {
+            format!(
+                "In the {tag} part, sentence {i} carries the paragraph along with ordinary words."
+            )
+        })
+        .collect();
+    format!("\\section{{{head}}}\n{}\n", s.join(" "))
+}
+
+/// [`input_origins`]: chapters that are `\\input` files (one inside
+/// another), main text around them.
+#[test]
+fn latex_glyph_origins_of_input_files() {
+    let mut chap = String::from("\\section{The chapter}\n");
+    let mut inner = String::from("\\subsection{Inside}\n");
+    for k in 0..6 {
+        chap.push_str(&input_para(k, "chapter"));
+        inner.push_str(&input_para(k, "inner part"));
+    }
+    chap.push_str("\\input{inner}\n");
+    let main = format!(
+        "{}\\input{{chapter}}\n{}",
+        input_para(0, "main text"),
+        input_para(1, "main text")
+    );
+    input_origins(
+        "nested",
+        &main,
+        &[("chapter.tex", chap), ("inner.tex", inner)],
+        (
+            "chapter.tex",
+            "Paragraph 3 of the chapter",
+            "Paragraph 3 of the chapters",
+        ),
+    );
+}
+
+/// [`input_origins`]: one line of main text, then `\\input` files one
+/// after another, in braces, by the space form and in a directory.
+#[test]
+fn latex_glyph_origins_of_input_files_in_a_row() {
+    input_origins(
+        "row",
+        "Main text before the chapters.\n\\input{intro2}\n\\input{ch2}\n\\input ch3\n\\input{chapters/intro}\n",
+        &[
+            ("intro2.tex", input_file("Intro two", "introtwo")),
+            ("ch2.tex", input_file("Two", "two")),
+            ("ch3.tex", input_file("Three", "three")),
+            ("chapters/intro.tex", input_file("Intro", "intro")),
+        ],
+        ("ch2.tex", "sentence 3 carries", "sentence 3 carried"),
+    );
+}
+
+/// [`input_origins`]: an `\\input` file then an `\\include`d one.
+#[test]
+fn latex_glyph_origins_of_input_and_include() {
+    input_origins(
+        "include",
+        "\\input{intro2}\n\\include{ch2}\n",
+        &[
+            ("intro2.tex", input_file("Intro two", "introtwo")),
+            ("ch2.tex", input_file("Two", "two")),
+        ],
+        ("intro2.tex", "sentence 2 carries", "sentence 2 carried"),
+    );
+}
+
+/// [`input_origins`]: a directory's `\\input` file, an `\\include`d
+/// one, then one by the space form.
+#[test]
+fn latex_glyph_origins_of_input_include_input() {
+    input_origins(
+        "mixed",
+        "\\input{chapters/intro}\n\\include{ch2}\n\\input ch3\n",
+        &[
+            ("chapters/intro.tex", input_file("Intro", "intro")),
+            ("ch2.tex", input_file("Two", "two")),
+            ("ch3.tex", input_file("Three", "three")),
+        ],
+        (
+            "chapters/intro.tex",
+            "sentence 5 carries",
+            "sentence 5 carried",
+        ),
+    );
 }
 
 /// A two-section article with its `.aux` on disk from a pdflatex run,

@@ -90,6 +90,12 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
 /// Example: a page of lines A, B, C, a word edited in B keeping B's
 /// dimensions: the finisher stands, this node reads B's unit again and
 /// writes the page with the new B.
+///
+/// A line of a piece outside the page's window is read by its piece's
+/// unit by itself where one page is filled (a page's own writer,
+/// `crate::xdvpdf::XdvPage`: it reads its own lines only, so that an edit
+/// runs again only the writers of the pages it changed), from the whole
+/// field read once where several are (the output's writer, every page).
 pub(crate) fn fill_sealed_pages(
     cx: &mut Ctx<'_>,
     pages: Vec<ValueId>,
@@ -108,17 +114,24 @@ pub(crate) fn fill_sealed_pages(
     // (the pieces' items, read once all of them where a page names a
     // piece outside its window: [`pieces_items`])
     let mut all: Option<phitex_defuse::FxHashMap<i64, ValueId>> = None;
+    let one = pages.len() == 1;
     for page in pages {
         let t0 = std::time::Instant::now();
         let xs = list_of(v, page);
-        let mut units = window_units(cx, &xs)?;
+        let named = named_pieces(v, page);
+        let mut units = window_units(cx, &xs, &named)?;
         t_win += t0.elapsed();
         let t0 = std::time::Instant::now();
         // (the lines a routine gave back from pieces outside the window:
         // their pieces' units, each read by itself)
-        let named = named_pieces(v, page);
         for &p in named.iter() {
             if units.iter().any(|e| e.0 == p) {
+                continue;
+            }
+            if one {
+                if let Some(x) = crate::pages::unit_items_of(cx, p)? {
+                    units.push((p, x));
+                }
                 continue;
             }
             if all.is_none() {
@@ -172,8 +185,15 @@ pub(crate) fn fill_sealed_pages(
 }
 
 /// The units of a page's sealed lines read in its finisher's window
-/// ([`fill_sealed_pages`]): `[piece, items]` each, by its place there.
-fn window_units(cx: &mut Ctx<'_>, xs: &[ValueId]) -> Result<Vec<(i64, ValueId)>, Stop> {
+/// ([`fill_sealed_pages`]): `[piece, items]` each, by its place there,
+/// of the pieces its sealed lines are of only (`named`, sorted): a page
+/// whose window held a piece none of its lines is of read that piece's
+/// items too, and every edit of the piece ran its writer again.
+fn window_units(
+    cx: &mut Ctx<'_>,
+    xs: &[ValueId],
+    named: &[i64],
+) -> Result<Vec<(i64, ValueId)>, Stop> {
     use phitex_defuse::Step;
     let v = cx.values();
     let node = crate::pages::node_of;
@@ -189,6 +209,9 @@ fn window_units(cx: &mut Ctx<'_>, xs: &[ValueId]) -> Result<Vec<(i64, ValueId)>,
                 cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(at(1)))?;
             for &[p, i] in w[2.min(w.len())..].as_chunks::<2>().0 {
                 let (p, i) = (int_of(v, p), int_of(v, i));
+                if named.binary_search(&p).is_err() {
+                    continue;
+                }
                 let Some(u) = cx.at(view, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
                     continue;
                 };
@@ -429,6 +452,23 @@ pub(crate) fn file_bytes_shared(v: &phitex_defuse::Values, x: ValueId) -> std::s
                 .map(|c| u8::try_from(u32::from(c)).unwrap_or(0))
                 .collect(),
         ),
+    }
+}
+
+/// [`file_bytes_shared`], made when asked from the file `x` stands for
+/// now (a layout's exact file is made once, and kept by the layout).
+pub(crate) fn file_bytes_later(
+    v: &phitex_defuse::Values,
+    x: ValueId,
+) -> std::sync::Arc<dyn Fn() -> std::sync::Arc<Vec<u8>> + Send + Sync> {
+    match file_of(v, x) {
+        Found::File(File::Bytes(b)) => std::sync::Arc::new(move || b.clone()),
+        Found::File(File::Layout(l)) => std::sync::Arc::new(move || l.exact().unwrap_or_default()),
+        Found::Gone => std::sync::Arc::new(|| std::sync::Arc::new(Vec::new())),
+        Found::Str => {
+            let b = file_bytes_shared(v, x);
+            std::sync::Arc::new(move || b.clone())
+        }
     }
 }
 
@@ -1109,6 +1149,8 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
             .read(o.fields.param(v, "pdfpkresolution"))?
             .and_then(|x| i32::try_from(int_of(v, x)).ok())
             .unwrap_or(0),
+        origins: o.origins.load(std::sync::atomic::Ordering::Relaxed),
+        pngs: Some(o.stream_objs.locked().memo()),
     };
     let t_seed = t0.elapsed();
     let l = crate::pdfout::finish_exact(v, &f, &xpages, &units, changed.as_ref(), &o.pdf_cmds);

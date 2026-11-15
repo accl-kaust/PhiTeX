@@ -168,6 +168,31 @@ function errorNeeds(message) {
 
 // viewer/src/text.ts
 var LAYER_LINES = /* @__PURE__ */ new WeakMap();
+var PENDING = /* @__PURE__ */ new WeakMap();
+function deferText(svg2, fill) {
+  PENDING.set(svg2, fill);
+  svg2.setAttribute("data-pending", "");
+}
+var WAITING = ".phx-text[data-pending], .phx-text[data-hold]";
+function textPending(root) {
+  return !!root.querySelector(WAITING) || isWaiting(root);
+}
+var isWaiting = (n) => "matches" in n && n.matches(WAITING);
+function holdText(root) {
+  for (const svg2 of root.querySelectorAll(".phx-text:not([data-pending])")) svg2.setAttribute("data-hold", "");
+}
+function ensureText(root) {
+  if (!root) return;
+  const all = [...isWaiting(root) ? [root] : [], ...root.querySelectorAll(WAITING)];
+  for (const svg2 of all) {
+    svg2.removeAttribute("data-hold");
+    if (!svg2.hasAttribute("data-pending")) continue;
+    const fill = PENDING.get(svg2);
+    PENDING.delete(svg2);
+    svg2.removeAttribute("data-pending");
+    fill?.();
+  }
+}
 function fold(c) {
   const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
   return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
@@ -247,6 +272,194 @@ function search(pages2, q, max = 1e3) {
   }
   return out;
 }
+function caretAt(lines2, x, y, from2) {
+  if (!lines2.length) return null;
+  const top = (l2) => l2.y - l2.size * 0.8, bottom = (l2) => l2.y + l2.size * 0.25;
+  const dx = (l2) => x < l2.x ? l2.x - x : x > l2.x + l2.w ? x - (l2.x + l2.w) : 0;
+  const dy = (l2) => y < top(l2) ? top(l2) - y : y > bottom(l2) ? y - bottom(l2) : 0;
+  const inColumn = (l2) => !from2 || l2.x < from2.x + from2.w && from2.x < l2.x + l2.w;
+  const idx = lines2.map((_, i2) => i2);
+  const best = (cands, key) => cands.reduce((a, b) => key(lines2[b]) < key(lines2[a]) ? b : a);
+  const row = idx.filter((i2) => dy(lines2[i2]) === 0);
+  let i;
+  const over = row.filter((i2) => dx(lines2[i2]) === 0);
+  const rowCol = row.filter((i2) => inColumn(lines2[i2]));
+  if (over.length) i = over[0];
+  else if (rowCol.length) i = best(rowCol, dx);
+  else {
+    const col = idx.filter((i2) => inColumn(lines2[i2]) && dx(lines2[i2]) === 0);
+    const near = col.length ? col : idx.filter((i2) => inColumn(lines2[i2]));
+    i = best(near.length ? near : idx, (l2) => dy(l2) * 4 + dx(l2));
+  }
+  const l = lines2[i];
+  let off = 0;
+  if (x >= l.x + l.w) off = l.text.length;
+  else if (x > l.x) {
+    const n = l.text.length;
+    off = n;
+    for (let j = 0; j < n; j++) {
+      const a = l.xs?.[j] ?? l.x + l.w * j / n, b = l.rs?.[j] ?? l.x + l.w * (j + 1) / n;
+      if (x < (a + b) / 2) {
+        off = j;
+        break;
+      }
+    }
+  }
+  return { i, off };
+}
+
+// viewer/src/wasp.ts
+var WASP_PRESETS = [
+  { id: "classic", name: "Classic", light: ["#1747d6", "#d0202a"], dark: ["#6e98ff", "#ff7b72"], vivid: ["#0000ff", "#ff0000"], vividDark: ["#4f86ff", "#ff4646"] },
+  { id: "blues", name: "Blues", light: ["#1a3ccf", "#0a8fc7"], dark: ["#7d93ff", "#5cc8ff"], vivid: ["#0028ff", "#00a2ff"], vividDark: ["#5a74ff", "#1fbcff"] },
+  { id: "gray", name: "Gray", light: ["#6e6e6e", "#8c8c8c"], dark: ["#8c8c8c", "#a6a6a6"], vivid: ["#9c9c9c", "#b8b8b8"], vividDark: ["#5e5e5e", "#787878"] },
+  { id: "warm", name: "Warm", light: ["#d8620a", "#8a2bbf"], dark: ["#ffa05a", "#c590ff"], vivid: ["#ff7000", "#a000ff"], vividDark: ["#ff8526", "#b060ff"] }
+];
+function saturate(c, t) {
+  const p = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) || 0);
+  const g = (p[0] + p[1] + p[2]) / 3;
+  return "#" + p.map((v) => Math.round(Math.min(255, Math.max(0, v + (v - g) * t))).toString(16).padStart(2, "0")).join("");
+}
+function mix(a, b, t) {
+  const p = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) || 0);
+  const [x, y] = [p(a), p(b)];
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+function waspColours(l) {
+  const p = WASP_PRESETS.find((x) => x.id === l.colours);
+  const light = p ? p.light : l.custom;
+  const dark = p ? p.dark : l.custom.map((c) => mix(c, "#ffffff", 0.45));
+  const vivid = p ? p.vivid : l.custom.map((c) => saturate(c, 0.8));
+  const vividDark = p ? p.vividDark : l.custom.map((c) => mix(saturate(c, 0.8), "#ffffff", 0.3));
+  const s = Math.min(2, Math.max(0, l.strength));
+  const at = (base, none, more) => base.map((c, i) => s <= 1 ? mix(none, c, s) : mix(c, more[i], s - 1));
+  return { light: at(light, "#000000", vivid), dark: at(dark, "#ffffff", vividDark) };
+}
+function bands(lines2, all = false) {
+  const count = /* @__PURE__ */ new Map();
+  for (const l of lines2) {
+    const s = Math.round(l.size * 10) / 10;
+    count.set(s, (count.get(s) ?? 0) + l.text.replace(/\s/g, "").length);
+  }
+  let body = 0, most = 0;
+  for (const [s, n2] of count) if (n2 > most) most = n2, body = s;
+  if (!body) return [];
+  const em = body;
+  const runs = lines2.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
+  if (!runs.length) return [];
+  const long = runs.filter((l) => l.w > em * 15);
+  const base = long.length ? long : runs;
+  const ws = base.map((l) => l.w).sort((a, b) => a - b);
+  const measure = ws[ws.length >> 1];
+  const across = (l) => l.w > measure * 1.4;
+  const spans2 = base.filter((l) => !across(l)).map((l) => [l.x, l.x + l.w]).sort((a, b) => a[0] - b[0]);
+  const cols = [];
+  for (const s of spans2) {
+    const last = cols[cols.length - 1];
+    if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
+    else cols.push([...s]);
+  }
+  const wide = runs.filter(across);
+  if (wide.length) cols.unshift([Math.min(...wide.map((l) => l.x)), Math.max(...wide.map((l) => l.x + l.w))]);
+  const colOf = (l) => {
+    if (wide.length && across(l)) return 0;
+    const m = l.x + l.w / 2;
+    let best = -1, d = Infinity;
+    cols.forEach(([a, b], i) => {
+      if (wide.length && i === 0) return;
+      const e = m < a ? a - m : m > b ? m - b : 0;
+      if (e < d) d = e, best = i;
+    });
+    return best;
+  };
+  const out = [];
+  let n = 0;
+  cols.forEach((col, ci) => {
+    const mine = runs.filter((l) => colOf(l) === ci).sort((a, b) => a.y - b.y || a.x - b.x);
+    const rows = [];
+    for (const l of mine) {
+      const last = rows[rows.length - 1];
+      const edges = [];
+      for (let i = 0; i < l.text.length; i++) if (l.text[i].trim()) edges.push([l.xs?.[i] ?? l.x, l.rs?.[i] ?? l.x + l.w]);
+      if (!l.xs) edges.splice(0, edges.length, [l.x, l.x + l.w]);
+      if (last && Math.abs(l.y - last.y) < Math.max(last.size, l.size, em) * 0.3) {
+        last.l = Math.min(last.l, l.x);
+        last.r = Math.max(last.r, l.x + l.w);
+        last.edges.push(...edges);
+        if (l.size > last.size) last.size = l.size, last.y = l.y;
+      } else rows.push({ l: l.x, r: l.x + l.w, y: l.y, size: l.size, edges });
+    }
+    for (const row of rows) {
+      const em2 = all ? row.size : body;
+      const inset = row.l > col[0] + em2 * 3;
+      const edges = row.edges.sort((a, b) => a[0] - b[0]);
+      let gap = 0, r = edges.length ? edges[0][1] : row.l;
+      for (const [a, b] of edges) gap = Math.max(gap, a - r), r = Math.max(r, b);
+      if (inset && (row.r < col[1] - em2 * 3 || gap > em2 * 3)) continue;
+      const pad = em2 * 0.15;
+      const dir = n % 2;
+      out.push({ x: row.l - pad, y: row.y - em2 * 0.82, w: row.r - row.l + 2 * pad, h: em2 * 1.14, dir, c: Math.floor(n / 2) % 2 });
+      n++;
+    }
+  });
+  return out;
+}
+var SVG = "http://www.w3.org/2000/svg";
+var made = 0;
+var HOLD = 0.85;
+function stopsAt(dir, length) {
+  const l = Math.min(2, Math.max(0, length));
+  const ink2 = Math.max(0, 1 - l), colour = l > 1 ? 1 - HOLD * (l - 1) : 1;
+  return dir ? [1 - ink2, 1 - colour] : [ink2, colour];
+}
+function waspLength(root, length) {
+  for (const s of root.querySelectorAll(".phx-wasp stop")) s.setAttribute("offset", stopsAt(s.dataset.dir === "1" ? 1 : 0, length)[s.classList.contains("wi") ? 0 : 1].toFixed(3));
+}
+function waspOn(page, all = false, length = 1) {
+  const had = page.querySelector(":scope > .phx-wasp");
+  if (had?.dataset.all === String(all)) return waspLength(page, length);
+  had?.remove();
+  const text = page.querySelector(":scope > .phx-text");
+  if (!text) return;
+  ensureText(text);
+  const lines2 = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l) => !!l);
+  const svg2 = document.createElementNS(SVG, "svg");
+  svg2.setAttribute("class", "phx-wasp");
+  svg2.setAttribute("viewBox", text.getAttribute("viewBox") ?? "");
+  svg2.setAttribute("preserveAspectRatio", "none");
+  svg2.setAttribute("aria-hidden", "true");
+  svg2.dataset.all = String(all);
+  const id = `phx-wasp${made++}`;
+  const defs = document.createElementNS(SVG, "defs");
+  for (const c of [0, 1])
+    for (const dir of [0, 1]) {
+      const g = document.createElementNS(SVG, "linearGradient");
+      g.id = `${id}-${c}${dir}`;
+      const [ink2, col] = stopsAt(dir, length).map((x) => x.toFixed(3));
+      for (const [off, cls] of [dir ? [col, `w${c}`] : [ink2, "wi"], dir ? [ink2, "wi"] : [col, `w${c}`]]) {
+        const s = document.createElementNS(SVG, "stop");
+        s.setAttribute("offset", off);
+        s.setAttribute("class", cls);
+        s.dataset.dir = String(dir);
+        g.append(s);
+      }
+      defs.append(g);
+    }
+  svg2.append(defs);
+  for (const b of bands(lines2, all)) {
+    const r = document.createElementNS(SVG, "rect");
+    r.setAttribute("x", b.x.toFixed(2));
+    r.setAttribute("y", b.y.toFixed(2));
+    r.setAttribute("width", b.w.toFixed(2));
+    r.setAttribute("height", b.h.toFixed(2));
+    r.setAttribute("fill", `url(#${id}-${b.c}${b.dir})`);
+    svg2.append(r);
+  }
+  page.insertBefore(svg2, text);
+}
+function waspOff(page) {
+  page.querySelector(":scope > .phx-wasp")?.remove();
+}
 
 // viewer/src/viewer.ts
 var spans = /* @__PURE__ */ new WeakMap();
@@ -270,6 +483,12 @@ function inkSpan(c) {
   spans.set(c, out);
   return out;
 }
+function bitmaps(el) {
+  const all = el instanceof HTMLCanvasElement ? [el] : [...el.querySelectorAll("canvas")];
+  const f = (v) => (parseFloat(v) || 0) / 100;
+  return all.filter((c) => c.width > 0).map((c) => c.classList.contains("phx-tile") ? { c, l: f(c.style.left), t: f(c.style.top), w: f(c.style.width), h: f(c.style.height), whole: false } : { c, l: 0, t: 0, w: 1, h: 1, whole: true });
+}
+var MAG = `<svg viewBox="0 0 16 16" aria-hidden="true" fill="none"><circle cx="6.5" cy="6.5" r="4.6" stroke="currentColor" stroke-width="1.4"/><path d="m10 10 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>`;
 var LETTER = { w: 612, h: 792 };
 var Viewer = class _Viewer {
   slots = [];
@@ -290,6 +509,7 @@ var Viewer = class _Viewer {
     this.io = new IntersectionObserver((es) => this.seen(es), { root: scroller, rootMargin: "100% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] });
     let frame = 0;
     scroller.addEventListener("scroll", () => {
+      this.moved();
       if (!frame)
         frame = requestAnimationFrame(() => {
           frame = 0;
@@ -343,7 +563,35 @@ var Viewer = class _Viewer {
       });
     });
     let dragFrame = 0;
-    root.addEventListener("pointerdown", () => told = "");
+    root.addEventListener("pointerdown", () => {
+      told = "";
+      for (const k of this.visible) ensureText(this.slots[k]?.el);
+    });
+    root.addEventListener("pointermove", (e) => {
+      if (!e.movementX && !e.movementY) return;
+      const slot = e.target?.closest?.(".slot");
+      if (slot && textPending(slot)) ensureText(slot);
+    }, { passive: true });
+    let drag = null;
+    root.addEventListener("mousedown", (e) => {
+      drag = null;
+      if (e.button !== 0 || e.detail > 1 || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.defaultPrevented) return;
+      const t = e.target;
+      if (!t?.closest?.(".slot") || t.closest("a, button, input, textarea, select, [contenteditable], .peer-tag")) return;
+      const at = this.caretFrom(e.clientX, e.clientY);
+      const sel = this.selection();
+      if (!at || !sel) return;
+      e.preventDefault();
+      t.closest("[tabindex]")?.focus({ preventScroll: true });
+      drag = at;
+      sel.setBaseAndExtent(at.node, at.off, at.node, at.off);
+    });
+    root.addEventListener("pointermove", (e) => {
+      if (!drag || !(e.buttons & 1)) return;
+      const to = this.caretFrom(e.clientX, e.clientY, drag);
+      if (to) this.selection()?.setBaseAndExtent(drag.node, drag.off, to.node, to.off);
+    });
+    root.ownerDocument.addEventListener("pointerup", () => drag = null);
     root.addEventListener("pointermove", (e) => {
       if (!(e.buttons & 1) || dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
@@ -433,6 +681,14 @@ var Viewer = class _Viewer {
         });
   }
   // ---- Link previews: a link hovered, the place it goes to shown in a small window on that page ----
+  /**
+   * The highlight's scroll margin, a share of the view's height (0 to 0.45): the
+   * highlight that follows the editor is kept at least this far from the view's top
+   * and bottom, the page scrolled just enough to bring it back to the band's edge
+   * (Emacs's scroll-margin); 0, as before: the page moves only once the highlight
+   * leaves the view, and then centres it.
+   */
+  margin = 0.2;
   /** Links previewed on hover (the host's setting). */
   peeks = true;
   /** Back and Forward after a jump (the pill, the history, the mouse's buttons): the host's setting. */
@@ -470,6 +726,8 @@ var Viewer = class _Viewer {
   peekShow(at) {
     clearTimeout(this.peekHiding);
     const el = this.peekEl ?? this.peekMake();
+    const again = this.peekLink === at.link && !el.hidden;
+    if (!again) this.peekZ.delete(el), this.peekSharp.delete(el);
     this.peekLink = at.link;
     this.peekFrom = at.k;
     const to = at.link[4];
@@ -489,7 +747,7 @@ var Viewer = class _Viewer {
       const list = said2?.length ? said2 : this.host.cited ? this.host.cited(mid, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
       el.classList.toggle("cite", !!list?.length);
       if (list?.length) this.peekCard(list, at.link);
-      else this.peekDraw();
+      else this.peekDraw(el, at.link, again);
     }
     this.peekPlace(at);
   }
@@ -499,11 +757,66 @@ var Viewer = class _Viewer {
     el.className = "peek";
     el.setAttribute("role", "tooltip");
     el.hidden = true;
-    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><button type="button" class="go" data-jump>Go there</button><button type="button" class="pin" data-pin title="Keep it open (a window of its own, moved by its bar)" aria-label="Keep it open"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.6 14.4 6.2l-1.1 1.1-1-.3-2.6 2.6.2 2.6-1.1 1.1-2.6-2.6-3.2 3.2-.7-.7 3.2-3.2-2.6-2.6L4 6.4l2.6.2 2.6-2.6-.3-1z" fill="currentColor"/></svg></button></div>`;
+    el.innerHTML = `<div class="pv"><canvas></canvas><div class="pz"></div><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><span class="zm"><button type="button" data-zoom="-1" title="Zoom out (Ctrl+scroll, or pinch)" aria-label="Zoom out">${MAG}<path d="M4.5 6.5h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button><button type="button" class="zl" data-zoom="0" title="Back to the page's width" aria-label="Back to the page's width">100%</button><button type="button" data-zoom="1" title="Zoom in (Ctrl+scroll, or pinch)" aria-label="Zoom in">${MAG}<path d="M4.5 6.5h4M6.5 4.5v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button></span><button type="button" class="go" data-jump>Go there</button><button type="button" class="pin" data-pin title="Keep it open (a window of its own, moved by its bar)" aria-label="Keep it open"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.6 14.4 6.2l-1.1 1.1-1-.3-2.6 2.6.2 2.6-1.1 1.1-2.6-2.6-3.2 3.2-.7-.7 3.2-3.2-2.6-2.6L4 6.4l2.6.2 2.6-2.6-.3-1z" fill="currentColor"/></svg></button></div>`;
     el.addEventListener("mouseenter", () => el === this.peekEl && clearTimeout(this.peekHiding));
     el.addEventListener("mouseleave", () => el === this.peekEl && this.peekSoon(100));
+    el.addEventListener(
+      "wheel",
+      (e) => {
+        if (!e.ctrlKey || el.classList.contains("cite") || el.classList.contains("url")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
+        const f = notch ? e.deltaY < 0 ? 1.25 : 1 / 1.25 : Math.exp(-e.deltaY / 100);
+        const r = pv.getBoundingClientRect();
+        this.peekZoom(el, (this.peekZ.get(el) ?? 1) * f, e.clientX - r.left, e.clientY - r.top);
+      },
+      { passive: false }
+    );
+    const pv = el.querySelector(".pv"), touches = /* @__PURE__ */ new Map();
+    let pinch = null;
+    const spread = () => {
+      const [a, b] = [...touches.values()];
+      return { d: Math.hypot(a[0] - b[0], a[1] - b[1]), x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 };
+    };
+    pv.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "mouse" || e.button !== 0 || !el.classList.contains("zoomed")) return;
+      e.preventDefault();
+      pv.setPointerCapture(e.pointerId);
+      pv.classList.add("grabbing");
+      const [x0, y0, l0, t0] = [e.clientX, e.clientY, pv.scrollLeft, pv.scrollTop];
+      const move = (m) => (pv.scrollLeft = l0 - (m.clientX - x0), pv.scrollTop = t0 - (m.clientY - y0));
+      const up = () => (pv.classList.remove("grabbing"), pv.removeEventListener("pointermove", move), pv.removeEventListener("pointerup", up), pv.removeEventListener("pointercancel", up));
+      pv.addEventListener("pointermove", move);
+      pv.addEventListener("pointerup", up);
+      pv.addEventListener("pointercancel", up);
+    });
+    pv.addEventListener("pointerdown", (e) => {
+      if (e.pointerType !== "touch") return;
+      touches.set(e.pointerId, [e.clientX, e.clientY]);
+      if (touches.size === 2) pinch = { d: spread().d, z: this.peekZ.get(el) ?? 1 };
+    });
+    pv.addEventListener("pointermove", (e) => {
+      if (!touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, [e.clientX, e.clientY]);
+      if (!pinch || touches.size !== 2) return;
+      const { d, x, y } = spread(), r = pv.getBoundingClientRect();
+      if (pinch.d > 0) this.peekZoom(el, pinch.z * d / pinch.d, x - r.left, y - r.top);
+    });
+    const lift = (e) => {
+      touches.delete(e.pointerId);
+      if (touches.size < 2) pinch = null;
+    };
+    pv.addEventListener("pointerup", lift);
+    pv.addEventListener("pointercancel", lift);
+    pv.addEventListener("scroll", () => this.peekPaintSoon(el), { passive: true });
     el.addEventListener("click", (e) => {
       if (e.target.closest("[data-pin]")) return void this.peekPin();
+      const zb = e.target.closest("[data-zoom]");
+      if (zb) {
+        const z = this.peekZ.get(el) ?? 1, step = Number(zb.dataset.zoom);
+        return void this.peekZoom(el, step ? z * 1.25 ** step : 1);
+      }
       if (e.target.closest(".ph")) return;
       const st = this.stateOf(el);
       const b = e.target.closest("[data-act]");
@@ -537,6 +850,7 @@ var Viewer = class _Viewer {
     clearTimeout(this.peekTimer);
     clearTimeout(this.peekHiding);
     const box = this.scroller.parentElement ?? this.scroller, b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    const pv = el.querySelector(".pv"), kept = [pv.scrollLeft, pv.scrollTop];
     box.append(el);
     const h = Math.min(r.height, b.height - 16), t = Math.max(0, Math.min(r.top - b.top, b.height - h - 8));
     Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${t}px`, width: `${r.width}px`, height: `${h}px` });
@@ -548,6 +862,8 @@ var Viewer = class _Viewer {
     bar2.innerHTML = `<span class="t"></span><button type="button" class="x" aria-label="Close" title="Close">\xD7</button>`;
     bar2.querySelector(".t").textContent = what;
     el.prepend(bar2);
+    [pv.scrollLeft, pv.scrollTop] = kept;
+    this.peekPaint(el);
     bar2.querySelector(".x").addEventListener("click", (e) => (e.stopPropagation(), el.remove()));
     bar2.addEventListener("pointerdown", (e) => {
       if (e.target.closest(".x")) return;
@@ -566,7 +882,8 @@ var Viewer = class _Viewer {
     if (!el.classList.contains("cite") && !el.classList.contains("url")) {
       let t2, w = el.offsetWidth;
       new ResizeObserver(() => {
-        if (!el.isConnected || el.offsetWidth === w) return;
+        if (!el.isConnected) return;
+        if (el.offsetWidth === w) return this.peekPaintSoon(el);
         w = el.offsetWidth;
         clearTimeout(t2);
         t2 = setTimeout(() => this.peekDraw(el, this.pinned.get(el)?.link ?? void 0, true), 120);
@@ -596,6 +913,7 @@ var Viewer = class _Viewer {
     if (!s) return "";
     const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
     const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    ensureText(s.el);
     for (const el of s.el.querySelectorAll("text")) {
       const tr = el.getBoundingClientRect();
       if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
@@ -654,9 +972,9 @@ var Viewer = class _Viewer {
    */
   peekDraw(el = this.peekEl, link = this.peekLink ?? this.peekAt?.link, keep = false) {
     if (!el || !link || typeof link[4] !== "number") return;
-    const pvKeep = el.querySelector(".pv"), was = keep && pvKeep.scrollHeight ? pvKeep.scrollTop / pvKeep.scrollHeight : -1;
+    const pv = el.querySelector(".pv");
+    const was = keep && pv.scrollHeight ? [pv.scrollLeft / pv.scrollWidth, pv.scrollTop / pv.scrollHeight] : null;
     const k = link[4], top = link[5] ?? 0, s = this.slots[k];
-    const pv = el.querySelector(".pv"), c = pv.querySelector("canvas");
     el.classList.toggle("wait", !s?.img);
     if (!s?.img) {
       el.querySelector(".where").textContent = `Page ${k + 1} \xB7 drawing\u2026`;
@@ -665,31 +983,103 @@ var Viewer = class _Viewer {
     }
     el.querySelector(".where").textContent = `Page ${k + 1}`;
     Object.assign(el.querySelector(".go"), { hidden: false, textContent: "Go there" });
-    const img = s.img, W2 = pv.clientWidth || 420, dpr = window.devicePixelRatio || 1;
-    const all = img.canvas instanceof HTMLCanvasElement ? [img.canvas] : [...img.canvas.querySelectorAll("canvas")];
-    const base = all.find((b) => !b.classList.contains("phx-tile") && b.width);
+    const img = s.img;
+    const base = bitmaps(img.canvas).find((b) => b.whole)?.c;
     const [il, ir] = base ? inkSpan(base) : [0, 1];
-    const pad = 10 / img.w, l = Math.max(0, il - pad), r = Math.min(1, ir + pad);
-    const PW = W2 / (r - l), H2 = Math.round(PW * img.h / img.w), X = -l * PW;
-    c.style.width = `${W2}px`;
-    c.style.height = `${H2}px`;
-    c.width = Math.round(W2 * dpr);
-    c.height = Math.round(H2 * dpr);
-    const g = c.getContext("2d");
-    g.fillStyle = "#fff";
-    g.fillRect(0, 0, c.width, c.height);
-    g.setTransform(dpr, 0, 0, dpr, X * dpr, 0);
-    g.imageSmoothingQuality = "high";
-    for (const b of all) {
-      if (!b.width) continue;
-      const tile = b.classList.contains("phx-tile");
-      const f = (v) => (parseFloat(v) || 0) / 100;
-      const [bl, bt, bw, bh] = tile ? [f(b.style.left), f(b.style.top), f(b.style.width), f(b.style.height)] : [0, 0, 1, 1];
-      g.drawImage(b, bl * PW, bt * H2, bw * PW, bh * H2);
+    const pad = 10 / img.w;
+    this.peekGeo.set(el, { k, hash: s.hash ?? null, img, l: Math.max(0, il - pad), r: Math.min(1, ir + pad), top });
+    this.peekLay(el);
+    if (was) [pv.scrollLeft, pv.scrollTop] = [was[0] * pv.scrollWidth, was[1] * pv.scrollHeight];
+    else pv.scrollTop = Math.max(0, top / img.h * pv.scrollHeight - 28);
+    this.peekPaint(el);
+  }
+  /** What a link's window shows of its page: the page, the part across (`l` to `r`, fractions of its width) the window's width shows at zoom 1, the place's height. */
+  peekGeo = /* @__PURE__ */ new WeakMap();
+  /** A window's zoom (1: the printed width across the window; absent, 1). */
+  peekZ = /* @__PURE__ */ new WeakMap();
+  /** A window's sharper drawing of its page, asked at its zoom (`zoomed`): its scale, the page's hash it is of. */
+  peekSharp = /* @__PURE__ */ new WeakMap();
+  /** A window's page laid out at its zoom: its scroll box the page's size at it, the place's mark; scrolled so (`at`) a point stays where it was. */
+  peekLay(el, at) {
+    const g = this.peekGeo.get(el);
+    if (!g) return;
+    const pv = el.querySelector(".pv"), z = this.peekZ.get(el) ?? 1;
+    const W2 = pv.clientWidth || 420, PW = W2 / (g.r - g.l) * z, H2 = Math.round(PW * g.img.h / g.img.w);
+    const pz = pv.querySelector(".pz");
+    pz.style.width = `${Math.round(W2 * z)}px`;
+    pz.style.height = `${H2}px`;
+    pv.querySelector(".at").style.top = `${g.top / g.img.h * H2}px`;
+    el.querySelector(".zl").textContent = `${Math.round(z * 100)}%`;
+    el.classList.toggle("zoomed", z > 1.001);
+    if (at) {
+      const f = z / at.z0;
+      pv.scrollLeft = (pv.scrollLeft + at.x) * f - at.x;
+      pv.scrollTop = (pv.scrollTop + at.y) * f - at.y;
     }
-    const y = top / img.h * H2;
-    pv.querySelector(".at").style.top = `${y}px`;
-    pv.scrollTop = was >= 0 ? was * pv.scrollHeight : Math.max(0, y - 28);
+  }
+  /** A window's zoom set to `z` (1 to 8), the point (`x`, `y`, in its page view) staying put; the middle, none given. */
+  peekZoom(el, z, x, y) {
+    const pv = el.querySelector(".pv"), z0 = this.peekZ.get(el) ?? 1;
+    const z1 = Math.min(8, Math.max(1, z));
+    if (Math.abs(z1 - z0) < 1e-3 || !this.peekGeo.get(el)) return;
+    this.peekZ.set(el, z1);
+    const at = { x: x ?? pv.clientWidth / 2, y: y ?? pv.clientHeight / 2, z0 };
+    this.peekLay(el, at);
+    this.peekPaint(el);
+  }
+  /** A window's page drawn again at the next frame (a scroll of it), sharp once it rests. */
+  peekPaintSoon(el) {
+    if (this.peekFrame.has(el)) return;
+    this.peekFrame.add(el);
+    requestAnimationFrame(() => (this.peekFrame.delete(el), this.peekPaint(el)));
+  }
+  peekFrame = /* @__PURE__ */ new WeakSet();
+  peekRest = /* @__PURE__ */ new WeakMap();
+  /**
+   * The part of a window's page in view drawn on its canvas (the canvas
+   * the view's size, where it scrolled to: a page zoomed 8 times is no
+   * canvas of its size): the page's own bitmaps, the window's sharper
+   * one over them; once it rests, a sharper one asked where these are
+   * coarser than the zoom shows them.
+   */
+  peekPaint(el) {
+    const g = this.peekGeo.get(el);
+    if (!g || !el.isConnected) return;
+    const s = this.slots[g.k];
+    const img = s?.img ?? g.img, sharp = this.peekSharp.get(el);
+    if (sharp && (sharp.k !== g.k || sharp.hash !== (s?.hash ?? null))) this.peekSharp.delete(el);
+    const pv = el.querySelector(".pv"), c = pv.querySelector("canvas"), dpr = window.devicePixelRatio || 1;
+    const z = this.peekZ.get(el) ?? 1, W2 = pv.clientWidth || 420, PW = W2 / (g.r - g.l) * z, H2 = Math.round(PW * g.img.h / g.img.w), X = -g.l * PW;
+    const vw = pv.clientWidth, vh = pv.clientHeight, sx = pv.scrollLeft, sy = pv.scrollTop;
+    Object.assign(c.style, { left: `${sx}px`, top: `${sy}px`, width: `${vw}px`, height: `${vh}px` });
+    const cw = Math.max(1, Math.round(vw * dpr)), ch = Math.max(1, Math.round(vh * dpr));
+    if (c.width !== cw) c.width = cw;
+    if (c.height !== ch) c.height = ch;
+    const x = c.getContext("2d");
+    x.setTransform(1, 0, 0, 1, 0, 0);
+    x.fillStyle = "#fff";
+    x.fillRect(0, 0, cw, ch);
+    x.setTransform(dpr, 0, 0, dpr, (X - sx) * dpr, -sy * dpr);
+    x.imageSmoothingQuality = "high";
+    const all = [...bitmaps(img.canvas), ...this.peekSharp.get(el) ? bitmaps(this.peekSharp.get(el).img.canvas) : []].map((b) => ({ ...b, d: b.c.width / (b.w * img.w) }));
+    all.sort((a, b) => a.d - b.d);
+    for (const b of all) x.drawImage(b.c, b.l * PW, b.t * H2, b.w * PW, b.h * H2);
+    clearTimeout(this.peekRest.get(el));
+    const want = PW / img.w * dpr;
+    const view = [Math.max(0, (sx - X) / PW), Math.max(0, sy / H2), Math.min(1, (sx - X + vw) / PW), Math.min(1, (sy + vh) / H2)];
+    const covers = all.some((b) => b.d >= want * 0.9 && b.l <= view[0] + 1e-3 && b.t <= view[1] + 1e-3 && b.l + b.w >= view[2] - 1e-3 && b.t + b.h >= view[3] - 1e-3);
+    if (covers || !this.host.zoomed) return;
+    this.peekRest.set(
+      el,
+      setTimeout(() => {
+        const k = g.k, hash = this.slots[k]?.hash ?? null;
+        void this.host.zoomed(k, want, view).then((got) => {
+          if (!got || !el.isConnected || this.peekGeo.get(el)?.k !== k || (this.slots[k]?.hash ?? null) !== hash) return;
+          this.peekSharp.set(el, { k, hash, img: got });
+          this.peekPaint(el);
+        });
+      }, 200)
+    );
   }
   /** The window gone `ms` on, unless the pointer comes back to it or its link (one timer: a later leave restarts it, never a second). */
   peekSoon(ms) {
@@ -728,6 +1118,7 @@ var Viewer = class _Viewer {
     const s = this.slots[k];
     if (!s) return [];
     const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
+    ensureText(s.el);
     return [...s.el.querySelectorAll("text")].map((t) => {
       const r = t.getBoundingClientRect();
       const y0 = (r.top - b.top) * sy, y1 = (r.bottom - b.top) * sy, base = Number(t.getAttribute("y"));
@@ -865,6 +1256,7 @@ var Viewer = class _Viewer {
     if (!s) return null;
     const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
     const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    ensureText(s.el);
     for (const el of s.el.querySelectorAll("text")) {
       const tr = el.getBoundingClientRect();
       if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
@@ -1019,6 +1411,7 @@ var Viewer = class _Viewer {
     if (!at) return null;
     let words2 = "", far = Infinity;
     const y = v.top + 12;
+    ensureText(this.slots[at.k]?.el);
     for (const t of this.slots[at.k]?.el.querySelectorAll("text") ?? []) {
       const r = t.getBoundingClientRect();
       if (r.bottom < y - 4 || !t.textContent?.trim()) continue;
@@ -1070,6 +1463,7 @@ var Viewer = class _Viewer {
     s.el.querySelector(".phx-flash")?.remove();
     const y0 = top ?? 0, b = s.el.getBoundingClientRect(), sy = this.size.h / b.height, sx = this.size.w / b.width;
     let box = exact ?? null;
+    if (!exact) ensureText(s.el);
     for (const t2 of exact ? [] : s.el.querySelectorAll("text")) {
       if (!t2.textContent?.trim()) continue;
       const r2 = t2.getBoundingClientRect(), ty = (r2.top - b.top) * sy, tb = (r2.bottom - b.top) * sy;
@@ -1224,6 +1618,37 @@ var Viewer = class _Viewer {
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
   }
+  /** The selection the pages' text is in (the panel's shadow root's, where the browser keeps one). */
+  selection() {
+    const rn = this.root.getRootNode();
+    return rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
+  }
+  /**
+   * The place in the pages' text a point on the screen selects to (text.ts's
+   * caretAt): on the page under it, or the nearest page above or below; kept
+   * in the column of `from`'s line when on its page.
+   */
+  caretFrom(cx, cy, from2) {
+    let slot = null, gap = Infinity;
+    for (const s of this.slots) {
+      const b2 = s.el.getBoundingClientRect();
+      if (!b2.height) continue;
+      const d = cy < b2.top ? b2.top - cy : cy > b2.bottom ? cy - b2.bottom : 0;
+      if (d < gap) gap = d, slot = s;
+      if (!d) break;
+    }
+    if (!slot) return null;
+    ensureText(slot.el);
+    const texts = [...slot.el.querySelectorAll("text")].filter((t) => LAYER_LINES.get(t)?.text && t.firstChild);
+    if (!texts.length) return null;
+    const lines2 = texts.map((t) => LAYER_LINES.get(t));
+    const b = slot.el.getBoundingClientRect();
+    const k = Number(slot.el.dataset.k);
+    const x = (cx - b.left) / b.width * this.size.w, y = (Math.min(Math.max(cy, b.top), b.bottom) - b.top) / b.height * this.size.h;
+    const c = caretAt(lines2, x, y, from2 && from2.k === k ? from2.line : void 0);
+    if (!c) return null;
+    return { node: texts[c.i].firstChild, off: c.off, k, line: lines2[c.i] };
+  }
   /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
   drawSelection() {
     for (const m of this.root.querySelectorAll(".seltext")) m.remove();
@@ -1235,6 +1660,7 @@ var Viewer = class _Viewer {
       const r = sel.getRangeAt(i);
       for (const s of this.slots) {
         if (!r.intersectsNode(s.el)) continue;
+        ensureText(s.el);
         for (const t of s.el.querySelectorAll("text")) {
           const l = LAYER_LINES.get(t);
           if (!l || !l.text || !r.intersectsNode(t)) continue;
@@ -1328,6 +1754,7 @@ var Viewer = class _Viewer {
       if (!s) continue;
       if (rule && boxes2.length) {
         const [x, y, bw, bh] = boxes2[0];
+        ensureText(s.el);
         const lines2 = [...s.el.querySelectorAll("text")].map((t) => LAYER_LINES.get(t)).filter((l) => !!l && !!l.text).sort((a, b) => a.y - b.y);
         const right = (l) => l.rs?.[l.rs.length - 1] ?? l.x + l.w;
         let at = lines2.findIndex((l) => l.y >= y && l.y - l.size <= y + bh);
@@ -1358,6 +1785,48 @@ var Viewer = class _Viewer {
       }
     }
   }
+  /**
+   * The review's marks (review.ts): each its `boxes` on page `k` as
+   * `.rv.CLS` (`data-id` its note's or hunk's), and with `pin` a button at
+   * the page's right edge beside its first box (a note's: its thread a click
+   * away). The whole set, the last one's replaced; never scrolls, never asks
+   * for a page (one drawn later keeps them, as paint does).
+   */
+  /** A page's size in PDF points (the pages' boxes are in them). */
+  pageSize() {
+    return this.size;
+  }
+  reviewMarks(marks) {
+    for (const m of this.root.querySelectorAll(".rv")) m.remove();
+    const { w, h } = this.size;
+    const pinned = /* @__PURE__ */ new Map();
+    for (const mk of marks) {
+      const s = this.slots[mk.k];
+      if (!s || !mk.boxes.length) continue;
+      for (const [x, y, bw, bh] of mk.boxes) {
+        const m = document.createElement("div");
+        m.className = `rv ${mk.cls}`;
+        m.dataset.id = mk.id;
+        Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${Math.max(bw, 1.5) / w * 100}%`, height: `${bh / h * 100}%` });
+        s.el.append(m);
+      }
+      if (mk.pin !== void 0) {
+        const ys = pinned.get(mk.k) ?? [];
+        let y = mk.boxes[0][1];
+        while (ys.some((o) => Math.abs(o - y) < 13)) y += 13;
+        ys.push(y);
+        pinned.set(mk.k, ys);
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `rv rv-pin ${mk.cls}`;
+        b.dataset.id = mk.id;
+        b.textContent = mk.pin;
+        if (mk.title) b.title = mk.title, b.setAttribute("aria-label", mk.title);
+        Object.assign(b.style, { top: `${y / h * 100}%` });
+        s.el.append(b);
+      }
+    }
+  }
   /** Highlight `boxes` ([x, y top, w, h], PDF points) on page `k`, scrolled into view, for a moment. */
   mark(k, boxes2, scroll = true) {
     const s = this.slots[k];
@@ -1381,7 +1850,8 @@ var Viewer = class _Viewer {
     const v = this.scroller;
     if (scroll) {
       const to = { behavior: "smooth" };
-      if (top < v.scrollTop + 20 || top > v.scrollTop + v.clientHeight - 40) to.top = top - v.clientHeight / 2;
+      const y = marginScroll(top, s.el.offsetTop + Math.max(...boxes2.map(([, by, , bh]) => by + bh)) / h * s.el.offsetHeight, v.scrollTop, v.clientHeight, this.margin);
+      if (y !== null) to.top = y;
       if (v.scrollWidth > v.clientWidth) {
         const [lx, , lw] = boxes2[boxes2.length - 1];
         const end = s.el.offsetLeft + (lx + lw) / w * s.el.offsetWidth;
@@ -1526,6 +1996,49 @@ var Viewer = class _Viewer {
     this.toPaint.add(s);
     if (!this.paintFrame) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
+  // ---- The pages' text layers: filled once the view rests (text.ts's deferText) ----
+  /** The view's motion (a scroll, a zoom's frames) last seen, and the wait for it to rest. */
+  restTimer;
+  filling = 0;
+  /**
+   * The view moved (a scroll; a zoom gesture's frame, Panel.zoomLay): the
+   * pages' text layers still to fill wait until it rests 120 ms. A page's
+   * text built in the frame it came into view was the long frames of a
+   * scroll or a zoom (its SVG text made and laid out); read before then (a
+   * selection, a link's text, the reading aid), a layer is filled at once.
+   */
+  moved() {
+    this.waitText();
+  }
+  /** The text layers shown so far held out of the layout too, shown again a page a frame once the view rests (a zoom's end: text.ts's holdText). */
+  holdText() {
+    holdText(this.root);
+    this.waitText();
+  }
+  waitText() {
+    cancelAnimationFrame(this.filling);
+    this.filling = 0;
+    clearTimeout(this.restTimer);
+    this.restTimer = setTimeout(() => (this.restTimer = void 0, this.fillText()), 120);
+  }
+  /**
+   * The text layers still to fill or show, those in view first, a page a frame
+   * (its layout, after, is most of its cost), until a motion begins again.
+   */
+  fillText() {
+    if (this.restTimer !== void 0 || this.filling) return;
+    const step = () => {
+      this.filling = 0;
+      for (const k of [...this.visible, ...this.slots.keys()]) {
+        const el = this.slots[k]?.el;
+        if (!el || !textPending(el)) continue;
+        ensureText(el);
+        this.filling = requestAnimationFrame(step);
+        return;
+      }
+    };
+    this.filling = requestAnimationFrame(step);
+  }
   toPaint = /* @__PURE__ */ new Set();
   paintFrame = 0;
   paintSome() {
@@ -1543,6 +2056,7 @@ var Viewer = class _Viewer {
     painted.forEach((s, i) => this.snap(s, boxes2[i]));
     if (this.culpritMarks.some((m) => m.rule && painted.some((s) => Number(s.el.dataset.k) === m.k))) this.culprits(this.culpritMarks);
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
+    this.fillText();
   }
   /** The format changed: every page is to be drawn again (as it comes into view). */
   invalidate() {
@@ -1653,7 +2167,7 @@ var Viewer = class _Viewer {
   }
   paint(s) {
     if (!s.img) return;
-    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
@@ -1665,6 +2179,21 @@ var Viewer = class _Viewer {
     c.style.width = "100%";
     c.style.height = "100%";
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
+    if (this.wasp) waspOn(c, this.waspAll, this.waspLen);
+  }
+  // ---- The reading aid (wasp.ts): each line of the text coloured by a gradient, alternating ----
+  wasp = false;
+  waspAll = false;
+  waspLen = 1;
+  /** The reading aid on or off, `all` every line or only the body's (the host's setting): the pages drawn so far given it or rid of it, those drawn later as they come. */
+  waspShown(on, all = false, length = 1) {
+    if (on === this.wasp && all === this.waspAll) {
+      if (length !== this.waspLen && on) waspLength(this.root, length);
+      this.waspLen = length;
+      return;
+    }
+    [this.wasp, this.waspAll, this.waspLen] = [on, all, length];
+    for (const s of this.slots) if (s.img) on ? waspOn(s.img.canvas, all, length) : waspOff(s.img.canvas);
   }
   /**
    * A page drawn as a bitmap shown at its own pixels: its box exactly its
@@ -1700,17 +2229,27 @@ var Viewer = class _Viewer {
   }
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n) {
+    const to = this.turnTop(n);
+    if (to !== null) this.scroller.scrollTo({ top: to, behavior: "auto" });
+  }
+  /**
+   * Where `turn(n)` scrolls to (the scroller's scroll top), counted from scroll
+   * top `from` (by default where it is): from where a motion under way is
+   * going, a page key pressed again turns on from the page it was going to.
+   */
+  turnTop(n, from2 = this.scroller.scrollTop) {
     const v = this.scroller.getBoundingClientRect();
-    const top = (k) => this.slots[k].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
-    const at = this.scroller.scrollTop + 12;
+    const top = (k2) => this.slots[k2].el.getBoundingClientRect().top - v.top + this.scroller.scrollTop;
+    const at = from2 + 12;
     let lo = 0, hi = this.slots.length - 1;
-    if (hi < 0) return;
+    if (hi < 0) return null;
     while (lo < hi) {
       const mid = lo + hi + 1 >> 1;
       if (top(mid) <= at + 1) lo = mid;
       else hi = mid - 1;
     }
-    this.goTo(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n);
+    const k = Math.max(0, Math.min(n < 0 && top(lo) < at - 1 ? lo + n + 1 : lo + n, this.slots.length - 1));
+    return Math.max(0, Math.min(top(k) - 12, this.scroller.scrollHeight - this.scroller.clientHeight));
   }
   seen(es) {
     for (const e of es) {
@@ -1817,6 +2356,13 @@ function part(r, v) {
   const fx = (x) => Math.min(1, Math.max(0, (x - r.left) / r.width));
   const fy = (y) => Math.min(1, Math.max(0, (y - r.top) / r.height));
   return [fx(v.left), fy(v.top), fx(v.right), fy(v.bottom)];
+}
+function marginScroll(top, bottom, at, height, margin) {
+  if (!(margin > 0)) return top < at + 20 || top > at + height - 40 ? top - height / 2 : null;
+  const m = Math.min(0.45, margin) * height;
+  if (top < at + m) return top - m;
+  if (bottom > at + height - m) return Math.min(bottom - (height - m), top - m);
+  return null;
 }
 
 // viewer/src/print.ts
@@ -2091,16 +2637,38 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
+/* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
+   white), darken on Dark PDF's (its light ink takes a light colour, the grey stays); a stop "wi" leaves the ink as it is; the
+   colours the panel's variables (Panel.waspApply: the preset or the user's, at the strength chosen), Classic's at full without them */
+.phx-wasp { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; mix-blend-mode: lighten; }
+.phx-wasp .wi { stop-color: #000; }
+.phx-wasp .w0 { stop-color: var(--ph-wasp0, #1747d6); }
+.phx-wasp .w1 { stop-color: var(--ph-wasp1, #d0202a); }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
-.zooming .phx-text { display: none; }
+.zooming .phx-text, .phx-text[data-hold] { display: none; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 /* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
 .peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: default; font: var(--ph-size)/1.4 var(--ph-font); }
-.peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
-.peek .pv canvas { display: block; }
+.peek .pv { position: relative; height: 250px; overflow: auto; overscroll-behavior: contain; background: #fff; touch-action: pan-x pan-y; }
+.peek .pv canvas { display: block; position: absolute; left: 0; top: 0; }
+.peek .pv .pz { pointer-events: none; }
+.peek.zoomed .pv { cursor: grab; }
+.peek.zoomed .pv.grabbing { cursor: grabbing; }
+.peek .pf .zm { display: inline-flex; align-items: center; gap: 1px; margin-left: auto; }
+.peek .pf .zm button { all: unset; cursor: pointer; display: inline-grid; place-items: center; min-width: 20px; height: 20px; border-radius: var(--ph-radius); color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.peek .pf .zm button svg { width: 14px; height: 14px; }
+.peek .pf .zm .zl { min-width: 38px; font-size: 11.5px; }
+.peek .pf .zm button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg); }
+.peek .pf .zm button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.peek.cite .pf .zm, .peek.url .pf .zm, .peek.wait .pf .zm { display: none; }
+.peek .pf .zm + .go { margin-left: 4px; }
 .peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
 .peek.wait .pv canvas, .peek.wait .pv .at { visibility: hidden; }
 .peek .pu { display: none; padding: 8px 10px 0; word-break: break-all; color: var(--ph-link, var(--ph-accent)); }
@@ -2199,6 +2767,8 @@ header:active { cursor: grabbing; }
 .smarks i:hover { transform: scale(1.5, 2); }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
+.smarks i.rv-highlight { background: #c9a800; } .smarks i.rv-note { background: #2f6fd1; } .smarks i.rv-comment { background: #e08a1e; }
+.smarks i.rv-change { background: #1a7f37; } .smarks i.rv-dim { opacity: .4; }
 .phx-card[data-key] { cursor: pointer; }
 /* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
    amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
@@ -2464,6 +3034,28 @@ header:active { cursor: grabbing; }
 .settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
 .settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
 .settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+/* Colour lines' tab: the presets as swatches, the strength's slider, Custom's two pickers, the sample */
+.settings .srow.swatches { grid-template-areas: "lab lab" "help help" "picks picks" "err err"; }
+.settings .swatches .tiles { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+.settings .sw { all: unset; cursor: pointer; display: grid; gap: 5px; justify-items: center; font-size: 12px; color: var(--ph-fg2); }
+.settings .sw .art { display: grid; gap: 3px; width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: var(--ph-radius); background: #fff; box-shadow: 0 0 0 1px var(--ph-border); }
+.settings .sw .art.dark { background: ${DARK_PAGE}; }
+.settings .sw .art i { display: block; height: 4px; border-radius: 2px; }
+.settings .sw .art i:last-child { width: 60%; }
+.settings .sw[aria-pressed="true"] { color: var(--ph-fg); font-weight: 600; }
+.settings .sw[aria-pressed="true"] .art { box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .sw:focus-visible .art { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.settings .sw:disabled { cursor: default; opacity: .55; }
+.settings input[type="range"] { width: 180px; accent-color: var(--ph-accent); }
+.settings .cols { display: inline-flex; gap: 8px; }
+.settings .cols input { width: 34px; height: 24px; padding: 0 2px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); background: var(--ph-menu); cursor: pointer; }
+.settings .srow.custom { grid-template-areas: "lab lab" "help help" "picks picks"; }
+.settings .wsample { grid-area: picks; margin-top: 8px; padding: 12px 16px; border-radius: var(--ph-radius); box-shadow: 0 0 0 1px var(--ph-border); background: #fff; color: #000; isolation: isolate; overflow: hidden; text-align: left; font: 13px/1.45 Georgia, "Times New Roman", serif; }
+.settings .wsample.dark { background: #282828; color: #e1e1e1; }
+.settings .wsample span { position: relative; display: block; width: fit-content; white-space: nowrap; }
+.settings .wsample span.h { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.settings .wsample span i { position: absolute; inset: 0 -2px; mix-blend-mode: lighten; pointer-events: none; }
+.settings .wsample.dark span i { mix-blend-mode: darken; }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
 .settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
 .settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
@@ -2827,6 +3419,165 @@ li.folded > .phx-row .phx-fold::before { content: "\u25B8"; }
 .phx-none { color: var(--ph-fg2, #777); padding: 8px 16px; margin: 0; }
 `;
 
+// viewer/src/glide.ts
+var LINE = 60;
+var SPEED = 1.5;
+var OMEGA = 1 / 50;
+var ZOOM_RATE = Math.LN2 / 1e3;
+var ZOOM_STEP = 1.1;
+function springStep(a, t0, u, dt, w = OMEGA) {
+  if (!(dt > 0)) return { x: a.x, v: a.v };
+  const rest = -2 * u / w;
+  const f = a.x - t0 - rest;
+  const g = a.v - u;
+  const E = Math.exp(-w * dt);
+  const c = g + w * f;
+  return { x: t0 + u * dt + rest + (f + c * dt) * E, v: u + (g - w * c * dt) * E };
+}
+var HELD_FROM = 0;
+var HELD_RAMP = 200;
+function heldRamp(held) {
+  const x = (held - HELD_FROM) / HELD_RAMP;
+  if (!(x > 0)) return 0;
+  if (x >= 1) return HELD_RAMP / 2 + (held - HELD_FROM - HELD_RAMP);
+  return HELD_RAMP * (x * x * x - x * x * x * x / 2);
+}
+function heldReach(held, n, line = LINE, rate = SPEED) {
+  return n * line + rate * heldRamp(held);
+}
+var Glide = class {
+  base = [0, 0, 0];
+  holds = /* @__PURE__ */ new Map();
+  ax = [{ x: 0, v: 0 }, { x: 0, v: 0 }];
+  /** The target at the last frame (steps since: a tap's, a page's, a press's, added at once). */
+  prev = [0, 0, 0];
+  /** What was scrolled so far, in whole pixels (the place rounded: the sum of the moves is exact). */
+  done = [0, 0];
+  last = 0;
+  id = 0;
+  host;
+  constructor(host2) {
+    this.host = host2;
+  }
+  now() {
+    return this.host.now?.() ?? performance.now();
+  }
+  target(i, t) {
+    let s = this.base[i];
+    for (const h of this.holds.values()) if (h.axis === i) s += h.dir * (i === 2 ? heldReach(t - h.t0, h.n, Math.log(ZOOM_STEP), ZOOM_RATE) : heldReach(t - h.t0, h.n));
+    return s;
+  }
+  /** Whether a frame is coming (a motion under way). */
+  get moving() {
+    return this.id !== 0;
+  }
+  /** Where the scroll is still going: its target less its place, per axis (px). */
+  ahead() {
+    const t = this.now();
+    return [this.target(0, t) - this.done[0], this.target(1, t) - this.done[1]];
+  }
+  /**
+   * A key pressed and held: `id` its own (its code), released by `release(id)`.
+   * Axis 0, 1: it moves `n` lines at once, then on at SPEED. Axis 2 (zoom):
+   * the tap's step is the caller's; held, the zoom goes on from there.
+   */
+  press(id, axis, dir, n = 1) {
+    this.release(id);
+    const t0 = this.now();
+    const h = { axis, dir, n, t0 };
+    const step = axis === 2 ? dir * n * Math.log(ZOOM_STEP) : dir * n * LINE;
+    this.holds.set(id, h);
+    this.prev[axis] += step;
+    this.run();
+  }
+  /** The key let go: its target kept where it reached (the spring eases out to it). */
+  release(id) {
+    const h = this.holds.get(id);
+    if (!h) return;
+    const t = this.now();
+    const before = this.target(h.axis, t);
+    this.holds.delete(id);
+    this.base[h.axis] += before - this.target(h.axis, t);
+  }
+  /** Whether the key `id` is held (pressed, its keyup not yet come). */
+  holding(id) {
+    return this.holds.has(id);
+  }
+  /** Every key let go (the window lost the keys: no keyup will come). */
+  releaseAll() {
+    for (const id of [...this.holds.keys()]) this.release(id);
+  }
+  /** Scroll by (`dx`, `dy`) eased: the target moved on from where it was going. */
+  by(dx, dy) {
+    this.base[0] += dx;
+    this.base[1] += dy;
+    this.prev[0] += dx;
+    this.prev[1] += dy;
+    this.run();
+  }
+  /** Stopped where it is (a jump: Home, a page by number): nothing still to come. */
+  stop() {
+    this.holds.clear();
+    if (this.id && this.host.cancel) this.host.cancel(this.id);
+    else if (this.id) cancelAnimationFrame(this.id);
+    this.id = 0;
+    for (const i of [0, 1]) {
+      this.base[i] = this.prev[i] = this.ax[i].x = this.done[i];
+      this.ax[i].v = 0;
+    }
+    this.base[2] = this.prev[2] = 0;
+  }
+  run() {
+    if (this.id) return;
+    this.last = 0;
+    const frame = this.host.frame ?? ((cb) => requestAnimationFrame(cb));
+    const step = (t) => {
+      this.id = 0;
+      const dt = this.last ? Math.min(100, Math.max(0, t - this.last)) : 16;
+      this.last = t;
+      if (this.tick(t, dt)) this.id = frame(step);
+    };
+    this.id = frame(step);
+  }
+  /** One frame at time `t`, `dt` ms after the last: false once at rest. */
+  tick(t, dt) {
+    const want = [0, 0];
+    let busy2 = false;
+    for (const i of [0, 1]) {
+      const to = this.target(i, t);
+      const u = dt > 0 ? (to - this.prev[i]) / dt : 0;
+      const a = springStep(this.ax[i], this.prev[i], u, dt);
+      this.prev[i] = to;
+      const held = [...this.holds.values()].some((h) => h.axis === i);
+      if (!held && Math.abs(to - a.x) < 0.1 && Math.abs(a.v) < 3e-3) a.x = to, a.v = 0;
+      else busy2 = true;
+      this.ax[i] = a;
+      want[i] = Math.round(a.x) - this.done[i];
+    }
+    if (want[0] || want[1]) {
+      const got = this.host.scroll(want[0], want[1]);
+      for (const i of [0, 1]) {
+        this.done[i] += got[i];
+        if (got[i] !== want[i]) {
+          this.ax[i] = { x: this.done[i], v: 0 };
+          for (const h of this.holds.values()) if (h.axis === i) h.t0 = t, h.n = 0;
+          this.base[i] += this.done[i] - this.target(i, t);
+          this.prev[i] = this.done[i];
+        }
+      }
+    }
+    const z = this.target(2, t);
+    if (z !== this.prev[2]) this.host.zoom?.(Math.exp(z - this.prev[2]));
+    this.prev[2] = z;
+    if ([...this.holds.values()].some((h) => h.axis === 2)) busy2 = true;
+    return busy2;
+  }
+};
+function zoomAnchor(r, p) {
+  const over = !!p && p.x >= r.left && p.x < r.left + r.width && p.y >= r.top && p.y < r.top + r.height;
+  return over ? [p.x - r.left, p.y - r.top] : [r.width / 2, r.height / 2];
+}
+
 // viewer/src/keys.ts
 var KEYS = [
   ["j k  \u2193 \u2191", "scroll down, up"],
@@ -2848,18 +3599,50 @@ var KEYS = [
   ["?", "these keys"],
   ["Esc", "close; forget a count"]
 ];
-var LINE = 60;
 function typing(e) {
   const el = e.composedPath?.()[0] ?? e.target;
   return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName ?? ""));
 }
+var reduced = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
 function bindKeys(on, t) {
   let count = "";
   let g = false;
   let helping = false;
   const times = () => Math.max(1, Number(count) || 1);
-  const page = (delta) => t.turn(delta);
-  const by = (dx, dy) => t.scroller.scrollBy({ left: dx, top: dy, behavior: "auto" });
+  const scroll = (dx, dy) => {
+    if (t.scrollBy) return t.scrollBy(dx, dy);
+    const s = t.scroller, x = s.scrollLeft, y = s.scrollTop;
+    s.scrollBy({ left: dx, top: dy, behavior: "auto" });
+    const end = (d, was, now) => d && Math.round(now - was) !== d ? Math.round(now - was) : d;
+    return [end(dx, x, s.scrollLeft), end(dy, y, s.scrollTop)];
+  };
+  const glide = new Glide({ scroll, zoom: (f) => t.zoomBy?.(f, true) });
+  const by = (dx, dy) => reduced() ? (glide.stop(), void scroll(dx, dy)) : glide.by(dx, dy);
+  const page = (n) => {
+    if (!t.turnTop) return glide.stop(), t.turn(n);
+    const from2 = t.scroller.scrollTop + glide.ahead()[1];
+    const to = t.turnTop(n, from2);
+    glide.stop();
+    scroll(0, to - t.scroller.scrollTop);
+  };
+  const jump = (f) => (glide.stop(), f());
+  const line = (e, axis, dir, n) => {
+    if (reduced()) return void scroll(axis ? 0 : dir * n * LINE, axis ? dir * n * LINE : 0);
+    if (!e.repeat || !glide.holding(e.code || e.key)) glide.press(e.code || e.key, axis, dir, n);
+  };
+  const zoom = (e, dir, n) => {
+    if (!t.zoomBy) return t.zoom(ZOOM_STEP ** (dir * n));
+    const instant = reduced();
+    if (e.repeat && !instant && glide.holding(e.code || e.key)) return;
+    t.zoomBy(ZOOM_STEP ** (dir * n), !instant);
+    if (!instant) glide.press(e.code || e.key, 2, dir, n);
+  };
+  const up = (ev) => {
+    const e = ev;
+    glide.release(e.code || e.key);
+    if (!e.code) glide.release(e.key === e.key.toLowerCase() ? e.key.toUpperCase() : e.key.toLowerCase());
+  };
+  const lost = () => glide.releaseAll();
   const handler = (ev) => {
     const e = ev;
     if (typing(e)) return;
@@ -2885,7 +3668,7 @@ function bindKeys(on, t) {
       return;
     }
     const n = times();
-    const goToCount = (last) => t.goTo(count ? Math.min(t.pages, Number(count)) - 1 : last ? t.pages - 1 : 0);
+    const goToCount = (last) => jump(() => t.goTo(count ? Math.min(t.pages, Number(count)) - 1 : last ? t.pages - 1 : 0));
     let done = true;
     if (g) {
       g = false;
@@ -2895,17 +3678,17 @@ function bindKeys(on, t) {
       switch (k) {
         case "j":
         case "ArrowDown":
-          by(0, n * LINE);
+          line(e, 1, 1, n);
           break;
         case "k":
         case "ArrowUp":
-          by(0, -n * LINE);
+          line(e, 1, -1, n);
           break;
         case "h":
-          by(-n * LINE, 0);
+          line(e, 0, -1, n);
           break;
         case "l":
-          by(n * LINE, 0);
+          line(e, 0, 1, n);
           break;
         case " ":
           page(e.shiftKey ? -n : n);
@@ -2919,10 +3702,10 @@ function bindKeys(on, t) {
           page(-n);
           break;
         case "Home":
-          t.goTo(0);
+          jump(() => t.goTo(0));
           break;
         case "End":
-          t.goTo(t.pages - 1);
+          jump(() => t.goTo(t.pages - 1));
           break;
         case "g":
           g = true;
@@ -2934,18 +3717,18 @@ function bindKeys(on, t) {
         case "K":
         case "+":
         case "=":
-          t.zoom(1.1 ** n);
+          zoom(e, 1, n);
           break;
         case "J":
         case "-":
-          t.zoom(1.1 ** -n);
+          zoom(e, -1, n);
           break;
         case "0":
         case "w":
-          t.fitWidth();
+          jump(() => t.fitWidth());
           break;
         case "f":
-          t.fitPage();
+          jump(() => t.fitPage());
           break;
         case "?":
           helping = !helping;
@@ -2964,7 +3747,15 @@ function bindKeys(on, t) {
     if (done) e.preventDefault();
   };
   on.addEventListener("keydown", handler);
-  return () => on.removeEventListener("keydown", handler);
+  on.addEventListener("keyup", up);
+  const win = typeof window === "undefined" ? null : window;
+  win?.addEventListener("blur", lost);
+  return () => {
+    on.removeEventListener("keydown", handler);
+    on.removeEventListener("keyup", up);
+    win?.removeEventListener("blur", lost);
+    glide.stop();
+  };
 }
 
 // viewer/src/report.ts
@@ -3143,11 +3934,11 @@ function byline(svg2, word) {
 }
 function opening(box, fill, bg) {
   const tag = String(uid++);
-  const w = WORD, size = w.size, phi = w.letters[0];
+  const w = WORD, size2 = w.size, phi = w.letters[0];
   box.append(
     html`<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
     <defs><mask id="phx-hole${tag}" maskUnits="userSpaceOnUse" x="-1e5" y="-1e5" width="2e5" height="2e5"><rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="#fff"/>
-      <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size / 1e3} ${-size / 1e3})"/></mask></defs>
+      <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size2 / 1e3} ${-size2 / 1e3})"/></mask></defs>
     <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${svgArt(art(WOVEN, fill, tag))}</svg>`
   );
   const el = box.lastElementChild, hole2 = el.querySelector(".phx-hole");
@@ -3171,7 +3962,7 @@ function opening(box, fill, bg) {
     cy: (r.y0 + r.y1) / 2,
     s: Math.max((r.x1 - r.x0) / (fw * W2()), (r.y1 - r.y0) / (fh * H2()))
   });
-  const P = { x: phi.x + OPEN.into[0] * size, y: phi.y - OPEN.into[1] * size };
+  const P = { x: phi.x + OPEN.into[0] * size2, y: phi.y - OPEN.into[1] * size2 };
   const deep = () => OPEN.deep / W2();
   const still2 = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const T1 = OPEN.draw + 3 * OPEN.stagger, T2 = T1 + 200 + OPEN.sweep + 1.5 * OPEN.stagger, T3 = T2 + OPEN.rest;
@@ -3244,7 +4035,7 @@ function still() {
 var INK = { light: "#1d3e72", dark: "#e4e6ea" };
 var PAPER = { light: "#ffffff", dark: "#2c2e33" };
 var RIBBON = ["#00a8a4", "#d3c72a", "#f0b225", "#f58f2d"];
-var reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+var reduced2 = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 var registered = false;
 function register() {
   if (registered) return;
@@ -3316,7 +4107,7 @@ function ending(el, exit, cleanup = () => {
     ...says,
     done: (page) => ending2 ??= new Promise((ok) => {
       if (over) return ok();
-      const ms = reduced() ? 0 : exit(page);
+      const ms = reduced2() ? 0 : exit(page);
       setTimeout(() => (stop(), ok()), ms);
     }),
     stop
@@ -3857,7 +4648,7 @@ function ink(box, dark) {
     void e.offsetWidth;
     e.classList.add("bleed");
   };
-  const size = (s) => (el.style.setProperty("--s", String(s)), blot.style.setProperty("--s", String(s)));
+  const size2 = (s) => (el.style.setProperty("--s", String(s)), blot.style.setProperty("--s", String(s)));
   const drop = () => {
     const d = document.createElement("div");
     d.className = "drop";
@@ -3881,7 +4672,7 @@ function ink(box, dark) {
       clearInterval(rain);
       if (pct === void 0 && seen.size) rain = window.setInterval(drop, 1100);
     }
-    size(pct !== void 0 ? 0.25 + 0.6 * (pct / 100) : seen.size ? 0.9 : 0.12);
+    size2(pct !== void 0 ? 0.25 + 0.6 * (pct / 100) : seen.size ? 0.9 : 0.12);
   };
   const hint = (text) => write($(".hint"), `Did you know? ${plain(text)}`);
   return ending(
@@ -4064,12 +4855,12 @@ var FLY = 0.42;
 var STEPS = ["Reading the project", "Fetching packages", "Typesetting"];
 var ease = (u) => (u = Math.min(1, Math.max(0, u)), u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
 var lerp = (a, b, u) => a + (b - a) * u;
-var mix = (a, b, u) => a.map((p, i) => [lerp(p[0], b[i][0], u), lerp(p[1], b[i][1], u)]);
+var mix2 = (a, b, u) => a.map((p, i) => [lerp(p[0], b[i][0], u), lerp(p[1], b[i][1], u)]);
 var place2 = (pts, o) => pts.map(([x, y]) => [o.x + o.s * (x * Math.cos(o.r) - y * Math.sin(o.r)), o.y + o.s * (x * Math.sin(o.r) + y * Math.cos(o.r))]);
 var str = (pts) => pts.map((p) => p.map((v) => v.toFixed(2)).join(",")).join(" ");
 var folded = (f) => {
   const i = Math.min(2, Math.floor(f));
-  return mix(SHAPES2[i], SHAPES2[i + 1], ease(f - i));
+  return mix2(SHAPES2[i], SHAPES2[i + 1], ease(f - i));
 };
 function plane(box, dark) {
   const c = dark ? "#c9d4ea" : INK.light, paper = dark ? "#e9edf5" : "#fff", bg = dark ? PAPER.dark : "#eef3f8";
@@ -4469,12 +5260,12 @@ function blur(a, lw, lh, sigma) {
     const across = pass % 2 === 0, n = across ? lw : lh, m = across ? lh : lw, step = across ? 1 : lw, line = across ? lw : 1;
     for (let j = 0; j < m; j++) {
       const o = j * line, last = o + (n - 1) * step;
-      let sum = src[o] * (r + 1);
-      for (let i = 1; i <= r; i++) sum += src[o + Math.min(i, n - 1) * step];
+      let sum2 = src[o] * (r + 1);
+      for (let i = 1; i <= r; i++) sum2 += src[o + Math.min(i, n - 1) * step];
       for (let i = 0, at = o; i < n; i++, at += step) {
-        dst[at] = sum / d;
+        dst[at] = sum2 / d;
         const add = i + r + 1 < n ? o + (i + r + 1) * step : last, drop = i - r > 0 ? o + (i - r) * step : o;
-        sum += src[add] - src[drop];
+        sum2 += src[add] - src[drop];
       }
     }
     [src, dst] = [dst, src];
@@ -4482,9 +5273,9 @@ function blur(a, lw, lh, sigma) {
   return src;
 }
 function levels(a, lw, lh, norm) {
-  const made = [];
+  const made2 = [];
   return (l) => {
-    if (made[l]) return made[l];
+    if (made2[l]) return made2[l];
     const s = SIGMAS[l], b = s ? blur(a, lw, lh, s) : a.slice();
     if (norm) {
       const hist = new Uint32Array(256);
@@ -4498,7 +5289,7 @@ function levels(a, lw, lh, norm) {
       const k = (s ? 0.8 : 1.15) / Math.max(top / 255, 1e-3);
       for (let i = 0; i < b.length; i++) b[i] = Math.min(1, b[i] * k);
     }
-    return made[l] = b;
+    return made2[l] = b;
   };
 }
 function field(lw, lh, ink2, draw) {
@@ -4723,9 +5514,1249 @@ function firstPage(cv, dark) {
   }
 }
 
+// viewer/src/sheetline.ts
+var LINE_GAP = 250;
+var realClock = {
+  now: () => performance.now(),
+  later: (f, ms) => setTimeout(f, ms),
+  cancel: (h) => clearTimeout(h)
+};
+var Calm = class {
+  drawnAt = -Infinity;
+  drawn;
+  next;
+  timer;
+  draw;
+  clock;
+  gap;
+  key;
+  constructor(draw, clock = realClock, gap = LINE_GAP, key = (v) => JSON.stringify(v)) {
+    this.draw = draw;
+    this.clock = clock;
+    this.gap = gap;
+    this.key = key;
+  }
+  set(v) {
+    const k = this.key(v);
+    if (k === this.drawn) return void this.drop();
+    const wait = this.drawnAt + this.gap - this.clock.now();
+    if (wait <= 0) return void (this.drop(), this.put(v, k));
+    this.next = v;
+    this.timer ??= this.clock.later(() => {
+      this.timer = void 0;
+      const n = this.next;
+      this.next = void 0;
+      if (n !== void 0) this.put(n, this.key(n));
+    }, wait);
+  }
+  /** The pending value drawn now (none: nothing). */
+  flush() {
+    const n = this.next;
+    this.drop();
+    if (n !== void 0) this.put(n, this.key(n));
+  }
+  /** Nothing pending, and the next value drawn at once (a new opening). */
+  reset() {
+    this.drop();
+    this.drawnAt = -Infinity;
+    this.drawn = void 0;
+  }
+  /** A value is waiting for the end of the gap. */
+  get pending() {
+    return this.next !== void 0;
+  }
+  drop() {
+    if (this.timer !== void 0) this.clock.cancel(this.timer);
+    this.timer = void 0;
+    this.next = void 0;
+  }
+  put(v, k) {
+    this.drawnAt = this.clock.now();
+    this.drawn = k;
+    this.draw(v);
+  }
+};
+var SheetLine = class {
+  rank = 0;
+  calm;
+  constructor(draw, clock = realClock, gap = LINE_GAP) {
+    this.calm = new Calm(draw, clock, gap);
+  }
+  say(rank, s) {
+    if (rank < this.rank) return false;
+    this.rank = rank;
+    this.calm.set(s);
+    return true;
+  }
+  /** The step now (its rank): a writer composing its detail asks. */
+  get at() {
+    return this.rank;
+  }
+  /** A new opening (a rebuild, another document): from the first step again, drawn at once. */
+  reset() {
+    this.rank = 0;
+    this.calm.reset();
+  }
+  flush() {
+    this.calm.flush();
+  }
+};
+function size(b) {
+  return b ? b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB` : "";
+}
+function packName(id) {
+  return id.replace(/-[0-9a-f]{12}$/, "");
+}
+var Tally = class {
+  f = { done: 0, bytes: 0, missing: 0, name: "" };
+  base = { done: 0, bytes: 0 };
+  update(p) {
+    const f = this.f;
+    f.done = Math.max(f.done, (p.done ?? 0) - this.base.done);
+    f.bytes = Math.max(f.bytes, (p.bytes ?? 0) - this.base.bytes);
+    f.missing = Math.max(f.missing, p.missing ?? 0);
+    if (p.loading.length) f.name = packName(p.loading[p.loading.length - 1]);
+    return { ...f };
+  }
+  get now() {
+    return { ...this.f };
+  }
+  /** Counted from none again; `from`: the host's totals so far (a burst after the first page counts its own). */
+  reset(from2) {
+    this.f = { done: 0, bytes: 0, missing: 0, name: "" };
+    this.base = { done: from2?.done ?? 0, bytes: from2?.bytes ?? 0 };
+  }
+};
+function fetchedLine(f, name = true) {
+  return [`${f.done} fetched`, size(f.bytes), f.missing ? `${f.missing} not found` : "", name ? f.name : ""].filter(Boolean).join(" \xB7 ");
+}
+
+// viewer/src/review.ts
+var KIND_WORD = { highlight: "Highlight", note: "Note", comment: "Comment" };
+var VERDICT_WORD = { approve: "Approved", request_changes: "Changes requested", reject: "Rejected", comment: "Commented" };
+var STATUS_WORD = { open: "Waiting for you", changes_requested: "Changes requested", accepted: "Accepted", rejected: "Rejected", partial: "Partly accepted", done: "Done" };
+var STATE_WORD = { open: "", accepted: "Accepted", rejected: "Rejected", conflict: "Conflicts with your edit" };
+function openHunks(x) {
+  return x.hunks.filter((h) => (h.state ?? "open") === "open");
+}
+function lineDiff(h) {
+  const lines2 = (t) => (t.endsWith("\n") ? t.slice(0, -1) : t).split("\n");
+  const pre = h.before.replace(/^…/, "");
+  const post = h.after.replace(/…$/, "");
+  return { del: h.whole === "added" ? [] : lines2(pre + h.old + post), add: h.whole === "deleted" ? [] : lines2(pre + h.new + post) };
+}
+var PATHS = {
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
+  close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  check: "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z",
+  undo: "M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z",
+  delete: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+  highlight: "M6 14 3 17v3h3l3-3v-1l7.5-7.5-3-3L6 16zm13.71-8.29-2.42-2.42a1 1 0 0 0-1.41 0L14 5.17l3 3 1.71-1.71a1 1 0 0 0 0-1.46zM4 22h16v-1H4z",
+  note: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
+  comment: "M21.99 4c0-1.1-.89-2-1.99-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4-.01-18zM18 14H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z",
+  link: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"
+};
+var icon = (name, size2 = 16) => html`<svg class="icon" viewBox="0 0 24 24" width="${size2}" height="${size2}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name] ?? ""}"></path></svg>`;
+function ago(iso, now = Date.now()) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const s = Math.max(0, (now - t) / 1e3);
+  if (s < 45) return "now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+function oneLine(s, max = 160) {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? `${t.slice(0, max - 1)}\u2026` : t;
+}
+function placeOf(file, a, b = a) {
+  return a === b ? `${file}:${a}` : `${file}:${a}\u2013${b}`;
+}
+var utf8 = (s) => new TextEncoder().encode(s).length;
+function groupHunks(s) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const h of s.hunks) {
+    const note = h.note ? s.notes.find((n) => n.id === h.note) : void 0;
+    const key = note ? `n:${note.id}` : `f:${h.file}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, g = { key, title: note ? `For your ${KIND_WORD[note.kind].toLowerCase()}: \u201C${oneLine(note.thread.find((p) => p.by !== "agent" && p.text)?.text || note.anchor.quote, 60)}\u201D` : h.file, note, hunks: [] });
+    g.hunks.push(h);
+  }
+  return [...groups.values()].sort((a, b) => Number(!a.note) - Number(!b.note));
+}
+var REVIEW_CSS = `
+.win.review-on .body { flex-direction: row; }
+.rside { display: none; flex: none; width: var(--rv-w, 340px); min-width: 260px; max-width: 70%; flex-direction: column; background: var(--ph-bar); border-left: 1px solid var(--ph-border); color: var(--ph-fg); min-height: 0; position: relative; }
+.win.review-on .rside { display: flex; }
+@container (max-width: 640px) { .win.review-on .rside { position: absolute; inset: 0 0 0 auto; width: min(100%, 360px); z-index: 6; box-shadow: -4px 0 16px rgb(0 0 0 / 22%); } }
+.rside .rgrip { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 2; }
+.rside header { display: flex; align-items: center; gap: 2px; padding: 4px 6px 0; border-bottom: 1px solid var(--ph-border); }
+.rside .rtab { border: 0; background: none; padding: 7px 10px; border-bottom: 2px solid transparent; color: var(--ph-fg2); cursor: pointer; font-weight: 600; }
+.rside .rtab[aria-selected="true"] { color: var(--ph-fg); border-bottom-color: var(--ph-accent); }
+.rside .rtab .n { margin-left: 5px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ph-fg2); }
+.rside .ib { border: 0; background: none; padding: 4px; border-radius: var(--ph-radius); cursor: pointer; color: var(--ph-fg2); display: inline-flex; align-items: center; }
+.rside .ib:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.rside .rbody { flex: 1; min-height: 0; overflow: auto; padding: 8px 8px 24px; }
+.rside .rtools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 2px 8px; }
+.rside .seg { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); overflow: hidden; }
+.rside .seg button { border: 0; background: none; padding: 3px 9px; cursor: pointer; color: var(--ph-fg2); }
+.rside .seg button[aria-pressed="true"] { background: var(--ph-hover); color: var(--ph-fg); font-weight: 600; }
+.rside .btn, .rv-pop .btn, .rv-compose .btn, .rv-finish .btn { display: inline-flex; align-items: center; gap: 4px; line-height: 20px; border: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); padding: 3px 10px; border-radius: var(--ph-radius); cursor: pointer; white-space: nowrap; }
+.rside .btn:hover, .rv-pop .btn:hover, .rv-compose .btn:hover, .rv-finish .btn:hover { background: var(--ph-hover); }
+.rside .btn.primary, .rv-compose .btn.primary, .rv-finish .btn.primary { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.rside .btn.primary:hover, .rv-compose .btn.primary:hover, .rv-finish .btn.primary:hover { background: var(--ph-accent-hover, var(--ph-accent)); }
+.rside .btn.accept { color: #1a7f37; } .rside .btn.reject { color: var(--ph-danger); }
+.rside .btn:disabled { opacity: .5; cursor: default; }
+.rside .empty { color: var(--ph-fg2); padding: 18px 8px; line-height: 1.5; }
+.rside .empty b { color: var(--ph-fg); }
+.rside h3 { font-size: 11px; text-transform: none; letter-spacing: 0; margin: 12px 2px 6px; color: var(--ph-fg2); font-weight: 600; }
+.rside .card { border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); background: var(--ph-menu); margin: 0 0 8px; padding: 8px 10px; cursor: pointer; position: relative; }
+.rside .card:hover { border-color: color-mix(in srgb, var(--ph-accent) 40%, var(--ph-border)); }
+.rside .card.on { border-color: var(--ph-accent); box-shadow: 0 0 0 1px var(--ph-accent); cursor: default; }
+.rside .card.resolved { opacity: .72; }
+.rside .card .top { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ph-fg2); }
+.rside .chip { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: var(--ph-pill); border: 1px solid currentColor; line-height: 16px; }
+.rside .chip.comment { color: #b25e00; } .rside .chip.note { color: #2f6fd1; } .rside .chip.highlight { color: #8a7300; }
+.rside .chip.draft { color: var(--ph-fg2); } .rside .chip.det { color: var(--ph-warning); } .rside .chip.done { color: #1a7f37; }
+.rside .place { color: var(--ph-link); text-decoration: none; cursor: pointer; font-variant-numeric: tabular-nums; border: 0; background: none; padding: 0; font: inherit; }
+.rside .place:hover { text-decoration: underline; }
+.rside .quote { margin: 6px 0 2px; padding-left: 8px; border-left: 3px solid var(--q, #d0b400); color: var(--ph-fg); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.rside .card.on .quote { -webkit-line-clamp: unset; }
+.rside .quote.spot { color: var(--ph-fg2); font-style: italic; }
+.rside .quote.comment { --q: #e08a1e; } .rside .quote.note { --q: #4b8cf0; }
+.rside .post { margin-top: 6px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.rside .card:not(.on) .post:not(.update) { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.rside .post .by { font-weight: 600; margin-right: 4px; }
+.rside .post .by.agent { color: #7a4fc9; }
+.rside .post .when { color: var(--ph-fg2); font-size: 11px; margin-left: 4px; }
+.rside .post .edited { display: block; margin-top: 2px; font-size: 12px; color: var(--ph-fg2); }
+.rside .post.update { font-size: 12px; color: var(--ph-fg2); }
+.rside .more { color: var(--ph-fg2); font-size: 12px; margin-top: 4px; }
+.rside .act { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+.rside textarea, .rv-compose textarea, .rv-finish textarea { width: 100%; min-height: 54px; resize: vertical; font: inherit; color: var(--ph-fg); background: var(--ph-bar); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 6px 8px; }
+.rside textarea:focus, .rv-compose textarea:focus, .rv-finish textarea:focus { outline: 2px solid var(--ph-link); outline-offset: 0; }
+.rside .hint { font-size: 11px; color: var(--ph-fg2); }
+.rside .diff { font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--ph-bar); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 6px 8px; margin: 6px 0 0; max-height: 260px; overflow: auto; cursor: text; }
+.rside .diff .ctx { color: var(--ph-fg2); }
+.rside .diff del { background: rgb(255 80 70 / 18%); color: var(--ph-danger); text-decoration: line-through; text-decoration-thickness: 1px; }
+.rside .diff ins { background: rgb(40 170 80 / 20%); color: #1a7f37; text-decoration: none; }
+.win.watch.dark .rside .diff ins, .win.vscode .rside .diff ins { color: #57c97a; }
+@media (prefers-color-scheme: dark) { .win.watch:not(.light) .rside .diff ins { color: #57c97a; } .win.watch:not(.light) .rside .btn.accept { color: #57c97a; } }
+.rside .hunk .file { font-weight: 600; color: var(--ph-fg); }
+.rside .comments { border-top: 1px dashed var(--ph-border); margin-top: 8px; padding-top: 4px; }
+.rside .rbar { position: sticky; top: -8px; z-index: 1; margin: -8px -8px 8px; padding: 8px 10px; background: color-mix(in srgb, var(--ph-accent) 12%, var(--ph-bar)); border-bottom: 1px solid var(--ph-border); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.rside .reviewrec { font-size: 12px; color: var(--ph-fg2); margin: 2px 2px 8px; }
+.rv-pop { position: absolute; z-index: 30; display: flex; gap: 4px; padding: 4px; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 22%); }
+.rv-pop .btn { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; }
+.rv-pop .btn:hover, .rv-pop .btn:focus-visible { background: var(--ph-hover); }
+.rv-compose, .rv-finish { position: absolute; z-index: 31; width: min(340px, calc(100% - 16px)); padding: 10px; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 8px 28px rgb(0 0 0 / 28%); }
+.rv-compose .q, .rv-finish .q { color: var(--ph-fg2); font-size: 12px; margin-bottom: 6px; overflow-wrap: anywhere; }
+.rv-compose .act, .rv-finish .act { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; align-items: center; }
+.rv-compose .act .hint, .rv-finish .act .hint { margin-right: auto; font-size: 11px; color: var(--ph-fg2); }
+.rv-finish label { display: flex; gap: 8px; align-items: flex-start; padding: 4px 2px; cursor: pointer; }
+.rv-finish label small { display: block; color: var(--ph-fg2); }
+.slot .rv { position: absolute; pointer-events: none; border-radius: 2px; }
+.slot .rv.n-highlight { background: rgb(255 214 0 / 40%); mix-blend-mode: multiply; }
+.slot .rv.n-note { background: rgb(75 140 240 / 22%); mix-blend-mode: multiply; box-shadow: inset 0 -2px 0 rgb(75 140 240 / 70%); }
+.slot .rv.n-comment { background: rgb(240 150 40 / 26%); mix-blend-mode: multiply; box-shadow: inset 0 -2px 0 rgb(224 138 30 / 85%); }
+.slot .rv.n-resolved { background: none; box-shadow: inset 0 -1px 0 rgb(120 120 120 / 45%); mix-blend-mode: normal; }
+.slot .rv.h-add { background: rgb(40 170 80 / 18%); box-shadow: inset 0 -2px 0 rgb(30 150 70 / 75%); mix-blend-mode: multiply; }
+.slot .rv.h-del { background: rgb(220 50 40 / 85%); width: 2px !important; margin-left: -1px; border-radius: 1px; }
+.slot .rv.on { outline: 2px solid var(--ph-accent, #1d3e72); outline-offset: 1px; }
+.slot .rv-pin { pointer-events: auto; position: absolute; right: -2px; transform: translate(100%, -10%); min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px 9px 9px 2px; border: 0; font: 600 10px/18px var(--ph-font, system-ui); color: #fff; cursor: pointer; z-index: 3; box-shadow: 0 1px 3px rgb(0 0 0 / 30%); }
+.slot .rv-pin.n-highlight { background: #b39500; } .slot .rv-pin.n-note { background: #2f6fd1; } .slot .rv-pin.n-comment { background: #d27510; }
+.slot .rv-pin.n-resolved { background: #8a919c; } .slot .rv-pin.h-add, .slot .rv-pin.h-del { background: #1a7f37; }
+.slot .rv-pin.on { outline: 2px solid var(--ph-accent, #1d3e72); outline-offset: 1px; }
+.slot .rv-pin:focus-visible { outline: 2px solid var(--ph-link, #1d3e72); outline-offset: 2px; }
+.stage.dark-pdf .slot .rv { mix-blend-mode: normal; }
+.rside .pcard { cursor: default; }
+.rside .pcard .ptitle { font-weight: 650; font-size: 14px; margin: 4px 0 2px; overflow-wrap: anywhere; }
+.rside .pcard .pwhy { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ph-fg); margin: 2px 0 4px; max-height: 8.5em; overflow: auto; }
+.rside .pcard .pmeta { font-size: 12px; color: var(--ph-fg2); }
+.rside .pcard .phunks { margin-top: 8px; }
+.rside .pcard .phunks .card { margin: 0 0 6px; padding: 6px 8px; }
+.rside .card.phunk:focus-visible, .rside .card.hunk:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.rside .card.phunk.st-accepted, .rside .card.phunk.st-rejected { opacity: .62; }
+.rside .chip.st-accepted { color: #1a7f37; } .rside .chip.st-rejected, .rside .chip.st-conflict { color: var(--ph-danger); }
+.rside .chip.st-changes_requested { color: var(--ph-warning); } .rside .chip.st-open { color: var(--ph-link); } .rside .chip.st-partial { color: var(--ph-fg2); }
+.rside .ldiff { font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); margin: 6px 0 0; max-height: 260px; overflow: auto; }
+.rside .ldiff div { padding: 0 6px; }
+.rside .ldiff .d { background: rgb(255 80 70 / 14%); } .rside .ldiff .a { background: rgb(40 170 80 / 16%); }
+.rside .ldiff .d::before { content: "\u2212"; color: var(--ph-danger); margin-right: 6px; } .rside .ldiff .a::before { content: "+"; color: #1a7f37; margin-right: 6px; }
+.rside .keys { font-size: 11px; color: var(--ph-fg2); margin-top: 6px; }
+.rside .keys kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--ph-border); border-radius: 3px; padding: 0 3px; }
+.rside .post .on { color: var(--ph-fg2); font-size: 12px; }
+.rside .pcompose { margin-top: 8px; }
+.slot .rv-h { pointer-events: auto; position: absolute; width: 10px !important; margin-left: -5px; cursor: ew-resize; z-index: 4; background: none; }
+.slot .rv-h::before { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 2px; background: var(--ph-accent, #1d3e72); }
+.slot .rv-h::after { content: ""; position: absolute; left: 1px; width: 8px; height: 8px; border-radius: 50%; background: var(--ph-accent, #1d3e72); }
+.slot .rv-h.start::after { top: -6px; } .slot .rv-h.end::after { bottom: -6px; }
+.rv-toast { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 40; display: flex; gap: 12px; align-items: center; padding: 8px 10px 8px 14px; background: var(--ph-fg, #222); color: var(--ph-bar, #fff); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 30%); }
+.rv-toast .btn { border: 0; background: none; color: inherit; font-weight: 700; cursor: pointer; padding: 2px 6px; text-decoration: underline; }
+.rside .editbox { margin-top: 6px; }
+.rside .editbox .seg { margin-bottom: 6px; }
+.rside .pact { display: flex; gap: 10px; margin: 0 0 2px; }
+.rside .lnk { border: 0; background: none; padding: 0; color: var(--ph-link); cursor: pointer; font-size: 12px; }
+.rside .lnk:hover { text-decoration: underline; }
+@media (prefers-reduced-motion: no-preference) { .rside .card.flash { animation: rvflash 1.2s ease-out; } @keyframes rvflash { from { box-shadow: 0 0 0 3px var(--ph-progress); } } }
+`;
+var Review = class {
+  p;
+  host;
+  s = { notes: [], hunks: [], reviews: [], git: false };
+  tab = "notes";
+  filter = "open";
+  /** The note or hunk selected (its card open, its marks outlined). */
+  sel = null;
+  side;
+  body;
+  /** The last text selected on the pages, its source looked up when asked. */
+  picked = null;
+  pointerDown = false;
+  pop = null;
+  compose = null;
+  /** Drafts typed in a card's reply box, kept across redraws. */
+  drafts = /* @__PURE__ */ new Map();
+  showing = false;
+  onCount;
+  /** The marks drawn last (a newer drawing stops an older one). */
+  drawn = 0;
+  /** Where each note is on the pages, as last drawn: its page and height (the list's order). */
+  where = /* @__PURE__ */ new Map();
+  /** The proposals shown as source lines (else words). */
+  lines = /* @__PURE__ */ new Set();
+  /** A comment being written on a proposal (on one of its hunks; asking for changes). */
+  pcompose = null;
+  /** The proposal shown typeset (Show diff), "" the direct batch. */
+  showingP = null;
+  /** The note being edited (`id`), or one of its replies (`id#i`). */
+  editing = null;
+  toastEl = null;
+  /** The change to focus once drawn (the next after one decided: the state comes after the op). */
+  wantFocus = null;
+  /** The marks drawn last: the selected note's handles from them. */
+  lastOut = [];
+  constructor(p, host2) {
+    this.p = p;
+    this.host = host2;
+    this.side = document.createElement("aside");
+    this.side.className = "rside";
+    this.side.setAttribute("aria-label", "Review");
+    this.side.append(html`<div class="rgrip" title="Drag to resize"></div><header role="tablist"><button type="button" class="rtab" role="tab" data-tab="notes">Notes<span class="n" id="rv-nn"></span></button><button type="button" class="rtab" role="tab" data-tab="changes">Changes<span class="n" id="rv-nc"></span></button><span class="grow"></span><button type="button" class="ib" id="rv-x" title="Close the review (Esc)" aria-label="Close the review">${icon("close")}</button></header><div class="rbody" id="rv-body" role="tabpanel"></div>`);
+    this.body = this.side.querySelector("#rv-body");
+    p.win.querySelector(".body").append(this.side);
+    this.side.querySelector("header").addEventListener("click", (e) => {
+      const t = e.target.closest("[data-tab]");
+      if (t) this.tab = t.dataset.tab, this.render();
+    });
+    this.side.querySelector("#rv-x").onclick = () => this.open(false);
+    this.grip();
+    this.body.addEventListener("click", (e) => void this.clicked(e));
+    this.body.addEventListener("keydown", (e) => this.keyed(e));
+    this.body.addEventListener("input", (e) => e.target instanceof HTMLTextAreaElement && this.keepDraft(e.target));
+    host2.onState((s) => this.take(s));
+    p.stage.addEventListener("pointerdown", (e) => {
+      this.pointerDown = true;
+      if (!e.target.closest(".rv-pop, .rv-compose, .rv-finish")) this.closePop();
+    });
+    addEventListener("pointerup", () => {
+      if (!this.pointerDown) return;
+      this.pointerDown = false;
+      setTimeout(() => this.offer(), 0);
+    });
+    p.stage.addEventListener("keyup", (e) => e.shiftKey && setTimeout(() => this.offer(), 0));
+    p.stage.addEventListener("click", (e) => void this.pageClick(e));
+    p.root.addEventListener("keydown", (e) => {
+      const k = e;
+      if (k.key !== "Escape") return;
+      if (this.compose || this.pop) this.closePop(), e.stopPropagation();
+    }, { capture: true });
+    void host2.request("review_state").then((r) => {
+      if (r.ok && r.json) this.take(r.json);
+    });
+  }
+  /**
+   * Whether the review is on: the user's Experimental switch
+   * (`experimental-review`, the state's `changes`). Off, nothing of it
+   * shows: no note kinds offered at a selection, no marks on the pages or
+   * the scrollbar, no side, and the panel's button and menu item hidden
+   * (`onEnabled`). Until the watch says, off.
+   */
+  get enabled() {
+    return this.s.changes === true;
+  }
+  enabledCb;
+  /** `cb(on)` now and whenever the review is switched on or off. */
+  onEnabled(cb) {
+    this.enabledCb = cb;
+    cb(this.enabled);
+  }
+  /** A state from the watch: the side, the marks, and the switch as it says. */
+  take(s) {
+    const was = this.enabled;
+    this.s = s;
+    if (!this.enabled) {
+      this.closePop();
+      if (this.isOpen) this.open(false);
+    }
+    if (was !== this.enabled) this.enabledCb?.(this.enabled);
+    void this.marks();
+    this.render();
+  }
+  /** The pages' origins changed (a build): the marks found again. */
+  refresh() {
+    void this.marks();
+  }
+  /** The counts for a button outside (the bar's): open notes, pending changes. */
+  counts(cb) {
+    this.onCount = cb;
+    this.count();
+  }
+  count() {
+    const open = this.s.notes.filter((n) => n.status === "open" && !n.draft && !n.hunk).length;
+    this.onCount?.(open, this.pendingCount());
+  }
+  /** Changes waiting for the user: the agent's hunks and the proposals' open ones. */
+  pendingCount() {
+    const props = (this.s.proposals ?? []).filter((x) => x.mode === "propose").reduce((n, x) => n + openHunks(x).length, 0);
+    return this.s.hunks.length + props;
+  }
+  get isOpen() {
+    return this.p.win.classList.contains("review-on");
+  }
+  /** The side shown (or hidden), on `tab` if given. */
+  open(on = !this.isOpen, tab) {
+    if (on && !this.enabled) return;
+    if (tab) this.tab = tab;
+    this.p.win.classList.toggle("review-on", on);
+    if (on) this.render();
+    this.p.laidOut();
+    if (on) this.side.querySelector(`[data-tab="${this.tab}"]`)?.focus();
+  }
+  grip() {
+    const g = this.side.querySelector(".rgrip");
+    g.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const x0 = e.clientX, w0 = this.side.getBoundingClientRect().width;
+      g.setPointerCapture(e.pointerId);
+      const move = (m) => this.side.style.setProperty("--rv-w", `${Math.round(Math.max(260, w0 + x0 - m.clientX))}px`);
+      const up = () => (g.removeEventListener("pointermove", move), g.removeEventListener("pointerup", up), this.p.laidOut());
+      g.addEventListener("pointermove", move);
+      g.addEventListener("pointerup", up);
+    });
+  }
+  // ---- the side ----
+  render() {
+    this.count();
+    const nn = this.s.notes.filter((n) => n.status === "open" && !n.hunk && !n.draft).length;
+    this.side.querySelector("#rv-nn").textContent = nn ? String(nn) : "";
+    const nc = this.pendingCount();
+    this.side.querySelector("#rv-nc").textContent = nc ? String(nc) : "";
+    for (const t of this.side.querySelectorAll("[data-tab]")) t.setAttribute("aria-selected", String(t.dataset.tab === this.tab));
+    if (!this.isOpen) return;
+    const focused = this.p.root.activeElement;
+    const focusKey = focused && this.body.contains(focused) ? focused.dataset.focus ?? null : null;
+    const top = this.body.scrollTop;
+    const changesOn = this.s.changes !== false;
+    this.side.querySelector('[data-tab="changes"]').hidden = !changesOn;
+    if (!changesOn && this.tab === "changes") this.tab = "notes";
+    this.body.replaceChildren(this.tab === "notes" ? this.notesView() : this.changesView());
+    for (const ta of this.body.querySelectorAll("textarea[data-reply], textarea[data-comment], textarea[data-pc]"))
+      ta.value = this.drafts.get(this.draftKey(ta)) ?? "";
+    for (const ta of this.body.querySelectorAll("textarea[data-edit]")) {
+      const n = this.s.notes.find((x) => x.id === ta.dataset.edit);
+      const key = `e:${ta.dataset.edit}#${ta.dataset.i}`;
+      ta.value = this.drafts.get(key) ?? n?.thread[Number(ta.dataset.i)]?.text ?? "";
+    }
+    this.body.scrollTop = top;
+    const want = this.wantFocus ? this.body.querySelector(`[data-ph="${CSS.escape(this.wantFocus)}"], .card.hunk[data-id="${CSS.escape(this.wantFocus)}"]`) : null;
+    if (want) {
+      want.focus();
+      this.wantFocus = null;
+    } else if (focusKey) {
+      const f = this.body.querySelector(`[data-focus="${CSS.escape(focusKey)}"]`);
+      if (f) {
+        f.focus();
+        if (f instanceof HTMLTextAreaElement) f.selectionStart = f.selectionEnd = f.value.length;
+      }
+    }
+  }
+  draftKey(ta) {
+    if (ta.dataset.edit !== void 0) return `e:${ta.dataset.edit}#${ta.dataset.i}`;
+    return ta.dataset.reply ?? (ta.dataset.pc !== void 0 ? `p:${ta.dataset.pc}` : `h:${ta.dataset.comment}`);
+  }
+  /** What is typed in a box, kept for the next drawing (as it is typed: a box sent is forgotten with its draft). */
+  keepDraft(ta) {
+    const key = this.draftKey(ta);
+    if (ta.value) this.drafts.set(key, ta.value);
+    else this.drafts.delete(key);
+  }
+  notesView() {
+    const all = this.s.notes.filter((n) => !n.hunk);
+    const resolved = all.filter((n) => n.status === "resolved").length;
+    const shown = all.filter((n) => this.filter === "all" || n.status === this.filter);
+    const seg = (v, label, n) => html`<button type="button" data-filter="${v}" aria-pressed="${this.filter === v}">${label} ${n ? String(n) : ""}</button>`;
+    const tools = html`<div class="rtools"><span class="seg" role="group" aria-label="Show">${seg("open", "Open", all.length - resolved)}${seg("resolved", "Resolved", resolved)}${seg("all", "All", 0)}</span><span class="grow"></span>${resolved ? html`<button type="button" class="btn" data-act="clear" title="Delete every resolved note">Clear resolved</button>` : ""}</div>`;
+    if (!all.length)
+      return html`${tools}<div class="empty"><b>No notes yet.</b><br>Select text on a page to highlight it, note it, or comment for your agent. <b>Alt+click</b> notes a spot with no text, such as a figure.<br><br>Your agent reads them with <code>phitex session notes</code>.</div>`;
+    if (!shown.length)
+      return html`${tools}<div class="empty">${this.filter === "open" ? "Every note is resolved." : "No resolved notes."}</div>`;
+    const placed = shown.filter((n) => !n.detached);
+    const detached = shown.filter((n) => n.detached);
+    const at = (n) => this.where.get(n.id) ?? [n.anchor.page ?? 1e9, 0];
+    placed.sort((a, b) => at(a)[0] - at(b)[0] || at(a)[1] - at(b)[1] || a.anchor.file.localeCompare(b.anchor.file) || a.anchor.start - b.anchor.start);
+    return html`${tools}${placed.map((n) => this.noteCard(n))}${detached.length ? html`<h3>Detached: their text is gone from the source</h3>${detached.map((n) => this.noteCard(n))}` : ""}`;
+  }
+  /** The box editing note `n`'s words (post `i`; its kind with the first). */
+  editBox(n, i) {
+    const kinds = ["highlight", "note", "comment"].map((k) => html`<button type="button" data-kind="${k}" data-id="${n.id}" aria-pressed="${n.kind === k}">${KIND_WORD[k]}</button>`);
+    return html`<div class="editbox">${i === 0 && !n.hunk ? html`<span class="seg" role="group" aria-label="Kind">${kinds}</span>` : ""}<textarea data-edit="${n.id}" data-i="${String(i)}" data-focus="ed:${n.id}#${String(i)}" rows="3" aria-label="Edit the words" placeholder="${i === 0 && n.kind === "highlight" ? "Words for this highlight (none: a plain highlight)" : "Your words"}"></textarea><div class="act"><button type="button" class="btn primary" data-act="save-edit" data-id="${n.id}" data-i="${String(i)}">Save</button><button type="button" class="btn" data-act="cancel-edit" data-id="${n.id}">Cancel</button><span class="hint">Ctrl+Enter saves · Esc cancels</span></div></div>`;
+  }
+  noteCard(n, inHunk = false) {
+    const on = this.sel === n.id;
+    const a = n.anchor;
+    const quote = a.quote ? html`<div class="quote ${n.kind}">${oneLine(a.quote, on ? 2e3 : 240)}</div>` : html`<div class="quote spot ${n.kind}">A spot on page ${String((a.page ?? 0) + 1)}</div>`;
+    const editingNote = on && this.editing === n.id;
+    const thread = n.thread.map((p, i) => on && this.editing === `${n.id}#${i}` ? this.editBox(n, i) : html`${editingNote && i === 0 ? "" : this.post(p)}${on && !inHunk && i > 0 && p.by === "you" ? html`<div class="pact"><button type="button" class="lnk" data-act="edit-post" data-id="${n.id}" data-i="${String(i)}">Edit</button><button type="button" class="lnk" data-act="del-post" data-id="${n.id}" data-i="${String(i)}">Delete</button></div>` : ""}`);
+    if (editingNote) thread.unshift(this.editBox(n, 0));
+    const lastBy = n.thread.at(-1)?.by;
+    const waiting = n.status === "open" && n.kind === "comment" && lastBy !== "agent" && !n.draft && !n.verdict;
+    const reply = on && !n.draft && !this.editing?.startsWith(n.id) ? html`<textarea data-focus="reply:${n.id}" data-reply="${n.id}" placeholder="${n.kind === "highlight" ? "Add a note\u2026" : "Reply\u2026"}" aria-label="Reply to this note" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="reply" data-id="${n.id}" data-focus="send:${n.id}">Reply</button>${n.status === "open" ? html`<button type="button" class="btn" data-act="resolve" data-id="${n.id}" data-focus="res:${n.id}">${icon("check", 14)} Resolve</button>` : html`<button type="button" class="btn" data-act="reopen" data-id="${n.id}" data-focus="reo:${n.id}">${icon("undo", 14)} Reopen</button>`}<span class="grow"></span>${inHunk ? "" : html`<button type="button" class="btn" data-act="edit" data-id="${n.id}" data-focus="edit:${n.id}" title="Edit its words or kind (Enter)">${icon("note", 14)} Edit</button>`}<button type="button" class="btn" data-act="delete" data-id="${n.id}" data-focus="del:${n.id}" title="Delete (Delete key)">${icon("delete", 14)} Delete</button></div><div class="hint">Ctrl+Enter replies · Enter on the card edits · Delete deletes · Esc closes</div>` : "";
+    const answered = (n.hunks ?? []).length;
+    return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top"><span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
+  }
+  post(p) {
+    if (p.changes?.length)
+      return html`<div class="post update"><span class="by agent">Agent</span>revised it<span class="when">${ago(p.at)}</span>${p.text ? html`<div class="txt">${p.text}</div>` : ""}${p.changes.slice(0, 8).map((c) => html`<div class="diff"><span class="ctx">${c.file}:${String(c.line)} </span>${c.old ? html`<del>${oneLine(c.old, 160)}</del>` : ""}${c.new ? html`<ins>${oneLine(c.new, 160)}</ins>` : ""}</div>`)}${p.changes.length > 8 ? html`<div class="more">and ${String(p.changes.length - 8)} more</div>` : ""}</div>`;
+    if (p.diff && p.by !== "agent")
+      return html`<div class="post"><span class="by">You</span><span class="txt">${p.text}</span><span class="when" title="${p.at}">${ago(p.at)}</span><div class="on">on ${placeOf(p.diff.file, p.diff.line)}: ${p.diff.old ? html`<del>${oneLine(p.diff.old, 60)}</del>` : ""}${p.diff.new ? html`<ins>${oneLine(p.diff.new, 60)}</ins>` : ""}</div></div>`;
+    if (p.diff)
+      return html`<div class="post update"><span class="by agent">Agent</span>changed it<span class="when">${ago(p.at)}</span><div class="diff">${p.diff.old ? html`<del>${oneLine(p.diff.old, 160)}</del>` : ""}${p.diff.new ? html`<ins>${oneLine(p.diff.new, 160)}</ins>` : ""}</div></div>`;
+    const edited = (p.edited ?? []).map((e) => html`<button type="button" class="place" data-goto="${e.file}" data-line="${String(e.from_line)}" data-from="${String(e.start)}" data-to="${String(e.end)}">${placeOf(e.file, e.from_line, e.to_line)}</button> `);
+    return html`<div class="post"><span class="by ${p.by === "agent" ? "agent" : ""}">${p.by === "agent" ? "Agent" : "You"}</span><span class="txt">${p.text}</span><span class="when" title="${p.edited_at ? `Edited ${p.edited_at}` : p.at}">${ago(p.at)}${p.edited_at ? " \xB7 edited" : ""}</span>${edited.length ? html`<span class="edited">Edited ${edited}</span>` : ""}</div>`;
+  }
+  changesView() {
+    const mode = this.s.mode ?? "direct";
+    const props = this.s.proposals ?? [];
+    const drafts = this.s.notes.filter((n) => n.draft);
+    const bar2 = drafts.length ? html`<div class="rbar"><span><b>${String(drafts.length)}</b> comment${drafts.length === 1 ? "" : "s"} in your review</span><span class="grow"></span><button type="button" class="btn primary" data-act="finish">Finish review</button></div>` : "";
+    const last = this.s.reviews.at(-1);
+    const rec = last ? html`<div class="reviewrec">Last review: ${VERDICT_WORD[last.verdict]}${last.summary ? `: ${oneLine(last.summary, 80)}` : ""} · ${ago(last.at)}</div>` : "";
+    const segb = (m, label, title) => html`<button type="button" data-mode="${m}" aria-pressed="${mode === m}" title="${title}">${label}</button>`;
+    const modes = html`<div class="rtools"><span class="hint">Your agent</span><span class="seg" role="group" aria-label="How your agent's changes come">${segb("direct", "Edits", "It edits the files; its changes show on the pages, waiting for you")}${segb("propose", "Proposes", "Its changes are kept apart until you accept them; the pages show them only with Show diff")}</span></div>`;
+    const batch = this.s.hunks.length ? this.batchCard(props.find((x) => x.mode === "direct" && x.status !== "done")) : "";
+    const live = props.filter((x) => x.mode === "propose" && (x.status === "open" || x.status === "changes_requested"));
+    const decided = props.filter((x) => x.mode === "propose" && !live.includes(x));
+    const empty = !this.s.hunks.length && !live.length ? mode === "propose" ? html`<div class="empty"><b>No proposals waiting.</b><br>Your agent writes its change in the workspace (<code>.phitex/work/</code>) and sends it with <code>phitex session propose -m "why"</code>. Your files and pages stay as they are until you accept it here.<br><br>Accept all, or change by change; <b>Show diff</b> typesets it against your text.</div>` : html`<div class="empty"><b>No changes waiting.</b><br>Edits your agent makes to the files show here, word by word, to accept or reject. ${this.s.git ? "Accepting one stages it in git; rejecting one puts the staged text back." : "Accepted text is kept in .phitex/baseline."}<br><br>Edits you type in an editor attached to this watch are yours and are accepted as you type.</div>` : "";
+    return html`${bar2}${rec}${modes}${empty}${live.map((x) => this.propCard(x))}${batch}${decided.length ? html`<h3>Decided</h3>${decided.slice(0, 6).map((x) => this.propCard(x))}` : ""}${this.earlier(!this.s.hunks.length)}`;
+  }
+  /** The keys of a card's changes, said under its buttons. */
+  keysHint() {
+    return html`<div class="keys"><kbd>n</kbd> <kbd>p</kbd> next, previous change · <kbd>a</kbd> accept · <kbd>r</kbd> reject · <kbd>c</kbd> comment</div>`;
+  }
+  /** A card's buttons and its compose box (`id`: the proposal, "" the direct batch not named). */
+  cardTools(id, open, showing, propose) {
+    const lines2 = this.lines.has(id);
+    return html`<div class="act"><button type="button" class="btn accept" data-pact="accept-all" data-p="${id}" disabled="${!open}" title="Accept every change waiting${propose ? ": applied to your files" : ""}">${icon("check", 14)} Accept all</button><button type="button" class="btn reject" data-pact="reject-all" data-p="${id}" disabled="${!open}" title="${propose ? "Reject every change waiting: your files stay as they are" : "Reject every change: the files get the accepted text back"}">Reject all</button><button type="button" class="btn" data-pact="request" data-p="${id}" title="Ask your agent to change it (it is told at once)">Request changes</button><button type="button" class="btn" data-pact="comment" data-p="${id}">Comment</button></div><div class="act"><label class="hint" title="Typeset it against your text (latexdiff), on the pages"><input type="checkbox" data-pact="show" data-p="${id}" checked="${showing}"> Show diff</label><span class="grow"></span><span class="seg" role="group" aria-label="The source as"><button type="button" data-pact="words" data-p="${id}" aria-pressed="${!lines2}">Words</button><button type="button" data-pact="lines" data-p="${id}" aria-pressed="${lines2}">Lines</button></span></div>${this.composeBox(id)}`;
+  }
+  composeBox(id) {
+    const c = this.pcompose;
+    if (!c || c.id !== id) return "";
+    const h = c.hunk ? this.findHunk(c.hunk) : void 0;
+    return html`<div class="pcompose">${h ? html`<div class="hint">On ${placeOf(h.file, h.line)}</div>` : ""}<textarea data-pc="${id}" data-focus="pc:${id}" rows="2" placeholder="${c.request ? "What should your agent change?" : "Your comment for the agent\u2026"}" aria-label="${c.request ? "Changes to request" : "Comment"}"></textarea><div class="act"><button type="button" class="btn primary" data-pact="send" data-p="${id}">${c.request ? "Request changes" : "Comment"}</button><button type="button" class="btn" data-pact="cancel" data-p="${id}">Cancel</button><span class="hint">Ctrl+Enter sends · Esc cancels</span></div></div>`;
+  }
+  findHunk(id) {
+    return this.s.hunks.find((h) => h.id === id) ?? (this.s.proposals ?? []).flatMap((x) => x.hunks).find((h) => h.id === id);
+  }
+  /** The direct batch: the agent's changes waiting, under the title and why it gave them. */
+  batchCard(x) {
+    const id = x?.id ?? "";
+    const hs = this.s.hunks;
+    const files = [...new Set(hs.map((h) => h.file))];
+    const groups = groupHunks(this.s);
+    const flash = (this.s.mode ?? "direct") === "propose" ? html`<div class="hint">Your agent edited these files directly, so they show on the pages: <code>phitex session propose</code> makes them a proposal and puts the files back.</div>` : "";
+    return html`<div class="card pcard batch" data-p="${id}"><div class="top"><span class="chip st-${x?.status ?? "open"}">${STATUS_WORD[x?.status ?? "open"]}</span><span class="grow"></span><span>${x ? ago(x.updated) : ""}</span></div><div class="ptitle">${x?.title || "The agent's changes"}</div>${x?.why && x.why !== x.title ? html`<div class="pwhy">${x.why}</div>` : ""}<div class="pmeta">${files.join(", ")} · ${String(hs.length)} change${hs.length === 1 ? "" : "s"}${this.s.git ? " \xB7 accepting stages them in git" : ""}</div>${flash}${this.cardTools(id, hs.length, this.showing && this.showingP === "", false)}${(x?.thread ?? []).map((p) => this.post(p))}<div class="phunks">${groups.map((g) => html`${groups.length > 1 || g.note ? html`<h3>${g.title}${g.note ? html` <button type="button" class="place" data-note="${g.note.id}">${g.note.id}</button>` : ""}</h3>` : ""}${g.hunks.map((h) => this.hunkCard(h, this.lines.has(id)))}`)}</div>${this.keysHint()}</div>`;
+  }
+  /** A proposal: its title, why, files, hunks and thread, and what the user can do with it. */
+  propCard(x) {
+    const open = openHunks(x).length;
+    const count = (st) => x.hunks.filter((h) => h.state === st).length;
+    const said2 = [count("accepted") && `${count("accepted")} accepted`, count("rejected") && `${count("rejected")} rejected`, count("conflict") && `${count("conflict")} conflicting`].filter(Boolean).join(", ");
+    const live = x.status === "open" || x.status === "changes_requested";
+    return html`<div class="card pcard" data-p="${x.id}"><div class="top"><span class="chip st-${x.status}">${STATUS_WORD[x.status]}</span><span>${x.id}${x.revision > 1 ? ` \xB7 revision ${x.revision}` : ""}</span><span class="grow"></span><span title="${x.updated}">${ago(x.updated)}</span></div><div class="ptitle">${x.title}</div>${x.why && x.why !== x.title ? html`<div class="pwhy">${x.why}</div>` : ""}<div class="pmeta">${x.files.join(", ")} · ${String(x.hunks.length)} change${x.hunks.length === 1 ? "" : "s"}${said2 ? ` (${said2})` : ""}</div>${live ? this.cardTools(x.id, open, this.showing && this.showingP === x.id, true) : ""}${x.thread.map((p) => this.post(p))}${live ? html`<div class="phunks">${x.hunks.map((h) => this.propHunk(x, h))}</div>${this.keysHint()}` : ""}</div>`;
+  }
+  /** The source of a change: its words (deleted and added in line), or its lines. */
+  source(h, lines2) {
+    if (lines2) {
+      const d = lineDiff(h);
+      return html`<div class="ldiff">${d.del.map((l) => html`<div class="d">${l}</div>`)}${d.add.map((l) => html`<div class="a">${l}</div>`)}</div>`;
+    }
+    if (h.whole) return html`<div class="diff">${h.whole === "added" ? html`<ins>${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>`;
+    return html`<div class="diff"><span class="ctx">${h.before}</span>${h.parts.map(([k, t]) => k === "del" ? html`<del>${t}</del>` : k === "add" ? html`<ins>${t}</ins>` : html`<span>${t}</span>`)}<span class="ctx">${h.after}</span></div>`;
+  }
+  propHunk(x, h) {
+    const st = h.state ?? "open";
+    const what = h.whole === "added" ? " (new file)" : h.whole === "deleted" ? " (file deleted)" : "";
+    const open = st === "open";
+    return html`<div class="card hunk phunk st-${st}" data-ph="${h.id}" data-p="${x.id}" data-focus="ph:${h.id}" tabindex="0" aria-label="${`Proposed change at ${h.file} line ${h.line}${what}${st !== "open" ? `, ${STATE_WORD[st]}` : ""}`}"><div class="top"><button type="button" class="place" data-goto="${h.file}" data-line="${String(h.line)}" title="Open in the editor"><span class="file">${placeOf(h.file, h.line, h.end_line)}</span></button>${what}${st !== "open" ? html`<span class="chip st-${st}">${STATE_WORD[st]}</span>` : ""}<span class="grow"></span><button type="button" class="btn accept" data-pact="accept" data-p="${x.id}" data-h="${h.id}" disabled="${!open}" aria-label="Accept this change">${icon("check", 14)} Accept</button><button type="button" class="btn reject" data-pact="reject" data-p="${x.id}" data-h="${h.id}" disabled="${!open}" aria-label="Reject this change">Reject</button><button type="button" class="ib" data-pact="comment" data-p="${x.id}" data-h="${h.id}" title="Comment on this change" aria-label="Comment on this change">${icon("comment", 16)}</button></div>${this.source(h, this.lines.has(x.id))}</div>`;
+  }
+  /** The comments on changes accepted or rejected since, with their verdicts: a review's history. */
+  earlier(top = false) {
+    const pending = new Set(this.s.hunks.map((h) => h.id));
+    const done = this.s.notes.filter((n) => n.hunk && !n.draft && !pending.has(n.hunk.id));
+    if (!done.length) return "";
+    const verdict = (n) => n.verdict ?? (this.s.verdicts ?? []).find((v) => v.hunk.id === n.hunk.id);
+    return html`<h3>${top ? "Reviewed" : "Reviewed earlier"}</h3>${done.map((n) => {
+      const v = verdict(n);
+      return html`<div class="card hunk past${this.sel === n.id ? " on" : ""}" data-id="${n.id}" tabindex="0" role="button"><div class="top"><span class="file">${placeOf(n.hunk.file, n.hunk.line)}</span>${v ? html`<span class="chip ${v.verdict === "accepted" ? "done" : "det"}">${v.verdict === "accepted" ? "Accepted" : "Rejected"}</span>` : ""}<span class="grow"></span><span>${v ? ago(v.at) : ""}</span></div><div class="diff">${n.hunk.old ? html`<del>${oneLine(n.hunk.old, 200)}</del>` : ""}${n.hunk.new ? html`<ins>${oneLine(n.hunk.new, 200)}</ins>` : ""}</div><div class="comments">${this.noteCard(n, true)}</div></div>`;
+    })}`;
+  }
+  hunkCard(h, lines2 = false) {
+    const on = this.sel === h.id;
+    const comments = this.s.notes.filter((n) => h.comments.includes(n.id));
+    let at = h.now[0];
+    const parts = h.parts.map(([k, t]) => {
+      if (k === "del") return html`<del data-at="${String(at)}">${t}</del>`;
+      const el = k === "add" ? html`<ins data-at="${String(at)}">${t}</ins>` : html`<span data-at="${String(at)}">${t}</span>`;
+      at += utf8(t);
+      return el;
+    });
+    const what = h.whole === "added" ? " (new file)" : h.whole === "deleted" ? " (file deleted)" : "";
+    const diff2 = lines2 ? this.source(h, true) : h.whole ? html`<div class="diff">${h.whole === "added" ? html`<ins data-at="${String(h.now[0])}">${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>` : html`<div class="diff" data-hunk="${h.id}"><span class="ctx">${h.before}</span>${parts}<span class="ctx">${h.after}</span></div>`;
+    const box = on ? html`<textarea data-focus="hc:${h.id}" data-comment="${h.id}" placeholder="Comment on this change (select words in it to comment on them)…" aria-label="Comment on this change" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="comment" data-id="${h.id}">Comment</button><button type="button" class="btn" data-act="draft" data-id="${h.id}" title="Gather it with others and submit them as one review">Add to review</button></div>` : "";
+    return html`<div class="card hunk${on ? " on" : ""}" data-id="${h.id}" data-focus="card:${h.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`Change at ${h.file} line ${h.line}${what}`}"><div class="top"><button type="button" class="place" data-goto="${h.file}" data-line="${String(h.line)}" title="Open in the editor"><span class="file">${placeOf(h.file, h.line, h.end_line)}</span></button>${what}<span class="grow"></span><button type="button" class="btn accept" data-act="accept" data-id="${h.id}" title="Accept: ${this.s.git ? "staged in git" : "kept as the accepted text"}" aria-label="Accept this change">${icon("check", 14)} Accept</button><button type="button" class="btn reject" data-act="reject" data-id="${h.id}" title="Reject: the file gets the accepted text back" aria-label="Reject this change">Reject</button></div>${diff2}${comments.length ? html`<div class="comments">${comments.map((c) => this.noteCard(c, true))}</div>` : ""}${box}</div>`;
+  }
+  // ---- what the user does in the side ----
+  keyed(e) {
+    const t = e.target;
+    if (t instanceof HTMLTextAreaElement && t.dataset.edit !== void 0) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.preventDefault(), void this.act("save-edit", t.dataset.edit, t.dataset.i);
+      else if (e.key === "Escape") e.stopPropagation(), void this.act("cancel-edit", t.dataset.edit);
+      return;
+    }
+    if (t.classList.contains("note") && t.classList.contains("card") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const id = t.dataset.id;
+      if (e.key === "Enter" && this.sel === id) return void (e.preventDefault(), this.act("edit", id));
+      if (e.key === "Delete" || e.key === "Backspace") return void (e.preventDefault(), e.stopPropagation(), this.act("delete", id));
+      if (e.key === "Escape" && this.sel === id) return void (e.stopPropagation(), this.select(null), this.body.querySelector(`.card[data-id="${CSS.escape(id)}"]`)?.focus());
+    }
+    if (t instanceof HTMLTextAreaElement && t.dataset.pc !== void 0) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.preventDefault(), void this.pact("send", t.dataset.pc);
+      else if (e.key === "Escape") e.stopPropagation(), void this.pact("cancel", t.dataset.pc);
+      return;
+    }
+    const hc = t.closest(".card.hunk");
+    const card = t.closest(".pcard");
+    if (card && !(t instanceof HTMLTextAreaElement) && !e.ctrlKey && !e.altKey && !e.metaKey && "nprac".includes(e.key) && e.key.length === 1) {
+      const list = [...card.querySelectorAll(".phunks .card.hunk")];
+      const i = hc ? list.indexOf(hc) : -1;
+      const pid = card.dataset.p ?? "";
+      const hid = hc?.dataset.ph ?? hc?.dataset.id;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "n" || e.key === "p") return void list[Math.max(0, Math.min(list.length - 1, i + (e.key === "n" ? 1 : i < 0 ? 1 : -1)))]?.focus();
+      if (!hid) return void list[0]?.focus();
+      if (e.key === "c") return void this.pact("comment", pid, hid);
+      return void this.pact(e.key === "a" ? "accept" : "reject", pid, hid);
+    }
+    if (t instanceof HTMLTextAreaElement) {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        if (t.dataset.reply) void this.act("reply", t.dataset.reply);
+        else if (t.dataset.comment) void this.act("comment", t.dataset.comment);
+      } else if (e.key === "Escape") {
+        e.stopPropagation();
+        this.select(null);
+      }
+      return;
+    }
+    if ((e.key === "Enter" || e.key === " ") && t.classList.contains("card")) {
+      e.preventDefault();
+      this.select(t.dataset.id, true);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const cards = [...this.body.querySelectorAll(".rbody > .card, .rbody > div > .card, .card")].filter((c) => !c.closest(".comments"));
+      const i = cards.indexOf(t.closest(".card"));
+      const next = cards[i + (e.key === "ArrowDown" ? 1 : -1)];
+      if (next) e.preventDefault(), next.focus();
+    }
+  }
+  async clicked(e) {
+    const t = e.target;
+    const f = t.closest("[data-filter]");
+    if (f) return void (this.filter = f.dataset.filter, this.render());
+    const go = t.closest("[data-goto]");
+    if (go) {
+      e.stopPropagation();
+      if (go.dataset.from) void this.reveal(go.dataset.goto, Number(go.dataset.from), Number(go.dataset.to));
+      return this.host.goto(go.dataset.goto, Number(go.dataset.line) || 1);
+    }
+    const nt = t.closest("[data-note]");
+    if (nt) return void (this.tab = "notes", this.filter = "all", this.select(nt.dataset.note, true));
+    const kd = t.closest("[data-kind]");
+    if (kd) return void (e.stopPropagation(), this.req("review_edit", { id: kd.dataset.id, kind: kd.dataset.kind }));
+    const md = t.closest("[data-mode]");
+    if (md) return void this.setMode(md.dataset.mode);
+    const pa = t.closest("[data-pact]");
+    if (pa) {
+      e.stopPropagation();
+      if (pa.dataset.pact === "show") return void this.pshow(pa.dataset.p ?? "", pa.checked);
+      return void this.pact(pa.dataset.pact, pa.dataset.p ?? "", pa.dataset.h);
+    }
+    const a = t.closest("[data-act]");
+    if (a) {
+      e.stopPropagation();
+      if (a.dataset.act === "show") return this.show(a.checked);
+      return void this.act(a.dataset.act, a.dataset.id, a.dataset.i);
+    }
+    if (t.closest("textarea, .diff, .ldiff, .pcard:not(.batch) .phunk, .pcard > *:not(.phunks)")) return;
+    const card = t.closest(".card");
+    if (card && this.sel !== card.dataset.id) this.select(card.dataset.id, true);
+  }
+  /** The review mode: this watch's (and said). */
+  async setMode(m) {
+    if ((this.s.mode ?? "direct") === m) return;
+    if (await this.req("review_mode", { mode: m })) this.p.msg(m === "propose" ? "Your agent's changes now come as proposals: your files stay as they are until you accept one" : "Your agent edits the files; its changes wait for you here");
+  }
+  /** Show diff of proposal `id` ("" the direct batch): typeset, or back to the pages. */
+  pshow(id, on) {
+    this.showingP = on ? id : null;
+    this.showing = on;
+    if (id && id !== this.directId()) this.host.showChanges?.(on, this.s.git, id);
+    else this.host.showChanges?.(on, this.s.git);
+    this.render();
+    void this.marks();
+  }
+  directId() {
+    return (this.s.proposals ?? []).find((x) => x.mode === "direct" && x.status !== "done")?.id ?? "";
+  }
+  /** What the user does with proposal `id` ("" the direct batch not named yet), or its hunk `h`. */
+  async pact(act, id, h) {
+    const direct = !id || id === this.directId();
+    const x = (this.s.proposals ?? []).find((p) => p.id === id);
+    switch (act) {
+      case "words":
+      case "lines":
+        if (act === "lines") this.lines.add(id);
+        else this.lines.delete(id);
+        return this.render();
+      case "comment":
+      case "request":
+        this.pcompose = { id, hunk: h, request: act === "request" };
+        this.render();
+        this.body.querySelector(`textarea[data-pc="${CSS.escape(id)}"]`)?.focus();
+        return;
+      case "cancel":
+        this.pcompose = null;
+        this.drafts.delete(`p:${id}`);
+        return this.render();
+      case "send": {
+        const c = this.pcompose;
+        const ta = this.body.querySelector(`textarea[data-pc="${CSS.escape(id)}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!text && !c?.request) return void ta?.focus();
+        const r = await this.req("review_proposal_comment", { id, text, ...c?.hunk ? { hunk: c.hunk } : {}, ...c?.request ? { verdict: "request_changes" } : {} });
+        if (!r) return;
+        this.drafts.delete(`p:${id}`);
+        this.pcompose = null;
+        this.p.msg(c?.request ? "Changes requested: your agent is told" : "Comment sent to your agent");
+        return this.render();
+      }
+      case "accept-all":
+      case "reject-all": {
+        const n = direct ? this.s.hunks.length : x ? openHunks(x).length : 0;
+        const yes = act === "accept-all";
+        if (!yes && !confirm(`Reject all ${n} change${n === 1 ? "" : "s"}?${direct ? " The files get the accepted text back." : " Your files stay as they are."}`)) return;
+        if (direct && !id) return this.verdict(yes ? "accept" : "reject", "all");
+        const r = await this.req(`review_proposal_${yes ? "accept" : "reject"}`, { id, hunks: "all" });
+        if (r) this.p.msg(`${yes ? "Accepted" : "Rejected"} ${String(r.done ?? n)} change${Number(r.done ?? n) === 1 ? "" : "s"}${yes && !direct ? ": applied to your files" : ""}`);
+        return this.afterDecision(id);
+      }
+      case "accept":
+      case "reject": {
+        if (!h) return;
+        const card = this.body.querySelector(`.pcard[data-p="${CSS.escape(id)}"]`);
+        const list = card ? [...card.querySelectorAll(".phunks .card.hunk")].map((c) => c.dataset.ph ?? c.dataset.id) : [];
+        const next = list[list.indexOf(h) + 1] ?? list[list.indexOf(h) - 1];
+        this.wantFocus = next ?? null;
+        if (direct && !id) await this.verdict(act, [h]);
+        else {
+          const r = await this.req(`review_proposal_${act}`, { id, hunks: [h] });
+          if (!r) return;
+          this.p.msg(act === "accept" ? direct ? "Accepted" : "Accepted: applied to your file" : "Rejected");
+        }
+        await this.afterDecision(id);
+        const el = next ? this.body.querySelector(`[data-ph="${CSS.escape(next)}"], .card.hunk[data-id="${CSS.escape(next)}"]`) : null;
+        if (el && el.isConnected) el.focus();
+        return;
+      }
+    }
+  }
+  /** A short message with Undo, gone after a few seconds: a deletion's way back. */
+  toast(text, undo) {
+    this.toastEl?.remove();
+    const el = html`<div class="rv-toast" role="status"><span>${text}</span><button type="button" class="btn">Undo</button></div>`.firstElementChild;
+    this.p.win.append(el);
+    this.toastEl = el;
+    const done = setTimeout(() => el.remove(), 6e3);
+    el.querySelector("button").onclick = async () => {
+      clearTimeout(done);
+      el.remove();
+      if (await this.req("review_restore", undo)) this.p.msg("Restored");
+    };
+  }
+  /** After a decision: the typeset diff made again where shown. */
+  async afterDecision(id) {
+    if (this.showing && this.showingP === id) this.host.showChanges?.(true, this.s.git, id && id !== this.directId() ? id : void 0);
+  }
+  show(on) {
+    this.showing = on;
+    this.host.showChanges?.(on, this.s.git);
+    void this.marks();
+  }
+  /** The op `act` on note or hunk `id` (`i`: a post of its thread). */
+  async act(act, id, i) {
+    const r = (op, params) => this.req(op, params);
+    switch (act) {
+      case "edit":
+      case "edit-post": {
+        this.editing = act === "edit" ? id : `${id}#${i}`;
+        if (this.sel !== id) this.sel = id;
+        this.render();
+        const ta = this.body.querySelector(`textarea[data-edit="${CSS.escape(id)}"]`);
+        if (ta) ta.focus(), ta.selectionStart = ta.selectionEnd = ta.value.length;
+        return;
+      }
+      case "cancel-edit":
+        for (const k of [...this.drafts.keys()]) if (k.startsWith(`e:${id}#`)) this.drafts.delete(k);
+        this.editing = null;
+        this.render();
+        this.body.querySelector(`.card[data-id="${CSS.escape(id)}"]`)?.focus();
+        return;
+      case "save-edit": {
+        const ta = this.body.querySelector(`textarea[data-edit="${CSS.escape(id)}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!await r("review_edit", { id, text, post: Number(i ?? 0) })) return;
+        for (const k of [...this.drafts.keys()]) if (k.startsWith(`e:${id}#`)) this.drafts.delete(k);
+        this.editing = null;
+        this.render();
+        this.body.querySelector(`.card[data-id="${CSS.escape(id)}"]`)?.focus();
+        return;
+      }
+      case "del-post": {
+        const g = await r("review_delete", { id, post: Number(i) });
+        if (g) this.toast("Reply deleted", { id, gone: g.gone });
+        return;
+      }
+      case "clear": {
+        const n = this.s.notes.filter((x) => x.status === "resolved" && !x.hunk).length;
+        if (!confirm(`Delete ${n} resolved note${n === 1 ? "" : "s"}?`)) return;
+        await r("review_clear");
+        return;
+      }
+      case "reply": {
+        const ta = this.body.querySelector(`[data-reply="${id}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!text) return void ta?.focus();
+        if (await r("review_reply", { id, text })) this.drafts.delete(id);
+        return;
+      }
+      case "resolve":
+      case "reopen": {
+        const ta = this.body.querySelector(`[data-reply="${id}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (await r(`review_${act}`, { id, text })) this.drafts.delete(id);
+        if (act === "resolve" && this.filter === "open") this.select(null);
+        return;
+      }
+      case "delete": {
+        const n = this.s.notes.find((x) => x.id === id);
+        if (n && (n.thread.some((p) => p.by === "agent") || (n.hunks ?? []).length) && !confirm("Delete this note with its thread? Your agent's replies go too.")) return;
+        const g = await r("review_delete", { id });
+        if (!g) return;
+        this.select(null);
+        this.toast(`${n ? KIND_WORD[n.kind] : "Note"} deleted`, { gone: g.gone });
+        return;
+      }
+      case "accept":
+      case "reject":
+        await this.verdict(act, [id]);
+        return;
+      case "accept-all":
+      case "reject-all": {
+        const n = this.s.hunks.length;
+        if (act === "reject-all" && !confirm(`Reject all ${n} change${n === 1 ? "" : "s"}? The files get the accepted text back.`)) return;
+        await this.verdict(act === "accept-all" ? "accept" : "reject", "all");
+        return;
+      }
+      case "comment":
+      case "draft": {
+        const ta = this.body.querySelector(`[data-comment="${id}"]`);
+        const text = ta?.value.trim() ?? "";
+        if (!text) return void ta?.focus();
+        const range = this.diffRange(id);
+        if (await r("review_comment", { hunk: id, text, draft: act === "draft", ...range ? { range } : {} })) this.drafts.delete(`h:${id}`);
+        return;
+      }
+      case "finish":
+        return this.finish();
+    }
+  }
+  async verdict(how, ids) {
+    const list = this.s.hunks.map((h) => h.id);
+    const at = ids === "all" ? -1 : list.indexOf(ids[0]);
+    const r = await this.req(`review_${how}`, { ids });
+    if (!r) return;
+    const n = Number(r.done ?? 0);
+    this.p.msg(`${how === "accept" ? "Accepted" : "Rejected"} ${n} change${n === 1 ? "" : "s"}${how === "accept" && this.s.git ? " (staged)" : ""}`);
+    if (at >= 0) {
+      const next = this.s.hunks.find((h) => !list.slice(0, at + 1).includes(h.id)) ?? this.s.hunks.at(-1);
+      this.select(next?.id ?? null, false, true);
+    }
+    if (this.showing) this.host.showChanges?.(true, this.s.git);
+  }
+  /** A range selected inside hunk `id`'s diff: bytes of the current text. */
+  diffRange(id) {
+    const rn = this.p.root;
+    const sel = rn.getSelection?.() ?? document.getSelection();
+    const d = this.body.querySelector(`.diff[data-hunk="${id}"]`);
+    if (!sel || sel.isCollapsed || !d || !d.contains(sel.anchorNode)) return null;
+    const pos = (node, off) => {
+      const el = (node instanceof HTMLElement ? node : node?.parentElement)?.closest("[data-at]");
+      if (!el || !d.contains(el)) return null;
+      const base = Number(el.dataset.at);
+      return el.localName === "del" ? base : base + utf8((el.textContent ?? "").slice(0, off));
+    };
+    const r = sel.getRangeAt(0);
+    const a = pos(r.startContainer, r.startOffset), b = pos(r.endContainer, r.endOffset);
+    if (a === null || b === null) return null;
+    return [Math.min(a, b), Math.max(a, b)];
+  }
+  async req(op, params) {
+    const { id, ...rest } = params ?? {};
+    const r = await this.host.request(op, id === void 0 ? rest : { ...rest, target: id });
+    if (!r.ok) {
+      this.p.msg(r.error ?? "The watch did not answer", true);
+      return null;
+    }
+    return r.json ?? {};
+  }
+  /** Note or hunk `id` selected (its card open, its marks outlined); `scroll`: the page to it; `focus`: its card focused. */
+  select(id, scroll = false, focus = false) {
+    if (this.editing && this.editing.split("#")[0] !== id) this.editing = null;
+    this.sel = id;
+    const note = id ? this.s.notes.find((n) => n.id === id) : void 0;
+    if (note && !note.hunk) {
+      this.tab = "notes";
+      if (this.filter !== "all" && note.status !== this.filter) this.filter = "all";
+    } else if (id && (this.s.hunks.some((h) => h.id === id) || note?.hunk)) this.tab = "changes";
+    if (id && !this.isOpen) this.open(true);
+    this.render();
+    this.outline();
+    this.handles(this.lastOut);
+    const card = id ? this.body.querySelector(`.card[data-id="${CSS.escape(id)}"]`) : null;
+    if (card) {
+      card.scrollIntoView({ block: "nearest" });
+      if (focus) {
+        const box = card.querySelector("textarea");
+        (box && !focus ? box : card).focus();
+      }
+    }
+    if (scroll && id) void this.toPage(id);
+  }
+  /** The selected one's marks outlined on the pages. */
+  outline() {
+    for (const m of this.p.stage.querySelectorAll(".rv")) m.classList.toggle("on", !!this.sel && m.dataset.id === this.sel);
+  }
+  /** The pages scrolled to note or hunk `id`'s place. */
+  async toPage(id) {
+    const n = this.s.notes.find((x) => x.id === id);
+    const h = this.s.hunks.find((x) => x.id === id);
+    const [file, a, b] = n ? [n.anchor.file, n.anchor.start, n.anchor.end] : h ? [h.file, h.now[0], h.now[1]] : ["", 0, 0];
+    if (!file) return;
+    if (n && !n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) return void this.p.viewer.scrollToPlace(n.anchor.page, n.anchor.point[1]);
+    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
+    if (at.length) this.p.viewer.scrollToPlace(at[0].k, at[0].boxes[0][1]);
+    else this.p.msg("Not on the pages (none of its text is typeset)");
+  }
+  /** Bytes [a, b) of `file` shown on the pages a moment (an edit a thread recorded). */
+  async reveal(file, a, b) {
+    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
+    if (at.length) this.p.viewer.mark(at[0].k, at[0].boxes);
+  }
+  /** Each note's and pending change's place beside the scrollbar: its kind's colour, resolved ones fainter; hovered its first line, clicked opened. */
+  scrollbar(where) {
+    if (!this.p.scrollMarks) return;
+    const out = [];
+    for (const [id, [k, y]] of where) {
+      const n = this.s.notes.find((x) => x.id === id);
+      const h = n ? void 0 : this.s.hunks.find((x) => x.id === id);
+      if (!n && !h) continue;
+      const title = n ? `${KIND_WORD[n.kind]}: ${oneLine(n.thread.find((p) => p.text)?.text || n.anchor.quote, 80)}` : `Change at ${placeOf(h.file, h.line)}: ${oneLine(h.new || h.old, 70)}`;
+      const cls = n ? `rv-${n.kind}${n.status === "resolved" ? " rv-dim" : ""}` : "rv-change";
+      out.push({ k, y, cls, title, go: () => this.select(id, true, true) });
+    }
+    this.p.scrollMarks(out);
+  }
+  /** The selected note's ends on the pages: handles that move them (a drag, then its source place). */
+  handles(out) {
+    for (const h of this.p.stage.querySelectorAll(".rv-h")) h.remove();
+    const n = this.sel ? this.s.notes.find((x) => x.id === this.sel) : void 0;
+    if (!n || !n.anchor.quote || n.hunk) return;
+    const mine = out.filter((m) => m.id === n.id && m.boxes.length);
+    if (!mine.length) return;
+    const size2 = this.p.viewer.pageSize();
+    const first = mine[0], last = mine.at(-1);
+    const put = (k, b, end) => {
+      const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
+      if (!slot) return;
+      const h = document.createElement("div");
+      h.className = `rv rv-h ${end ? "end" : "start"}`;
+      h.title = end ? "Drag to move the note's end" : "Drag to move the note's start";
+      Object.assign(h.style, { left: `${(end ? b[0] + b[2] : b[0]) / size2.w * 100}%`, top: `${b[1] / size2.h * 100}%`, height: `${b[3] / size2.h * 100}%` });
+      h.addEventListener("pointerdown", (e) => this.drag(e, h, n, end));
+      slot.append(h);
+    };
+    put(first.k, first.boxes[0], false);
+    put(last.k, last.boxes.at(-1), true);
+  }
+  drag(e, h, n, end) {
+    e.preventDefault();
+    e.stopPropagation();
+    h.setPointerCapture(e.pointerId);
+    const move = (m) => {
+      const slot = h.parentElement.getBoundingClientRect();
+      h.style.left = `${(m.clientX - slot.left) / slot.width * 100}%`;
+      h.style.top = `${(m.clientY - slot.top) / slot.height * 100 - 1}%`;
+    };
+    const up = async (u) => {
+      h.removeEventListener("pointermove", move);
+      h.removeEventListener("pointerup", up);
+      const slot = (this.p.root.elementsFromPoint?.(u.clientX, u.clientY) ?? []).map((x) => x.closest?.(".slot")).find(Boolean);
+      if (!slot) return void this.marks();
+      const r = slot.getBoundingClientRect();
+      const size2 = this.p.viewer.pageSize();
+      const at = await this.host.spot(Number(slot.dataset.k), (u.clientX - r.left) / r.width * size2.w, (u.clientY - r.top) / r.height * size2.h);
+      if (!at || at.file !== n.anchor.file) return void (this.p.msg("Not in the note's file there", true), this.marks());
+      if (await this.req("review_anchor", end ? { id: n.id, end: Math.max(at.start + 1, n.anchor.start + 1), snap: true } : { id: n.id, start: Math.min(at.start, n.anchor.end - 1), snap: true })) this.select(n.id);
+    };
+    h.addEventListener("pointermove", move);
+    h.addEventListener("pointerup", up);
+  }
+  // ---- the marks on the pages ----
+  async marks() {
+    const turn = ++this.drawn;
+    if (!this.enabled) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
+    if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
+    const out = [];
+    const cls = (n) => n.status === "resolved" ? "n-resolved" : `n-${n.kind}`;
+    let i = 0;
+    for (const n of this.s.notes) {
+      if (n.hunk || n.draft) continue;
+      i++;
+      if (n.detached) continue;
+      const said2 = n.thread.filter((p) => p.text).length;
+      const pin = n.status === "resolved" ? "\u2713" : n.kind === "highlight" && !said2 ? "" : String(said2 || "\u2022");
+      const title = `${KIND_WORD[n.kind]}: ${oneLine(n.thread[0]?.text || n.anchor.quote, 80)}`;
+      if (!n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) {
+        const [x, y] = n.anchor.point;
+        out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id, pin, title });
+        continue;
+      }
+      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1));
+      if (turn !== this.drawn) return;
+      at.forEach((p, j) => out.push({ ...p, cls: cls(n), id: n.id, ...j === 0 && pin !== "" ? { pin, title } : {} }));
+    }
+    for (const h of this.s.hunks) {
+      if (h.whole === "deleted") continue;
+      const empty = h.now[1] <= h.now[0];
+      const at = await this.host.boxes(h.file, h.now[0], empty ? h.now[0] + 1 : h.now[1]);
+      if (turn !== this.drawn) return;
+      at.forEach((p) => out.push({ k: p.k, boxes: empty ? p.boxes.slice(0, 1).map(([x, y, , bh]) => [x, y, 2, bh]) : p.boxes, cls: empty ? "h-del" : "h-add", id: h.id }));
+    }
+    void i;
+    this.p.viewer.reviewMarks(out);
+    this.lastOut = out;
+    this.handles(out);
+    this.outline();
+    const where = /* @__PURE__ */ new Map();
+    for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
+    const moved = [...where].some(([id, w]) => this.where.get(id)?.join() !== w.join());
+    this.where = where;
+    this.scrollbar(where);
+    if (moved && this.isOpen && this.tab === "notes") this.render();
+  }
+  /** A click on the pages: a pin or a mark selects its note or hunk; Alt+click notes a spot. */
+  async pageClick(e) {
+    if (!this.enabled) return;
+    const t = e.target;
+    if (t.closest(".rv-h")) return;
+    const pin = t.closest(".rv-pin");
+    if (pin) {
+      e.stopPropagation();
+      return this.select(pin.dataset.id, false, true);
+    }
+    const slot = t.closest(".slot");
+    if (!slot) return;
+    const rn = this.p.root;
+    const sel = rn.getSelection?.() ?? document.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const r = slot.getBoundingClientRect();
+    const k = Number(slot.dataset.k);
+    const size2 = this.p.viewer.pageSize();
+    const x = (e.clientX - r.left) / r.width * size2.w, y = (e.clientY - r.top) / r.height * size2.h;
+    if (e.altKey) {
+      e.preventDefault();
+      const at = await this.host.spot(k, x, y);
+      if (!at) return this.p.msg("No source near that spot (nothing typeset from a file there)", true);
+      return this.openCompose(e.clientX, e.clientY, { kind: "note", anchor: { file: at.file, start: at.start, end: at.start, page: k, point: [x, y] } }, "A spot on this page");
+    }
+    const hit = [...slot.querySelectorAll(".rv:not(.rv-pin):not(.rv-h)")].reverse().find((m) => {
+      const b = m.getBoundingClientRect();
+      return e.clientX >= b.left - 1 && e.clientX <= b.right + 1 && e.clientY >= b.top - 1 && e.clientY <= b.bottom + 1;
+    });
+    if (hit) this.select(hit.dataset.id, false, false);
+  }
+  // ---- making a note ----
+  /** Text selected on the pages, as the panel tells it (each drag's frame). */
+  selected(sel) {
+    this.picked = sel;
+    if (!this.pointerDown) setTimeout(() => this.offer(), 0);
+  }
+  /** The note kinds offered at the selection's end. */
+  offer() {
+    if (!this.enabled) return this.closePopOnly();
+    const rn = this.p.root;
+    const sel = rn.getSelection?.() ?? document.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount || !this.picked) return this.closePopOnly();
+    const range = sel.getRangeAt(0);
+    if (!this.p.stage.contains(range.commonAncestorContainer)) return;
+    const rects = [...range.getClientRects()].filter((r) => r.width > 0);
+    const end = rects.at(-1) ?? range.getBoundingClientRect();
+    const sig = JSON.stringify(this.picked);
+    if (this.pop?.dataset.sig === sig) return;
+    this.closePop();
+    const picked = this.picked;
+    const pop = html`<div class="rv-pop" role="toolbar" aria-label="Note the selection"><button type="button" class="btn" data-k="highlight" title="Highlight (h)">${icon("highlight", 15)} Highlight</button><button type="button" class="btn" data-k="note" title="A note for you and your agent (n)">${icon("note", 15)} Note</button><button type="button" class="btn" data-k="comment" title="A request for your agent (c)">${icon("comment", 15)} Comment</button></div>`.firstElementChild;
+    pop.dataset.sig = sig;
+    const first = rects[0] ?? end;
+    this.place(pop, first.left + first.width / 2, first.top - 6, true, true);
+    pop.addEventListener("pointerdown", (e) => e.preventDefault());
+    pop.addEventListener("click", (e) => {
+      const k = e.target.closest("[data-k]")?.dataset.k;
+      if (k) void this.make(k, picked, end);
+    });
+    pop.addEventListener("keydown", (e) => {
+      const k = { h: "highlight", n: "note", c: "comment" }[e.key];
+      if (k) e.preventDefault(), void this.make(k, picked, end);
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        const bs = [...pop.querySelectorAll("button")];
+        const i = bs.indexOf(e.target);
+        bs[(i + (e.key === "ArrowRight" ? 1 : bs.length - 1)) % bs.length]?.focus();
+      }
+    });
+    this.pop = pop;
+  }
+  /** A popover put at (x, y) in the window's coordinates, kept inside the panel; `center`: x is its middle. */
+  place(el, x, y, center = false, above = false) {
+    const w = this.p.win;
+    w.append(el);
+    const wr = w.getBoundingClientRect(), er = el.getBoundingClientRect();
+    let left = x - wr.left - (center ? er.width / 2 : 0);
+    let top = y - wr.top - (above ? er.height : 0);
+    if (above && top < 44) top = y - wr.top + 30;
+    left = Math.max(8, Math.min(left, wr.width - er.width - 8));
+    if (top + er.height > wr.height - 8) top = Math.max(8, y - wr.top - er.height - 30);
+    Object.assign(el.style, { left: `${left}px`, top: `${top}px` });
+  }
+  closePopOnly() {
+    this.pop?.remove();
+    this.pop = null;
+  }
+  closePop() {
+    this.closePopOnly();
+    this.compose?.remove();
+    this.compose = null;
+    this.p.win.querySelector(".rv-finish")?.remove();
+  }
+  /** A note of `kind` on the selection `picked` (its source looked up now). */
+  async make(kind, picked, end) {
+    const src = await this.host.source(picked);
+    if (!src) return void (this.closePop(), this.p.msg("That text came from no file of the project (a header, a number the class made): Alt+click notes a spot instead", true));
+    const anchor = { file: src.file, start: src.start, end: src.end, page: picked[0].k };
+    const sel = this.p.root.getSelection?.() ?? document.getSelection();
+    const seen = sel?.toString() ?? "";
+    if (kind === "highlight") {
+      this.closePop();
+      const r = await this.req("review_note", { kind, anchor });
+      if (r) this.clearSelection(), this.p.msg("Highlighted");
+      return;
+    }
+    this.openCompose(end.left, end.bottom + 6, { kind, anchor }, seen);
+  }
+  /** The box to write a note in, at (x, y). */
+  openCompose(x, y, note, quote) {
+    this.closePop();
+    const c = html`<div class="rv-compose" role="dialog" aria-label="${note.kind === "comment" ? "Comment for your agent" : "Note"}"><div class="q">${note.kind === "comment" ? "Comment for your agent on" : "Note on"} “${oneLine(quote, 120)}”</div><textarea placeholder="${note.kind === "comment" ? "What should your agent do here?" : "Your note\u2026"}" aria-label="Its text" rows="3"></textarea><div class="act"><span class="hint">Ctrl+Enter saves</span><button type="button" class="btn" data-x>Cancel</button><button type="button" class="btn primary" data-save>${note.kind === "comment" ? "Comment" : "Save note"}</button></div></div>`.firstElementChild;
+    const ta = c.querySelector("textarea");
+    const save2 = async () => {
+      const text = ta.value.trim();
+      if (!text) return ta.focus();
+      const b = c.querySelector("[data-save]");
+      b.disabled = true;
+      const r = await this.req("review_note", { ...note, text });
+      b.disabled = false;
+      if (!r) return;
+      this.closePop();
+      this.clearSelection();
+      this.select(r.id, false, false);
+      this.p.msg(note.kind === "comment" ? "Comment left for your agent" : "Note saved");
+    };
+    c.querySelector("[data-save]").onclick = () => void save2();
+    c.querySelector("[data-x]").onclick = () => this.closePop();
+    ta.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) e.preventDefault(), void save2();
+      if (e.key === "Escape") e.stopPropagation(), this.closePop();
+    });
+    c.addEventListener("pointerdown", (e) => e.stopPropagation());
+    this.place(c, x, y);
+    this.compose = c;
+    ta.focus();
+  }
+  clearSelection() {
+    const rn = this.p.root;
+    (rn.getSelection?.() ?? document.getSelection())?.removeAllRanges();
+    this.picked = null;
+  }
+  /** The review's last step: its summary and verdict. */
+  finish() {
+    this.closePop();
+    const drafts = this.s.notes.filter((n2) => n2.draft);
+    const on = new Set(drafts.map((n2) => n2.hunk?.id).filter(Boolean));
+    const n = this.s.hunks.filter((h) => on.has(h.id)).length;
+    const opt = (v, label, help, checked = false) => html`<label><input type="radio" name="rv-verdict" value="${v}" checked="${checked}"><span>${label}<small>${help}</small></span></label>`;
+    const c = html`<div class="rv-finish" role="dialog" aria-label="Finish your review"><b>Finish your review</b><div class="q">${String(drafts.length)} comment${drafts.length === 1 ? "" : "s"} on ${String(n)} change${n === 1 ? "" : "s"}</div><textarea placeholder="Summary for your agent (optional)" aria-label="Summary" rows="3"></textarea>${opt("comment", "Comment", "Send the comments; decide later", true)}${opt("request_changes", "Request changes", "Your agent revises them; nothing is applied")}${opt("approve", "Approve", "Accept the changes commented on")}${opt("reject", "Reject", "Reject the changes commented on")}<div class="act"><button type="button" class="btn" data-x>Cancel</button><button type="button" class="btn primary" data-go>Submit review</button></div></div>`.firstElementChild;
+    c.querySelector("[data-x]").onclick = () => this.closePop();
+    c.querySelector("[data-go]").onclick = async () => {
+      const verdict = c.querySelector("input[name=rv-verdict]:checked")?.value ?? "comment";
+      const summary = c.querySelector("textarea").value;
+      const r2 = await this.req("review_submit", { verdict, summary });
+      if (!r2) return;
+      this.closePop();
+      this.p.msg(`Review sent: ${VERDICT_WORD[verdict].toLowerCase()}`);
+    };
+    c.addEventListener("keydown", (e) => e.key === "Escape" && (e.stopPropagation(), this.closePop()));
+    const r = this.side.getBoundingClientRect();
+    this.place(c, r.left + 8, r.top + 48);
+    this.compose = c;
+    c.querySelector("textarea").focus();
+  }
+};
+
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
+var PKG_QUIET = 600;
 var KIND_HELP = {
   error: "LaTeX errors and files not found",
   overfull: "Lines that stick out into the margin",
@@ -4760,12 +6791,12 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
 }
-var PATHS = {
+var PATHS2 = {
   preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
   chevron_left: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
   chevron_right: "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
@@ -4789,10 +6820,11 @@ var PATHS = {
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
   keyboard: "M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z",
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
+  rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
-var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
-var icon = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild;
+var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon2("copy", 16)}</button>`;
+var icon2 = (name, size2 = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size2}" height="${size2}" aria-hidden="true"><path fill="currentColor" d="${PATHS2[name]}"/></svg>`.firstElementChild;
 function zoomToward(f, goal, dt) {
   if (!(f > 0) || !Number.isFinite(f)) return goal;
   const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
@@ -4804,7 +6836,6 @@ function zoomOf(z) {
   return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
 }
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
-var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
 var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
 var bars = (parts, cycle = Infinity) => html`<div class="tbar">${parts.map(([, ms], i) => html`<i class="c${i % cycle}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`)}</div><div class="legend">${parts.map(([n, ms], i) => html`<span><i class="c${i % cycle}"></i>${n} ${dur(ms)}</span>`)}</div>`;
 function framePart(json) {
@@ -4861,7 +6892,7 @@ var TIPS = [
     title: "Typeset as you type",
     text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
-    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`
+    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon2("bolt", 11)}12 ms</span></div>`
   },
   {
     id: "compare",
@@ -4884,14 +6915,14 @@ var TIPS = [
     at: "#b-rec",
     title: "Clean rebuild",
     text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
-    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
+    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon2("refresh", 12)}Rebuild</span><span class="dd">${icon2("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
   },
   {
     id: "more",
     at: "#b-more",
     title: "Dark PDF and more",
     text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
-    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
+    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon2("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon2("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
   },
   {
     id: "contents",
@@ -4941,7 +6972,7 @@ var Panel = class {
     this.root = host2.attachShadow({ mode: "open" });
     const item2 = (id, name, label, sub = "", cls = "") => html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -4955,6 +6986,7 @@ var Panel = class {
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
+    <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
@@ -4972,6 +7004,7 @@ var Panel = class {
       ${item2("x-pdf", "download", "Download PDF")}
       ${item2("x-log", "log", "View log")}
       ${item2("x-contents", "toc", "Contents", "t")}
+      ${item2("x-review", "rate_review", "Notes and changes", "m")}
       ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item2("x-compare", "compare", "Compare\u2026", "", "narrow")}
       <hr>
@@ -4985,7 +7018,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -5005,7 +7038,7 @@ var Panel = class {
   </div>
 </div>`;
     for (const ic of skeleton.querySelectorAll("span.icon"))
-      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon(ic.textContent, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
+      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon2(ic.textContent, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
     this.root.replaceChildren(style, skeleton);
     this.host = host2;
     host2.style.display = "none";
@@ -5017,6 +7050,7 @@ var Panel = class {
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
+    offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -5072,6 +7106,7 @@ var Panel = class {
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     this.$("#settings").onclick = (e) => void this.settingClicked(e);
     this.$("#settings").onchange = (e) => void this.settingClicked(e);
+    this.$("#settings").oninput = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
       const copy = e.target.closest(".copyai");
@@ -5109,7 +7144,7 @@ var Panel = class {
         if (!ev.onShortcut?.()) this.collapse(!this.prefs.collapsed);
       }
     });
-    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && this.ownZoom(), { capture: true, passive: true });
+    this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && !e.target.closest?.(".peek") && this.ownZoom(), { capture: true, passive: true });
     this.drag();
     this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
       need: (k) => ev.onNeed?.(k),
@@ -5123,18 +7158,40 @@ var Panel = class {
       box: (d, w2) => pageBox(d, w2),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange(file, pos, pos, true) : void 0,
-      selected: (sel) => ev.onSelectPage?.(sel),
+      selected: (sel) => (ev.onSelectPage?.(sel), this.review?.selected(sel)),
       link: ev.onLink ? (u) => ev.onLink(u) : void 0,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from2, to, top) => ev.onCited(from2, to, top) : void 0,
       // (the engine's reading of a citation: the session's, given by it (citesBy); none yet, the pages')
       cites: (k, x, y) => this.citesAsk?.(k, x, y) ?? Promise.resolve(null),
+      // (a link's window zoomed in: the session's drawing of that part, sharp (zoomBy); none, the pages' bitmaps enlarged)
+      zoomed: (k, scale, view) => this.zoomAsk?.(k, scale, view) ?? Promise.resolve(null),
       openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt(k, top) : void 0,
       // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
       // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : void 0
     });
     this.extras(opts);
+    if (opts.review) {
+      const rv = this.review = new Review(
+        { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), scrollMarks: (m) => (this.noteMarks = m, this.drawScrollMarks()), laidOut: () => requestAnimationFrame(() => (this.stageSize = null, this.redraw())) },
+        opts.review
+      );
+      const b = this.$("#b-review");
+      rv.onEnabled((on) => offer("#x-review, #b-review", on));
+      b.onclick = this.$("#x-review").onclick = () => (this.menu(null), rv.open());
+      rv.counts((open, pending) => {
+        const n = open + pending;
+        this.$("#rvcount").textContent = n ? String(n) : "";
+        b.title = `Notes and changes (m): ${open} open note${open === 1 ? "" : "s"}, ${pending} change${pending === 1 ? "" : "s"} to review`;
+      });
+      new MutationObserver(() => b.setAttribute("aria-pressed", String(rv.isOpen))).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+      window.addEventListener("keydown", (e) => {
+        if (e.key !== "m" || e.ctrlKey || e.metaKey || e.altKey || typing(e) || !rv.enabled) return;
+        e.preventDefault();
+        rv.open();
+      });
+    }
     this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
@@ -5161,10 +7218,13 @@ var Panel = class {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.linksShown();
+      this.marginApply();
     });
   }
   /** The menus and popovers by their buttons. */
   menus = [];
+  /** Notes and changes (opts.review). */
+  review;
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   menu(m) {
     for (const [b, el] of this.menus) {
@@ -5190,8 +7250,10 @@ var Panel = class {
     if (this.ending) this.stopSheet();
     this.reopen = true;
     this.typesetting = false;
-    this.loadPct = 0;
     this.loadDone = -1;
+    this.tally.reset();
+    this.line.reset();
+    this.lineNow = void 0;
     this.paints = 0;
     this.walk = null;
     this.opened = false;
@@ -5268,7 +7330,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.firstStep(), void 0, "", false);
+    if (on && !this.last) this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
   }
   wasShown;
   save() {
@@ -5288,7 +7350,7 @@ var Panel = class {
     this.win.classList.toggle("collapsed", on);
     const b = this.$("#min");
     b.title = on ? "Expand (Alt+Shift+P)" : "Collapse (Alt+Shift+P)";
-    b.replaceChildren(icon(on ? "open_in_full" : "close_fullscreen"));
+    b.replaceChildren(icon2(on ? "open_in_full" : "close_fullscreen"));
     this.win.style.width = on ? "" : `${this.prefs.w}px`;
     this.win.style.height = on ? "" : `${this.prefs.h}px`;
     if (!on) this.redraw();
@@ -5317,6 +7379,8 @@ var Panel = class {
   }
   /** Packages on their way after the first page, and a build running on: said in the bar, or in the corner. */
   pkgNow;
+  /** The packages' note, drawn calmly (sheetline.ts): at most four times a second, the latest. */
+  toastLine = new Calm((t) => this.toast("pkgs", { ...t, pct: void 0, icon: "download" }));
   buildSince = 0;
   actTick;
   prepSince = 0;
@@ -5333,7 +7397,7 @@ var Panel = class {
   streaming(s) {
     this.streamed = s ? s.pages : void 0;
     this.making = s?.phase === "format";
-    if (s && this.firstPending()) this.typesetting = true, this.step(this.words.steps[2], void 0, this.making ? MAKING : `Page ${s.pages + 1}`);
+    if (s && this.firstPending()) this.typesetting = true, this.sayTypesetting();
     this.activity();
   }
   busy(on) {
@@ -5342,18 +7406,17 @@ var Panel = class {
   }
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
   activity() {
-    const p = this.pkgNow;
     const now = performance.now();
+    if (this.pkgNow?.quiet && now - this.pkgNow.quiet > PKG_QUIET) this.pkgNow = void 0;
+    const p = this.pkgNow;
     const prep = !!this.prepSince && now - this.prepSince > 400;
     const long = !!this.buildSince && now - this.buildSince > 400 || prep;
     if (long || this.buildSince || this.prepSince || p) this.actTick ??= setInterval(() => this.activity(), 250);
     else clearInterval(this.actTick), this.actTick = void 0;
     this.renderStatus();
     if (!this.last && this.viewer.pages === 0) return;
-    if (p) {
-      const names = p.names.slice(0, 3).join(", ") + (p.names.length > 3 ? ` and ${p.names.length - 3} more` : "");
-      return this.toast("pkgs", { title: `Fetching ${names}`, detail: `${p.done} of ${p.total} files${known(p.source) ? ` \xB7 from ${p.source}` : ""}`, pct: p.pct, icon: "download" });
-    }
+    if (p) return this.toastLine.set({ title: `Fetching packages${known(p.source) ? ` from ${p.source}` : ""}`, detail: fetchedLine(p.fetched) });
+    this.toastLine.reset();
     if (this.toastKind === "pkgs") this.toast("pkgs", null);
     if (this.ownBar) return;
     if (long && this.words.preparing) {
@@ -5371,7 +7434,7 @@ var Panel = class {
     let t, m = "", err = false;
     if (this.offline) t = "Disconnected", err = true;
     else if (this.firstPending() && this.stepNow) t = this.stepNow;
-    else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.done} of ${this.pkgNow.total}`;
+    else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.fetched.done} fetched`;
     else if (running) {
       const s = (now - (this.buildSince || this.prepSince)) / 1e3;
       t = this.making ? `${MAKING}\u2026` : this.streamed ? `Typesetting page ${this.streamed + 1}\u2026` : "Typesetting\u2026";
@@ -5517,6 +7580,8 @@ var Panel = class {
   /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
   problemMarks = [];
   changeMarks = [];
+  /** The review's notes and pending changes (review.ts), beside the scrollbar too. */
+  noteMarks = [];
   /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
   diffMarks(changes) {
     this.changeMarks = changes.map((c) => ({ ...c, cls: "change" }));
@@ -5530,7 +7595,7 @@ var Panel = class {
    */
   drawScrollMarks() {
     const el = this.$("#smarks");
-    const marks = [...this.problemMarks, ...this.changeMarks];
+    const marks = [...this.problemMarks, ...this.changeMarks, ...this.noteMarks];
     el.replaceChildren();
     el.hidden = !marks.length;
     if (!marks.length) return;
@@ -5545,6 +7610,7 @@ var Panel = class {
       t.onmouseleave = () => this.$("#ctip").hidden = true;
       t.onclick = () => {
         this.$("#ctip").hidden = true;
+        if (m.go) return m.go();
         this.viewer.scrollToPlace(m.k, m.y);
         if (m.box) this.viewer.mark(m.k, [m.box], false);
       };
@@ -5556,7 +7622,7 @@ var Panel = class {
     const tip = this.$("#ctip");
     tip.dataset.i = "";
     tip.className = `ctip ${m.p?.severity ?? "change"}`;
-    if (m.p) tip.replaceChildren(icon(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
+    if (m.p) tip.replaceChildren(icon2(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
     else tip.replaceChildren(html`<div class="txt"><div>${m.title}</div></div>`);
     tip.hidden = false;
     const body = this.$(".body").getBoundingClientRect(), r = t.getBoundingClientRect();
@@ -5572,6 +7638,7 @@ var Panel = class {
   origins() {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
+    this.review?.refresh();
   }
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
   culpritHit(e) {
@@ -5598,7 +7665,7 @@ var Panel = class {
     if (tip.hidden || tip.dataset.i !== el.dataset.i) {
       tip.dataset.i = el.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.replaceChildren(icon(p.severity, 14), culpritTip(p));
+      tip.replaceChildren(icon2(p.severity, 14), culpritTip(p));
       tip.hidden = false;
     }
     const body = this.$(".body").getBoundingClientRect(), r = el.getBoundingClientRect();
@@ -5721,7 +7788,7 @@ var Panel = class {
     pb.hidden = !errors && !warnings;
     pb.className = `ib probs ${errors ? "error" : "warning"}`;
     pb.title = `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`;
-    this.$("#psev").replaceChildren(icon(errors ? "error" : "warning", 16));
+    this.$("#psev").replaceChildren(icon2(errors ? "error" : "warning", 16));
     this.$("#pcount").textContent = String(errors || warnings);
     this.$("#logshead").textContent = diags.length ? [errors && `${errors} error${errors === 1 ? "" : "s"}`, warnings && `${warnings} warning${warnings === 1 ? "" : "s"}`].filter(Boolean).join(", ") || "Notes" : "No problems";
     const nopages = s.pages === 0 && !this.last;
@@ -5795,31 +7862,18 @@ var Panel = class {
       this.msg("Couldn't copy to the clipboard", true, true);
     }
   }
-  /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
-  readNow;
-  readDrawn = 0;
-  readTimer;
+  /** The packages fetched so far: the first page's (since the opening began), and after it a burst's (one note in the corner). */
   loadDone = -1;
-  loadPct = 0;
+  tally = new Tally();
+  burst = new Tally();
   /**
    * Reading the project, before the packages: what is happening (the
    * download from Overleaf, each file unpacked, each figure handed to the
    * engine), the file in hand and how far, so the first seconds read as work.
+   * (said as often as the host says it: the sheet's line draws it calmly, sheetline.ts)
    */
   reading(r) {
     if (this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readNow = r;
-    const wait = 50 - (performance.now() - this.readDrawn);
-    if (wait > 0) {
-      this.readTimer ??= setTimeout(() => (this.readTimer = void 0, this.drawReading()), wait);
-      return;
-    }
-    this.drawReading();
-  }
-  drawReading() {
-    const r = this.readNow;
-    if (!r || this.last || this.pkgBusy || this.loadDone >= 0) return;
-    this.readDrawn = performance.now();
     const pct = r.pct ?? (r.total ? Math.round(100 * (r.done ?? 0) / r.total) : void 0);
     const count = r.total ? `${r.done ?? 0} of ${r.total}` : "";
     this.step(r.h, pct, [r.detail, count].filter(Boolean).join(" \xB7 "));
@@ -5830,32 +7884,42 @@ var Panel = class {
     if (p.loading.length && d.since === void 0) d.since = now;
     else if (!p.loading.length && d.since !== void 0) d.ms += now - d.since, d.since = void 0;
     d.n = done, d.bytes = p.bytes ?? 0;
-    const total = done + p.loading.length;
-    if (done !== this.loadDone) this.loadDone = done;
-    const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
+    this.loadDone = done;
     if (this.firstPending()) {
+      const f = this.tally.update({ done, bytes: p.bytes, loading: p.loading, missing: p.unavailable.length });
       if (!p.loading.length && !p.building) {
         this.pkgBusy = false;
         if (this.stopped()) return;
-        if (this.typesetting) this.step(this.words.steps[2], void 0, downloaded(done, p.bytes));
-        else if (done) this.step(this.words.steps[1], pct, `${done} of ${total}${mb(p.bytes)}`);
+        if (this.typesetting) this.sayTypesetting();
+        else if (f.done) this.step(this.words.steps[1], void 0, fetchedLine(f));
         return;
       }
       this.pkgBusy = true;
-      if (p.loading.length) {
-        const name = p.loading[0];
-        const what = `${name} \xB7 ${done} of ${total}${mb(p.bytes)}${p.unavailable.length ? ` \xB7 ${p.unavailable.length} not found` : ""}`;
-        if (this.typesetting) this.step(this.words.steps[2], void 0, `fetching ${what}`);
-        else this.step(this.words.steps[1], pct, what);
-      } else this.typesetting = true, this.step(this.words.steps[2], void 0, downloaded(done, p.bytes));
+      if (p.loading.length && !this.typesetting) this.step(this.words.steps[1], void 0, fetchedLine(f));
+      else this.typesetting = true, this.sayTypesetting();
       return;
     }
-    this.pkgNow = p.loading.length ? { names: p.loading, done, total, pct, source: p.source, failed: p.failed ?? [] } : void 0;
     if (p.failed?.length && !p.loading.length) {
+      this.pkgNow = void 0;
+      this.toastLine.reset();
       const f = p.failed[0];
-      this.toast("pkgs", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      this.toast("pkgfail", { title: `Couldn't fetch ${f.name}`, detail: `${f.error}. Asked again at the next build.`, pct: null, icon: "warning", err: true });
+      return this.activity();
+    }
+    if (p.loading.length) {
+      if (!this.pkgNow) this.burst.reset({ done, bytes: p.bytes });
+      this.pkgNow = { fetched: this.burst.update({ done, bytes: p.bytes, loading: p.loading, missing: 0 }), source: p.source, quiet: 0 };
+    } else if (this.pkgNow) {
+      this.pkgNow.fetched = this.burst.update({ done, bytes: p.bytes, loading: [], missing: 0 });
+      this.pkgNow.quiet ||= now;
     }
     this.activity();
+  }
+  /** Typesetting's detail, one shape: the page it is on (or the format made first), then the packages fetched for it. */
+  sayTypesetting() {
+    const f = this.tally.now;
+    const page = this.making ? MAKING : this.streamed !== void 0 ? `Page ${this.streamed + 1}` : "";
+    this.step(this.words.steps[2], void 0, [page, f.done ? fetchedLine(f, false) : ""].filter(Boolean).join(" \xB7 "));
   }
   /**
    * The first page's step `k` (0, 1, 2 of the words' steps), saying `text`
@@ -5897,22 +7961,36 @@ var Panel = class {
     };
     this.hintTimer = setTimeout(show, 2e3);
   }
-  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  /**
+   * The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said
+   * only (the panel shown, nothing built yet). Every writer says it here, and the line
+   * (sheetline.ts) draws it calmly: at most four times a second, the latest, and the step
+   * forward only (the project, the packages, typesetting) until the opening begins again.
+   */
   step(what, pct, detail = "", raise = true) {
     if (!this.firstPending()) return;
+    const k = !raise ? 0 : what === this.words.steps[2] ? 2 : what === this.words.steps[1] ? 1 : 0;
+    if (!this.line.say(k, { what, pct, detail })) return;
     this.walkTo(what);
     if (raise) this.sheetUp();
     if (this.anim) this.hints(true);
+  }
+  /** The line said now (the step, the bar, the detail): an opening put up later says it too. */
+  lineNow;
+  drawLine(s) {
+    if (!this.firstPending()) return;
+    this.lineNow = s;
     const el = this.$("#opening");
-    this.stepNow = what;
-    el.querySelector(".what").textContent = what;
-    el.querySelector(".detail").textContent = detail;
+    this.stepNow = s.what;
+    el.querySelector(".what").textContent = s.what;
+    el.querySelector(".detail").textContent = s.detail;
     const track = el.querySelector(".track");
-    track.classList.toggle("unknown", pct === void 0);
-    track.querySelector("i").style.width = pct === void 0 ? "" : `${pct}%`;
-    this.anim?.step?.(what, pct, detail);
+    track.classList.toggle("unknown", s.pct === void 0);
+    track.querySelector("i").style.width = s.pct === void 0 ? "" : `${s.pct}%`;
+    this.anim?.step?.(s.what, s.pct, s.detail);
     this.renderStatus();
   }
+  line = new SheetLine((s) => this.drawLine(s));
   /**
    * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
    * at a build's step; `now`: a Rebuild asked for. Put up once the stage is laid out, at the
@@ -5934,16 +8012,19 @@ var Panel = class {
     const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
-    const was = this.prefs.built.find((e) => e.split(" ")[0] === this.builtKey());
-    const warm = !now && was !== void 0 && (!was.includes(" ") || was.split(" ")[1] === this.look);
-    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
-    this.anim = anim;
-    if (!warm) this.lastLook = id;
-    if (id !== "off") this.seen(["opening"]);
-    el.classList.toggle("owns", !!anim.step);
-    if (anim.step) anim.step(this.firstStep(), void 0, "");
-    this.animSince = performance.now();
+    this.playOn(sheet, this.look, first, dark);
     this.hints(true);
+  }
+  /** The opening for `look` played on `sheet`, in place of one playing there. */
+  playOn(sheet, look2, first, dark) {
+    this.anim?.stop();
+    sheet.replaceChildren();
+    const { id, anim } = play(look2, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
+    this.anim = anim;
+    if (id !== "off") this.lastLook = id, this.seen(["opening"]);
+    this.$("#opening").classList.toggle("owns", !!anim.step);
+    if (anim.step) anim.step(this.stepNow || this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "");
+    this.animSince = performance.now();
   }
   /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
   builtKey() {
@@ -5952,13 +8033,6 @@ var Panel = class {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
     return (h >>> 0).toString(36);
-  }
-  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
-  builtHere() {
-    const k = this.builtKey(), e = `${k} ${this.look}`, was = this.prefs.built ?? [];
-    if (was[0] === e) return;
-    this.prefs.built = [e, ...was.filter((x) => x.split(" ")[0] !== k)].slice(0, 200);
-    this.save();
   }
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
   sheetDark() {
@@ -6034,7 +8108,6 @@ var Panel = class {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
-      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -6064,7 +8137,7 @@ var Panel = class {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon2(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : t.pct === void 0 ? html`<div class="track unknown"><i></i></div>` : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span").textContent = t.title;
     el.querySelector(".d").textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -6212,6 +8285,11 @@ var Panel = class {
   citesBy(ask2) {
     this.citesAsk = ask2;
   }
+  /** The session's drawing of part of a page at a zoom of its own (PreviewSink.zoomBy), for a link's window zoomed in. */
+  zoomAsk;
+  zoomBy(ask2) {
+    this.zoomAsk = ask2;
+  }
   outline(items) {
     this.contents?.set(items);
     this.contents?.at(this.at);
@@ -6274,7 +8352,7 @@ var Panel = class {
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
     const extra = [["e", "the build's errors and warnings"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
-    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
+    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
     addEventListener(
       "keydown",
       (e) => {
@@ -6304,6 +8382,20 @@ var Panel = class {
       turn: (n) => this.viewer.turn(n),
       scroller: stage,
       zoom: (f) => this.zoomTo(String(Math.min(5, Math.max(0.25, this.scale() * f)))),
+      zoomBy: (f, ease4) => {
+        const [x, y] = zoomAnchor(stage.getBoundingClientRect(), this.pointer);
+        this.zoomAt(f, x, y, ease4);
+      },
+      scrollBy: (dx, dy) => {
+        if (this.gesture) return this.zoomScroll(this.gesture, dx, dy, false), [dx, dy];
+        const moved = (d, was, max) => was + d < 0 ? -was : was + d > max ? max - was : d;
+        const mx = moved(dx, stage.scrollLeft, stage.scrollWidth - stage.clientWidth);
+        const my = moved(dy, stage.scrollTop, stage.scrollHeight - stage.clientHeight);
+        if (mx) stage.scrollLeft += mx;
+        if (my) stage.scrollTop += my;
+        return [Math.round(mx), Math.round(my)];
+      },
+      turnTop: (n, from2) => this.viewer.turnTop(n, from2) ?? from2,
       fitWidth: () => this.zoomTo("fit"),
       fitPage: () => this.zoomTo(String(Math.max(0.2, Math.min((stage.clientHeight - 24) / pageH(), this.scale())))),
       help: (show) => {
@@ -6419,21 +8511,43 @@ var Panel = class {
     if (!g) {
       const r = this.$("#stage").getBoundingClientRect();
       const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, sx: 0, sy: 0, ix: 0, iy: 0 };
     }
     if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
     if (!ease4) g.f = g.goal;
-    const gg = g;
-    const step = (t) => {
-      gg.frame = 0;
-      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
-      gg.last = t;
-      this.zoomLay(gg);
-      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
-    };
-    if (!g.frame) g.frame = requestAnimationFrame((t) => (gg.last = t - 16, step(t)));
+    this.zoomRun(g);
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
+  }
+  /**
+   * A scroll (pixels) while a zoom gesture runs, made in the gesture's frames: each frame
+   * keeps the place under the pointer there (keepAt sets the scroll), which undid a scroll
+   * made apart from it (the browser's smooth scroll of a wheel, a key's glide), the pages
+   * not scrolling until the zoom rested. `ease`: eased as a browser's smooth scroll (a
+   * wheel's notch); else all of it at the next frame (the keys', eased already).
+   */
+  zoomScroll(g, dx, dy, ease4) {
+    if (ease4) g.sx += dx, g.sy += dy;
+    else g.ix += dx, g.iy += dy;
+    this.zoomRun(g);
+  }
+  /** The gesture's frames, until its zoom is at its goal and its scroll all made. */
+  zoomRun(g) {
+    const step = (t) => {
+      g.frame = 0;
+      const dt = t - g.last;
+      g.f = zoomToward(g.f, g.goal, dt);
+      g.last = t;
+      const k = 1 - Math.exp(-Math.max(0, dt) / 50);
+      const tx = (Math.abs(g.sx) < 1 ? g.sx : g.sx * k) + g.ix;
+      const ty = (Math.abs(g.sy) < 1 ? g.sy : g.sy * k) + g.iy;
+      g.sx -= tx - g.ix;
+      g.sy -= ty - g.iy;
+      g.ix = g.iy = 0;
+      this.zoomLay(g, false, tx, ty);
+      if (g.f !== g.goal || g.sx || g.sy) g.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => (g.last = t - 16, step(t)));
   }
   /**
    * The gesture's zoom now, as pdf.js's viewer zooms: the pages laid out at it each frame
@@ -6444,21 +8558,24 @@ var Panel = class {
    * not what the layout made of them (a narrow page is centred, the gaps between pages
    * keep their size, pages come into view as it zooms out): they jumped when it rested.
    */
-  zoomLay(g, final = false) {
+  zoomLay(g, final = false, dx = 0, dy = 0) {
     this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const st = this.$("#stage");
     st.classList.remove("fit");
     st.classList.toggle("zooming", !final);
+    if (final) this.viewer.holdText();
+    else this.viewer.moved();
     this.viewer.redraw(true);
-    if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
+    if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
+    if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
   }
   /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
   zoomEnd() {
     const g = this.gesture;
     if (!g) return;
-    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    if (g.f !== g.goal || g.sx || g.sy || g.ix || g.iy) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = void 0;
     cancelAnimationFrame(g.frame);
     this.zoomLay(g, true);
@@ -6473,6 +8590,8 @@ var Panel = class {
   findTimer;
   /** The pointer over the panel (in a host's page, its keys only then). */
   hover = false;
+  /** The pointer's last place over the pages (client pixels): where the zoom keys zoom. */
+  pointer = null;
   /** The find field opened (its text selected) or closed (the marks gone). */
   find(on) {
     const box = this.$("#find");
@@ -6526,10 +8645,19 @@ var Panel = class {
   findAndZoom(all) {
     const stage = this.$("#stage");
     this.win.addEventListener("pointerenter", () => this.hover = true);
+    stage.addEventListener("pointermove", (e) => this.pointer = { x: e.clientX, y: e.clientY }, { passive: true });
+    stage.addEventListener("pointerleave", () => this.pointer = null);
     this.win.addEventListener("pointerleave", () => this.hover = false);
     stage.addEventListener(
       "wheel",
       (e) => {
+        const g = this.gesture;
+        if (!e.ctrlKey && g) {
+          e.preventDefault();
+          const u = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? stage.clientHeight : 1;
+          const x = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, y = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+          return this.zoomScroll(g, x * u, y * u, !matchMedia("(prefers-reduced-motion: reduce)").matches);
+        }
         if (!e.ctrlKey) return;
         e.preventDefault();
         const r = stage.getBoundingClientRect();
@@ -6556,7 +8684,8 @@ var Panel = class {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing2 = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        const into = e.composedPath()[0] ?? e.target;
+        const typing2 = !!into && into !== q && (into.isContentEditable || !!into.closest?.('input, textarea, select, [contenteditable=true], [contenteditable=""]'));
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);
@@ -6612,11 +8741,15 @@ var Panel = class {
       if (same) same.rows.push(...g.rows);
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
+    for (const g of groups) {
+      const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
+      if (m >= 0 && f >= 0) g.rows.splice(f + (f > m ? 0 : 1), 0, ...g.rows.splice(m, 1));
+    }
     this.settingRows.clear();
     this.tilesGone();
     const shown = groups.filter((g) => g.rows.length);
     const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
-    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
+    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
     const body = el.querySelector(".sbody");
     shown.forEach((g, i) => {
       const sec = document.createElement("section");
@@ -6664,6 +8797,17 @@ var Panel = class {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
       row.querySelector(".help").after(grid);
       if (r.tile) for (const b of row.querySelectorAll(".pick")) this.tileShown(b.querySelector(".lk"), (box) => r.tile(b.dataset.v, box));
+    } else if (r.kind === "swatches") {
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
+      row.querySelector(".help").after(grid);
+      for (const t of row.querySelectorAll(".sw")) this.waspSwatch(t, t.dataset.v);
+    } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
+    else if (r.kind === "colors") {
+      const [a, b] = String(r.value ?? "").split(",");
+      ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
+    } else if (r.kind === "custom") {
+      const made2 = r.make?.();
+      if (made2) row.querySelector(".help").after(made2);
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, ctl.querySelector(".val").textContent = String(r.value ?? "");
     return row;
@@ -6678,6 +8822,9 @@ var Panel = class {
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
     else if (r.kind === "select" && e.type === "change") v = t.value;
+    else if (r.kind === "swatches" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
+    else if (r.kind === "range" && e.type === "input") v = t.value;
+    else if (r.kind === "colors" && e.type === "input") v = [...row.querySelectorAll("input")].map((i) => i.value).join(",");
     else if (r.kind === "picks" && e.type === "click") {
       const all = t.closest("[data-all]")?.dataset.all, one = t.closest(".pick")?.dataset.v;
       const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
@@ -6695,7 +8842,7 @@ var Panel = class {
     if (why) return;
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch").setAttribute("aria-checked", String(v === true));
-    if (r.kind === "choice") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "choice" || r.kind === "swatches") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
     if (r.kind === "picks") {
       const on = new Set(String(v).split(","));
       row.querySelectorAll(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v))));
@@ -6735,6 +8882,15 @@ var Panel = class {
     const preview2 = [];
     if (this.mainFiles.names.length)
       preview2.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview2.push({
+      id: "margin",
+      label: "Keep a margin",
+      help: "The highlight that follows your editor stays at least this far from the top and bottom of the view; the page scrolls just enough to keep it there. 0: it scrolls only once the highlight leaves the view",
+      kind: "range",
+      max: 45,
+      value: String(this.prefs.margin),
+      set: (v) => (this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0)), this.marginApply(), this.save())
+    });
     const look2 = [];
     look2.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
@@ -6777,6 +8933,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview2 },
       { title: "Appearance", rows: look2 },
+      { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },
@@ -6788,11 +8945,114 @@ var Panel = class {
   startAt(k, top) {
     this.viewer.startAt(k, top);
   }
-  /** The links' switches (PanelPrefs) given to the viewer. */
+  /** The links' switches and the reading aid (PanelPrefs) given to the viewer. */
   linksShown() {
     const v = this.viewer, p = this.prefs;
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
+    this.waspApply();
+  }
+  // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
+  /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
+  waspLook() {
+    const p = this.prefs;
+    const hex = (c, d) => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c : d;
+    const custom = Array.isArray(p.waspCustom) ? p.waspCustom : [];
+    return {
+      on: p.wasp === true,
+      colours: p.waspColours === "custom" || WASP_PRESETS.some((x) => x.id === p.waspColours) ? p.waspColours : "classic",
+      custom: [hex(custom[0], DEFAULTS.waspCustom[0]), hex(custom[1], DEFAULTS.waspCustom[1])],
+      // (0 to 200, 100 the default: the first scale's 0 to 100 the same numbers)
+      strength: Number.isFinite(p.waspStrength) ? Math.min(200, Math.max(0, p.waspStrength)) / 100 : 1,
+      length: Number.isFinite(p.waspLength) ? Math.min(200, Math.max(0, p.waspLength)) / 100 : 1,
+      text: p.waspText === "all" ? "all" : "body"
+    };
+  }
+  /** The sample in the tab (null: the tab not drawn). */
+  waspSample = null;
+  /**
+   * The aid as chosen: the viewer told (on, which text), the colours put
+   * in the panel's variables (print.ts's bands read them: nothing drawn
+   * again for a colour or the strength), the tab's sample and Custom's
+   * swatch shown with them.
+   */
+  waspApply() {
+    const l = this.waspLook();
+    const c = waspColours(l);
+    const st = this.win.style;
+    st.setProperty("--ph-wasp0", c.light[0]);
+    st.setProperty("--ph-wasp1", c.light[1]);
+    st.setProperty("--ph-wasp0-dark", c.dark[0]);
+    st.setProperty("--ph-wasp1-dark", c.dark[1]);
+    this.viewer.waspShown(l.on, l.text === "all", l.length);
+    const box = this.waspSample;
+    if (box?.isConnected) {
+      const dark = this.sheetDark();
+      box.classList.toggle("dark", dark);
+      const [a, b] = dark ? c.dark : c.light, ink2 = dark ? "#ffffff" : "#000000";
+      const all = l.text === "all";
+      box.querySelectorAll("i").forEach((band, k) => {
+        const n = all ? k : k - 1, col = Math.floor(n / 2) % 2 ? b : a;
+        const [i, k2] = stopsAt(n % 2 ? 1 : 0, l.length).map((x) => `${(x * 100).toFixed(1)}%`);
+        band.style.background = l.on && n >= 0 ? `linear-gradient(to right, ${n % 2 ? `${col} ${k2}, ${ink2} ${i}` : `${ink2} ${i}, ${col} ${k2}`})` : "none";
+      });
+    }
+    this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => this.waspSwatch(t, t.dataset.v));
+  }
+  /** A swatches tile's art: two lines of each colour's fade, as on the pages (Dark PDF's, the pages dark). */
+  waspSwatch(tile, id) {
+    const art3 = tile.querySelector(".art");
+    if (!art3) return;
+    const dark = this.sheetDark();
+    const c = waspColours({ ...this.waspLook(), colours: id, strength: 1 });
+    const [a, b] = dark ? c.dark : c.light, ink2 = dark ? "#e1e1e1" : "#202020";
+    art3.classList.toggle("dark", dark);
+    const fades = [`${ink2}, ${a}`, `${a}, ${ink2}`, `${ink2}, ${b}`, `${b}, ${ink2}`];
+    art3.querySelectorAll("i").forEach((line, n) => line.style.background = `linear-gradient(to right, ${fades[n]})`);
+  }
+  /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
+  waspRows() {
+    const p = this.prefs, l = this.waspLook();
+    const kept = (k, v) => {
+      p[k] = v;
+      this.waspApply();
+      this.save();
+    };
+    const colours = [...WASP_PRESETS.map((x) => [x.id, x.name]), ["custom", "Custom"]];
+    const sample = () => {
+      const box = html`<div class="wsample" aria-hidden="true"><span class="h">1 Introduction<i></i></span><span>Each line of the text fades into a colour at its end,<i></i></span><span>and the next line starts with that same colour, so the<i></i></span><span>eye, going back across the page, lands on the right<i></i></span><span>line. The colour changes every two lines.<i></i></span></div>`.firstElementChild;
+      this.waspSample = box;
+      queueMicrotask(() => this.waspApply());
+      return box;
+    };
+    return [
+      { id: "wasp", label: "Colour lines", help: "A reading aid: each line of text shades into a colour, the next one starts with it, so the eye finds the next line", kind: "toggle", value: l.on, set: (on) => kept("wasp", on === true) },
+      {
+        id: "wasp-colours",
+        label: "Colours",
+        help: "Each pair of lines fades into one colour, the next pair into the other",
+        kind: "swatches",
+        options: colours,
+        value: l.colours,
+        set: (v) => kept("waspColours", String(v))
+      },
+      { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
+      { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
+      { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
+      { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
+      { id: "wasp-sample", label: "Sample", kind: "custom", make: sample }
+    ];
+  }
+  /** Custom's colours picked: kept, and Custom chosen (its swatch ticked). */
+  waspCustomSet(v) {
+    const [a, b] = v.split(",");
+    this.prefs.waspCustom = [a, b];
+    this.prefs.waspColours = "custom";
+    const row = this.settingRows.get("wasp-colours");
+    if (row) row.value = "custom";
+    this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    this.waspApply();
+    this.save();
   }
   /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
   linkRows() {
@@ -6808,6 +9068,11 @@ var Panel = class {
     ];
     if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (\u2318 on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
     return rows;
+  }
+  /** The highlight's scroll margin as chosen, given to the viewer. */
+  marginApply() {
+    const m = Number(this.prefs.margin);
+    this.viewer.margin = Number.isFinite(m) ? Math.max(0, Math.min(45, m)) / 100 : DEFAULTS.margin / 100;
   }
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p) {
@@ -6872,6 +9137,7 @@ var Panel = class {
   }
   applyDark() {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || this.dark === "theme" && this.hostDark());
+    if (this.waspSample?.isConnected) this.waspApply();
   }
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
   tipAt = -1;
@@ -7129,8 +9395,8 @@ var Panel = class {
     const d = this.downloads;
     if (!d.n && d.since === void 0) return "";
     const ms = d.ms + (d.since === void 0 ? 0 : performance.now() - d.since);
-    const size = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
-    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
+    const size2 = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
+    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size2}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
   }
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   times = { edits: [] };
@@ -7393,22 +9659,20 @@ var Panel = class {
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
-    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();
   }
 };
-var downloaded = (n, bytes) => n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "";
 function foldedDetail(text, label) {
   const d = document.createElement("details");
   d.className = "folded";
-  const sum = document.createElement("summary");
-  sum.textContent = label;
+  const sum2 = document.createElement("summary");
+  sum2.textContent = label;
   const pre = document.createElement("pre");
   pre.className = "detail";
   pre.textContent = text;
-  d.append(sum, pre);
+  d.append(sum2, pre);
   return d;
 }
 function known(source2) {
@@ -7576,7 +9840,7 @@ var preambleOf = (t) => {
   return end < 0 ? t ?? "" : t.slice(0, end);
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
 var PENDING_CAP_MS = 1e4;
 var NEAR_CULPRIT = 64;
 function place3(t, pos) {
@@ -7804,6 +10068,7 @@ var PreviewSession = class {
     };
     this.sink = sink;
     sink.citesBy?.((k, x, y) => this.cites(k, x, y));
+    sink.zoomBy?.((k, scale, view) => this.zoomed(k, scale, view));
     this.o = { ...defaults, ...opts };
     host2.onOpen((f0, t) => {
       const f = this.known(f0);
@@ -7812,10 +10077,10 @@ var PreviewSession = class {
       this.sync(f, t);
       this.status();
     });
-    host2.onChanges((f0, es, len, sum) => {
+    host2.onChanges((f0, es, len, sum2) => {
       const f = this.known(f0);
       this.queue(f, es);
-      if (len !== void 0) this.agree(f, len, es, sum);
+      if (len !== void 0) this.agree(f, len, es, sum2);
     });
     core.onLost?.(() => {
       this.opened = false;
@@ -7835,10 +10100,10 @@ var PreviewSession = class {
    * so it is said and the whole text asked for again, sync() diffing it in.
    * Once until it comes.
    */
-  agree(file, len, edits, sum) {
+  agree(file, len, edits, sum2) {
     const text = this.text(file) ?? "";
-    if (text.length === len && (sum === void 0 || textSum(text) === sum) || this.resending.has(file)) return;
-    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum !== void 0, edits: edits.slice(-5) });
+    if (text.length === len && (sum2 === void 0 || textSum(text) === sum2) || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum2 !== void 0, edits: edits.slice(-5) });
     if (!this.host.resend) return;
     this.resending.add(file);
     this.host.resend(file);
@@ -8206,6 +10471,12 @@ var PreviewSession = class {
     const img = image(r);
     if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
   }
+  /** Part of page `k` (`view`, fractions of it) at `scale` pixels a point, for a link's window zoomed in: not the pages' drawing, which stays as it is. */
+  async zoomed(k, scale, view) {
+    if (!this.opened) return null;
+    const r = await this.core.request({ op: "png", page: k, dpi: this.dpi(), scale, view }).catch(() => null);
+    return r?.ok ? image(r) : null;
+  }
   async showPage() {
     if (!this.opened) return;
     if (this.sink.layout) return this.layout();
@@ -8403,7 +10674,22 @@ var PreviewSession = class {
    * came from, from its first glyph's start to its last's end).
    */
   async selectPage(sel) {
-    if (!this.opened || !sel.length) return;
+    const best = await this.sourceOf(sel);
+    if (!best) return;
+    const { file, start: lo, end: hi } = best;
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
+    const t = this.files[file];
+    if (t === void 0) return;
+    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+  }
+  /**
+   * The source of text selected on the pages ([x, y top, w, h] boxes in PDF
+   * points, by page): the file most of its glyphs came from, from its first
+   * glyph's start to its last's end, in bytes (the glyph origins'); null
+   * where none of it came from a file.
+   */
+  async sourceOf(sel) {
+    if (!this.opened || !sel.length) return null;
     const by = /* @__PURE__ */ new Map();
     for (const { k, rects } of sel) {
       for (const g of this.cached(k) ?? await this.glyphsOf(k)) {
@@ -8416,12 +10702,15 @@ var PreviewSession = class {
     }
     const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
     this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return;
+    if (!best) return null;
     const [file, { lo, hi }] = best;
-    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
-    const t = this.files[file];
-    if (t === void 0) return;
-    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+    return { file, start: lo, end: hi };
+  }
+  /** The source place nearest (x, y) on page `k` (PDF points from its top left): a spot with no text of its own, a figure's. */
+  async spotOf(k, x, y) {
+    if (!this.opened) return null;
+    const g = nearest(this.cached(k) ?? await this.glyphsOf(k), x, y);
+    return g?.file ? { file: g.file, start: g.start } : null;
   }
   /**
    * The editor's cursor at `pos` (UTF-16) in `file`, as it moves: the word it
@@ -8732,6 +11021,8 @@ var PreviewSession = class {
   }
   /** The watch joined (or joined again): its pages, outline and last problems. */
   async watchJoined() {
+    const s = await this.core.request({ op: "status" });
+    if (s.ok && typeof s.json?.building === "boolean") this.watchBusy(s.json.building);
     await this.layout();
     this.status();
     void this.watchOutline();
@@ -8753,7 +11044,6 @@ var PreviewSession = class {
   onWatch(e) {
     switch (e.event) {
       case "page": {
-        this.watchBusy(true);
         const hs = [...this.hashes];
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
@@ -8767,7 +11057,6 @@ var PreviewSession = class {
         return;
       }
       case "progress":
-        this.watchBusy(true);
         if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
         if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
           this.pkg.done = [...this.pkg.done ?? [], ...this.pkg.loading];
@@ -8779,7 +11068,16 @@ var PreviewSession = class {
         this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
         return;
       case "superseded":
-        this.watchBusy(true);
+        return;
+      // (a build of the watch's began or ended, the document's or Compare's
+      // diff's: the status's "Typesetting…" from one to the other. Taken
+      // from the progress records and pages, a record after the build was
+      // in (a fetch's, a worker's last page, Compare's diff built in the
+      // background, which says no `settled`) put it back on, and nothing
+      // took it off: "Typesetting…" for ever, the CLI's build long done)
+      case "building":
+        this.watchBusy(e.on);
+        this.sink.preparing?.(e.on);
         return;
       case "diagnostics":
         this.watchDiags = e.items.map(asDiagnostic);
@@ -8971,9 +11269,9 @@ var Strips = class {
    * drawn at (the box that shows them one to one).
    */
   async page(k, scale, view) {
-    const size = this.sizes.get(k) ?? this.sizes.values().next().value;
-    if (view && !size) await this.frame(k, Math.min(scale, 1));
-    const sz = this.sizes.get(k) ?? size;
+    const size2 = this.sizes.get(k) ?? this.sizes.values().next().value;
+    if (view && !size2) await this.frame(k, Math.min(scale, 1));
+    const sz = this.sizes.get(k) ?? size2;
     const px = sz ? sz.w * sz.h * scale * scale : 0;
     if (!view || !sz || px <= BUDGET) {
       const f = await this.frame(k, sz && px > BUDGET ? Math.sqrt(BUDGET / (sz.w * sz.h)) : scale);
@@ -8981,8 +11279,8 @@ var Strips = class {
       const el2 = document.createElement("div");
       el2.className = "phx-page";
       Object.assign(el2.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
-      el2.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
-      return { el: el2, w: f.w, h: f.h, links: f.links };
+      el2.append(this.canvas(f), textLayer(f.text, f.w, f.h));
+      return { el: el2, w: f.w, h: f.h, links: f.links, hash: f.hash };
     }
     const grow = (a, b2, most2) => {
       const m = (a + b2) / 2, half = Math.min((b2 - a) * 2, most2) / 2;
@@ -9007,8 +11305,8 @@ var Strips = class {
       width: `${w / part3.pw * 100}%`,
       height: `${h / part3.ph * 100}%`
     });
-    el.append(this.canvas(base), tile, textLayer(base.text.map(composeLine), base.w, base.h));
-    return { el, w: base.w, h: base.h, links: base.links };
+    el.append(this.canvas(base), tile, textLayer(base.text, base.w, base.h));
+    return { el, w: base.w, h: base.h, links: base.links, hash: base.hash === part3.hash ? base.hash : base.hash === void 0 ? void 0 : "" };
   }
   /** Page `k`'s frame at `scale` (only `win` of it, if given), its strips fetched and kept. */
   async frame(k, scale, win) {
@@ -9063,14 +11361,14 @@ var Strips = class {
   /** The strips of `keys` in `buf` from byte `at` (each its size, then its pixels), made bitmaps and kept. */
   async take(keys, buf, at) {
     const dv = new DataView(buf);
-    const made = [];
+    const made2 = [];
     for (const key of keys) {
       if (at + 8 > buf.byteLength) break;
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
         const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
-        made.push(
+        made2.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
             const old = this.kept.get(key);
             if (old) this.bytes -= old.width * old.height * 4, old.close();
@@ -9081,7 +11379,7 @@ var Strips = class {
       }
       at += w * h * 4;
     }
-    await Promise.all(made);
+    await Promise.all(made2);
     for (const [k, b] of this.kept) {
       if (this.bytes <= this.max) break;
       this.bytes -= b.width * b.height * 4;
@@ -9094,21 +11392,23 @@ function pagewise(px) {
   const clone = globalThis.cloneInto;
   return clone ? clone(px, window) : px;
 }
-var SVG = "http://www.w3.org/2000/svg";
+var SVG2 = "http://www.w3.org/2000/svg";
 function textLayer(lines2, w, h) {
-  const svg2 = document.createElementNS(SVG, "svg");
+  const svg2 = document.createElementNS(SVG2, "svg");
   svg2.setAttribute("class", "phx-text");
   svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg2.setAttribute("preserveAspectRatio", "none");
-  for (const l of lines2) {
-    const t = document.createElementNS(SVG, "text");
-    t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
-    t.setAttribute("y", String(l.y));
-    t.setAttribute("font-size", String(l.size));
-    t.textContent = l.text;
-    LAYER_LINES.set(t, l);
-    svg2.append(t);
-  }
+  deferText(svg2, () => {
+    for (const l of lines2.map(composeLine)) {
+      const t = document.createElementNS(SVG2, "text");
+      t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
+      t.setAttribute("y", String(l.y));
+      t.setAttribute("font-size", String(l.size));
+      t.textContent = l.text;
+      LAYER_LINES.set(t, l);
+      svg2.append(t);
+    }
+  });
   return svg2;
 }
 
@@ -9249,7 +11549,7 @@ function layout(cs) {
   if (rows.length) rows[rows.length - 1].down = pending;
   return { rows, width };
 }
-function ago(t, now = Date.now() / 1e3) {
+function ago2(t, now = Date.now() / 1e3) {
   const s = Math.max(0, now - t);
   const units = [[31536e3, "year"], [2592e3, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
   for (const [n, u] of units)
@@ -9500,7 +11800,7 @@ var Commits = class {
       const title = `${c.subject}
 ${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
 click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
-      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago(c.time)}</span></span></div>`;
+      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago2(c.time)}</span></span></div>`;
     });
     const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
     return html`${top}${lines2}${more}`;
@@ -9520,19 +11820,38 @@ var Socket = class {
   onClose = () => {
   };
   /**
+   * Called on every open, beside `onOpen` (which later code assigns over:
+   * a listener chained into it was dropped by that, so the notes were asked
+   * for on no open, and a reloaded tab showed none until the next build).
+   */
+  opens = [];
+  /** `f` on every open from now on, and now if it is open. */
+  onOpened(f) {
+    this.opens.push(f);
+    if (this.ws?.readyState === WebSocket.OPEN) f();
+  }
+  /**
    * Join the watch: first asked over HTTP whether it is there, so a tab
    * left open after its watch ended never opens WebSockets to a dead port
    * (Firefox opens one WebSocket at a time to an address, and delays
    * those after failures: such a tab would hold back every other's).
    */
   async connect() {
-    if (!await this.there()) return this.again();
+    const there = await this.there();
+    if (!there) return this.again();
+    if (there !== true && ownViewer() && there !== ownViewer()) return this.onStale();
     this.open();
   }
-  /** Whether the watch answers HTTP here. */
+  /** A watch serving another viewer than this page's (`ping`'s `viewer` line): the tab must be reloaded. */
+  onStale = () => {
+  };
+  /** Whether the watch answers HTTP here: false, else the viewer it serves (`ping`), true where it says none. */
   async there() {
     try {
-      return (await fetch(new URL("ping", location.href), { cache: "no-store" })).ok;
+      const r = await fetch(new URL("ping", location.href), { cache: "no-store" });
+      if (!r.ok) return false;
+      const m = /^viewer (\S+)$/m.exec(await r.text());
+      return m ? m[1] : true;
     } catch {
       return false;
     }
@@ -9545,7 +11864,11 @@ var Socket = class {
     const url = new URL("ws", location.href);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     this.ws = new WebSocket(url);
-    this.ws.onopen = () => (this.wait = 1e3, this.onOpen());
+    this.ws.onopen = () => {
+      this.wait = 1e3;
+      this.onOpen();
+      for (const f of this.opens) f();
+    };
     this.ws.onmessage = (m) => {
       const r = JSON.parse(m.data);
       if (r.event) return this.events.forEach((f) => f(r));
@@ -9563,7 +11886,7 @@ var Socket = class {
     const id = this.next++;
     return new Promise((ok) => {
       this.waiting.set(id, ok);
-      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ id, ...op }));
+      if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ ...op, id }));
       else this.waiting.delete(id), ok({ ok: false, error: "not connected" });
     });
   }
@@ -9572,11 +11895,21 @@ var Socket = class {
   }
 };
 var dur2 = (ms) => ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
-function timing(s) {
+var sum = (parts) => parts.filter(([, ms]) => ms >= 0.05).map(([k, ms]) => `${k.replace(/[^a-z ]/gi, "")} ${ms.toFixed(1)}`).join(" + ");
+function timing(s, drawn) {
   const ms = s.ms ?? 0;
+  const waited = s.waited ?? [];
+  const wait = waited.reduce((a, [, x]) => a + x, 0);
+  const since = typeof s.since_ms === "number" ? s.since_ms : null;
+  const after = since === null ? 0 : Math.max(0, since - wait - ms);
+  const total = since === null ? null : since + (drawn ?? 0);
   const parts = [
+    [
+      drawn === void 0 ? "save to built" : "keystroke\u2192page",
+      total === null ? null : `${total.toFixed(1)} ms = ${sum([["queued", wait], ["build", ms], ["files and viewer", after], ...drawn === void 0 ? [] : [["paint", drawn]]])}`
+    ],
+    ["before the build", wait >= 1 ? `${wait.toFixed(1)} ms = ${sum(waited)}` : null],
     [s.cold ? "first build" : "build", `${dur2(ms)}${s.cold ? " (the format, the packages, the whole document)" : ""}`],
-    ["save to build", typeof s.since_ms === "number" ? dur2(s.since_ms) : null],
     ["LaTeX runs", s.passes === void 0 ? null : String(s.passes)],
     ["steps", s.ran === void 0 ? null : `${s.ran} run, ${s.kept ?? 0} kept from the last build`],
     ["packages fetched", s.fetched ? String(s.fetched) : null],
@@ -9598,7 +11931,7 @@ function statsIn(s) {
 }
 function statsLines(s) {
   const n = s.nodes ?? {};
-  const size = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const size2 = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
   const pc = s.pages_changed;
   const changed = pc === void 0 ? "?" : pc.length && pc.length <= 8 ? `${pc.length} (${pc.join(", ")})` : String(pc.length);
   return [
@@ -9606,7 +11939,7 @@ function statsLines(s) {
     `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur2(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur2(ms)}`).join(" \xB7 ")}`,
     `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} \xB7 ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds \xB7 pages ${changed} of ${s.pages ?? "?"} changed`,
     `${s.cores_busy == null ? `threads ${s.threads ?? "?"}` : `parallel ${s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy`} \xB7 busy ${dur2(s.busy_ms ?? 0)}, engine ${dur2(s.engine_ms ?? 0)}, wasted ${dur2(s.wasted_ms ?? 0)}`,
-    `memory ${s.resident_kb === void 0 ? "?" : size(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : size(s.values_bytes)}`,
+    `memory ${s.resident_kb === void 0 ? "?" : size2(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : size2(s.values_bytes)}`,
     `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "\u2014"}`
   ];
 }
@@ -9614,6 +11947,8 @@ var Pages = class {
   sock;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
   change = null;
+  /** The last build's `settled` event, for its parts once its page is drawn. */
+  settled = null;
   /** Every page's text, for finding (asked again after each build). */
   texts = null;
   constructor(sock2) {
@@ -9625,16 +11960,18 @@ var Pages = class {
       const s = e;
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
+      this.settled = s;
       if (typeof s.ms === "number") panel.latency(...timing(s));
     });
   }
   async request(op) {
     const o = op;
     if (o.op === "png") {
-      const p = await strips.page(o.page ?? 0, panel.pixelsPerPoint(), panel.pageView(o.page ?? 0)).catch(() => null);
+      const zoom = typeof o.scale === "number" && o.scale > 0;
+      const p = await strips.page(o.page ?? 0, zoom ? o.scale : panel.pixelsPerPoint(), zoom ? o.view ?? null : panel.pageView(o.page ?? 0)).catch(() => null);
       if (!p) return { ok: false, json: { error: "no such page" } };
-      this.painted();
-      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links };
+      if (!zoom) this.painted();
+      return { ok: true, canvas: p.el, size: [p.w, p.h], links: p.links, ...p.hash !== void 0 && p.hash !== null ? { json: { hash: p.hash } } : {} };
     }
     return this.sock.request(op);
   }
@@ -9648,6 +11985,8 @@ var Pages = class {
     this.change = null;
     requestAnimationFrame(() => {
       const ms = c.since + performance.now() - c.at;
+      const s = this.settled;
+      if (s && typeof s.ms === "number") panel.latency(...timing(s, ms - c.since));
       panel.painted(ms);
       void this.sock.request({ op: "painted", ms });
     });
@@ -9687,17 +12026,34 @@ if (location.hash === "#debug") {
 }
 var strips = new Strips(stripSource, chip ?? null);
 var sock = new Socket();
+sock.onStale = staleBar;
 var pages = new Pages(sock);
 async function clearCache() {
-  const mb2 = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+  const mb = (b) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
   const now = await sock.request({ op: "cache" });
   if (!now.ok) return void panel.msg(`Couldn't clear the cache: ${now.error ?? "not available"}`, true, true);
   const bytes = Number(now.json?.bytes ?? 0);
-  if (!confirm(`Clear PhiTeX's cache (${mb2(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
+  if (!confirm(`Clear PhiTeX's cache (${mb(bytes)} in ${now.json?.dir ?? "its cache folder"})? Packages and formats are fetched again when a build needs them.`)) return;
   const r = await sock.request({ op: "cache", clear: true });
-  panel.msg(r.ok ? `Cache cleared: ${mb2(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
+  panel.msg(r.ok ? `Cache cleared: ${mb(Number(r.json?.freed ?? 0))} freed` : `Couldn't clear the cache: ${r.error ?? "not cleared"}`, !r.ok, true);
 }
 var source = (file, line, col = 1) => void sock.request({ op: "source", file, line, col });
+var review = {
+  request: (op, params) => sock.request({ op, ...params }),
+  onState(cb) {
+    sock.onEvent((e) => e.event === "review" && cb(e));
+    sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json)));
+  },
+  boxes: (file, start, end) => session.boxesOf(file, start, end),
+  source: (sel) => session.sourceOf(sel),
+  spot: (k, x, y) => session.spotOf(k, x, y),
+  goto: (file, line) => source(file, line),
+  showChanges(on, git, proposal) {
+    if (!on) return controls.stop();
+    if (proposal) return void controls.start({ from: "now", to: `proposal:${proposal}` }, `Proposal ${proposal}`, "against your files as they are");
+    void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
+  }
+};
 var panel = new Panel(
   {
     onPage: () => {
@@ -9774,6 +12130,7 @@ var panel = new Panel(
   {
     host: "watch",
     outline: true,
+    review,
     keys: true,
     header: true,
     footer: false,
@@ -9798,6 +12155,41 @@ var panel = new Panel(
 {
   const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
   if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
+}
+function ownViewer() {
+  return document.querySelector('meta[name="phitex-viewer"]')?.content ?? "";
+}
+function staleBar() {
+  if (document.getElementById("phitex-stale")) return;
+  const bar2 = document.createElement("div");
+  bar2.id = "phitex-stale";
+  bar2.setAttribute("role", "alert");
+  Object.assign(bar2.style, {
+    position: "fixed",
+    top: "0",
+    left: "0",
+    right: "0",
+    zIndex: "2147483647",
+    display: "flex",
+    gap: "12px",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "10px 16px",
+    font: "14px system-ui, sans-serif",
+    background: "#1d3e72",
+    color: "#ffffff",
+    boxShadow: "0 2px 8px rgba(0,0,0,.25)"
+  });
+  const text = document.createElement("span");
+  text.textContent = "phitex was updated: reload this tab to use the new viewer.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Reload";
+  Object.assign(button.style, { font: "inherit", padding: "4px 14px", borderRadius: "6px", border: "0", background: "#ffffff", color: "#1d3e72", cursor: "pointer" });
+  button.onclick = () => location.reload();
+  bar2.append(text, button);
+  document.body.append(bar2);
+  button.focus();
 }
 var PAGE_PREFS = (() => {
   try {
@@ -10203,12 +12595,12 @@ var setPref = async (k, v) => {
   return r.ok ? void 0 : r.error ?? "not saved";
 };
 async function watchSettings() {
-  const [r, info, cache] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" })]);
+  const [r, info, cache, rv] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" }), sock.request({ op: "review_state" })]);
   if (!r.ok) return [{ title: "Preview", rows: [{ id: "prefs", label: "Your settings", kind: "info", value: "", disabled: `Couldn't read them: ${r.error ?? "not available"}` }] }];
   const p = r.json ?? {}, at = info.ok ? info.json ?? {} : {};
   const file = String(p.file ?? "phitex.toml");
   const project = "In the project's phitex.toml (or the command line): the page never changes a project's files";
-  const mb2 = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const mb = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
   const toggle2 = (id, label, help) => ({ id, label, help, kind: "toggle", value: !!p[id], set: (v) => setPref(id, v) });
   const cores = Number(p.cores ?? 1);
   return [
@@ -10232,6 +12624,7 @@ async function watchSettings() {
       title: "Build",
       rows: [
         toggle2("watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does. From the next phitex watch on."),
+        toggle2("watch-ask-write", "Ask at quit whether to write the PDF", "When nothing was written while watching, quitting asks whether to write the PDF here. Off: it writes nothing and asks nothing."),
         toggle2("synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."),
         {
           id: "threads",
@@ -10248,7 +12641,7 @@ async function watchSettings() {
     {
       title: "Packages",
       rows: [
-        { id: "cache", label: "The cache", help: cache.ok ? `${mb2(Number(cache.json?.bytes ?? 0))} in ${cache.json?.dir ?? "its folder"}: packages and formats, fetched again when a build needs them` : "Its size: not available", kind: "action", button: "Clear", set: () => void clearCache() },
+        { id: "cache", label: "The cache", help: cache.ok ? `${mb(Number(cache.json?.bytes ?? 0))} in ${cache.json?.dir ?? "its folder"}: packages and formats, fetched again when a build needs them` : "Its size: not available", kind: "action", button: "Clear", set: () => void clearCache() },
         {
           id: "cache-limit",
           label: "Keep at most",
@@ -10257,6 +12650,36 @@ async function watchSettings() {
           options: [["500MB", "500 MB"], ["1GB", "1 GB"], ["4GB", "4 GB"], ["16GB", "16 GB"]],
           value: { 5e8: "500MB", 1e9: "1GB", 4e9: "4GB", 16e9: "16GB" }[Number(p["cache-limit"] ?? 4e9)] ?? "",
           set: (v) => setPref("cache-limit", v)
+        }
+      ]
+    },
+    {
+      title: "Experimental",
+      rows: [
+        {
+          id: "experimental-review",
+          label: "Review your agent's edits",
+          help: "Its edits to your files shown here change by change, to accept, reject or comment on (the Changes tab beside the pages). Off: nothing of it is shown or kept. For this watch now, and from the next on.",
+          kind: "toggle",
+          value: !!p["experimental-review"],
+          set: async (v) => {
+            const r2 = await sock.request({ op: "review_changes", on: !!v });
+            if (!r2.ok) return r2.error ?? "not changed";
+            return await setPref("experimental-review", !!v) ?? void 0;
+          }
+        },
+        {
+          id: "review-mode",
+          label: "Your agent's changes",
+          help: "Edits: it edits the files, its changes show on the pages and wait for you. Proposes: they are kept apart until you accept them (the agent writes in .phitex/work/). For this watch now, and your default from the next.",
+          kind: "choice",
+          options: [["direct", "Edits"], ["propose", "Proposes"]],
+          value: String(rv.json?.mode ?? p["review-mode"] ?? "direct"),
+          set: async (v) => {
+            const r2 = await sock.request({ op: "review_mode", mode: v });
+            if (!r2.ok) return r2.error ?? "not changed";
+            return await setPref("review-mode", v) ?? void 0;
+          }
         }
       ]
     },

@@ -210,3 +210,98 @@ fn the_output_is_written_once_after_the_last_pass() {
     assert_eq!(e.output(o).and_then(|x| v.as_int(x)), Some(7));
     assert_eq!(out.0.load(Ordering::Relaxed), 2, "once for the edit's two passes");
 }
+
+/// `[at, f, x]`: a page-layer node (settles at quiet points): in one
+/// commit stands the layer's frontier at node `at` (-1: none) and defines
+/// f := x.
+struct FrontPage;
+
+impl Operation for FrontPage {
+    fn name(&self) -> &'static str {
+        "front_page"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let at = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        cx.set_frontier(at.map(phitex_defuse::NodeId::from_raw));
+        cx.define(Field(a[1]), a[2]);
+        Ok(a[2])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// `[f, ms]`: text that reads the page value f, then after `ms`
+/// milliseconds contributes it to "s" (a `\label` on the page it reads).
+struct PageContrib;
+
+impl Operation for PageContrib {
+    fn name(&self) -> &'static str {
+        "page_contrib"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let x = cx.read(Field(a[0]))?.unwrap_or_else(|| v.int(0));
+        let ms = v.as_int(a[1]).unwrap_or(0).unsigned_abs();
+        std::thread::sleep(Duration::from_millis(ms));
+        cx.contribute(v.field("s"), x);
+        Ok(x)
+    }
+}
+
+/// A file read back (the `.aux`, and the tool run on it, BibTeX) is
+/// written on the text its pass has written whole: at a quiet point that
+/// lets a run held at the layer's frontier go, the writer waits for the
+/// next quiet point, after that run. Let go with it, the writer read the
+/// file as the held run had yet to write it, and ran again once it had
+/// (Grail at -j8 wrote its `.aux` and ran BibTeX on it four times, -j1
+/// once: mc 86379). Line: F (page: the frontier, pn), A, C (a
+/// contribution to "s"), T (reads pn, slow, contributes it to "s"), W
+/// (the aux writer: the sum of "s"). Edited at 2 threads: C, re-asking W
+/// (final-only, deferred to the quiet point), and F, standing the
+/// frontier at A and changing pn, so T is held there. At the quiet point
+/// both are due; T's run is slow, so W let go beside it reads "s" before
+/// T's new contribution is in, every time.
+#[test]
+fn a_read_back_writer_waits_for_the_runs_held_at_the_frontier() {
+    for _ in 0..4 {
+        let e = Engine::new();
+        let v = e.values();
+        let c = e.register(Arc::new(SlowContrib));
+        let front = e.register(Arc::new(FrontPage));
+        let t_op = e.register(Arc::new(PageContrib));
+        let aux = Arc::new(AuxWriter(AtomicU64::new(0)));
+        let aop = e.register(aux.clone());
+        let u = e.new_unit();
+        let pn = v.field("pn");
+        let f = e.push(u, front, vec![v.int(-1), pn.0, v.int(1)]);
+        let a = e.push(u, c, vec![v.int(0), v.int(0)]);
+        let k = e.push(u, c, vec![v.int(10), v.int(0)]);
+        let t = e.push(u, t_op, vec![pn.0, v.int(150)]);
+        let w = e.push(u, aop, vec![]);
+        e.evaluate(2).unwrap();
+        assert!(e.check_invariants().is_empty());
+        assert_eq!(e.output(w).and_then(|x| v.as_int(x)), Some(11));
+        let at = i64::try_from(a.raw()).expect("a id");
+        let held = e.frontier_held();
+        aux.0.store(0, Ordering::Relaxed);
+        e.replace(k, c, vec![v.int(20), v.int(0)]);
+        e.replace(f, front, vec![v.int(at), pn.0, v.int(2)]);
+        let rep = e.evaluate(2).unwrap();
+        assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+        assert_eq!(e.output(t).and_then(|x| v.as_int(x)), Some(2), "{rep:?}");
+        assert!(e.frontier_held() > held, "T was held at the frontier: {rep:?}");
+        assert_eq!(e.output(w).and_then(|x| v.as_int(x)), Some(22), "{rep:?}");
+        assert_eq!(
+            aux.0.load(Ordering::Relaxed),
+            1,
+            "the aux writer ran once, after the held run: {rep:?}"
+        );
+    }
+}

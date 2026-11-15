@@ -107,6 +107,25 @@ fn refuse(hash: u64) {
         .insert(hash);
 }
 
+/// The pictures (by the hash of their text) whose runs meet more pictures
+/// after them: such a run reads them inline, as TeX does, and places their
+/// children for the runs after ([`Run::pic_begin`]).
+static MANY: std::sync::Mutex<Option<phitex_defuse::FxHashSet<u64>>> = std::sync::Mutex::new(None);
+
+fn many(hash: u64) -> bool {
+    MANY.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|s| s.contains(&hash))
+}
+
+fn mark_many(hash: u64) {
+    MANY.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(Default::default)
+        .insert(hash);
+}
+
 /// What the child's run keeps ([`Run::pic_run`]).
 pub(crate) struct PicChild {
     /// The parent's locals, a field read key by key
@@ -249,7 +268,7 @@ fn hash_segs(segs: &[Seg]) -> u64 {
                 l.buf[l.loc.min(l.buf.len())..].hash(&mut h);
                 l.ends.hash(&mut h);
             }
-            Seg::File(_) => 3u8.hash(&mut h),
+            Seg::File(_) | Seg::Chunk(..) => 3u8.hash(&mut h),
         }
     }
     h.finish()
@@ -399,6 +418,7 @@ impl Run<'_, '_> {
         let hash = body.hash;
         let node = self.cx.node().raw();
         if refused(hash) {
+            self.pic_inline_count();
             if trace() {
                 eprintln!(
                     "pic: node {node} {} {hash:x}: refused before, inline",
@@ -415,9 +435,9 @@ impl Run<'_, '_> {
         let locals = self.pic_locals();
         // (the parent's view the child has run on: this run's, where my
         // last run gave the child the same one; another, and the child's
-        // output is of another state than this one)
+        // output is of another state than this one, unless every key of it
+        // the child read is as it was, `Ctx::placed_reads_hold`)
         let view_held = self.cx.last_def(field) == Some(locals);
-        self.cx.define_with(field, locals, Locality::Global);
         let frames = self.pic_frames(&body);
         let params = self.pic_params();
         let args = vec![
@@ -426,75 +446,127 @@ impl Run<'_, '_> {
             params,
             v.int(i64::from_ne_bytes(hash.to_ne_bytes())),
         ];
-        let i = self.cx.child_once(self.ops.pic, args);
-        self.muts += 1;
-        // (a child whose view moved since its output: the picture read
-        // here, inline, as TeX reads it, its output not read now; the child
-        // runs on the view this run gave it, and the runs after take its
-        // output. Taken, the pictures after it were given a state made with
-        // that old output, their children ran again on it, and the run went
-        // again for each one's new output, one picture a pass: lie-hasse's
-        // page of diagrams after a page's routine moved TikZ's counter,
-        // a 45 s piece run once per picture, past 3000 s cold, accl 26269)
-        // (and one that has yet to run again on it, re-asked or running on
-        // another thread: its output is of an older view as well, at -j4
-        // taken and the run asked again for each new one, 2503 s)
-        // (on the run's first of an evaluation, an edit's, the old output
-        // is taken as it is, its child's commit asking again where it
-        // differs: the pictures it moves are few, and read inline each ran
-        // twice, here and in its child, Grail's deleted figure 8.0 -> 13.3 s)
-        let peeked = self.cx.placed_output_peek(i);
-        if peeked.is_some()
-            && self.cx.ran_this_evaluation()
-            && !(view_held && self.cx.placed_output_settled(i).is_some())
-        {
-            self.muts += 1;
-            if trace() {
-                eprintln!(
-                    "pic: node {node} {} {hash:x}: its view moved, inline",
-                    body.name
-                );
-            }
-            return Ok(false);
-        }
-        let Some(x) = peeked else {
-            // (no output yet: the run goes on on the output of the
-            // picture its last run placed here, an edited picture's old
-            // one, and the child's commit asks it again where its own
-            // differs: the fonts, names and appends the picture made stand
-            // meanwhile, where empty they went and every later reader of
-            // them was asked again, then again when the child had run
-            // (Grail's changed drawing: 198 paragraphs checked, the first
-            // load of an 8 pt font gone for that while))
-            // (a guess only on my first run of an evaluation, an edit's: run
-            // again in it, the old output is one this evaluation has moved
-            // already, and pictures guessed on, one after another, were
-            // each placed anew and asked the run again with their real
-            // output, one a pass: lie-hasse -j4, its piece of diagrams run
-            // 25 times on new children 671, 701, 712, ...)
-            if !self.cx.ran_this_evaluation() && self.pic_guess(i, &body) {
+        // (a picture after one gone on as if empty in this run, its view
+        // moved: its state lacks the work of the one before. One whose
+        // child has run keeps the view it has and goes on as if empty; one
+        // whose child has not makes the run go again at once, the picture
+        // gone on as if empty marked to be read inline from now on, as TeX
+        // reads it, with its child placed for the runs after: so a run of
+        // many pictures reads them all inline the first time, as before
+        // §8 of the spec. Gone on as if empty and placed one a run, each
+        // picture ran once but the run went again once a picture,
+        // lie-hasse's piece of 24 diagrams, -j1 860 -> 1356 s (mc 86456);
+        // read inline and placed there, their children ran on views
+        // without the one before and again, past 2400 s (mc 86471))
+        if self.pic_pending.is_some() && !view_held {
+            if self.cx.placed_before_ran(self.ops.pic, &args)
+                && let Some(old) = self.cx.last_def(field)
+            {
+                self.muts += 1;
+                self.pic_skip(&body.skip);
+                self.cx.define_with(field, old, Locality::Global);
+                self.cx.child_once(self.ops.pic, args);
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: after one to come, as if empty, its child kept",
+                        body.name
+                    );
+                }
                 return Ok(true);
             }
-            // (none: the picture read here, inline, as TeX reads it, and
-            // the child placed for the runs after this one, its output not
-            // read now (exact by construction, it is this one; the edits
-            // after take it). Gone on as if empty, the pictures after it
-            // were given the state without this one's work, their children
-            // ran on it, and the run went again for each one's output, one
-            // more right each time: lie-hasse's page of 24 diagrams, a 55 s
-            // piece run 24 times, past 3000 s cold where 1073 s, accl 26269)
-            self.muts += 1;
+            if let Some(first) = self.pic_pending {
+                mark_many(first);
+            }
             if trace() {
                 eprintln!(
-                    "pic: node {node} {} {hash:x}: placed, no output yet, inline",
+                    "pic: node {node} {} {hash:x}: after one to come, no output yet: the run again, its pictures inline",
                     body.name
                 );
             }
-            return Ok(false);
-        };
+            return Err(Halt::Stop(self.cx.run_again()));
+        }
+        self.cx.define_with(field, locals, Locality::Global);
+        let i = self.cx.child_once(self.ops.pic, args);
+        self.muts += 1;
+        match self.cx.placed_output_peek(i) {
+            None => Ok(self.pic_no_output(i, &body)),
+            Some(x) => Ok(self.pic_with_output(i, &body, (field, locals, view_held), x)),
+        }
+    }
+
+    /// [`Run::pic_begin`] where the child has not run: an edit's first
+    /// run guesses its last run's output; else the run goes on as if the
+    /// picture were empty. True: the body is skipped.
+    fn pic_no_output(&mut self, i: usize, body: &Body) -> bool {
+        let (node, hash) = (self.cx.node().raw(), body.hash);
+        // (no output yet: the run goes on on the output of the
+        // picture its last run placed here, an edited picture's old
+        // one, and the child's commit asks it again where its own
+        // differs: the fonts, names and appends the picture made stand
+        // meanwhile, where empty they went and every later reader of
+        // them was asked again, then again when the child had run
+        // (Grail's changed drawing: 198 paragraphs checked, the first
+        // load of an 8 pt font gone for that while))
+        // (a guess only on my first run of an evaluation, an edit's: run
+        // again in it, the old output is one this evaluation has moved
+        // already, and pictures guessed on, one after another, were
+        // each placed anew and asked the run again with their real
+        // output, one a pass: lie-hasse -j4, its piece of diagrams run
+        // 25 times on new children 671, 701, 712, ...)
+        if !self.cx.ran_this_evaluation() && self.pic_guess(i, body) {
+            return true;
+        }
+        // (a run of many pictures: read here, inline, its child placed for
+        // the runs after, as above)
+        if self.pic_many || many(hash) {
+            self.pic_many = true;
+            self.pic_inline_count();
+            if trace() {
+                eprintln!(
+                    "pic: node {node} {} {hash:x}: placed, no output yet, many after it: inline",
+                    body.name
+                );
+            }
+            return false;
+        }
+        // (none: the run goes on as if the picture were empty, and the
+        // child's first commit asks it again (its output is not the
+        // guess read here), that run taking it. So the picture runs
+        // once, in its child, on another thread where one is free, and
+        // the run is the cheap part of the figure, never the picture:
+        // read inline here as well, each of Grail's pictures ran twice
+        // on a clean build, 6.1 s of its 19.3 s at -j1, and every
+        // figure's run held the text behind it for its picture)
+        self.cx.placed_output_or(i, ValueId::UNIT);
+        self.pic_pending = Some(hash);
+        self.pic_skip(&body.skip);
+        if trace() {
+            eprintln!(
+                "pic: node {node} {} {hash:x}: placed, no output yet, as if empty",
+                body.name
+            );
+        }
+        true
+    }
+
+    /// [`Run::pic_begin`] where the child has an output `x`: taken where
+    /// it is of this run's view (`view`: the field, the bindings this run
+    /// hands over, whether my last run gave the same), read inline where
+    /// it refused, as if empty where its view moved. True: the body is
+    /// skipped.
+    fn pic_with_output(
+        &mut self,
+        i: usize,
+        body: &Body,
+        (field, locals, view_held): (Field, ValueId, bool),
+        x: ValueId,
+    ) -> bool {
+        let v = self.v;
+        let (node, hash) = (self.cx.node().raw(), body.hash);
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
             refuse(hash);
+            self.pic_inline_count();
             if trace() {
                 eprintln!(
                     "pic: node {node} {} {hash:x}: the child refused ({}), inline from now on",
@@ -502,10 +574,84 @@ impl Run<'_, '_> {
                     xs.get(1).map(|&w| v.render(w)).unwrap_or_default()
                 );
             }
-            return Ok(false);
+            return false;
+        }
+        // (on the run's first of an evaluation, an edit's, the output is
+        // taken as it is, its child's commit asking again where it
+        // differs: the pictures it moves are few, and read inline each ran
+        // twice, here and in its child, Grail's deleted figure 8.0 -> 13.3 s)
+        if self.cx.ran_this_evaluation() {
+            // (the view held: the child's last run read this one. My
+            // last run defining the same, the child asked again on it and
+            // not run since, its output is of the view before: taken, the
+            // run went again once the child had run)
+            let holds = (view_held && !self.cx.placed_pending(i))
+                || self.cx.placed_reads_hold(i, field, locals);
+            if !holds && (self.pic_many || many(hash)) {
+                // (a run of many pictures: inline, as above)
+                self.pic_many = true;
+                self.pic_inline_count();
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: its view moved, many after it: inline",
+                        body.name
+                    );
+                }
+                return false;
+            }
+            if !holds && self.cx.longest_run_ns() > self.cx.placed_longest_run_ns(i) {
+                // (its view moved, and my run costs more than the
+                // picture's: read here, inline, its child placed on the
+                // view for the runs after. Gone on as if empty, the run
+                // went again once the child had run: lie-hasse's
+                // paragraphs of diagrams, 30 s a run for a 12 s picture,
+                // twice each where TeX reads them once)
+                self.pic_inline_count();
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: its view moved, the run dearer than the picture: inline",
+                        body.name
+                    );
+                }
+                return false;
+            }
+            if !holds {
+                // (its view moved where the child read it: the run goes on
+                // as if the picture were empty, the child asked again by the
+                // bindings this run hands it, and this run asked again at
+                // its commit (the output it has is not the guess) and at the
+                // child's next one: it takes the output once the child has
+                // run on them. Read inline instead, the picture ran twice,
+                // here and in its child (Grail's figures on every move of
+                // `\@freelist` before a clean build settled); taken, the
+                // pictures after it were given a state made with that old
+                // output, their children ran again on it, and the run went
+                // again for each one's new output, one picture a pass:
+                // lie-hasse's page of diagrams after a page's routine moved
+                // TikZ's counter, a 45 s piece run once per picture, past
+                // 3000 s cold, accl 26269)
+                self.cx.placed_output_guessed(i, ValueId::UNIT);
+                self.cx.placed_output_wait(i);
+                self.pic_pending = Some(hash);
+                self.pic_skip(&body.skip);
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: its view moved, as if empty",
+                        body.name
+                    );
+                }
+                return true;
+            }
+            // (asked again or running, its view held: its output is taken
+            // as the guess it is, read as seen, and the child's commit with
+            // another asks this run again. Waited for instead, as for a
+            // definer, the run stood behind a child whose reads were held
+            // at the page layer's frontier, which stood at this run: Grail
+            // at -j8 never ended, a resume node woken 15 677 times for its
+            // picture child 1249, held, accl 28411)
         }
         let x = self.cx.placed_output_or(i, ValueId::UNIT);
-        self.pic_apply(&body, x);
+        self.pic_apply(body, x);
         if trace() {
             eprintln!(
                 "pic: node {node} {} {hash:x}: the child's output taken ({} items)",
@@ -513,7 +659,14 @@ impl Run<'_, '_> {
                 xs.get(1).map_or(0, |&l| list_of(v, l).len())
             );
         }
-        Ok(true)
+        true
+    }
+
+    /// A picture found read inline ([`crate::Stats::pics_inline`]).
+    fn pic_inline_count(&self) {
+        self.ops
+            .pic_inline
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// [`Run::pic_begin`] for a child that has not run: the output of the
@@ -574,7 +727,7 @@ impl Run<'_, '_> {
                         .collect::<String>()
                 ),
                 Seg::Toks(t) => format!("toks {}", t.len()),
-                Seg::File(_) => "file".to_owned(),
+                Seg::File(_) | Seg::Chunk(..) => "file".to_owned(),
             })
             .collect();
         eprintln!(
@@ -754,7 +907,7 @@ impl Run<'_, '_> {
                 Seg::Line(l) => frames.extend(
                     crate::pages::line_frame(v, l).map(|f| rebase_frame(v, f, pic_base(body))),
                 ),
-                Seg::File(_) => {}
+                Seg::File(_) | Seg::Chunk(..) => {}
             }
         }
         v.list(frames)

@@ -106,6 +106,8 @@ impl Edits {
         let file = match a {
             Ask::Painted(us) => return Applied::Painted(us),
             Ask::Rebuild => return Applied::Rebuild,
+            // (the owner's, which holds the last build: never here)
+            Ask::WritePdf { .. } => return Applied::Nothing,
             Ask::Transcript => {
                 if let Some(v) = viewer {
                     v.set_transcript(&s.transcript());

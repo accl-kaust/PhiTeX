@@ -92,6 +92,35 @@ fn as_program(name: &str) -> PathBuf {
     p
 }
 
+/// The oracle's fontconfig (`scripts/xetex/fonts.conf`: TeX Live's
+/// OpenType and TrueType fonts, as `xelatex`'s references were made,
+/// `scripts/ci/manuals.py`'s `side_env`), its tree this TeX Live's: XeTeX
+/// finds fonts by name in fontconfig's list, the environment's.
+fn tl_fonts_conf() -> PathBuf {
+    static CONF: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CONF.get_or_init(|| {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/xetex/fonts.conf");
+        let text = std::fs::read_to_string(&src).unwrap_or_default();
+        let dist = Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "/usr/share/texmf-dist".to_owned());
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fontconfig");
+        let _ = std::fs::create_dir_all(&dir);
+        let conf = dir.join(format!("fonts-{}.conf", std::process::id()));
+        let text = text.replace("/usr/share/texmf-dist", &dist).replace(
+            "/tmp/phitex-xetex-fc-cache",
+            &dir.join("cache").display().to_string(),
+        );
+        std::fs::write(&conf, text).expect("the fonts.conf");
+        conf
+    })
+    .clone()
+}
+
 /// `program` in `dir`, stopped after ten minutes (`timeout`): a build that
 /// hangs fails its test instead of holding the job.
 fn command(program: &Path, dir: &Path) -> Command {
@@ -99,6 +128,49 @@ fn command(program: &Path, dir: &Path) -> Command {
     c.arg("600").arg(program);
     c.current_dir(dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
+        .env("SOURCE_DATE_EPOCH", "0")
+        .env("FORCE_SOURCE_DATE", "1")
+        .env_remove("PHITEX_COMPAT");
+    c
+}
+
+/// TeX Live's kpathsea as the watch's TeX job has it (`tex::kpse`:
+/// the tree of the `tex` on the path, pdfTeX's program name).
+fn texlive_kpse() -> phitex_kpse::Kpse {
+    let tex = std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("tex"))
+                .filter_map(|t| t.canonicalize().ok())
+                .find(|t| t.is_file())
+        })
+        .expect("TeX Live's tex on the path");
+    phitex_kpse::Kpse::new(tex.parent().expect("its folder"), "pdftex", "pdftex")
+}
+
+/// [`command`] with `timeout --foreground`: a signal sent to `timeout` is
+/// given to the program alone, once (without it, `timeout` gives it to
+/// the program and then to its whole process group: twice). The program
+/// starts with SIGINT, SIGTERM and SIGHUP at their defaults, as a
+/// terminal's foreground job has them (`env --default-signal`, which
+/// execs `timeout` in its place, the pid the same): a test run as a
+/// background job of a shell without job control (the gate's lanes,
+/// `( … ) &`) has SIGINT ignored, the watch inherited it, and a SIGINT
+/// sent to it was discarded, as a program started so must discard it:
+/// `watch_signal_ends_as_q` waited for its end until the gate's limit.
+fn command_fg(program: &Path, dir: &Path) -> Command {
+    let mut c = Command::new("env");
+    c.args([
+        "--default-signal=INT,TERM,HUP",
+        "timeout",
+        "--foreground",
+        "600",
+    ])
+    .arg(program);
+    c.current_dir(dir)
+        .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT");
@@ -546,14 +618,33 @@ fn update_ms(ev: &serde_json::Value) -> f64 {
 }
 
 /// `phitex watch`, headless: a word edited in the file on disk is built as
-/// an edit of the same Build; its PDF is the cold build's of the edited
-/// text, byte for byte, and the edit's update is within the brief's word
+/// an edit of the same Build; the PDF file the watch leaves once it has
+/// ended (the edit's update section made the exact file on its way out)
+/// is the cold build's of the edited text, byte for byte.
+#[test]
+fn watch_word_edit() {
+    let _one = one();
+    watch_word_edit_ms();
+}
+
+/// [`watch_word_edit`], and the edit's update within the brief's word
 /// budget (50 ms; phitex-red's budgets measure about 10 ms on this
 /// document) in a release build.
 #[test]
-#[ignore = "waits for phitex-tex's PDF output"]
-fn watch_word_edit() {
+#[ignore = "over the budget: the word edit's update took 54.6 ms at -j8 in the fastdev profile (mc 86326, 2026-11-13; dev before and after the watch's way-out fixes alike)"]
+fn watch_word_edit_budget() {
     let _one = one();
+    let ms = watch_word_edit_ms();
+    if !cfg!(debug_assertions) {
+        assert!(
+            ms <= 50.0,
+            "a word edit's update took {ms:.2} ms, over the brief's 50 ms"
+        );
+    }
+}
+
+/// [`watch_word_edit`]'s session and check: the edit's update's time.
+fn watch_word_edit_ms() -> f64 {
     let text = big();
     let dir = scratch("watch");
     std::fs::write(dir.join("big.tex"), &text).expect("the document");
@@ -588,11 +679,12 @@ fn watch_word_edit() {
     let line = until(&mut lines, "build", &2.into(), &mut seen);
     eprintln!("{line}");
     let ms = update_ms(&line);
-    let watched = std::fs::read(dir.join("big.pdf")).expect("the watch's PDF");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
     }
+    lines.for_each(drop);
     let _ = child.wait();
+    let watched = std::fs::read(dir.join("big.pdf")).expect("the watch's PDF");
     let cold_dir = scratch("watch-cold");
     std::fs::write(cold_dir.join("big.tex"), &edited).expect("the edited document");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
@@ -611,12 +703,655 @@ fn watch_word_edit() {
         first_difference(&watched, &cold_pdf)
     );
     eprintln!("watch: a word edit's update took {ms:.2} ms on 48 pages");
-    if !cfg!(debug_assertions) {
+    ms
+}
+
+/// `phitex watch --synctex` with a browser's socket: a save made while
+/// the viewer's asks are in flight (every page's origins, asked at once,
+/// as a browser asks for the pages it shows after a build), one made the
+/// moment the last build's event is out (the `SyncTeX` file and the
+/// problems then due, the watch's idle work) and one made when idle each
+/// begin their build at once: the wait before each, by what the watch did
+/// meanwhile (the build event's `waited`, the viewer's "before the
+/// build"), within 50 ms in a release build, and none of it behind the
+/// viewer's reads, which are answered off the watch's loop: also with every
+/// core kept busy, where a read on the loop held a save 220 ms (mc 86542).
+/// Every page's origins made first held a save 5.2 s behind them in Grail.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn watch_save_starts_at_once() {
+    let _one = one();
+    let text = big();
+    let dir = scratch("watch-save-at-once");
+    std::fs::write(dir.join("big.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--synctex",
+            "--ini",
+            "--etex",
+            "-j",
+            "1",
+            "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut stdin = child.stdin.take().expect("its input");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let pages = cold["pages"].as_u64().expect("its pages");
+    let mut viewer = Viewer::connect(&url);
+    let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
+    let word = text[at..].find(" the ").expect("a word") + at;
+    let edit = |w: &str| format!("{} {w} {}", &text[..word], &text[word + 5..]);
+    std::thread::sleep(Duration::from_millis(500));
+    let bound = if cfg!(debug_assertions) { 500.0 } else { 50.0 };
+    let mut id = 100;
+    // (the machine loaded: a thread spinning on every core while the
+    // last saves are made; a read on the watch's loop that took 220 ms of
+    // a loaded node's time held the save behind it, mc 86542)
+    let spin = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let spinners: Vec<_> = (0..cores)
+        .map(|_| {
+            let on = spin.clone();
+            std::thread::spawn(move || {
+                let mut x = 0u64;
+                while !on.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                    if std::sync::Arc::strong_count(&on) == 1 {
+                        return;
+                    }
+                }
+                while on.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+                }
+            })
+        })
+        .collect();
+    for (b, w, asks, pause, load) in [
+        (2, "thy", true, 0, false),
+        (3, "our", true, 0, false),
+        (4, "his", false, 0, false),
+        (5, "her", false, 600, false),
+        (6, "its", true, 300, true),
+        (7, "one", true, 0, true),
+    ] {
+        spin.store(load, std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(pause));
+        if asks {
+            // (every page's origins, twice over, not waited for)
+            for k in (0..pages).chain(0..pages) {
+                id += 1;
+                viewer
+                    .ws
+                    .send(tungstenite::Message::text(
+                        serde_json::json!({"id": id, "op": "origins", "page": k}).to_string(),
+                    ))
+                    .expect("an ask");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::write(dir.join("big.tex"), edit(w)).expect("a save");
+        let ev = until(&mut lines, "build", &b.into(), &mut seen);
+        let waited = ev["waited"].as_array().expect("the wait's parts");
+        let ms: f64 = waited.iter().filter_map(|p| p[1].as_f64()).sum();
+        eprintln!("watch: build {b}'s save waited {ms:.3} ms: {waited:?}");
+        // (loaded, the watch itself is late to run: what it did before the
+        // build, never a read, is what is bounded)
+        let reads: f64 = waited
+            .iter()
+            .filter(|p| p[0] == "the viewer's asks")
+            .filter_map(|p| p[1].as_f64())
+            .sum();
         assert!(
-            ms <= 50.0,
-            "a word edit's update took {ms:.2} ms, over the brief's 50 ms"
+            reads == 0.0 && (load || ms <= bound),
+            "build {b}'s save waited {ms:.3} ms before its build ({reads:.3} ms behind the viewer's reads): {ev}"
         );
     }
+    spin.store(false, std::sync::atomic::Ordering::Relaxed);
+    drop(spin);
+    for t in spinners {
+        let _ = t.join();
+    }
+    let _ = stdin.write_all(b"q\n");
+    drop(stdin);
+    lines.for_each(drop);
+    let _ = child.wait();
+}
+
+/// `phitex watch`, headless: an edit whose node makes what it made before
+/// (a comment's words changed, spaces after a control word added) runs
+/// that node and nothing after it, no reader asked again, no page folded
+/// or written, no link (one run in all); the PDF the watch leaves is a
+/// clean build's of the edited text. pdfLaTeX and XeLaTeX, -j1 and -j8.
+#[test]
+fn watch_an_edit_that_makes_what_it_made_runs_its_node_alone() {
+    let _one = one();
+    let mut base = String::from("\\documentclass{article}\n\\begin{document}\n");
+    for k in 0..40 {
+        if k == 20 {
+            base.push_str("% a note on the paragraphs\n% and a second one, its words\n");
+        }
+        let _ = write!(
+            base,
+            "\\section{{Part {k}}}\nParagraph {k} has a few words in it, and \\emph{{some}} more words after them, to fill a line or two of the page.\n\n"
+        );
+    }
+    base.push_str("\\end{document}\n");
+    let edits = [
+        (
+            "a comment's words",
+            base.replace("% and a second one, its words", "% and another one, its words"),
+        ),
+        (
+            "spaces after a control word",
+            base.replacen("\\emph{some} more words after them, to fill a line or two of the page.\n\n\\section{Part 31}", "\\emph   {some} more words after them, to fill a line or two of the page.\n\n\\section{Part 31}", 1),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for engine in ["pdflatex", "xelatex"] {
+        for (what, edited) in &edits {
+            assert_ne!(edited, &base, "{what}: an edit");
+            let clean = {
+                let dir = scratch("watch-same-clean");
+                std::fs::write(dir.join("doc.tex"), edited).expect("the document");
+                let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args(["build", "--no-synctex", "--engine", engine, "doc.tex"])
+                    .output()
+                    .expect("phitex build runs");
+                assert!(
+                    out.status.success(),
+                    "{engine}: the clean build failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                std::fs::read(dir.join("doc.pdf")).expect("the clean build's PDF")
+            };
+            for threads in ["1", "8"] {
+                let dir = scratch("watch-same");
+                std::fs::write(dir.join("doc.tex"), &base).expect("the document");
+                let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args([
+                        "watch",
+                        "--write",
+                        "--json",
+                        "--no-view",
+                        "--no-synctex",
+                        "--engine",
+                        engine,
+                        "-j",
+                        threads,
+                        "doc.tex",
+                    ])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("phitex watch runs");
+                let mut stdin = child.stdin.take().expect("its input");
+                let stdout = child.stdout.take().expect("its output");
+                let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+                let mut seen = Vec::new();
+                let cold = until(&mut lines, "build", &1.into(), &mut seen);
+                assert_eq!(cold["ok"], true, "{engine}: {cold}");
+                std::fs::write(dir.join("doc.tex"), edited).expect("the edit");
+                let ev = until(&mut lines, "build", &2.into(), &mut seen);
+                let _ = stdin.write_all(b"q\n");
+                drop(stdin);
+                lines.for_each(drop);
+                let _ = child.wait();
+                let runs = ev["runs"].as_u64().unwrap_or(u64::MAX);
+                if runs > 1 {
+                    wrong.push(format!(
+                        "{engine} -j{threads}, {what}: {runs} runs, not the edited node's alone: {}",
+                        ev["notes"]
+                    ));
+                }
+                let pdf = std::fs::read(dir.join("doc.pdf")).expect("the watch's PDF");
+                if pdf != clean {
+                    wrong.push(format!(
+                        "{engine} -j{threads}, {what}: the PDF is not the clean build's ({})",
+                        first_difference(&pdf, &clean)
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `phitex watch`, headless, with nothing changed: `r` (twice) and a
+/// file saved with its bytes evaluate nothing, run no node, write no
+/// PDF and change no page, and `r` reads no file again. The document
+/// asks for 40 files it does not find, as LaTeX's packages do, and
+/// writes a file it reads back, as LaTeX's `.aux`: `r` staged every
+/// name not found, and the file the watch itself wrote was a change
+/// made outside, evaluated (Grail's first `r` 13 ms, each later one
+/// 7 ms of 113 stagings of nothing). In a release build each build
+/// stays within 2 ms and 300 µs per 1000 nodes, and `r`'s check of the
+/// files within a small multiple of what the same calls cost this
+/// machine, timed beside it: a stat of each file found, kpathsea's lookup
+/// of each name not found (a bound in µs a file failed on loaded
+/// runners, 54 to 70 µs a file, #31; a file read again, or a second call
+/// a file, is over it on any machine).
+#[test]
+#[allow(clippy::too_many_lines, reason = "one watch session, step by step")]
+fn watch_no_change_rebuild() {
+    /// The `r`s timed.
+    const CHECKS: u64 = 5;
+    /// `r`'s keys of the files found, at most this many times as many
+    /// stat calls (0.96-1.59 on accl, 8 runs; a second stat a file
+    /// 2.16-2.69, a read 8.6-10.2).
+    const KEYS_PER_STAT: f64 = 1.9;
+    /// `r`'s lookups of the names not found, at most this many times
+    /// kpathsea's (1.57-1.99 on accl; a second lookup a name 3.1-3.9).
+    const LOOKUPS_PER_LOOKUP: f64 = 2.5;
+    let _one = one();
+    let big = big();
+    let body = big
+        .strip_prefix(&format!("\\pdfoutput=1\n{}", plain()))
+        .and_then(|b| b.strip_suffix("\\bye\n"))
+        .expect("big()'s body");
+    let mut main = "\\pdfoutput=1\n".to_string() + &plain();
+    for k in 0..40 {
+        let _ = writeln!(main, "\\openin1=absent-{k}.cfg \\closein1");
+    }
+    main.push_str(
+        "\\openin1=\\jobname.lst \\ifeof1 \\closein1 \\else \\closein1 \\input \\jobname.lst \\fi\n\\input chap\n\\immediate\\openout2=\\jobname.lst \\immediate\\write2{\\message{read back}}\\immediate\\closeout2\n\\bye\n",
+    );
+    let dir = scratch("watch-noop");
+    std::fs::write(dir.join("big.tex"), &main).expect("the document");
+    std::fs::write(dir.join("chap.tex"), body).expect("its chapter");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "1",
+            "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut stdin = child.stdin.take().expect("its input");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let live = cold["stats"]["nodes"]["live"].as_u64().expect("live nodes");
+    #[allow(clippy::cast_precision_loss, reason = "a bound in ms")]
+    let bound = 2.0 + 0.3 * live as f64 / 1000.0;
+    let pdf = dir.join("big.pdf");
+    let stamp = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .expect("written")
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    let (pdf_at, lst_at) = (stamp(&pdf), stamp(&dir.join("big.lst")));
+    // (the machine's own cost of the same calls, timed beside `r`'s:
+    // a stat of as many files found, the document's and TeX Live's fonts
+    // in turn, and kpathsea's lookup of the names not found, as the watch
+    // makes it, `tex::Tree::input`)
+    let mut kpse = texlive_kpse();
+    let found: Vec<PathBuf> = ["cmr10.tfm", "cmmi10.tfm", "cmsy10.tfm", "cmbx10.tfm"]
+        .iter()
+        .map(|n| {
+            let p = kpse
+                .find_file(n.as_bytes(), phitex_kpse::Format::Tfm, false)
+                .expect("TeX Live's fonts");
+            PathBuf::from(String::from_utf8(p).expect("a path"))
+        })
+        .chain(
+            ["big.tex", "chap.tex", "big.lst"]
+                .iter()
+                .map(|n| dir.join(n)),
+        )
+        .collect();
+    let absent: Vec<String> = (0..40).map(|k| format!("absent-{k}.cfg")).collect();
+    let mut machine = |keys: usize, lookups: usize| {
+        let t = Instant::now();
+        for p in found.iter().cycle().take(keys) {
+            std::hint::black_box(std::fs::metadata(p).ok());
+        }
+        let stats = t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
+        for n in absent.iter().cycle().take(lookups) {
+            std::hint::black_box(kpse.find_file(n.as_bytes(), phitex_kpse::Format::Tex, false));
+        }
+        (stats, t.elapsed().as_secs_f64() * 1e3)
+    };
+    // (kpathsea's databases read, the files' entries cached, before any
+    // is timed)
+    machine(found.len(), absent.len());
+    let check = |ev: &serde_json::Value, what: &str| {
+        assert_eq!(ev["ok"], true, "{what}: {ev}");
+        assert_eq!(ev["nodes_run"], 0, "{what} ran nodes: {ev}");
+        assert_eq!(ev["rounds"], 0, "{what} evaluated: {ev}");
+        assert_eq!(ev["evaluated"], false, "{what} evaluated: {ev}");
+        assert_eq!(ev["pages_changed"], serde_json::json!([]), "{what}: {ev}");
+        assert_eq!(stamp(&pdf), pdf_at, "{what} wrote the PDF again");
+        // (the build: nothing to do, within its bound)
+        let ms = update_ms(ev);
+        eprintln!("watch: {what}: the build {ms:.3} ms ({live} nodes)");
+        if !cfg!(debug_assertions) {
+            assert!(
+                ms <= bound,
+                "{what}'s build took {ms:.3} ms, over {bound:.3} ms: {ev}"
+            );
+        }
+    };
+    // (`r`'s check of the files, the keys of those found and the lookups
+    // of those not, each against the same calls made here right after it:
+    // the least of each over the `r`s, so that a moment's load on a
+    // shared machine, on either side, is not taken for the check's cost)
+    let mut least = [f64::INFINITY; 4];
+    let (mut keys, mut lookups) = (0, 0);
+    for k in 1..=CHECKS {
+        stdin.write_all(b"\n").expect("r");
+        stdin.flush().expect("r");
+        let ev = until(&mut lines, "build", &(k + 1).into(), &mut seen);
+        check(&ev, &format!("r {k}"));
+        let r = &ev["reread"];
+        assert_eq!(r["changed"], 0, "r {k} read files again: {ev}");
+        let n = |x: &serde_json::Value| usize::try_from(x.as_u64().unwrap_or(0)).expect("a count");
+        let checked = n(&r["checked"]);
+        lookups = n(&r["looked_up"]);
+        keys = checked - lookups;
+        assert!(checked > 40 && lookups >= 40, "r {k} checked: {ev}");
+        let ms = |f: &str| r[f].as_f64().expect("the check's times");
+        let (keys_ms, lookups_ms) = (ms("keys_ms"), ms("lookups_ms"));
+        let (stats_ms, kpse_ms) = machine(keys, lookups);
+        eprintln!(
+            "watch: r {k}: {keys} keys {keys_ms:.3} ms ({keys} stat calls {stats_ms:.3} ms), {lookups} lookups {lookups_ms:.3} ms (kpathsea's {kpse_ms:.3} ms)"
+        );
+        for (l, x) in least
+            .iter_mut()
+            .zip([keys_ms, stats_ms, lookups_ms, kpse_ms])
+        {
+            *l = l.min(x);
+        }
+    }
+    let [keys_ms, stats_ms, lookups_ms, kpse_ms] = least;
+    eprintln!(
+        "watch: r at best: the keys {:.2}x the stat calls, the lookups {:.2}x kpathsea's",
+        keys_ms / stats_ms,
+        lookups_ms / kpse_ms
+    );
+    if !cfg!(debug_assertions) {
+        assert!(
+            keys_ms <= KEYS_PER_STAT * stats_ms,
+            "r's keys of {keys} files took {keys_ms:.3} ms at best, over {KEYS_PER_STAT}x the {stats_ms:.3} ms of as many stat calls"
+        );
+        assert!(
+            lookups_ms <= LOOKUPS_PER_LOOKUP * kpse_ms,
+            "r's lookups of {lookups} names took {lookups_ms:.3} ms at best, over {LOOKUPS_PER_LOOKUP}x the {kpse_ms:.3} ms of kpathsea's"
+        );
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("chap.tex"), body).expect("the same bytes");
+    let ev = until(&mut lines, "build", &(CHECKS + 2).into(), &mut seen);
+    check(&ev, "a save of the same bytes");
+    assert_eq!(
+        stamp(&dir.join("big.lst")),
+        lst_at,
+        "the .lst written again"
+    );
+    let _ = stdin.write_all(b"q\n");
+    drop(stdin);
+    lines.for_each(drop);
+    let _ = child.wait();
+}
+
+/// The clean build's PDF file and `.synctex.gz` of `text` (`big.tex`,
+/// `-ini`, `--synctex`) at `-j threads`, built in the scratch directory
+/// `name` (a `.synctex.gz` names the files by their paths: a watch's is
+/// compared with the one built where the watch ran).
+fn clean_outputs(text: &str, threads: &str, name: &str) -> (Vec<u8>, Vec<u8>) {
+    let dir = scratch(name);
+    std::fs::write(dir.join("big.tex"), text).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "build",
+            "--synctex",
+            "--ini",
+            "--etex",
+            "-j",
+            threads,
+            "big.tex",
+        ])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let synctex =
+        std::fs::read(dir.join("big.synctex.gz")).expect("the clean build's `.synctex.gz`");
+    (
+        std::fs::read(dir.join("big.pdf")).expect("the clean build's PDF"),
+        synctex,
+    )
+}
+
+/// How a watch session is ended: `q`, or a signal sent to it.
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Q,
+    Signal(&'static str),
+}
+
+/// One `phitex watch --write` session on `text` at `-j threads` in the
+/// scratch directory `name`: the clean build, `edited` saved over it, the
+/// watch ended (`end`) at once after the edit's build event
+/// (`after_build`) or at once after the save; the PDF file and the
+/// `.synctex.gz` it leaves (empty: none), read once it has ended, and its
+/// exit status.
+fn watch_session(
+    text: &str,
+    edited: &str,
+    threads: &str,
+    after_build: bool,
+    end: End,
+    name: &str,
+) -> (Vec<u8>, Vec<u8>, Option<i32>) {
+    let dir = scratch(name);
+    std::fs::write(dir.join("big.tex"), text).expect("the document");
+    let mut child = command_fg(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            threads,
+            "big.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    until(&mut lines, "build", &1.into(), &mut seen);
+    std::fs::write(dir.join("big.tex"), edited).expect("the edit");
+    if after_build {
+        until(&mut lines, "build", &2.into(), &mut seen);
+    }
+    let mut stdin = child.stdin.take();
+    match end {
+        End::Q => {
+            if let Some(i) = stdin.as_mut() {
+                let _ = i.write_all(b"q\n");
+            }
+            drop(stdin.take());
+        }
+        // (to `timeout --foreground`, which gives it to the watch, once)
+        End::Signal(sig) => {
+            let _ = Command::new("kill")
+                .args([format!("-{sig}"), child.id().to_string()])
+                .status();
+        }
+    }
+    // (the rest of its output read, so that it never blocks on the pipe)
+    lines.for_each(drop);
+    let status = child.wait().expect("the watch ends");
+    drop(stdin);
+    (
+        std::fs::read(dir.join("big.pdf")).expect("the watch's PDF"),
+        std::fs::read(dir.join("big.synctex.gz")).unwrap_or_default(),
+        status.code(),
+    )
+}
+
+/// The big document, its two edits (a word, a paragraph inserted), and
+/// the clean builds' outputs of each in directory `name`: (kind, edited
+/// text, its PDF and `.synctex.gz` files), and the original's.
+#[allow(clippy::type_complexity)]
+fn edits_and_clean(
+    name: &str,
+) -> (
+    String,
+    (Vec<u8>, Vec<u8>),
+    Vec<(&'static str, String, (Vec<u8>, Vec<u8>))>,
+) {
+    let text = big();
+    let at = text.rfind("\\message{[part 2 story]}").expect("part 2");
+    let word = text[at..].find(" the ").expect("a word") + at;
+    let worded = format!("{} thy {}", &text[..word], &text[word + 5..]);
+    let par = text[at..].find("\n\n").expect("a paragraph's end") + at;
+    let parred = format!(
+        "{}\n\nAn inserted paragraph with a few new words in it.{}",
+        &text[..par],
+        &text[par..]
+    );
+    let original = clean_outputs(&text, "1", name);
+    let edits = [("word", worded), ("paragraph", parred)]
+        .into_iter()
+        .map(|(kind, edited)| {
+            let clean = clean_outputs(&edited, "1", name);
+            assert!(
+                clean.0 != original.0,
+                "the {kind} edit changed no byte of the PDF"
+            );
+            (kind, edited, clean)
+        })
+        .collect();
+    (text, original, edits)
+}
+
+/// The sessions ended by `end`, `after_build` and `after_save` of each
+/// edit at -j1 and -j8: where the files a session left are not a clean
+/// build's (after the edit's build: the edited text's; after the save:
+/// one text's or the other's, its PDF and `.synctex.gz` alike), or its
+/// exit status is not `status`.
+fn wrong_sessions(end: End, after_build: usize, after_save: usize, status: i32) -> Vec<String> {
+    let name = "watch-end";
+    let (text, original, edits) = edits_and_clean(name);
+    let mut wrong = Vec::new();
+    for (kind, edited, clean) in &edits {
+        for threads in ["1", "8"] {
+            for (built, n) in [(true, after_build), (false, after_save)] {
+                for i in 0..n {
+                    let (pdf, synctex, code) =
+                        watch_session(&text, edited, threads, built, end, name);
+                    let ok = if pdf == clean.0 {
+                        synctex == clean.1
+                    } else {
+                        !built && pdf == original.0 && synctex == original.1
+                    };
+                    let what = if built {
+                        "the edit's build"
+                    } else {
+                        "the save"
+                    };
+                    if !ok {
+                        wrong.push(format!(
+                            "{kind} -j{threads} #{i}, {end:?} after {what}: PDF {} the edited text's clean build's ({}), `.synctex.gz` {}",
+                            if pdf == clean.0 { "is" } else { "is not" },
+                            first_difference(&pdf, &clean.0),
+                            if synctex.is_empty() { "missing".to_owned() } else { first_difference(&synctex, &clean.1) }
+                        ));
+                    }
+                    if code != Some(status) {
+                        wrong.push(format!(
+                            "{kind} -j{threads} #{i}, {end:?} after {what}: exit status {code:?}, not {status}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    wrong
+}
+
+/// `phitex watch --write`, headless, quit (`q`) at once after an edit's
+/// build: the PDF file and the `.synctex.gz` it leaves are the clean
+/// build's of the edited text, byte for byte, a paragraph inserted and a
+/// word edited, at -j1 and -j8, twelve sessions each. A watch writes an
+/// edit's PDF as an update section and the exact file when idle or on its
+/// way out, and its `.synctex.gz` when idle; a `q` that came while its
+/// loop was still at the build's after-work ended the process at once and
+/// left the update sections (amsldoc: a paragraph inserted, 5 sessions of
+/// 12 at -j1 and -j8; a word, 1 of 6 at -j8; 2026-11-13) and the `.synctex.gz`
+/// file of an earlier build, or none. And `q` at once after the edit is
+/// saved (the edit's build dropped or done): the files are the clean
+/// build's of the one text or the other.
+#[test]
+fn watch_quit_leaves_the_exact_files() {
+    let _one = one();
+    let wrong = wrong_sessions(End::Q, 12, 4, 0);
+    assert!(
+        wrong.is_empty(),
+        "the watch's files are not a clean build's in {} sessions:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// `phitex watch --write`, headless, ended by SIGTERM or SIGINT (sent to
+/// it, no terminal) at once after an edit's build or after its save: it
+/// ends as `q` ends it, the PDF file and the `.synctex.gz` it leaves a
+/// clean build's (as [`watch_quit_leaves_the_exact_files`]), its exit
+/// status 128 + the signal. The signal's own end left the edit's update
+/// sections and no `.synctex.gz` of it.
+#[test]
+fn watch_signal_ends_as_q() {
+    let _one = one();
+    let mut wrong = Vec::new();
+    for (sig, n) in [("TERM", 15), ("INT", 2)] {
+        wrong.extend(wrong_sessions(End::Signal(sig), 6, 3, 128 + n));
+    }
+    assert!(
+        wrong.is_empty(),
+        "a signal did not end the watch as q does in {} sessions:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
 }
 
 /// `PHITEX_TIME_LIMIT_SECS=0` is no limit for the watch's builds, as it is
@@ -1268,7 +2003,7 @@ fn watch_lsp() {
 
 /// Editors attached to a terminal's `phitex watch` (docs/spec-editor-protocol.md
 /// §8): its discovery file (0600, in a 0700 folder) names its port and
-/// token, and `phitex sessions --json` lists it; two clients attach, each
+/// token, and `phitex session list --json` lists it; two clients attach, each
 /// told so in `initialize`; one's unsaved edit makes an error both are
 /// shown at its place at once (a terminal's watch places an edit's
 /// errors as one with a viewer does); the other detaches (`shutdown`, `exit`: its connection closed)
@@ -1345,10 +2080,10 @@ fn watch_attach() {
     let token = info["lsp"]["token"].as_str().expect("a token").to_owned();
     assert_eq!(token.len(), 32, "{info}");
     let listed = command(bin, &dir)
-        .args(["sessions", "--json"])
+        .args(["session", "list", "--json"])
         .env("XDG_RUNTIME_DIR", &run)
         .output()
-        .expect("phitex sessions runs");
+        .expect("phitex session list runs");
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
     assert_eq!(listed, json!([info.clone()]), "{listed}");
     let connect = || {
@@ -2474,8 +3209,10 @@ fn watch_plain_edit() {
 }
 
 /// `phitex watch`, headless: the user's phitex.toml changed in a viewer's
-/// preference only (a problems' filter, as the viewer writes it) is no
-/// new session: the next build is the edit's, not a clean build again.
+/// preference only (a problems' filter, as the viewer writes it), or in
+/// a setting no build reads (the review's switch and mode, the quit's
+/// question: the viewer's Settings) is no new session: the next build is
+/// the edit's, not a clean build again.
 /// A change the target reads (`synctex`) is one.
 #[test]
 fn watch_a_viewer_preference_is_no_new_session() {
@@ -2507,9 +3244,9 @@ fn watch_a_viewer_preference_is_no_new_session() {
     assert_eq!(cold["ok"], true, "{cold}");
     std::fs::write(
         &user,
-        "opening = \"random\"\nproblems-hidden = [\"other\"]\n",
+        "opening = \"random\"\nproblems-hidden = [\"other\"]\nexperimental-review = true\nreview-mode = \"propose\"\nwatch-ask-write = false\n",
     )
-    .expect("a viewer's preference");
+    .expect("a viewer's preference, and the settings no build reads");
     // (the watch's file events settle: a new session would start now)
     std::thread::sleep(Duration::from_millis(1500));
     let at = text.find(" the ").expect("a word");
@@ -2526,7 +3263,7 @@ fn watch_a_viewer_preference_is_no_new_session() {
     // (a setting a build reads: a new session, its clean build)
     std::fs::write(
         &user,
-        "opening = \"random\"\nproblems-hidden = [\"other\"]\nsynctex = false\n",
+        "opening = \"random\"\nproblems-hidden = [\"other\"]\nexperimental-review = true\nreview-mode = \"propose\"\nwatch-ask-write = false\nsynctex = false\n",
     )
     .expect("a build's setting");
     let ev = until(&mut lines, "build", &1.into(), &mut seen);
@@ -2629,7 +3366,7 @@ fn lualatex_refused() {
         (
             &["build", "c.tex"][..],
             "c.pdf",
-            "needs lualatex (it loads luacode)",
+            "needs LuaLaTeX (it loads luacode), which PhiTeX does not support yet",
         ),
     ] {
         let out = command(bin, &dir).args(args).output().expect("phitex runs");
@@ -3235,6 +3972,279 @@ fn xelatex_fontspec() {
         first_difference(&got, &want),
         dir.display()
     );
+}
+
+/// TeX Gyre Heros' face `style` renamed in place, the same lengths:
+/// family "Usr Gyre Heros", PostScript `UsrGyreHeros-…` (its name table
+/// and its CFF): a family TeX Live has not, for a user's font folder.
+fn renamed_heros(dist: &str, style: &str) -> Vec<u8> {
+    let mut b = std::fs::read(format!(
+        "{dist}/fonts/opentype/public/tex-gyre/texgyreheros-{style}.otf"
+    ))
+    .expect("TeX Gyre Heros");
+    let utf16 = |s: &str| {
+        s.encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect::<Vec<u8>>()
+    };
+    for (a, z) in [
+        ("TeX Gyre Heros", "Usr Gyre Heros"),
+        ("TeXGyreHeros", "UsrGyreHeros"),
+    ] {
+        for (a, z) in [
+            (a.as_bytes().to_vec(), z.as_bytes().to_vec()),
+            (utf16(a), utf16(z)),
+        ] {
+            let mut i = 0;
+            while let Some(k) = b[i..].windows(a.len()).position(|w| w == a.as_slice()) {
+                b[i + k..i + k + a.len()].copy_from_slice(&z);
+                i += k + a.len();
+            }
+        }
+    }
+    b
+}
+
+/// A case of [`xelatex_finds_fonts_as_xelatex`]: its name, its document,
+/// the fonts copied into its folder (from, to), its font setups.
+type Case<'a> = (&'a str, String, Vec<(String, String)>, &'a [&'a str]);
+
+/// XeTeX finds fonts as `xelatex` does (docs/spec-xetex.md §3.1), the
+/// PDF, the exit and the errors `xelatex`'s, at -j1 and -j8:
+/// - by file name: TeX Live's (`NewCM10-Regular.otf`, issue #27), the
+///   project's (`MyFont.otf`, `[Path=fonts/]`, `Extension=.otf` with
+///   `Path=./fonts/`, `\font\x="[MyFont]"`), one only in the user's font
+///   folder (not found: kpathsea does not search it), one nowhere;
+/// - by family name: a family only in the user's font folder
+///   (`XDG_DATA_HOME/fonts`) with its bold, italic and bold italic
+///   (`/B`, `/I`, `/BI`) and a full name, the same with TeX Live's trees
+///   in fontconfig before it, a family only in the project's folder
+///   (fontconfig does not list it: not found, unless the user's folder
+///   has it), an unknown family (the same error);
+/// - a font added to the user's font folder after a first run: found
+///   by the next one (the index's cache key moved).
+#[test]
+#[ignore = "heavy: xelatex and phitex's xelatex format; run on accl"]
+#[allow(clippy::too_many_lines, reason = "the cases, then their runs")]
+fn xelatex_finds_fonts_as_xelatex() {
+    let _one = one();
+    let out = Command::new("kpsewhich")
+        .args(["-var-value", "TEXMFDIST"])
+        .output()
+        .expect("kpsewhich (TeX Live) on the test machine");
+    let dist = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let tex_gyre = format!("{dist}/fonts/opentype/public/tex-gyre");
+    let root = scratch("xelatex-fonts-lookup");
+    // the user's font folder: the renamed family's four faces
+    let user = root.join("xdg");
+    std::fs::create_dir_all(user.join("fonts/sub")).expect("the user's fonts");
+    for s in ["regular", "bold", "italic", "bolditalic"] {
+        std::fs::write(
+            user.join(format!("fonts/sub/UserHeros-{s}.otf")),
+            renamed_heros(&dist, s),
+        )
+        .expect("a user font");
+    }
+    // fontconfig over TeX Live's trees, then the user's folder
+    let tluser = root.join("tluser.conf");
+    std::fs::write(
+        &tluser,
+        format!(
+            "<?xml version=\"1.0\"?>\n<!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n<fontconfig>\n  <dir>{dist}/fonts/opentype</dir>\n  <dir>{dist}/fonts/truetype</dir>\n  <dir prefix=\"xdg\">fonts</dir>\n  <cachedir>{}</cachedir>\n</fontconfig>\n",
+            root.join("fc-cache").display()
+        ),
+    )
+    .expect("tluser.conf");
+    let doc = |body: &str, pre: &str| {
+        format!(
+            "\\documentclass{{article}}\\usepackage{{fontspec}}\n{pre}\n\\begin{{document}}{body}\\end{{document}}\n"
+        )
+    };
+    let copy = |from: &str, to: &str| (from.to_owned(), to.to_owned());
+    // (name, document, files (from, to), environments)
+    let cases: Vec<Case> = vec![
+        (
+            "filename",
+            doc(
+                "Hello {\\pag Pagella \\textbf{bold}} world. Γράφοντας Писать",
+                "\\setmainfont{NewCM10-Regular.otf}\n\\newfontfamily\\pag{texgyrepagella-regular.otf}[BoldFont=texgyrepagella-bold.otf]",
+            ),
+            vec![],
+            &["tl"],
+        ),
+        (
+            "projfile",
+            doc(
+                "Project font. {\\other The other one.} {\\third A third.} {\\fourth x}",
+                "\\setmainfont{MyFont.otf}\n\\newfontfamily\\other{MyOther.otf}[Path=fonts/]\n\\newfontfamily\\third{MyThird}[Extension=.otf,Path=./fonts/]\n\\font\\fourth=\"[MyFont]\" at 9pt",
+            ),
+            vec![
+                copy(
+                    &format!("{tex_gyre}/texgyretermes-regular.otf"),
+                    "MyFont.otf",
+                ),
+                copy(
+                    &format!("{tex_gyre}/texgyrebonum-regular.otf"),
+                    "fonts/MyOther.otf",
+                ),
+                copy(
+                    &format!("{tex_gyre}/texgyreschola-regular.otf"),
+                    "fonts/MyThird.otf",
+                ),
+            ],
+            &["tl", "tluser"],
+        ),
+        (
+            "userfam",
+            doc(
+                "Regular \\textbf{bold} \\textit{italic} \\textbf{\\textit{bold italic}}. {\\bi full name}",
+                "\\setmainfont{Usr Gyre Heros}\n\\newfontfamily\\bi{Usr Gyre Heros Bold Italic}",
+            ),
+            vec![],
+            &["tl", "tluser", "user"],
+        ),
+        (
+            "projfam",
+            doc(
+                "A family only in the project.",
+                "\\setmainfont{Usr Gyre Heros}",
+            ),
+            vec![copy("user:UserHeros-regular.otf", "ProjSans.otf")],
+            &["tl", "tluser", "user"],
+        ),
+        (
+            "userfile",
+            doc(
+                "A file only in the user's font folder.",
+                "\\setmainfont{UserHeros-regular.otf}",
+            ),
+            vec![],
+            &["tl", "tluser", "user"],
+        ),
+        (
+            "unknown",
+            doc("Unknown.", "\\setmainfont{No Such Font At All}"),
+            vec![],
+            &["tl", "user"],
+        ),
+        (
+            "unknownfile",
+            doc("Unknown file.", "\\setmainfont{NoSuchFile.otf}"),
+            vec![],
+            &["tl"],
+        ),
+    ];
+    let env = |c: &mut Command, e: &str, xdg: &Path| {
+        match e {
+            "tl" => c.env("FONTCONFIG_FILE", tl_fonts_conf()),
+            "tluser" => c.env("FONTCONFIG_FILE", &tluser).env("XDG_DATA_HOME", xdg),
+            _ => c.env_remove("FONTCONFIG_FILE").env("XDG_DATA_HOME", xdg),
+        };
+        c.env("HOME", root.join("home"));
+    };
+    let errors = |log: &Path| -> Vec<String> {
+        chars(&std::fs::read(log).unwrap_or_default())
+            .lines()
+            .filter(|l| l.starts_with('!'))
+            .map(str::to_owned)
+            .collect()
+    };
+    let xelatex = as_program("xelatex");
+    let mut failed = Vec::new();
+    let mut checked = 0;
+    // one run of each side in `dir` (the document doc.tex), compared
+    let mut compare = |what: &str, dir: &Path, e: &str, xdg: &Path, j: usize| {
+        let (x, p) = (dir.join("x"), dir.join("p"));
+        for d in [&x, &p] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).expect("a run folder");
+            for f in std::fs::read_dir(dir).expect("the case").flatten() {
+                let n = f.file_name();
+                if n == "x" || n == "p" {
+                    continue;
+                }
+                let _ = Command::new("cp").arg("-a").arg(f.path()).arg(d).status();
+            }
+        }
+        let mut c = Command::new("timeout");
+        c.args(["600", "xelatex", "-interaction=nonstopmode", "doc.tex"])
+            .current_dir(&x)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1");
+        env(&mut c, e, xdg);
+        let xs = c.output().expect("xelatex runs").status.code();
+        let mut c = command(&xelatex, &p);
+        c.args([
+            &format!("-threads={j}"),
+            "-interaction=nonstopmode",
+            "doc.tex",
+        ]);
+        env(&mut c, e, xdg);
+        let ps = c.output().expect("phitex runs").status.code();
+        let (xp, pp) = (
+            std::fs::read(x.join("doc.pdf")).ok(),
+            std::fs::read(p.join("doc.pdf")).ok(),
+        );
+        let (xe, pe) = (errors(&x.join("doc.log")), errors(&p.join("doc.log")));
+        checked += 1;
+        if xp != pp || xs != ps || xe != pe {
+            failed.push(format!(
+                "{what}: pdf {} (xelatex {}, phitex {}), exit {xs:?} vs {ps:?}, errors {xe:?} vs {pe:?} (in {})",
+                if xp == pp { "same" } else { "differs" },
+                xp.as_ref().map_or(0, Vec::len),
+                pp.as_ref().map_or(0, Vec::len),
+                dir.display()
+            ));
+        }
+        xe.is_empty()
+    };
+    for (name, text, files, envs) in &cases {
+        for e in *envs {
+            for j in [1, 8] {
+                let dir = root.join(format!("{name}-{e}-j{j}"));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).expect("the case");
+                std::fs::write(dir.join("doc.tex"), text).expect("the document");
+                for (from, to) in files {
+                    let to = dir.join(to);
+                    std::fs::create_dir_all(to.parent().expect("a folder")).expect("its folder");
+                    let from = match from.strip_prefix("user:") {
+                        Some(n) => user.join("fonts/sub").join(n),
+                        None => PathBuf::from(from),
+                    };
+                    std::fs::copy(from, to).expect("a font");
+                }
+                compare(&format!("{name} ({e}, -j{j})"), &dir, e, &user, j);
+            }
+        }
+    }
+    // a font added to the user's folder after a first run
+    let late = root.join("xdg-late");
+    let _ = std::fs::remove_dir_all(&late);
+    std::fs::create_dir_all(late.join("fonts")).expect("the late folder");
+    let dir = root.join("added");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the case");
+    std::fs::write(dir.join("doc.tex"), &cases[2].1).expect("the document");
+    let before = compare("added: before", &dir, "user", &late, 1);
+    for f in std::fs::read_dir(user.join("fonts/sub"))
+        .expect("the fonts")
+        .flatten()
+    {
+        std::fs::copy(f.path(), late.join("fonts").join(f.file_name())).expect("a font added");
+    }
+    let after = compare("added: after", &dir, "user", &late, 1);
+    assert!(
+        !before && after,
+        "the font added: xelatex found it before {before}, after {after}"
+    );
+    assert!(
+        failed.is_empty(),
+        "{} of {checked} unlike xelatex:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+    eprintln!("{checked} runs as xelatex's");
 }
 
 /// `r` in `phitex watch` reads again only the files whose key on disk
@@ -3923,6 +4933,101 @@ fn xetex_from_shelf() {
         String::from_utf8_lossy(&out.stderr).contains("no font index"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// XeTeX from Shelf finds a font file of the project's as kpathsea
+/// does (docs/spec-xetex.md §3.1): the project's directory (kpathsea's
+/// `.`) before Shelf's tree, kpathsea's suffixes (`[MyFont]` is
+/// `MyFont.otf`), fontspec's `Path=` (`[fonts/Other.otf]`), the path
+/// `./name` as kpathsea gives it; a font the project's
+/// `lmroman10-regular.otf` names is the project's, not Shelf's. A font
+/// found nowhere is said with the host's note: Shelf's fonts, not the
+/// computer's, and how a font of one's own is used.
+#[test]
+fn xetex_from_shelf_finds_project_fonts() {
+    let _one = one();
+    let out = Command::new("kpsewhich")
+        .args(["-var-value", "TEXMFDIST"])
+        .output()
+        .expect("kpsewhich (TeX Live) on the test machine");
+    let dist = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let rel = "fonts/opentype/public/lm/lmroman10-regular.otf";
+    let face = std::fs::read(Path::new(&dist).join(rel)).expect("Latin Modern Roman");
+    let abs = format!("{dist}/{rel}");
+    let mut e = phitex_otf::index::FaceEntry::read(&abs, std::sync::Arc::from(face.clone()), 0);
+    e.fc_names = Some(phitex_otf::xetex::fontmgr::fc_names(&e));
+    let index = phitex_otf::index::FontIndex { entries: vec![e] }.relative_to(&dist);
+    let (port, _) = shelf_server(
+        &[
+            (rel.to_owned(), face),
+            (
+                "fonts/misc/partex/fontindex.pxfi".to_owned(),
+                index.to_bytes(),
+            ),
+        ],
+        false,
+    );
+    let gyre = Path::new(&dist).join("fonts/opentype/public/tex-gyre");
+    let run = |dir: &Path, text: &str| {
+        std::fs::write(dir.join("doc.tex"), text).expect("the document");
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir)
+            .args([
+                "build",
+                "--shelf",
+                "--ini",
+                "--engine",
+                "xetex",
+                "--output-format",
+                "xdv",
+                "doc.tex",
+            ])
+            .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env("PHITEX_SHELF_RELEASE", SHELF_RELEASE)
+            .env(
+                "PHITEX_SHELF_URL",
+                format!("http://127.0.0.1:{port}/tl2026/"),
+            )
+            .output()
+            .expect("phitex runs")
+    };
+    let dir = scratch("shelf-xetex-project");
+    std::fs::create_dir_all(dir.join("fonts")).expect("fonts/");
+    for (from, to) in [
+        ("texgyretermes-regular.otf", "MyFont.otf"),
+        ("texgyrebonum-regular.otf", "fonts/Other.otf"),
+        ("texgyreschola-regular.otf", "lmroman10-regular.otf"),
+    ] {
+        std::fs::copy(gyre.join(from), dir.join(to)).expect("a project font");
+    }
+    let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\a=\"[MyFont.otf]\" at 10pt \\font\\b=\"[MyFont]\" at 9pt \\font\\c=\"[fonts/Other.otf]\" at 10pt \\font\\d=\"[lmroman10-regular.otf]\" at 10pt \\setbox0\\hbox{\\a A\\b B\\c C\\d D}\\shipout\\box0 \\end\n";
+    let out = run(&dir, text);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let xdv = std::fs::read(dir.join("doc.xdv")).expect("the XDV");
+    let has = |s: &str| xdv.windows(s.len()).any(|w| w == s.as_bytes());
+    for p in [
+        "./MyFont.otf",
+        "./fonts/Other.otf",
+        "./lmroman10-regular.otf",
+    ] {
+        assert!(has(p), "the XDV names {p}: {err}");
+    }
+    assert!(
+        !has(&format!("/usr/share/texmf-dist/{rel}")),
+        "Shelf's lmroman10-regular.otf, not the project's"
+    );
+    // (a font found nowhere: the host's note)
+    let none = scratch("shelf-xetex-missing");
+    let out = run(
+        &none,
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\u=\"No Such Font\" at 10pt \\setbox0\\hbox{\\u x}\\shipout\\box0 \\end\n",
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("installed font not found")
+            && err.contains("not the fonts installed on this computer"),
+        "{err}"
     );
 }
 
@@ -5425,6 +6530,7 @@ fn watch_time_to_first_page() {
         .arg(env!("CARGO_BIN_EXE_phitex"))
         .current_dir(&dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT")
@@ -6028,6 +7134,7 @@ fn watch_compare_time() {
         .arg(env!("CARGO_BIN_EXE_phitex"))
         .current_dir(&dir)
         .env("PHITEX_CACHE_DIR", cache())
+        .env("FONTCONFIG_FILE", tl_fonts_conf())
         .env("SOURCE_DATE_EPOCH", "0")
         .env("FORCE_SOURCE_DATE", "1")
         .env_remove("PHITEX_COMPAT")

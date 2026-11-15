@@ -44,6 +44,10 @@ pub(crate) struct EnvReader {
 pub(crate) struct Env {
     pub(crate) values: Lock<FxHashMap<Field, Option<ValueId>>>,
     pub(crate) provider: Lock<Option<Box<EnvProvider>>>,
+    /// The misses being answered by the provider now, by field: the first
+    /// asker computes, those asking meanwhile wait for its answer
+    /// (`read::env_value`).
+    pub(crate) asking: Mx<FxHashMap<Field, Arc<std::sync::OnceLock<Option<ValueId>>>>>,
 }
 
 pub(crate) struct Paths {
@@ -504,6 +508,7 @@ impl Engine {
             env: Env {
                 values: Lock::new(FxHashMap::default()),
                 provider: Lock::new(None),
+                asking: Mx::new(FxHashMap::default()),
             },
             paths,
             projections,
@@ -2237,6 +2242,25 @@ impl Engine {
     }
 
     /// What each live node's last run defined `f` to, in no order.
+    /// A digest of the definitions of `f` filed now (each one's node and
+    /// value, in order), from the segments the field's index lists, no
+    /// node's record looked at: the same definitions, the same digest
+    /// (a client's check that what it made of [`Engine::defined_by_live`]
+    /// still holds, without a pass over every node).
+    pub fn defs_digest(&self, f: Field) -> u64 {
+        let mut h = crate::values::hash_words(0x6466_6473, &[f.0.raw()]);
+        for sid in self.defs.between(f, Pos(0), Pos(u64::MAX)) {
+            let seg = self.seg(sid);
+            let inner = seg.inner.read();
+            if let Some(m) = inner.defs.get(&f) {
+                for (p, d) in m.iter() {
+                    h = crate::values::hash_words(h, &[p.0, d.by.raw(), d.value.raw(), u64::from(d.multi)]);
+                }
+            }
+        }
+        h
+    }
+
     pub fn defined_by_live(&self, f: Field) -> Vec<(NodeId, ValueId)> {
         (0..self.nodes.len())
             .filter_map(|i| self.nodes.get(i))

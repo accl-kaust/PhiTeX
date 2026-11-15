@@ -379,7 +379,20 @@ impl PdfState {
             fd.fm.ff_name.clone().unwrap_or_default(),
             fd.fm.is_subsetted(),
         ));
-        if fd.fm.is_type1() {
+        if fd.fm.is_type1()
+            && fd.fm.is_subsetted()
+            && !fd.desc.all_glyphs
+            && let Some(memo) = self.stream_memo.clone()
+        {
+            // (a page's file of its own: the program made for every glyph
+            // the pages written so far used, once, `crate::stream`)
+            let ([l1, l2, l3], z) = self.stream_t1(&memo, &file, &fd.fm, &mut fd.desc)?;
+            fd.ff_found = true;
+            fd.ff_objnum = self.new_objnum_();
+            self.begin_dict(fd.ff_objnum, 0);
+            self.print(format!("/Length1 {l1}\n/Length2 {l2}\n/Length3 {l3}\n").as_bytes());
+            self.put_made_stream(&z);
+        } else if fd.fm.is_type1() {
             let e = self.write_t1_memo(&file, fd)?;
             fd.ff_found = true;
             fd.ff_objnum = self.new_objnum_();
@@ -547,7 +560,12 @@ impl PdfState {
                         String::from_utf8_lossy(&encname)
                     )));
                 };
-                let names = enc::load_enc(&bytes)?;
+                // (a page's file of its own: each file read once,
+                // `crate::stream`)
+                let names = match &self.stream_memo {
+                    Some(m) => Self::stream_enc(m, &bytes)?,
+                    None => enc::load_enc(&bytes)?,
+                };
                 t.fe_tree.insert(
                     encname.clone(),
                     Fe {

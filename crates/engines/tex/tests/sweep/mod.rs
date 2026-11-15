@@ -92,7 +92,7 @@ fn cold(name: &str, dir: &Path, epoch: i64, src: &str) -> Build {
     if !cached {
         let _ = std::fs::create_dir_all(cache.parent().expect("dir"));
         if let Some(bytes) = b.export_prelude() {
-            let _ = std::fs::write(&cache, bytes);
+            crate::common::write_whole(&cache, &bytes);
         }
     }
     b

@@ -17,6 +17,7 @@ no merge waits on them.
 | gate | `gate.yml` | every pull request to main, and by hand | the shards below, in the CI image, a job each |
 | image | `ci-image.yml` | by hand, when the image changes | builds the CI image and pushes it to GHCR |
 | research-shelf | `research-shelf.yml` | nightly, and by hand; not required | the research corpus built with `--shelf` from Shelf as served, against TeX Live's PDFs (below) |
+| bench | `bench.yml` | after each release (started by `release.yml`), and by hand for any release; not required | the proof page's numbers (phitex.org/measured): the release's Linux binary against TeX Live's engines on the research templates, the manuals and the public edit matrix, in the CI image on hosted runners; `bench.json` attached to the release, which the site's deploy takes (`releases/latest/download/bench.json`) |
 | release | `release.yml` | a tag `v1.6`, `v1.6.1`, `v1.61`, … on main | binaries, `SHA256SUMS`, the minisign signature, the GitHub release |
 
 **The CI image:** `ghcr.io/accl-kaust/phitex-ci:<snapshot>`.

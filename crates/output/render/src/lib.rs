@@ -171,10 +171,18 @@ struct Doc {
     names: Names,
 }
 
+/// How many documents a [`Renderer`] keeps open: the build's file and the
+/// pages streamed around the view (each streamed page is a file of its own).
+const DOCS: usize = 12;
+
 /// The strips of a viewer's pages, across builds.
 #[derive(Default)]
 pub struct Renderer {
-    doc: Option<Doc>,
+    /// The documents open, the one drawn last at the end ([`DOCS`] of
+    /// them): a build's file and the pages streamed, each its own file,
+    /// drawn in turn as a view scrolls over them, each opened once, not
+    /// again every time another was drawn between.
+    docs: Vec<Doc>,
     /// The strips kept, each with when it was last drawn or listed in a
     /// frame (a tick of [`Renderer::tick`]).
     strips: HashMap<u64, (Arc<Strip>, u64)>,
@@ -962,22 +970,30 @@ impl Renderer {
         let mut doc = self.open(pdf)?;
         let open_us = micros(t0);
         let out = self.frame_of(&mut doc, k, scale, win, open_us);
-        self.doc = Some(doc);
+        self.keep_doc(doc);
         out
     }
 
     /// The document of `pdf`, taken out (put back by the caller): the one
     /// open, or `pdf` opened now.
     fn open(&mut self, pdf: &Arc<[u8]>) -> Option<Doc> {
-        match self.doc.take() {
-            Some(d) if Arc::ptr_eq(&d.bytes, pdf) => Some(d),
-            _ => Some(Doc {
-                bytes: pdf.clone(),
-                pdf: Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?,
-                texts: HashMap::new(),
-                outline: None,
-                names: Names::default(),
-            }),
+        if let Some(i) = self.docs.iter().position(|d| Arc::ptr_eq(&d.bytes, pdf)) {
+            return Some(self.docs.remove(i));
+        }
+        Some(Doc {
+            bytes: pdf.clone(),
+            pdf: Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?,
+            texts: HashMap::new(),
+            outline: None,
+            names: Names::default(),
+        })
+    }
+
+    /// `doc` put back, the last drawn; the oldest closed past [`DOCS`].
+    fn keep_doc(&mut self, doc: Doc) {
+        self.docs.push(doc);
+        if self.docs.len() > DOCS {
+            self.docs.remove(0);
         }
     }
 
@@ -985,7 +1001,7 @@ impl Renderer {
     pub fn pages(&mut self, pdf: &Arc<[u8]>) -> Option<usize> {
         let doc = self.open(pdf)?;
         let n = doc.pdf.pages().len();
-        self.doc = Some(doc);
+        self.keep_doc(doc);
         Some(n)
     }
 
@@ -1003,7 +1019,7 @@ impl Renderer {
             }
         }
         let out = doc.texts.get(&k).cloned();
-        self.doc = Some(doc);
+        self.keep_doc(doc);
         out
     }
 
@@ -1019,7 +1035,7 @@ impl Renderer {
                 None => Vec::new(),
             }
         };
-        self.doc = Some(doc);
+        self.keep_doc(doc);
         out
     }
 
@@ -1032,7 +1048,7 @@ impl Renderer {
             .outline
             .get_or_insert_with(|| outline_of(&doc.pdf, &mut doc.names))
             .clone();
-        self.doc = Some(doc);
+        self.keep_doc(doc);
         out
     }
 

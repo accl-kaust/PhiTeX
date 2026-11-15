@@ -1103,6 +1103,9 @@ impl PdfState {
         flatten_into(list, &mut q);
         // "Initialize the LR stack": `before`, never matched
         let mut lr: Vec<u8> = vec![0];
+        // (the glyph origins' reversal level, [`crate::GlyphTap::level`]:
+        // a list reversed whole, outside reversed text, one level in)
+        let base = self.tap.level;
         if self.cur_dir == 1 {
             // "Reverse the complete hlist"
             let save_h = self.cur_h;
@@ -1111,14 +1114,29 @@ impl PdfState {
             rev.push_front(Lr::N(Node::Kern(-self.cur_h, KernKind::Explicit)));
             q = rev;
             self.cur_h = save_h;
+            if base.is_multiple_of(2) {
+                self.tap.set_level(base + 1);
+            }
         }
+        let floor = self.tap.level;
         fr.left_edge = self.cur_h;
         while let Some(it) = q.pop_front() {
             match it {
-                Lr::Edge { dir, width, dist } => {
+                Lr::Edge {
+                    dir,
+                    width,
+                    dist,
+                    open,
+                } => {
                     self.cur_h += width;
                     fr.left_edge = self.cur_h + dist;
                     self.cur_dir = dir;
+                    let l = self.tap.level;
+                    if open {
+                        self.tap.set_level(l.saturating_add(1));
+                    } else if l > floor {
+                        self.tap.set_level(l - 1);
+                    }
                 }
                 Lr::Fixed(g) => {
                     let w = g.spec.width;
@@ -1144,6 +1162,7 @@ impl PdfState {
                                 dir: 1 - dir,
                                 width: 0,
                                 dist: 0,
+                                open: false,
                             };
                             let mut rev = self.reverse(fr, &mut q, Some(tail), &mut lr, src);
                             let dist = self.cur_h;
@@ -1154,6 +1173,7 @@ impl PdfState {
                                 dir,
                                 width: w,
                                 dist,
+                                open: true,
                             });
                             q = rev;
                             continue;
@@ -1164,6 +1184,7 @@ impl PdfState {
                 Lr::N(n) => self.hlist_nodes(std::slice::from_ref(&n), fr, src, wh),
             }
         }
+        self.tap.set_level(base);
     }
 
     /// The width of character `c` of font `f` as the output moves past it.
@@ -1374,6 +1395,16 @@ impl PdfState {
 
     /// `pdf_vlist_out` (pdfTeX §738–§746).
     fn vlist_out(&mut self, b: &BoxNode, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
+        // (a box of lines: its lines read on their own, each in its
+        // order, [`phitex_pdf::GlyphTap::level`])
+        let level = self.tap.level;
+        self.tap.set_level(0);
+        self.vlist_body(b, src, wh);
+        self.tap.set_level(level);
+    }
+
+    /// [`Self::vlist_out`]'s output of the box.
+    fn vlist_body(&mut self, b: &BoxNode, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
         self.cur_s += 1;
         let left_edge = self.cur_h;
         self.cur_v -= b.height;
@@ -1544,38 +1575,30 @@ impl PdfState {
                 }
                 self.obj_list.push(*n);
             }
-            Whatsit::RefXForm(n) => {
-                let Some((_, h, _)) = self.xform_size(*n) else {
-                    self.fail(pdf_error("ext1", "cannot find referenced object"));
-                    return;
-                };
-                let (save_h, save_v) = (self.cur_h, self.cur_v);
-                if vertical {
-                    // "Output a Form node in a vlist"
-                    self.cur_v += h;
-                    self.cur_h = x;
+            Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
+                // "Output a Form node in a vlist" (§1618), an Image node
+                // (§1620): its place from the origin, the box's top in a
+                // vlist, else the baseline ([`PdfState::xobject_ops`])
+                let form = matches!(w, Whatsit::RefXForm(_));
+                let (h, v) = if vertical {
+                    (x - self.origin_h, self.origin_v - self.cur_v)
                 } else {
-                    self.cur_v = y;
-                }
-                self.out_form(*n);
-                self.cur_h = save_h;
-                self.cur_v = save_v;
-            }
-            Whatsit::RefXImage(n) => {
-                let Some(info) = self.ximage_info(*n) else {
-                    self.fail(pdf_error("ext1", "cannot find referenced object"));
-                    return;
+                    (self.cur_h - self.origin_h, self.origin_v - y)
                 };
-                let (save_h, save_v) = (self.cur_h, self.cur_v);
-                if vertical {
-                    self.cur_v += info.height + info.depth;
-                    self.cur_h = x;
+                let known = if form {
+                    self.aux.xforms.contains_key(n)
                 } else {
-                    self.cur_v = y + info.depth;
+                    self.aux.ximages.contains_key(n)
+                };
+                if known {
+                    if form {
+                        self.out_form(*n, vertical, h, v);
+                    } else {
+                        self.out_image(*n, vertical, h, v);
+                    }
+                } else if !self.hole_xobject(*n, form, vertical, h, v) {
+                    self.fail(pdf_error("ext1", "cannot find referenced object"));
                 }
-                self.out_image(*n, info.width, info.height, info.depth);
-                self.cur_h = save_h;
-                self.cur_v = save_v;
             }
             Whatsit::Annot {
                 objnum,
@@ -1656,27 +1679,94 @@ impl PdfState {
         }
     }
 
-    /// `out_form` (pdfTeX §1619).
-    fn out_form(&mut self, n: usize) {
+    /// `out_form` (pdfTeX §1619) at (`h`, `v`) ([`PdfState::xobject_ops`]).
+    fn out_form(&mut self, n: usize, vertical: bool, h: Scaled, v: Scaled) {
         self.end_text();
-        self.print_ln(b"q");
         if !self.xform_list.contains(&n) {
             self.xform_list.push(n);
         }
-        let depth = self.aux.xforms.get(&n).map_or(0, |x| x.depth);
-        self.cur_v += depth;
-        self.print(b"1 0 0 1 ");
-        self.print_bp(self.cur_h - self.origin_h);
-        self.pdf_out(b' ');
-        self.print_bp(self.origin_v - self.cur_v);
-        self.print_ln(b" cm");
-        self.print(b"/Fm");
-        self.print_int(self.objs[n].info);
-        self.print_ln(b" Do");
-        if let Some(t) = self.tap.sink.as_mut() {
-            t.xobject();
+        if let Some(ops) = self.xobject_ops(n, true, vertical, h, v) {
+            self.print(&ops);
         }
-        self.print_ln(b"Q");
+        if let Some(t) = self.tap.sink.as_mut() {
+            t.xobject(n);
+        }
+    }
+
+    /// The operators that show form (`form`) or image `n` (`out_form`,
+    /// `out_image` after `pdf_end_text`): `q`, its matrix, its name,
+    /// `Q`, placed `h` right of the origin and `v` below it (the top of
+    /// the box it is in, `vertical`, from which it goes down by its
+    /// height; else its baseline), its depth below that; none for one
+    /// not here (an image without its picture shows nothing). The walk
+    /// and [`PdfState::replay_page`] make them alike.
+    pub(crate) fn xobject_ops(
+        &self,
+        n: usize,
+        form: bool,
+        vertical: bool,
+        h: Scaled,
+        v: Scaled,
+    ) -> Option<Vec<u8>> {
+        let mut o = Vec::with_capacity(64);
+        o.extend_from_slice(b"q\n");
+        if form {
+            let x = self.aux.xforms.get(&n)?;
+            let y = v - if vertical { x.height } else { 0 } - x.depth;
+            o.extend_from_slice(b"1 0 0 1 ");
+            crate::num::bp(&mut o, h, self.dd);
+            o.push(b' ');
+            crate::num::bp(&mut o, y, self.dd);
+            o.extend_from_slice(b" cm\n/Fm");
+        } else {
+            self.image_ops(n, vertical, h, v, &mut o)?;
+            o.extend_from_slice(b" cm\n/Im");
+        }
+        crate::num::int(&mut o, self.objs.get(n)?.info);
+        o.extend_from_slice(b" Do\nQ\n");
+        Some(o)
+    }
+
+    /// A form or image the writer has not, shown on a page written apart
+    /// (a page's record, [`crate::replay::XHole`]): the text ended and
+    /// the page's list as `out_form` and `out_image` leave them, its
+    /// operators left for the link to make; false where no page's walk
+    /// is recorded.
+    fn hole_xobject(&mut self, n: usize, form: bool, vertical: bool, h: Scaled, v: Scaled) -> bool {
+        if !self.rec.as_ref().is_some_and(|r| r.walk) {
+            return false;
+        }
+        self.end_text();
+        let l = if form {
+            &mut self.xform_list
+        } else {
+            &mut self.ximage_list
+        };
+        if !l.contains(&n) {
+            l.push(n);
+        }
+        let at = self.content_pos();
+        if let Some(r) = &mut self.rec {
+            r.xholes.push(crate::replay::XHole {
+                at,
+                n,
+                form,
+                vertical,
+                h,
+                v,
+            });
+        }
+        // (its codes told where the object is known here: an image's;
+        // a form's where the page is shipped whole, else counted in the
+        // file made)
+        if form {
+            if let Some(t) = self.tap.sink.as_mut() {
+                t.xobject(n);
+            }
+        } else {
+            self.tap_image(n);
+        }
+        true
     }
 
     // ---- shipping out (pdfTeX §750–§771) ----
@@ -1883,11 +1973,15 @@ impl PdfState {
             r.deferred = defer;
             r.walk = false;
             r.font_list.clone_from(&self.font_list);
-            r.other = !self.xform_list.is_empty()
+            r.other = self
+                .xform_list
+                .iter()
+                .any(|k| !r.xholes.iter().any(|x| x.n == *k))
                 || !self.bead_list.is_empty()
                 || self.page_group_val != 0;
             r.obj_list.clone_from(&self.obj_list);
             r.ximage_list.clone_from(&self.ximage_list);
+            r.xform_list.clone_from(&self.xform_list);
             r.marks = self
                 .annot_list
                 .iter()
@@ -1903,7 +1997,13 @@ impl PdfState {
         if shipping_page {
             self.write_page_object(last_stream, last_resources);
         }
-        // "Write out resource lists"
+        // "Write out resource lists" (a form or image a page written
+        // apart shows that its writer has not: the link's to write)
+        let hole = |s: &Self, k: usize| {
+            s.rec
+                .as_ref()
+                .is_some_and(|r| r.xholes.iter().any(|x| x.n == k))
+        };
         for k in self.obj_list.clone() {
             if !self.is_written(k) {
                 self.pdf_write_obj(k);
@@ -1911,17 +2011,19 @@ impl PdfState {
         }
         for k in self.ximage_list.clone() {
             if !self.is_written(k)
+                && !hole(self, k)
                 && let Err(e) = self.pdf_write_image(k, src)
             {
                 self.fail(e);
             }
         }
         for k in self.xform_list.clone() {
-            if !self.is_written(k) {
+            if !self.is_written(k) && !hole(self, k) {
                 self.ship_form(k, src, wh);
             }
         }
         if shipping_page {
+            self.tap_forms();
             self.write_page_marks();
         }
         self.write_resources(last_resources, shipping_page, src);
@@ -1964,7 +2066,7 @@ impl PdfState {
     }
 
     /// "Write out pending forms": ship form `k` within the page.
-    fn ship_form(&mut self, k: usize, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
+    pub(crate) fn ship_form(&mut self, k: usize, src: &dyn FontSource, wh: &mut WhatsitSource<'_>) {
         let saved_form = self.cur_form;
         self.cur_form = k;
         let Some(b) = self.aux.xforms.get_mut(&k).and_then(|x| x.boxed.take()) else {
@@ -1980,7 +2082,7 @@ impl PdfState {
             self.xform_depth,
         );
         let err = self.error.take();
-        if let Err(e) = self.ship(&b, false, src, wh) {
+        if let Err(e) = self.ship_form_box(k, &b, src, wh) {
             self.fail(e);
         }
         if let Some(e) = err {

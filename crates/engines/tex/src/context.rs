@@ -116,7 +116,7 @@ impl Run<'_, '_> {
         for s in self.input.text.get(parked).unwrap_or_default() {
             match s {
                 Seg::Line(l) => out.push(line(l)),
-                Seg::Toks(_) => {}
+                Seg::Toks(_) | Seg::Chunk(..) => {}
                 Seg::File(f) => {
                     let n = i64::from(f.line);
                     out.push(Shown::Line(Vec::new(), 0, (Some(n), 0, None, None), true));

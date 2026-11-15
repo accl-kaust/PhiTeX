@@ -197,18 +197,21 @@ pub(crate) mod group {
 pub(crate) struct CsEntry {
     id: u32,
     name: Box<str>,
+    /// The name is a frozen or internal one (`\u{10FFFE}…`): a property
+    /// of the name, whatever its number ([`Tok::is_internal_cs`]).
+    internal: bool,
 }
 
 /// The frozen and internal names (`\u{10FFFE}…`) are numbered below
-/// this, every other name from it up (spec-final §2.6): whether a
-/// control sequence is frozen is a range test on its number.
+/// this while there is room, every other name from it up (spec-final
+/// §2.6). Whether a control sequence is frozen is its entry's
+/// ([`CsEntry::internal`]) and its token's [`INTERNAL_BIT`], never its
+/// number: the names are numbered once per process, in the order they
+/// are first seen, so an internal name first seen once this range was
+/// full (the deferred counters' symbols, a new one per build) was taken
+/// for an ordinary one, `\u{10FFFE}endv` among them, and every alignment
+/// after it in the process broke (#32).
 pub(crate) const FROZEN_MAX: u32 = 1 << 15;
-
-/// Whether an internal name was numbered past [`FROZEN_MAX`] (more of
-/// them than it leaves room for): then [`Tok::is_internal_cs`] reads the
-/// name.
-static INTERNAL_PAST_FROZEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// The entries by number, in chunks made once (read without a lock).
 const CS_CHUNK_BITS: usize = 12;
@@ -216,6 +219,19 @@ const CS_CHUNK: usize = 1 << CS_CHUNK_BITS;
 const CS_CHUNKS: usize = 1 << 12;
 type CsChunk = [std::sync::OnceLock<&'static CsEntry>];
 static CS_BY_ID: [OnceLock<&'static CsChunk>; CS_CHUNKS] = [const { OnceLock::new() }; CS_CHUNKS];
+
+/// The names by text, and how many frozen and other ones there are.
+type CsTable = (FxHashMap<&'static str, CsId>, u32, u32);
+static TABLE: OnceLock<std::sync::Mutex<CsTable>> = OnceLock::new();
+
+/// How many control sequence names this process has interned: the
+/// internal ones (`\u{10FFFE}…`) numbered below [`FROZEN_MAX`], and the
+/// others. Names are never dropped, so a long session must not mint new
+/// ones for what repeats ([`crate::interned_names`]).
+pub(crate) fn cs_counts() -> (u32, u32) {
+    let t = TABLE.get_or_init(Default::default).locked();
+    (t.1, t.2)
+}
 
 /// A control sequence: its interned entry ([`CsEntry`]).
 #[derive(Clone, Copy)]
@@ -228,9 +244,6 @@ impl CsId {
             static LOCAL: std::cell::RefCell<std::collections::HashMap<Box<str>, CsId, std::hash::BuildHasherDefault<phitex_defuse::FxHasher>>> =
                 std::cell::RefCell::default();
         }
-        /// The names by text, and how many frozen and other ones there are.
-        type Table = (FxHashMap<&'static str, CsId>, u32, u32);
-        static TABLE: OnceLock<std::sync::Mutex<Table>> = OnceLock::new();
         if let Some(c) = LOCAL.with(|l| l.borrow().get(name).copied()) {
             crate::prof::caches::hit(crate::prof::caches::CS);
             return c;
@@ -243,19 +256,18 @@ impl CsId {
             } else {
                 // (the name's class is read once, here, as it is first
                 // seen: its number says it from then on)
-                let id = if name.starts_with('\u{10FFFE}') && t.1 < FROZEN_MAX {
+                let internal = name.starts_with('\u{10FFFE}');
+                let id = if internal && t.1 < FROZEN_MAX {
                     t.1 += 1;
                     t.1 - 1
                 } else {
-                    if name.starts_with('\u{10FFFE}') {
-                        INTERNAL_PAST_FROZEN.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
                     t.2 += 1;
                     FROZEN_MAX + t.2 - 1
                 };
                 let e: &'static CsEntry = Box::leak(Box::new(CsEntry {
                     id,
                     name: Box::from(name),
+                    internal,
                 }));
                 let id = id as usize;
                 let chunk = CS_BY_ID[(id >> CS_CHUNK_BITS) % CS_CHUNKS].get_or_init(|| {
@@ -297,11 +309,10 @@ impl CsId {
         self.0.id as usize
     }
 
-    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`):
-    /// its number is below [`FROZEN_MAX`].
+    /// Whether the name is a frozen or internal one (`\u{10FFFE}…`).
     #[inline]
     pub(crate) fn frozen(self) -> bool {
-        self.0.id < FROZEN_MAX
+        self.0.internal
     }
 
     pub(crate) fn name(self) -> &'static str {
@@ -345,6 +356,14 @@ impl std::fmt::Display for CsId {
 /// The bit of a control sequence token.
 const CS_BIT: u32 = 1 << 31;
 
+/// A control sequence token's mark that its name is internal
+/// ([`CsEntry::internal`]): [`Tok::is_internal_cs`] tests a bit, no
+/// entry read, and is right whatever the name's number.
+const INTERNAL_BIT: u32 = 1 << 30;
+
+/// A control sequence token's number ([`CsId::index`]) under its marks.
+const CS_INDEX: u32 = !(CS_BIT | INTERNAL_BIT);
+
 /// A token (§289) in one word: a character, `cat << 21 | char` (category
 /// 13 is an active character), or, with bit 31 set, a control sequence
 /// by its number ([`CsId::index`]; frozen ones' names start with
@@ -377,7 +396,8 @@ impl Tok {
     }
 
     pub(crate) fn of_cs(c: CsId) -> Tok {
-        Tok(CS_BIT | u32::try_from(c.index()).unwrap_or(0))
+        let mark = if c.0.internal { INTERNAL_BIT } else { 0 };
+        Tok(CS_BIT | mark | (u32::try_from(c.index()).unwrap_or(0) & CS_INDEX))
     }
 
     /// The word: `cat << 21 | char` for a character (so `raw() >> 21` is
@@ -396,13 +416,13 @@ impl Tok {
     /// The control sequence of a control sequence token.
     #[inline]
     pub(crate) fn as_cs(self) -> Option<CsId> {
-        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & !CS_BIT) as usize))
+        (self.0 & CS_BIT != 0).then(|| CsId::from_index((self.0 & CS_INDEX) as usize))
     }
 
     /// The number of a control sequence token ([`CsId::index`]).
     #[inline]
     pub(crate) fn cs_index(self) -> Option<usize> {
-        (self.0 & CS_BIT != 0).then_some((self.0 & !CS_BIT) as usize)
+        (self.0 & CS_BIT != 0).then_some((self.0 & CS_INDEX) as usize)
     }
 
     #[inline]
@@ -410,21 +430,18 @@ impl Tok {
         self.0 & CS_BIT != 0
     }
 
-    /// Whether this is a frozen or internal control sequence: a range
-    /// test on its number ([`FROZEN_MAX`]), no entry lookup.
+    /// Whether this is a frozen or internal control sequence
+    /// (`\u{10FFFE}…`): its [`INTERNAL_BIT`], no entry lookup.
     #[inline]
     pub(crate) fn is_frozen_cs(self) -> bool {
-        self.0 & CS_BIT != 0 && self.0 & !CS_BIT < FROZEN_MAX
+        self.0 & (CS_BIT | INTERNAL_BIT) == CS_BIT | INTERNAL_BIT
     }
 
     /// Whether this is a control sequence with an internal name
-    /// (`\u{10FFFE}…`): its number below [`FROZEN_MAX`], the name read
-    /// only where internal names were numbered past it.
+    /// (`\u{10FFFE}…`): [`Tok::is_frozen_cs`].
     #[inline]
     pub(crate) fn is_internal_cs(self) -> bool {
         self.is_frozen_cs()
-            || (INTERNAL_PAST_FROZEN.load(std::sync::atomic::Ordering::Relaxed)
-                && self.as_cs().is_some_and(|n| n.starts_with('\u{10FFFE}')))
     }
 
     /// The category of a character token.

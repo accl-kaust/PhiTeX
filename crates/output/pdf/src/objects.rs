@@ -39,6 +39,9 @@ pub(crate) struct XForm {
     pub width: Scaled,
     pub height: Scaled,
     pub depth: Scaled,
+    /// The codes it shows where it is drawn, once written
+    /// ([`PdfState::ship_form_box`]).
+    pub codes: Option<usize>,
 }
 
 impl PdfState {
@@ -527,6 +530,7 @@ impl PdfState {
                 boxed: Some(Arc::new(b)),
                 attr,
                 resources,
+                codes: None,
             },
         );
         k
@@ -559,6 +563,6 @@ impl PdfState {
             .get_mut(&n)
             .and_then(|x| x.boxed.take())
             .ok_or_else(|| pdf_error("ext1", "\\pdfxform cannot be used with a void box"))?;
-        self.ship(&b, false, fonts, whatsits)
+        self.ship_form_box(n, &b, fonts, whatsits)
     }
 }

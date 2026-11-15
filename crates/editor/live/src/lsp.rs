@@ -44,7 +44,7 @@
 //! - **End.** `shutdown` answered; `exit` ends ([`Server::handle`]'s
 //!   false).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -119,6 +119,24 @@ pub trait LspHost: Send + Sync {
 
     /// `phitex/status`'s engine: `native` or `wasm`.
     fn engine(&self) -> &'static str;
+
+    /// A request of the host's own (`phitex/session/*`, `phitex/notes/*`,
+    /// `phitex/changes/*`: docs/spec-editor-protocol.md §9), `params` its
+    /// parameters: its result, or its error (code, message, data); none:
+    /// no such method here. Called on the client's own thread, which it
+    /// may hold (a `wait`).
+    fn request(&self, _method: &str, _params: &Value) -> Option<Result<Value, RequestError>> {
+        None
+    }
+}
+
+/// A host request's error ([`LspHost::request`]): JSON-RPC's code, its
+/// message and data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequestError {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Value>,
 }
 
 /// The byte of `text` at LSP position `p` (`{line, character}`, UTF-16
@@ -387,8 +405,9 @@ struct State {
     /// The client attached to a watch another program started (its
     /// terminal's): `experimental.phitex.attached` in the answer.
     attached: bool,
-    /// The URIs of the last diagnostics published, not empty.
-    published: HashSet<String>,
+    /// The last diagnostics published, by URI, not empty: a file's sent
+    /// again only when they changed.
+    published: HashMap<String, Value>,
     run: Option<Run>,
     builds: u64,
     last: Facts,
@@ -966,20 +985,32 @@ impl Server {
                 .or_default()
                 .push(lsp_diagnostic(d));
         }
-        let gone: Vec<String> = {
+        // (each file's sent where they are not the ones it was sent last:
+        // a build that changed none, `r` with nothing changed, sends none;
+        // one whose file has none now sends its empty list once)
+        let main_uri = self.uri(&main);
+        let send: Vec<(String, Value)> = {
             let mut st = lock(&self.st);
-            let g = st.published.drain().collect();
-            for (uri, ds) in &by {
-                if !ds.is_empty() {
-                    st.published.insert(uri.clone());
+            let mut last = std::mem::take(&mut st.published);
+            let mut send = Vec::new();
+            for (uri, ds) in by {
+                let keep = !ds.is_empty() || uri == main_uri;
+                let ds = Value::Array(ds);
+                let was = last.remove(&uri);
+                if was.as_ref() != Some(&ds) && (keep || was.is_some()) {
+                    send.push((uri.clone(), ds.clone()));
+                }
+                if keep {
+                    st.published.insert(uri, ds);
                 }
             }
-            g
+            // (a file that had some and has none now)
+            for (uri, _) in last {
+                send.push((uri, Value::Array(Vec::new())));
+            }
+            send
         };
-        for g in gone {
-            by.entry(g).or_default();
-        }
-        for (uri, ds) in by {
+        for (uri, ds) in send {
             self.notify(
                 "textDocument/publishDiagnostics",
                 json!({"uri": uri, "diagnostics": ds}),
@@ -1264,10 +1295,42 @@ impl Server {
             }
             _ => {
                 if let Some(id) = id {
-                    self.fail(id, -32601, &format!("no method {method:?} here"));
+                    match self.host.request(method, p) {
+                        Some(Ok(v)) => self.reply(id, v),
+                        Some(Err(e)) => {
+                            let mut err = json!({"code": e.code, "message": e.message});
+                            if let Some(d) = e.data {
+                                err["data"] = d;
+                            }
+                            self.send(&json!({"jsonrpc": "2.0", "id": id, "error": err}));
+                        }
+                        None => self.fail(id, -32601, &format!("no method {method:?} here")),
+                    }
                 }
             }
         }
+        true
+    }
+
+    /// The client's buffer of `file` (from the root) replaced by `text`
+    /// (`workspace/applyEdit`, the whole buffer: a change made for the
+    /// user, a rejected hunk written back): whether the client has the
+    /// file open (else nothing is sent).
+    pub fn replace_text(&self, file: &str, text: &str) -> bool {
+        let lines = {
+            let st = lock(&self.st);
+            let Some(d) = st.docs.get(file) else {
+                return false;
+            };
+            // (the end: past the last line, as the buffer has it)
+            d.split('\n').count()
+        };
+        self.request(
+            "workspace/applyEdit",
+            json!({"label": "PhiTeX", "edit": {"changes": {self.uri(file): [
+                {"range": {"start": {"line": 0, "character": 0}, "end": {"line": lines, "character": 0}}, "newText": text}
+            ]}}}),
+        );
         true
     }
 

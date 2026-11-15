@@ -507,6 +507,9 @@ struct Absorb<'a> {
     /// The lines before each node's text as the environment has them
     /// ([`dlines_of`]), moved with each text applied.
     dlines: &'a mut FxHashMap<u64, i64>,
+    /// A format's text's chunks as the environment has them
+    /// ([`Graph::ini`]), cut again with each text applied.
+    ini: &'a mut crate::chunks::Chunks,
 }
 
 impl phitex_defuse::EditSource for Absorb<'_> {
@@ -627,6 +630,33 @@ impl phitex_defuse::EditSource for Absorb<'_> {
             self.loads,
         );
         self.applied += n;
+        // (a format's text: its chunks cut again where it changed, the
+        // fields of those that changed or moved pushed; the node's
+        // arguments name its first chunk only)
+        let mut moved = false;
+        if self.incr.is_none() {
+            let (old, new) = (as_file(&old_text), as_file(self.text));
+            let cs = crate::chunks::rechunk(self.ini, &old, &new);
+            if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
+                assert!(
+                    cs.cs
+                        .iter()
+                        .map(|c| (c.start, c.end, c.h))
+                        .eq(crate::chunks::chunks_of(&new)
+                            .cs
+                            .iter()
+                            .map(|c| (c.start, c.end, c.h))),
+                    "the chunks cut again differ from the text's"
+                );
+            }
+            let changes = crate::chunks::changes(eng.values(), self.ini, &cs, &new);
+            *self.ini = cs;
+            crate::timeline::lap("engine: the format's chunks cut again");
+            if !changes.is_empty() {
+                eng.update_environment(&changes);
+                moved = true;
+            }
+        }
         // (the lines before each node's text, where the text moved them:
         // a run that reads a line of one reads them, `dline:<node>`)
         if self.incr.is_some() {
@@ -648,7 +678,7 @@ impl phitex_defuse::EditSource for Absorb<'_> {
                 eng.update_environment(&changes);
             }
         }
-        if n > 0 {
+        if n > 0 || moved {
             self.unchanged = None;
             Some(version)
         } else {
@@ -687,10 +717,12 @@ fn edit_apply_note(t_all: std::time::Instant, t: [std::time::Duration; 3], n: [u
 /// Whether node `old` (cut from `texts.0`) is slice `new` of `texts.1`:
 /// the same key, and the same text (the key is its hash).
 fn slice_same(old: &(u64, NodeId, Src), new: &(u64, DocNode), texts: (&str, &str)) -> bool {
-    old.0 == new.0 && {
-        let DocNode::Doc(s, e) = new.1;
-        old.2.text(texts.0) == texts.1.get(s..e).unwrap_or("")
-    }
+    old.0 == new.0
+        && match new.1 {
+            DocNode::Doc(s, e) => old.2.text(texts.0) == texts.1.get(s..e).unwrap_or(""),
+            // (a format's text: its first chunk, which its arguments name)
+            DocNode::Ini(_) => !texts.0.is_empty(),
+        }
 }
 
 fn common_ends(
@@ -728,8 +760,7 @@ fn slice_keys(
             }
             doc_nodes(text, inc)
         }
-        None if text.is_empty() => Vec::new(),
-        None => vec![(key(text, true), DocNode::Doc(0, text.len()))],
+        None => ini_node(text).into_iter().collect(),
     }
 }
 
@@ -894,8 +925,14 @@ fn apply_slices(
     let old = &*nodes_now;
     let same = |i: usize, j: usize| slice_same(&old[i], &new[j], texts);
     if old.len() == new.len() && (0..old.len()).all(|i| same(i, i)) {
+        // (a format's text's node: the same node, its text the text now,
+        // which an edit made longer or shorter)
+        let prefix = old.len();
+        if let ([(_, _, src)], [(_, n @ DocNode::Ini(_))]) = (nodes_now.as_mut_slice(), new) {
+            *src = Src::of(n);
+        }
         return Some(Applied {
-            prefix: old.len(),
+            prefix,
             ..Applied::default()
         });
     }
@@ -1937,6 +1974,10 @@ pub struct Stats {
     /// Runs that ended at their text's end with a continuation
     /// (`crate::cut`).
     pub text_cuts: u64,
+    /// Pictures whose body a run read inline though they were found
+    /// (`crate::pic`): a child's refusal, a picture after a refused one.
+    /// With [`Stats::runs_by_op`]'s `pic` runs, the pictures' runs.
+    pub pics_inline: u64,
     /// Runs of the text's pieces begun after a run claimed the rest of
     /// the input at a fatal error (none: the job ends there, §93).
     pub starts_after_fatal: u64,
@@ -2055,9 +2096,6 @@ pub struct Stats {
     pub refuted_by_field: Vec<(String, u64)>,
     /// The refuted predictions by field, with counts, most first.
     pub predictions_refuted_by_field: Vec<(String, u64)>,
-    /// The relations the live nodes' last runs filed, by operation and
-    /// field, counted ([`crate::run::NodeAudit`]).
-    pub relations: Vec<(&'static str, String, u64)>,
     /// The readers re-asked by field, by the reader's operation: `(op,
     /// field, count)` over the build ([`Stats::refuted_by_op`]).
     pub refuted_by_op_field: Vec<(&'static str, String, u64)>,
@@ -2668,17 +2706,6 @@ impl Stats {
         if op == "pages" { self.units_folded } else { 0 }
     }
 
-    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
-    /// operation `op` filed at their last runs (tests/state.rs).
-    #[must_use]
-    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
-        self.relations
-            .iter()
-            .filter(|r| r.0 == op && r.1 == field)
-            .map(|r| r.2)
-            .sum()
-    }
-
     /// The readers of operation `op` re-asked through field `name`, or a
     /// field of its family (`name:…`), over the build.
     #[must_use]
@@ -2968,6 +2995,15 @@ struct Graph {
     /// ([`Graph::push_env`], spec-final §4.5).
     env_pushed: Vec<(Field, ValueId)>,
     absent_pushed: Vec<Field>,
+    /// The comments `env_pushed` holds, by id ([`Marks::ids`]): a change
+    /// of the comments alone pushed as theirs ([`Graph::push_marks`]).
+    marks_pushed: FxHashMap<u64, Arc<str>>,
+    /// A format's text's chunks as [`Graph::push_text`] pushed them
+    /// (the build keeps them, [`Build::ini`]).
+    ini: crate::chunks::Chunks,
+    /// The PDF line (`crate::pdfout::XPAGES`) the last evaluation's
+    /// pruning kept the commands and pages of.
+    xpages_pruned: Option<ValueId>,
     pub(crate) env_calls: u64,
     /// The job's bindings (the format's state, the job's names and
     /// dates: [`job_env`]), pushed with the environment.
@@ -3090,7 +3126,7 @@ impl DocFile {
             let a = a.get_or_insert_with(|| {
                 node_args(v, &self.text, Some(&self.incr), n, loads, Some(name))
             });
-            let DocNode::Doc(s, _) = *n;
+            let s = n.start();
             now.entry(a[0].raw())
                 .and_modify(|k| *k = None)
                 .or_insert(Some(lines_before(&starts, len, s)));
@@ -3358,6 +3394,7 @@ impl Graph {
             stream: stream_on.clone(),
             watch: watch.clone(),
             xe: xe.clone(),
+            start: Arc::default(),
         }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
@@ -3398,6 +3435,7 @@ impl Graph {
             rec_ran: Arc::default(),
             pkg_loads: Arc::new(std::sync::RwLock::new(None)),
             docs: Arc::default(),
+            syms: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
             fin_defs_start: Arc::default(),
@@ -3410,6 +3448,7 @@ impl Graph {
             stream_objs,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pic_inline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
             spec_window: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             give_back_guesses: Arc::new([const { std::sync::atomic::AtomicU64::new(0) }; 2]),
@@ -3450,6 +3489,9 @@ impl Graph {
             link,
             env_pushed: Vec::new(),
             absent_pushed: Vec::new(),
+            marks_pushed: FxHashMap::default(),
+            ini: crate::chunks::Chunks::default(),
+            xpages_pruned: None,
             env_calls: 0,
             job: Vec::new(),
             files_op,
@@ -3900,12 +3942,60 @@ impl Graph {
             self.env_calls += 1;
             self.env_pushed = env;
         }
+        self.marks_pushed = self.marks.ids();
         if absent != self.absent_pushed {
             let gone: Vec<(Field, Option<ValueId>)> = absent.iter().map(|&f| (f, None)).collect();
             self.eng.update_environment(&gone);
             self.env_calls += 1;
             self.absent_pushed = absent;
         }
+    }
+
+    /// The comments' entries pushed where they changed since the last
+    /// push ([`Graph::marks_pushed`]), the rest of the environment as it
+    /// is: an edit that changed the comments or moved their lines (and
+    /// nothing the provider gives) neither makes nor compares the whole
+    /// environment again. False where none was pushed yet.
+    fn push_marks(&mut self) -> bool {
+        if self.env_pushed.is_empty() {
+            return false;
+        }
+        let new = self.marks.ids();
+        let v = self.eng.values();
+        let field = |id: u64| v.field(&format!("{DOC_MARKS}{id:016x}"));
+        let mut cs: Vec<(Field, Option<ValueId>)> = new
+            .iter()
+            .filter(|(id, t)| self.marks_pushed.get(id) != Some(t))
+            .map(|(&id, t)| (field(id), Some(v.str(t))))
+            .collect();
+        cs.extend(
+            self.marks_pushed
+                .keys()
+                .filter(|id| !new.contains_key(id))
+                .map(|&id| (field(id), None)),
+        );
+        crate::timeline::lap("env: the comments' changes");
+        if !cs.is_empty() {
+            self.eng.update_environment(&cs);
+            self.env_calls += 1;
+            for &(f, x) in &cs {
+                match (
+                    self.env_pushed
+                        .binary_search_by_key(&f.0.raw(), |e| e.0.0.raw()),
+                    x,
+                ) {
+                    (Ok(i), Some(x)) => self.env_pushed[i].1 = x,
+                    (Ok(i), None) => {
+                        self.env_pushed.remove(i);
+                    }
+                    (Err(i), Some(x)) => self.env_pushed.insert(i, (f, x)),
+                    (Err(_), None) => {}
+                }
+            }
+        }
+        self.marks_pushed = new;
+        crate::timeline::lap("env: the comments' entries pushed");
+        true
     }
 
     /// The commands' results of the last evaluation ([`crate::shell::OUTS`],
@@ -4084,7 +4174,7 @@ impl Graph {
             self.provide(finder);
             t_prov += tp.elapsed();
             // (the comments of a text applied before this evaluation)
-            if self.marks.dirty() {
+            if self.marks.dirty() && !self.push_marks() {
                 let env = self.environment(fixpoint);
                 env_trace(&self.eng, &env);
                 self.push_env(env);
@@ -4115,6 +4205,7 @@ impl Graph {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = held;
             }
+            crate::timeline::lap("engine: the finishers' table, the roots held");
             let t0 = std::time::Instant::now();
             // (every evaluation on the pool: it starts no thread for a
             // few nodes (`sched`: workers start when a deque holds more
@@ -4157,25 +4248,37 @@ impl Graph {
                 done.store(true, std::sync::atomic::Ordering::Relaxed);
                 r
             });
+            crate::timeline::lap("engine: the evaluation proper");
             {
                 // (the PDF commands no record names any more: dropped now,
                 // with no run in work)
                 let v = self.eng.values();
-                if let Some(line) = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES)) {
+                // (the line the last pruning kept: the same value, the
+                // same records named, nothing to drop that it did not)
+                let now = self.eng.acc_value(unit, v.field(crate::pdfout::XPAGES));
+                if let Some(line) = now.filter(|_| now != self.xpages_pruned) {
+                    self.xpages_pruned = now;
                     let line: Vec<ValueId> = crate::val::CatMemo::default().walk(v, line, Some);
                     crate::pdfout::prune_cmds(v, &line, &self.ops.pdf_cmds);
                     crate::pdfout::prune_pieces(v, &line);
                 }
+                crate::timeline::lap("engine: the PDF commands pruned");
                 // (the hints of nodes gone, by their arguments: a
-                // continuation run again is another node's arguments)
-                let live: phitex_defuse::FxHashSet<u64> = self
-                    .eng
-                    .order(unit)
-                    .into_iter()
-                    .filter_map(|n| self.eng.node_info(n))
-                    .map(|i| crate::hints::args_key(&i.args))
-                    .collect();
-                crate::hints::prune(&self.ops.hints, &live);
+                // continuation run again is another node's arguments;
+                // once they are as many as the live nodes, so that an
+                // edit's few go with the next pruning, not with a pass
+                // over every node, `hints::hint_count`)
+                if crate::hints::hint_count(&self.ops.hints) > 2 * self.eng.live_nodes() + 64 {
+                    let live: phitex_defuse::FxHashSet<u64> = self
+                        .eng
+                        .order(unit)
+                        .into_iter()
+                        .filter_map(|n| self.eng.node_info(n))
+                        .map(|i| crate::hints::args_key(&i.args))
+                        .collect();
+                    crate::hints::prune(&self.ops.hints, &live);
+                }
+                crate::timeline::lap("engine: the hints pruned");
             }
             if let (Ok(r), Some(path)) = (&res, crate::exec::env_str!("PHITEX_CHAIN_TSV")) {
                 dump_chain(&self.eng, r, path);
@@ -4345,6 +4448,10 @@ impl Graph {
             stats.text_cuts += self
                 .ops
                 .text_cuts
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
+            stats.pics_inline += self
+                .ops
+                .pic_inline
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
             // (the evaluation's: the next one's fatal run, if any, sets it
             // again)
@@ -4578,6 +4685,13 @@ impl Graph {
             None,
         );
         let incr = incr.as_deref();
+        // (a format's text: its chunks, which its node reads, in the
+        // environment)
+        if incr.is_none() {
+            self.ini = crate::chunks::chunks_of(text);
+            let env = crate::chunks::fields(self.eng.values(), &self.ini, text);
+            self.eng.set_environment(env);
+        }
         let t1 = t0.elapsed();
         crate::timeline::lap("push: the nodes' slices and keys");
         // (the nodes' arguments made on the pool: values are named by
@@ -4817,9 +4931,29 @@ fn register_doc(reg: &crate::hints::Registry, v: &Values, inc: &Incr) {
     }
 }
 
-/// A document node's text: a slice of the document (its bytes).
+/// A document node's text: a slice of the document (its bytes); or a
+/// format's whole text (its length), read from its chunks
+/// (`crate::chunks`).
 enum DocNode {
     Doc(usize, usize),
+    Ini(usize),
+}
+
+impl DocNode {
+    /// Its text's first byte.
+    fn start(&self) -> usize {
+        match *self {
+            DocNode::Doc(s, _) => s,
+            DocNode::Ini(_) => 0,
+        }
+    }
+}
+
+/// A format's text as its node (`crate::chunks`): its arguments name its
+/// first line, whatever the text, which the run reads from the chunks'
+/// fields (`crate::chunks::fields`); none for an empty text.
+fn ini_node(text: &str) -> Option<(u64, DocNode)> {
+    (!text.is_empty()).then(|| (key("", true), DocNode::Ini(text.len())))
 }
 
 /// The document's slices and their keys as [`doc_nodes`] made them
@@ -4962,6 +5096,15 @@ fn node_args(
             a.push(v.str(FORMAT_HINT));
             a
         }
+        // (a format's text: its first chunk named, from its first line;
+        // the run reads the chunks' fields, `crate::chunks`)
+        (&DocNode::Ini(_), _) => {
+            vec![
+                v.list(vec![crate::chunks::frame(v, crate::chunks::FIRST, 0)]),
+                v.int(1),
+                v.str(FORMAT_HINT),
+            ]
+        }
     }
 }
 
@@ -4974,8 +5117,9 @@ enum Src {
 
 impl Src {
     fn of(n: &DocNode) -> Src {
-        match n {
-            &DocNode::Doc(s, e) => Src::Doc(s, e),
+        match *n {
+            DocNode::Doc(s, e) => Src::Doc(s, e),
+            DocNode::Ini(n) => Src::Doc(0, n),
         }
     }
 
@@ -5003,7 +5147,7 @@ pub(crate) const DOC_MARKS: &str = "doc:mark:";
 /// the text is a NUL and the comment's id ([`mark_id`], 16 hex digits),
 /// so a run reads its comment by the id in its own line, not by where
 /// the line is in the file.
-pub(crate) type CommentMark = (u32, u64, String);
+pub(crate) type CommentMark = (u32, u64, Arc<str>);
 
 /// The hash of a comment line's text before its `%`.
 fn prefix_hash(prefix: &str) -> u64 {
@@ -5031,7 +5175,7 @@ fn collisions<'a>(
     let mut out = phitex_defuse::FxHashSet::default();
     for (_, h, c) in marks {
         match first.get(h) {
-            Some(&c0) if c0 != c.as_str() => {
+            Some(&c0) if c0 != &**c => {
                 out.insert(*h);
             }
             Some(_) => {}
@@ -5116,6 +5260,17 @@ impl Marks {
             .collect()
     }
 
+    /// Each comment's id and text ([`Marks::entries`] without a field
+    /// or a value made); the environment holds them from here.
+    fn ids(&self) -> FxHashMap<u64, Arc<str>> {
+        let mut m = self.0.locked();
+        m.1 = false;
+        let collide = collisions(&m.0);
+        m.0.iter()
+            .map(|(_, h, c)| (mark_id(*h, c, collide.contains(h)), c.clone()))
+            .collect()
+    }
+
     /// Whether marks changed since the environment was set.
     fn dirty(&self) -> bool {
         self.0.locked().1
@@ -5153,7 +5308,7 @@ fn ids_hold(marks: &[CommentMark]) -> bool {
     let mut by: FxHashMap<u64, &str> = FxHashMap::default();
     marks
         .iter()
-        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == c.as_str())
+        .all(|(_, h, c)| *by.entry(mark_id(*h, c, collide.contains(h))).or_insert(c) == &**c)
 }
 
 /// Whether `text` has what [`canonical_text`] cannot stand for (a NUL,
@@ -5263,6 +5418,20 @@ fn culprit(
         {
             return Some((ls + s, ls + e));
         }
+        // (on a line read before it: a command that looked ahead for a
+        // trailing optional argument, fontspec's
+        // `\newfontfamily\x{IPAexMincho}`, fails with TeX reading the
+        // next line; the argument is the last one read that holds the
+        // key. Only a LaTeX3 message's key, in double quotes: xparse's
+        // commands read trailing optional arguments; LaTeX2e's (`\ref`,
+        // `\cite`, `\input`, keys in `` `x' ``) end at their argument,
+        // so their key on an earlier line is another command's)
+        let read = &text[from.min(ls)..ls];
+        if latex3_quoted(message) == Some(key)
+            && let Some((s, e)) = key_argument(read, key)
+        {
+            return Some((from.min(ls) + s, from.min(ls) + e));
+        }
     }
     if let Some(cs) = named_cs(message)
         && let Some(k) = last_cs_token(&text[from..b], &cs)
@@ -5279,12 +5448,44 @@ fn culprit(
     None
 }
 
-/// The first text `m` quotes TeX's way (`` `x' ``).
-fn quoted(m: &str) -> Option<&str> {
-    let i = m.find('`')?;
+/// Whether `message` is an error of a font not found: fontspec's (`The
+/// font "X" cannot be found`), TeX's (`Font \\x="X" not loadable:
+/// Metric (TFM) file or installed font not found`), NFSS's (`Font
+/// TU/x/m/n/10 not found`).
+fn font_not_found(message: &str) -> bool {
+    (message.contains("font \"") && message.contains("cannot be found"))
+        || message.contains("installed font not found")
+        || (message.contains("LaTeX Error: Font ") && message.ends_with("not found."))
+}
+
+/// The text `m` quotes in double quotes, `LaTeX3`'s way, where it has
+/// no key quoted TeX's way before it ([`quoted`]'s second choice).
+fn latex3_quoted(m: &str) -> Option<&str> {
+    if m.contains('`') && m.find('`') < m.find('"') {
+        return None;
+    }
+    let i = m.find('"')?;
     let r = &m[i + 1..];
-    let k = &r[..r.find('\'')?];
-    (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+    let k = &r[..r.find('"')?];
+    (!k.is_empty() && !k.contains('\n')).then_some(k)
+}
+
+/// The first text `m` quotes TeX's way (`` `x' ``), else in double
+/// quotes (`LaTeX3`'s messages, fontspec's `The font "x" cannot be found`).
+fn quoted(m: &str) -> Option<&str> {
+    let tex = || {
+        let i = m.find('`')?;
+        let r = &m[i + 1..];
+        let k = &r[..r.find('\'')?];
+        (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+    };
+    let double = || {
+        let i = m.find('"')?;
+        let r = &m[i + 1..];
+        let k = &r[..r.find('"')?];
+        (!k.is_empty() && !k.contains('\n')).then_some(k)
+    };
+    tex().or_else(double)
 }
 
 /// Bytes of `before` of the command whose argument holds `key` (`{key}`,
@@ -5526,8 +5727,9 @@ mod culprit_tests {
 /// canonical form is its own; the marks after them renumbered). The new
 /// marks, and the range of `canon` replaced, `(start, old end, new end)`;
 /// `None` (`canon` untouched) where a comment's line made again or gone
-/// has the text before its `%` of another one's, whose id may change
-/// with it ([`mark_id`]): the whole text is made again.
+/// has the text before its `%` of a line kept, and that text now names
+/// one comment where it named more, or more where it named one: the
+/// kept line's id changes ([`mark_id`]), the whole text is made again.
 fn canonical_splice(
     old: &str,
     canon: &mut String,
@@ -5641,26 +5843,9 @@ fn canonical_lines_splice(
     for m in &mut mid {
         m.0 = m.0.saturating_add(lift);
     }
-    // (the marks of the lines kept, and of those made again or gone: a
-    // line text before a `%` they share takes the whole text again)
+    // (the marks of the lines kept, and of those made again or gone)
     let lo = u32::try_from(first).unwrap_or(u32::MAX);
     let hi = u32::try_from(first + old_lines).unwrap_or(u32::MAX);
-    let kept: phitex_defuse::FxHashSet<u64> = marks
-        .iter()
-        .filter(|m| m.0 <= lo || m.0 > hi)
-        .map(|m| m.1)
-        .collect();
-    if marks
-        .iter()
-        .filter(|m| m.0 > lo && m.0 <= hi)
-        .chain(&mid)
-        .any(|m| kept.contains(&m.1))
-    {
-        return None;
-    }
-    fill_ids(&mut out, &at, &mid, &collisions(&mid));
-    canon.replace_range(cs..ce, &out);
-    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     // (the marks: before the lines, theirs made again, after them moved)
     let new_lines = newlines(&n[ls..le]);
     let shift = |l: u32| -> u32 {
@@ -5669,16 +5854,45 @@ fn canonical_lines_splice(
         u32::try_from(l).unwrap_or(u32::MAX)
     };
     let mut ms: Vec<CommentMark> = marks.iter().filter(|m| m.0 <= lo).cloned().collect();
-    ms.extend(mid);
+    ms.extend(mid.iter().cloned());
     ms.extend(
         marks
             .iter()
             .filter(|m| m.0 > hi && le_old < o.len())
             .map(|(l, h, c)| (shift(*l), *h, c.clone())),
     );
+    // (a line kept whose text before its `%` is that of a comment made
+    // again or gone keeps its id while that text names more than one
+    // comment before and after, or one alone both times ([`mark_id`]);
+    // where that changed, the whole text again)
+    let kept: phitex_defuse::FxHashSet<u64> = marks
+        .iter()
+        .filter(|m| m.0 <= lo || m.0 > hi)
+        .map(|m| m.1)
+        .collect();
+    let shared: Vec<u64> = marks
+        .iter()
+        .filter(|m| m.0 > lo && m.0 <= hi)
+        .chain(&mid)
+        .map(|m| m.1)
+        .filter(|h| kept.contains(h))
+        .collect();
+    let collide = collisions(&ms);
+    if !shared.is_empty() {
+        let before = collisions(marks);
+        if shared
+            .iter()
+            .any(|h| before.contains(h) != collide.contains(h))
+        {
+            return None;
+        }
+    }
     if !ids_hold(&ms) {
         return None;
     }
+    fill_ids(&mut out, &at, &mid, &collide);
+    canon.replace_range(cs..ce, &out);
+    crate::timeline::note("canonical: spliced in place", t0.elapsed());
     Some((ms, (cs, ce, cs + out.len())))
 }
 
@@ -5763,7 +5977,7 @@ fn canonical_line(
             marks.push((
                 u32::try_from(n + 1).unwrap_or(u32::MAX),
                 prefix_hash(&body[..k]),
-                c.to_owned(),
+                Arc::from(c),
             ));
         }
         // (TeX reads the line without its blanks at the end: a trailing
@@ -6167,11 +6381,71 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> (Arc<Cached>, Option<Fo
 /// `\\input`s carry their files' names).
 pub const PRELUDE_NAME: &str = "(format)";
 
+/// Where in `text` (a file's text as a `Build` holds it: one character a
+/// byte of the file) the units `units` of a line TeX read from byte
+/// `from` end: as many of its characters as the units were read from
+/// ([`crate::xetex::source_width`]: XeTeX's units are the bytes decoded,
+/// `xe`). A diagnostic's column counts units; past a byte above 127 on
+/// its line, XeTeX's count is short of the file's, and the place it gave
+/// was early on the line or inside a character (the whole document's
+/// first line then).
+fn column_in(text: &str, from: usize, units: &[u32], xe: bool) -> usize {
+    let mut from = from.min(text.len());
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let rest = &text[from..];
+    let src: Vec<u32> = rest
+        .chars()
+        .take(4 * units.len() + 3)
+        .map(u32::from)
+        .collect();
+    let n = crate::xetex::source_width(&src, units, xe);
+    from + rest.chars().take(n).map(char::len_utf8).sum::<usize>()
+}
+
+/// The length (bytes) of the control sequence `t` begins with (`\\`
+/// and a name of letters, or one character).
+fn cs_len(t: &str) -> usize {
+    let name = t
+        .get(1..)
+        .map_or(0, |r| r.bytes().take_while(u8::is_ascii_alphabetic).count());
+    if name > 0 {
+        1 + name
+    } else {
+        t.chars().take(2).map(char::len_utf8).sum()
+    }
+}
+
+/// Bytes as a `Build`'s text holds them: one character a byte.
+fn tex_chars(b: &[u8]) -> String {
+    b.iter().map(|&c| char::from(c)).collect()
+}
+
+/// Part of a line of a `Build`'s text as TeX's context shows it: its
+/// bytes (one character each) read as UTF-8 where they are, so a
+/// context shows the line's characters, not one character a byte.
+fn shown(t: &str) -> std::borrow::Cow<'_, str> {
+    if t.is_ascii() || t.chars().any(|c| u32::from(c) > 0xFF) {
+        return t.into();
+    }
+    let b: Vec<u8> = t
+        .chars()
+        .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+        .collect();
+    match String::from_utf8(b) {
+        Ok(s) => s.into(),
+        Err(_) => t.into(),
+    }
+}
+
 /// TeX's errors in the prelude (`text`, its own text) at their places:
 /// the file and line, TeX's context (§318), as [`Build::diagnostics`]
 /// places a document's.
+#[allow(clippy::too_many_lines)]
 fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> Vec<Diagnostic> {
     let v = g.eng.values();
+    let xe = g.ops.xe.get().is_some();
     let entries = g
         .eng
         .acc_value(unit, v.field("diags"))
@@ -6187,14 +6461,48 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
         }
         let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
         let loc = usize::try_from(int(6)).unwrap_or(0);
+        // (the column a count of the line's units: as many of its
+        // characters as they were read from, [`column_in`])
+        let units: Vec<u32> = xs
+            .get(5)
+            .map(|&x| str_of(v, x))
+            .unwrap_or_default()
+            .chars()
+            .take(loc)
+            .map(u32::from)
+            .collect();
+        let width = |t: &str, b: usize| {
+            let e = column_in(t, b, &units, xe);
+            t.get(b.min(e)..e).map_or(loc, |r| r.chars().count())
+        };
         let name = xs
             .get(2)
             .filter(|&&n| n != ValueId::UNIT)
             .map(|&n| str_of(v, n));
         // (the file's characters are its bytes; the prelude's own text
         // is its characters)
+        // (a line of the prelude's text read from its chunks: its byte by
+        // its chunk and line in it, `crate::chunks`)
+        let chunked = name
+            .as_deref()
+            .filter(|&n| n == crate::chunks::PLACE)
+            .and_then(|_| {
+                crate::chunks::line_start(
+                    &g.ini,
+                    text,
+                    u64::from_ne_bytes(int(7).to_ne_bytes()),
+                    u32::try_from(int(3)).unwrap_or(u32::MAX),
+                )
+            });
         let (file, chars, at): (String, Vec<char>, usize) = match name {
-            Some(n) if n != DOC_NAME && int(3) >= 0 => {
+            _ if let Some(b) = chunked => {
+                let at = text
+                    .get(..b.min(text.len()))
+                    .map_or(0, |t| t.chars().count())
+                    + width(text, b);
+                (PRELUDE_NAME.to_owned(), text.chars().collect(), at)
+            }
+            Some(n) if n != DOC_NAME && n != crate::chunks::PLACE && int(3) >= 0 => {
                 let bytes = finder(n.trim_start_matches("./"))
                     .map(|(_, b)| b)
                     .unwrap_or_default();
@@ -6203,7 +6511,7 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                 // its characters before it counted)
                 let t = latin1(&bytes);
                 let b = usize::try_from(int(3)).unwrap_or(0);
-                let at = t.get(..b.min(t.len())).map_or(0, |h| h.chars().count()) + loc;
+                let at = t.get(..b.min(t.len())).map_or(0, |h| h.chars().count()) + width(&t, b);
                 (n, t.chars().collect(), at)
             }
             _ => {
@@ -6212,7 +6520,7 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                     let b = usize::try_from(int(3)).unwrap_or(0);
                     text.get(..b.min(text.len()))
                         .map_or(0, |t| t.chars().count())
-                        + loc
+                        + width(text, b)
                 } else {
                     0
                 };
@@ -6235,12 +6543,26 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
             .collect::<String>()
             .trim_end_matches('\r')
             .to_owned();
-        let start = if message == "Undefined control sequence" {
-            before
+        // (the culprit: an undefined name the one just read; else the
+        // command whose argument holds the key the message names, on
+        // this line or one read before it, [`culprit`])
+        let (start, end) = if message == "Undefined control sequence" {
+            let s = before
                 .rfind('\\')
-                .map_or(ci, |k| ls + before[..k].chars().count())
+                .map_or(ci, |k| ls + before[..k].chars().count());
+            (s, ci)
         } else {
-            ci
+            let t: String = chars[..ci].iter().collect();
+            let at = |k: usize| chars[..k].iter().map(|c| c.len_utf8()).sum::<usize>();
+            culprit(&message, &t, at(ls), t.len(), 0, false).map_or((ci, ci), |(s, e)| {
+                (t[..s].chars().count(), t[..e].chars().count())
+            })
+        };
+        // (the diagnostic's line the culprit's; TeX's in the context)
+        let place_line = if start < ls {
+            chars[..start].iter().filter(|&&c| c == '\n').count() + 1
+        } else {
+            line
         };
         let lead = format!("l.{line} ");
         let context = format!(
@@ -6249,8 +6571,8 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
         );
         out.push(Diagnostic {
             file,
-            range: (start, ci),
-            line,
+            range: (start, end),
+            line: place_line,
             severity: Severity::Error,
             message,
             context,
@@ -6394,6 +6716,9 @@ pub struct Build {
     opts: Options,
     /// The nodes of the text, with their keys.
     nodes: Vec<(u64, NodeId, Src)>,
+    /// A format's text's chunks as the environment has them
+    /// (`crate::chunks`): its node reads its lines from them.
+    ini: crate::chunks::Chunks,
     /// The lines of the text before each node's, as the environment
     /// gives them (`dline:<node>`, [`dlines_of`]).
     dlines: FxHashMap<u64, i64>,
@@ -6450,8 +6775,15 @@ pub struct Build {
     staged: bool,
     /// Whether the build has evaluated (its cold build done).
     evaluated: bool,
-    /// Glyph origins' memos ([`Build::page_origins`]).
-    origins: crate::origins::State,
+    /// Glyph origins' memos ([`Build::page_origins`]), shared with the
+    /// captures of them ([`Build::origins_capture`]).
+    origins: Arc<crate::origins::State>,
+    /// Files staged ([`Build::stage_file`]), for [`Build::origins_key`].
+    stages: u64,
+    /// The text nodes' spans ([`Build::spans_named`]) by the
+    /// [`Build::origins_key`] they were made at.
+    #[allow(clippy::type_complexity)]
+    spans_memo: Mutex<Option<(u64, Arc<[crate::origins::SpanRow]>)>>,
 }
 
 impl Drop for Build {
@@ -6686,11 +7018,13 @@ impl Build {
         }
         crate::timeline::lap("engine: the format's check taken");
         let edits = opts.edits.clone().unwrap_or_default();
+        let ini = std::mem::take(&mut g.ini);
         let mut b = Build {
             g,
             unit,
             opts,
             nodes,
+            ini,
             dlines,
             dvi,
             end,
@@ -6715,7 +7049,9 @@ impl Build {
             loads_ran: false,
             staged: false,
             evaluated: false,
-            origins: crate::origins::State::default(),
+            origins: Arc::default(),
+            stages: 0,
+            spans_memo: Mutex::new(None),
         };
         b.settle();
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -6937,7 +7273,6 @@ impl Build {
             version: last.version.max(v),
             live: last.live,
             threads: last.threads,
-            relations: last.relations,
             ..Stats::default()
         };
         self.loads_ran = false;
@@ -7005,6 +7340,7 @@ impl Build {
             loads: loads.as_deref(),
             applied: 0,
             dlines: &mut self.dlines,
+            ini: &mut self.ini,
         };
         let t_before = t_all.elapsed();
         crate::timeline::lap("engine: the edit's inputs");
@@ -7049,14 +7385,17 @@ impl Build {
         crate::timeline::lap("engine: package load stats");
         self.merge_load_records();
         crate::timeline::lap("engine: package load records merged");
-        stats.relations = self.relations_now();
+        self.audit_live();
+        crate::timeline::lap("engine: the gone nodes' audits dropped");
         self.stats = stats;
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
             self.note_edit_phases(t_all, t_before, t_apply, t_settle);
         }
         self.dump_claims();
         self.dump_readers();
+        crate::timeline::lap("engine: the edit's phases noted");
         self.tell_settled_pages();
+        crate::timeline::lap("engine: the pages settled told");
         // (a debug or observe build stops on a defect of the settled
         // line, not on a run's it does not keep: `Run::order_after_pages`)
         if cfg!(any(debug_assertions, feature = "observe"))
@@ -7137,6 +7476,7 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
+        self.stages += 1;
         // (what the provider answered in the last evaluation joins the
         // supplied files first, as `push_staged` joins it: the file is
         // looked up among all the build holds)
@@ -7295,8 +7635,13 @@ impl Build {
         // a package load whose record lists the file: its key no longer
         // matches, so its hint goes back to the unrecorded one
         // (`crate::pkgrec`)
+        // (keyed only where a node's record lists the file: every node's
+        // text hashed for each file staged was 1.9 ms of each keystroke
+        // in Grail's chapters, no record listing them)
         if let Some(l) = self.g.loads.clone() {
             l.forget(name);
+        }
+        if let Some(l) = self.g.loads.clone().filter(|l| l.node_reads_file(name)) {
             let text = as_file(&self.text);
             let incr = self.doc.then_some(&self.incr);
             let redo: Vec<(NodeId, Vec<ValueId>)> = self
@@ -7309,7 +7654,10 @@ impl Build {
                             self.g.eng.values(),
                             &text,
                             incr,
-                            &DocNode::Doc(s, e),
+                            &match incr {
+                                Some(_) => DocNode::Doc(s, e),
+                                None => ini_node(&text)?.1,
+                            },
                             Some(&l),
                             None,
                         ),
@@ -7627,7 +7975,7 @@ impl Build {
     pub fn node_spans(&self) -> Vec<(u64, Option<Arc<str>>, usize, usize)> {
         self.spans_named()
             .into_iter()
-            .map(|(n, f, s, e, _)| (n, f.map(|f| f.1), s, e))
+            .map(|(n, f, s, e, ..)| (n, f.map(|f| f.1), s, e))
             .collect()
     }
 
@@ -7644,10 +7992,24 @@ impl Build {
             .into_iter()
             .map(|x| u64::from_ne_bytes(int_of(v, x).to_ne_bytes()))
             .collect();
+        let key = self.origins_key();
+        let spans = {
+            let mut m = self.spans_memo.locked();
+            if let Some(x) = m.as_ref().filter(|x| x.0 == key) {
+                x.1.clone()
+            } else {
+                let t0 = std::time::Instant::now();
+                let sp: Arc<[_]> = Arc::from(self.spans_named());
+                crate::timeline::note("origins: the nodes' spans made", t0.elapsed());
+                *m = Some((key, sp.clone()));
+                sp
+            }
+        };
         crate::origins::Input {
+            key,
             inst: v.instance(),
             shown,
-            spans: self.spans_named(),
+            spans,
             doc_name: self.opts.name.trim_start_matches("./").to_owned(),
             doc_text: &self.text,
             doc_raw: if self.canon {
@@ -7655,7 +8017,25 @@ impl Build {
             } else {
                 None
             },
+            glyphs: None,
         }
+    }
+
+    /// Which state of the Build glyph origins are made of
+    /// ([`crate::origins::Input::key`]): its evaluations settled and the
+    /// files staged since, the text's length (the nodes, their texts and
+    /// places change with these alone).
+    fn origins_key(&self) -> u64 {
+        phitex_defuse::hash_words(
+            0x6f6b_6579,
+            &[
+                self.serial,
+                self.settles,
+                self.stages,
+                self.text.len() as u64,
+            ],
+        )
+        .max(1)
     }
 
     /// Glyph origins' memos.
@@ -7663,20 +8043,24 @@ impl Build {
         &self.origins
     }
 
+    /// [`Self::origins_state`], shared ([`Build::origins_capture`]).
+    pub(crate) fn origins_shared(&self) -> Arc<crate::origins::State> {
+        self.origins.clone()
+    }
+
     /// [`Build::node_spans`] with each file's name, and the index of the
     /// document node each node is under (its place in the document).
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn spans_named(
-        &self,
-    ) -> Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> {
-        let mut out: Vec<(u64, Option<(String, Arc<str>)>, usize, usize, usize)> = self
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    pub(crate) fn spans_named(&self) -> Vec<crate::origins::SpanRow> {
+        let mut out: Vec<crate::origins::SpanRow> = self
             .nodes
             .iter()
             .enumerate()
             .map(|(i, (_, n, src))| match src {
-                &Src::Doc(s, e) => (n.raw(), None, s, e, i),
+                &Src::Doc(s, e) => (n.raw(), None, s, e, i, n.raw()),
             })
             .collect();
+        let mut readers: Vec<(NodeId, usize)> = Vec::new();
         // (the nodes a run made of a file's slices, under the document's
         // nodes: each in its file's text, at the slice's place, moved as
         // far as an edit of its file moved the piece it is under,
@@ -7696,55 +8080,184 @@ impl Build {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let mut texts: FxHashMap<String, Option<Arc<str>>> = FxHashMap::default();
+        // (each file's name and text by its name's value, made once)
+        let mut texts: FxHashMap<ValueId, Option<(String, Arc<str>)>> = FxHashMap::default();
+        let s_tag = v.str("s");
         let mut seen: phitex_defuse::FxHashSet<u64> = phitex_defuse::FxHashSet::default();
-        let mut stack: Vec<(NodeId, i64, usize)> = self
+        // (a shift is of one file's places: the file of the piece the
+        // edit moved, its name's value; the nodes under it reading
+        // another file, an `\input` one, are where that file has them)
+        let first_name = |fs: ValueId| {
+            v.with_list(fs, |frames| {
+                frames.iter().find_map(|&f| {
+                    v.with_list(f, |xs| match xs {
+                        &[t, _, _, _, _, name, _] if t == s_tag => Some(name),
+                        _ => None,
+                    })
+                    .flatten()
+                })
+            })
+            .flatten()
+        };
+        let mut stack: Vec<(NodeId, Option<(ValueId, i64)>, usize)> = self
             .nodes
             .iter()
             .enumerate()
-            .map(|(k, (_, n, _))| (*n, 0, k))
+            .map(|(k, (_, n, _))| (*n, None, k))
             .collect();
         while let Some((x, sh, top)) = stack.pop() {
             if !seen.insert(x.raw()) {
                 continue;
             }
+            readers.push((x, top));
             let Some(i) = self.g.eng.node_info(x) else {
                 stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
                 continue;
             };
             let sh = match (shifts.get(&x.raw()), i.args.first()) {
-                (Some(&(fs, d)), Some(&a)) if fs == a => d,
+                (Some(&(fs, d)), Some(&a)) if fs == a => first_name(fs).map(|n| (n, d)),
                 _ => sh,
             };
             stack.extend(self.g.eng.children(x).into_iter().map(|c| (c, sh, top)));
             let Some(&fs) = i.args.first() else { continue };
-            let mut span: Option<(String, usize, usize)> = None;
-            for f in list_of(v, fs) {
-                let xs = list_of(v, f);
-                let Some(&t) = xs.first() else { continue };
-                let (name, s, e) = match (str_of(v, t).as_str(), &xs[..]) {
-                    ("s", &[_, seg, _, _, _, name, pos]) => {
-                        let s = usize::try_from(int_of(v, pos) + sh).unwrap_or(0);
-                        (str_of(v, name), s, s + str_of(v, seg).len() + 1)
+            // (the frames read in place: no string made of a line's text
+            // or a frame's name, a name compared by its value)
+            let mut span: Option<(ValueId, usize, usize)> = None;
+            v.with_list(fs, |frames| {
+                for (k, &f) in frames.iter().enumerate() {
+                    let Some((name, s, e)) = v
+                        .with_list(f, |xs| match xs {
+                            &[t, seg, _, _, _, name, pos] if t == s_tag => {
+                                let d = sh.filter(|&(n, _)| n == name).map_or(0, |x| x.1);
+                                let s = usize::try_from(int_of(v, pos) + d).unwrap_or(0);
+                                Some((name, s, s + v.with_str(seg, str::len).unwrap_or(0) + 1))
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    // (the span is of the first frame's file: one that is
+                    // no file's text, the document's own lines, has none,
+                    // and the rest of its frames are not read)
+                    if k == 0
+                        && texts
+                            .entry(name)
+                            .or_insert_with(|| {
+                                let n = str_of(v, name);
+                                self.g.file_text(&n).map(|t| (n, t))
+                            })
+                            .is_none()
+                    {
+                        break;
                     }
-                    _ => continue,
-                };
-                span = Some(match span {
-                    Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
-                    Some(sp) => sp,
-                    None => (name, s, e),
-                });
-            }
+                    span = Some(match span {
+                        Some((n, a, z)) if n == name => (n, a.min(s), z.max(e)),
+                        Some(sp) => sp,
+                        None => (name, s, e),
+                    });
+                }
+            });
             let Some((name, s, e)) = span else { continue };
             let text = texts
-                .entry(name.clone())
-                .or_insert_with(|| self.g.file_text(&name))
+                .entry(name)
+                .or_insert_with(|| {
+                    let n = str_of(v, name);
+                    self.g.file_text(&n).map(|t| (n, t))
+                })
                 .clone();
-            if let Some(t) = text {
-                out.push((x.raw(), Some((name, t)), s, e, top));
+            if let Some((n, t)) = text {
+                out.push((x.raw(), Some((n, t)), s, e, top, x.raw()));
             }
         }
+        self.spans_read_inline(&mut out, &readers);
         out
+    }
+
+    /// The document files a run read inline ([`Run::load_written`]: an
+    /// `\input` inside a paragraph goes on into the file, and no node
+    /// of its own holds that text): the parts of each that no span holds,
+    /// as spans of the first node that read it (its `fread`), under that
+    /// node's document node. A glyph of such a file has its own file and
+    /// bytes, not the `\input` that read it.
+    fn spans_read_inline(
+        &self,
+        out: &mut Vec<crate::origins::SpanRow>,
+        readers: &[(NodeId, usize)],
+    ) {
+        let v = self.g.eng.values();
+        let docs: Vec<(String, String, Arc<str>)> = self
+            .g
+            .ops
+            .docs
+            .locked()
+            .iter()
+            .map(|(k, d)| {
+                let d = d.locked();
+                (k.clone(), d.path.clone(), Arc::from(d.text.as_str()))
+            })
+            .collect();
+        if docs.is_empty() {
+            return;
+        }
+        let fread = v.field("fread");
+        let bare = |n: &str| n.trim_start_matches("./").to_owned();
+        let which = |n: &str| {
+            let n = bare(n);
+            docs.iter()
+                .position(|(k, p, _)| bare(k) == n || bare(p) == n)
+        };
+        // (each file's places the spans hold)
+        let mut held: Vec<Vec<(usize, usize)>> = vec![Vec::new(); docs.len()];
+        for (_, f, s, e, ..) in out.iter() {
+            if let Some((n, _)) = f
+                && let Some(d) = which(n)
+            {
+                held[d].push((*s, *e));
+            }
+        }
+        let mut done = vec![false; docs.len()];
+        for &(x, top) in readers {
+            for (f, val) in self.g.eng.contribs_of(x) {
+                if f != fread {
+                    continue;
+                }
+                for e in v.seq_to_vec(val) {
+                    let Some(&n) = list_of(v, e).first() else {
+                        continue;
+                    };
+                    let Some(d) = which(&str_of(v, n)) else {
+                        continue;
+                    };
+                    if std::mem::replace(&mut done[d], true) {
+                        continue;
+                    }
+                    let (_, path, text) = &docs[d];
+                    let h = &mut held[d];
+                    h.sort_unstable();
+                    let mut at = 0;
+                    let mut gaps = Vec::new();
+                    for &(s, e) in h.iter() {
+                        if s > at {
+                            gaps.push((at, s));
+                        }
+                        at = at.max(e);
+                    }
+                    if at < text.len() {
+                        gaps.push((at, text.len()));
+                    }
+                    for (s, e) in gaps {
+                        if text.get(s..e).is_none_or(|t| t.trim().is_empty()) {
+                            continue;
+                        }
+                        let raw =
+                            phitex_defuse::hash_words(0x696e_6c69, &[x.raw(), d as u64, s as u64]);
+                        out.push((raw, Some((path.clone(), text.clone())), s, e, top, x.raw()));
+                    }
+                }
+            }
+        }
     }
 
     /// The files the job writes and reads back, with their text.
@@ -8156,13 +8669,21 @@ impl Build {
     /// in the order first opened: what TeX leaves in them.
     #[must_use]
     pub fn files(&self) -> Vec<(String, String)> {
+        self.files_shared().to_vec()
+    }
+
+    /// [`Build::files`], shared: the evaluation's list, not a copy of
+    /// every file's text (a reader of their names only, the session's
+    /// records of a build, copied them all at each keystroke).
+    #[must_use]
+    pub fn files_shared(&self) -> Arc<Vec<(String, String)>> {
         let v = self.g.eng.values();
         let streams = self.g.eng.acc_value(self.unit, v.field("streams"));
         let mut m = self.memo.locked();
         if let Some((from, fs)) = &m.files
             && *from == streams
         {
-            return fs.to_vec();
+            return fs.clone();
         }
         let fs = Arc::new(
             written_texts(v, streams)
@@ -8171,7 +8692,7 @@ impl Build {
                 .collect::<Vec<_>>(),
         );
         m.files = Some((streams, fs.clone()));
-        fs.to_vec()
+        fs
     }
 
     /// The files `\write18`'s commands made through the hook, as the last
@@ -8231,10 +8752,35 @@ impl Build {
     /// for a later session of the same document.
     #[must_use]
     pub fn export_made(&self) -> Vec<u8> {
+        made_bytes(self.g.eng.values(), &self.made_values())
+    }
+
+    /// What [`Build::export_made`] is made from: each file a tool may
+    /// make of the files written, and the definitions of it filed
+    /// ([`phitex_defuse::Engine::defs_digest`]): the same, the same bytes
+    /// (a value is never changed in place), found without a pass over
+    /// every node's record per name.
+    #[must_use]
+    pub fn made_source(&self) -> u64 {
+        let v = self.g.eng.values();
+        let mut h = 0x6d61_6465;
+        for (input, _) in self.files_shared().iter() {
+            for o in crate::tools::made_names(input) {
+                h = phitex_defuse::hash_words(
+                    phitex_defuse::hash_bytes(h, o.as_bytes()),
+                    &[self.g.eng.defs_digest(crate::tools::made_field(v, &o))],
+                );
+            }
+        }
+        h
+    }
+
+    /// The files the tools made, by name: their values as defined.
+    fn made_values(&self) -> Vec<(String, ValueId)> {
         let v = self.g.eng.values();
         let mut made: Vec<(String, ValueId)> = Vec::new();
-        for (input, _) in self.files() {
-            for o in crate::tools::made_names(&input) {
+        for (input, _) in self.files_shared().iter() {
+            for o in crate::tools::made_names(input) {
                 if made.iter().any(|(n, _)| *n == o) {
                     continue;
                 }
@@ -8247,7 +8793,7 @@ impl Build {
                 }
             }
         }
-        made_bytes(v, &made)
+        made
     }
 
     /// The key sets of the read-back files that only define,
@@ -8316,6 +8862,16 @@ impl Build {
         self.end_file()
             .map(|x| crate::assemble::file_bytes_shared(v, x))
             .unwrap_or_default()
+    }
+
+    /// [`Self::output_bytes`] of the file as it is now, made when asked
+    /// (from any thread, whatever the Build has become meanwhile).
+    pub(crate) fn output_bytes_later(&self) -> Arc<dyn Fn() -> Arc<Vec<u8>> + Send + Sync> {
+        let v = self.g.eng.values();
+        match self.end_file() {
+            Some(x) => crate::assemble::file_bytes_later(v, x),
+            None => Arc::new(|| Arc::new(Vec::new())),
+        }
     }
 
     /// Whether TeX's history is `error_message_issued` or worse: an
@@ -8773,6 +9329,16 @@ impl Build {
             let end = r.get(l + 1).map_or(raw.len(), |&x| x.saturating_sub(1));
             (r.get(l).copied().unwrap_or(0) + col).min(end)
         };
+        // (a place in the raw text, or the document's own, as its file's
+        // byte: the text holds one character a byte of the file)
+        // (made at the first diagnostic in the document's text)
+        let doc_bytes = std::cell::OnceCell::new();
+        let doc_byte = |o: usize| {
+            let bs = doc_bytes.get_or_init(|| crate::origins::Bytes::of(raw.unwrap_or(doc)));
+            usize::try_from(bs.at(u32::try_from(o).unwrap_or(u32::MAX))).unwrap_or(o)
+        };
+        let mut file_bytes: FxHashMap<String, crate::origins::Bytes> = FxHashMap::default();
+        let xe = self.opts.xetex.is_some();
         // the node of the text a node is under, by its parents: the text's
         // nodes by id made only for a diagnostic placed by its node alone
         let mut top_map: Option<phitex_defuse::FxHashMap<u64, usize>> = None;
@@ -8850,7 +9416,7 @@ impl Build {
             let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
             let seg = xs.get(5).map(|&x| str_of(v, x)).unwrap_or_default();
             let loc = usize::try_from(int(6)).unwrap_or(0);
-            let before: String = seg.chars().take(loc).collect();
+            let units: Vec<u32> = seg.chars().take(loc).map(u32::from).collect();
             let in_doc = xs.get(2).is_some_and(|&n| str_of(v, n) == DOC_NAME);
             // (whose text the line is, [`crate::run::DiagPlace`]: a run
             // reads on into the next node's or piece's lines, which move
@@ -8893,13 +9459,31 @@ impl Build {
                         _ => 0,
                     }
                 });
-                let at = usize::try_from(int(3) + shift).unwrap_or(0)
-                    + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
+                // (the column a count of the line's units: XeTeX's are
+                // its bytes decoded, [`column_in`])
+                let start = usize::try_from(int(3) + shift).unwrap_or(0);
+                let at = column_in(doc, start, &units, xe);
                 node_from = spans.get(i).copied();
+                (docname.clone(), doc, at)
+            } else if xs
+                .get(2)
+                .is_some_and(|&n| v.with_str(n, |t| t == crate::chunks::PLACE) == Some(true))
+                && let Some(start) = crate::chunks::line_start(
+                    &self.ini,
+                    doc,
+                    u64::from_ne_bytes(int(7).to_ne_bytes()),
+                    u32::try_from(int(3)).unwrap_or(u32::MAX),
+                )
+            {
+                // a line of a format's text read from its chunks: placed
+                // by its chunk and its line in it, as the chunks are now
+                let at = column_in(doc, start, &units, xe);
+                node_from = Some(0);
                 (docname.clone(), doc, at)
             } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
                 && n != ValueId::UNIT
+                && v.with_str(n, |t| t == crate::chunks::PLACE) != Some(true)
             {
                 // a line of an `\input` file: its characters are bytes
                 let name = str_of(v, n);
@@ -8960,18 +9544,31 @@ impl Build {
                     None => piece_shift(&self.g.eng, &doc_shifts, node),
                 };
                 // (the line's place a byte of the file's text, one
-                // character per byte of the file: the column's characters
-                // as many of its bytes, [`crate::run::FileRest::line_at`])
-                let at = usize::try_from(int(3) + shift).unwrap_or(0) + before.len();
+                // character per byte of the file,
+                // [`crate::run::FileRest::line_at`]; the column a count of
+                // the line's units, [`column_in`])
+                let start = usize::try_from(int(3) + shift).unwrap_or(0);
+                let at = column_in(&file_text, start, &units, xe);
                 (name, &*file_text, at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
                 let i = top(node);
                 let from = spans.get(i).copied().unwrap_or(0);
+                // (the line as the text holds it: its characters, or, read
+                // by XeTeX, their UTF-8 bytes one character each)
+                let held: String = if xe {
+                    tex_chars(seg.as_bytes())
+                } else {
+                    seg.clone()
+                };
                 let at = doc
                     .get(from..)
-                    .and_then(|d| (!seg.is_empty()).then(|| d.find(&seg)).flatten())
-                    .map_or(from, |k| from + k + before.len());
+                    .and_then(|d| {
+                        (!seg.is_empty())
+                            .then(|| d.find(&seg).or_else(|| d.find(&held)))
+                            .flatten()
+                    })
+                    .map_or(from, |k| column_in(doc, from + k, &units, xe));
                 let at = if self.nodes.is_empty() { 0 } else { at };
                 (docname.clone(), doc, at)
             };
@@ -9046,27 +9643,58 @@ impl Build {
             // the message names, the control sequence it names, or the
             // last one read before a written warning ([`culprit`])
             let found = if undefined {
-                before.rfind('\\').map(|k| (ls + k, b))
+                // (the name alone: TeX reads on past it where it was in an
+                // argument, `\\textlang{arabic}{... \\foo ...}` read whole)
+                before
+                    .rfind('\\')
+                    .map(|k| (ls + k, ls + k + cs_len(&before[k..])))
             } else if kind == 1 || kind == 3 {
-                let from = node_from.map_or(ls, |f| f.min(ls));
+                // (from the node's start, and at least from the line
+                // with text before this one: a command that looked ahead
+                // for an optional argument, `\newfontfamily\x{F}`, fails
+                // with TeX on the next line, which may be the next node's)
+                let prev = {
+                    let mut p = ls;
+                    while p > 0 {
+                        let s = text[..p - 1].rfind('\n').map_or(0, |k| k + 1);
+                        p = s;
+                        // (blank lines and comments' lines read past)
+                        if text[s..ls]
+                            .lines()
+                            .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('%'))
+                        {
+                            break;
+                        }
+                    }
+                    p
+                };
+                let from = node_from.map_or(prev, |f| f.min(prev));
                 culprit(&message, text, ls, b, from, kind == 3)
             } else {
                 None
             };
-            // (in the file's units: the document's bytes, a file's
-            // characters)
-            let unit = |p: usize| {
+            // (places in `text`, made the file's bytes below)
+            let (start, end) = found.unwrap_or((b, b));
+            // (a culprit on a line read before TeX's: the diagnostic's
+            // line is the culprit's, TeX's stays in the context)
+            let place_line = if start < ls {
                 if file == docname {
-                    at - (b - p)
+                    doc_lines.partition_point(|&k| k <= start)
                 } else {
-                    at - text[p..b].chars().count()
+                    file_lines
+                        .get(&file)
+                        .map_or(line, |ls| ls.partition_point(|&k| k <= start))
                 }
+            } else {
+                line
             };
-            let (start, end) = found.map_or((at, at), |(s, e)| (unit(s), unit(e)));
+            // (the context as TeX shows the line: the file's bytes read as
+            // UTF-8 where they are, not one character a byte)
+            let (shown_before, shown_after) = (shown(&before), shown(&after));
             let lead = format!("l.{line} ");
             let context = format!(
-                "{lead}{before}\n{}{after}",
-                " ".repeat(lead.len() + before.chars().count())
+                "{lead}{shown_before}\n{}{shown_after}",
+                " ".repeat(lead.len() + shown_before.chars().count())
             );
             let help = if undefined {
                 let mut h = "The control sequence at the end of the top line\n\
@@ -9088,15 +9716,23 @@ impl Build {
             } else {
                 more
             };
+            // (the file's bytes: the text holds one character a byte of
+            // its file, [`crate::origins::Bytes`])
             let (start, end) = if file == docname {
-                (to_raw(start), to_raw(end))
+                (doc_byte(to_raw(start)), doc_byte(to_raw(end)))
             } else {
-                (start, end)
+                let bs = file_bytes
+                    .entry(file.clone())
+                    .or_insert_with(|| crate::origins::Bytes::of(text));
+                let at = |p: usize| {
+                    usize::try_from(bs.at(u32::try_from(p).unwrap_or(u32::MAX))).unwrap_or(p)
+                };
+                (at(start), at(end))
             };
             let d = Diagnostic {
                 file,
                 range: (start, end),
-                line,
+                line: place_line,
                 severity: match kind {
                     0 | 3 => Severity::Warning,
                     1 => Severity::Error,
@@ -9142,7 +9778,7 @@ impl Build {
                 _ => continue,
             };
             let end = doc.trim_end_matches(['\n', '\r']).len();
-            let at = to_raw(end);
+            let at = doc_byte(to_raw(end));
             out.push(Diagnostic {
                 file: docname.clone(),
                 range: (at, at),
@@ -9187,6 +9823,7 @@ impl Build {
                 help: None,
             });
         }
+        self.fonts_note(&mut out);
         out.sort_by(|a, b| (&a.file, a.range.0).cmp(&(&b.file, b.range.0)));
         out
     }
@@ -9280,6 +9917,23 @@ impl Build {
         }
     }
 
+    /// A font not found, in a host whose fonts are its own
+    /// ([`crate::XeTeX::fonts_note`]): said which fonts it has, before
+    /// TeX's help.
+    fn fonts_note(&self, out: &mut [Diagnostic]) {
+        let Some(note) = self.g.ops.xe.get().and_then(|x| x.fonts_note.clone()) else {
+            return;
+        };
+        for d in out {
+            if d.severity == Severity::Error && font_not_found(&d.message) {
+                d.help = Some(match d.help.take() {
+                    Some(h) if !h.is_empty() => format!("{note}\n{h}"),
+                    _ => note.to_string(),
+                });
+            }
+        }
+    }
+
     /// The diagnostics at no place alone (the engine's own warnings and
     /// errors, the format's): what [`Build::diagnostics`] gives but the
     /// document's, without placing those.
@@ -9310,6 +9964,7 @@ impl Build {
                 .chain(&self.g.no_fixpoint)
                 .map(|m| at(Severity::Error, m)),
         );
+        self.fonts_note(&mut out);
         out
     }
 
@@ -9786,27 +10441,30 @@ impl Build {
         out
     }
 
-    /// The relations the live nodes' last runs filed, by operation and
-    /// field ([`Stats::relations_by_op`]).
-    fn relations_now(&self) -> Vec<(&'static str, String, u64)> {
-        let v = self.g.eng.values();
-        let mut a = self.g.ops.audit.locked();
-        // (the nodes gone since: their runs' records dropped)
-        a.retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
-        let mut out: Vec<(&'static str, String, u64)> = Vec::new();
-        for x in a.values() {
-            for &(f, rel) in &x.defs {
-                if !rel {
-                    continue;
-                }
-                let name = field_name(v, f);
-                match out.iter_mut().find(|r| r.0 == x.op && r.1 == name) {
-                    Some(r) => r.2 += 1,
-                    None => out.push((x.op, name, 1)),
-                }
-            }
-        }
-        out
+    /// The gone nodes' runs' records ([`crate::run::NodeAudit`])
+    /// dropped.
+    fn audit_live(&self) {
+        self.g
+            .ops
+            .audit
+            .locked()
+            .retain(|&n, _| self.g.eng.is_live(NodeId::from_raw(n)));
+    }
+
+    /// The relations (`Ctx::define_rel`) on `field` the live nodes of
+    /// operation `op` filed at their last runs (tests/state.rs), counted
+    /// when asked, not after every evaluation.
+    #[must_use]
+    pub fn relations_by_op(&self, op: &str, field: &str) -> u64 {
+        let f = self.g.eng.values().field(field);
+        self.g
+            .ops
+            .audit
+            .locked()
+            .iter()
+            .filter(|(n, x)| x.op == op && self.g.eng.is_live(NodeId::from_raw(**n)))
+            .map(|(_, x)| x.defs.iter().filter(|d| d.0 == f && d.1).count() as u64)
+            .sum()
     }
 
     /// The reads of fields whose name starts with `prefix` the live
@@ -10765,19 +11423,19 @@ mod canonical_tests {
         let k = prefix_hash("x ");
         let met = mark_id(k, "b", true);
         let marks: Vec<CommentMark> = vec![
-            (1, met, "a".to_owned()),
-            (2, k, "b".to_owned()),
-            (3, k, "c".to_owned()),
+            (1, met, Arc::from("a")),
+            (2, k, Arc::from("b")),
+            (3, k, Arc::from("c")),
         ];
         assert!(!ids_hold(&marks));
         let apart: Vec<CommentMark> = vec![
-            (1, met ^ 1, "a".to_owned()),
-            (2, k, "b".to_owned()),
-            (3, k, "c".to_owned()),
+            (1, met ^ 1, Arc::from("a")),
+            (2, k, Arc::from("b")),
+            (3, k, Arc::from("c")),
         ];
         assert!(ids_hold(&apart));
         // (one comment twice under one id: the same text, one mark)
-        assert!(ids_hold(&[(1, k, "a".to_owned()), (2, k, "a".to_owned())]));
+        assert!(ids_hold(&[(1, k, Arc::from("a")), (2, k, Arc::from("a"))]));
     }
 
     /// The marking line by line, as it was before the copy between

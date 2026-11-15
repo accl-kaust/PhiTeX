@@ -24,6 +24,9 @@ pub enum Lr {
         width: Scaled,
         /// The new left edge, beyond `cur_h`.
         dist: Scaled,
+        /// Whether it begins a reversed segment (else it ends one): the
+        /// glyph origins' reading order, not the output's.
+        open: bool,
     },
     /// Leaders of a fixed width.
     Fixed(GlueNode),
@@ -133,6 +136,7 @@ pub fn reverse(
                                             dir,
                                             width: w,
                                             dist: -h - w,
+                                            open: false,
                                         });
                                     }
                                     return l;

@@ -36,7 +36,7 @@ import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
 import type { Entry } from "./outline.ts";
 
 /** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
-const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
 
 /** An editor. Edits are sequential (each against the text just before it), in UTF-16. */
 export interface EditorHost {
@@ -63,7 +63,7 @@ export type CoreReq =
   | { op: "open"; main: string; files: Record<string, string>; fuel: number; engine?: Engine; workers?: 1; latexmk?: { files: Record<string, string>; exact: boolean }; projectFiles?: string[] }
   | { op: "edit"; file: string; start: number; end: number; text: string; page: number; dpi: number }
   | { op: "set_file"; file: string; text: string }
-  | { op: "png"; page: number; dpi: number }
+  | { op: "png"; page: number; dpi: number; scale?: number; view?: [number, number, number, number] }
   | { op: "pdf" }
   | { op: "status" }
   | { op: "log" }
@@ -165,6 +165,7 @@ export type WatchEvent =
   | { event: "diagnostics"; items: Problem[] }
   | { event: "settled"; settling?: boolean; pass?: number; ms?: number; since_ms?: number | null; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number }
   | { event: "superseded" }
+  | { event: "building"; on: boolean }
   | { event: "sync"; file: string; lo: number; hi: number; at: number; page?: number; y?: number };
 
 /**
@@ -234,6 +235,8 @@ export interface PreviewSink {
   outline?(items: Entry[]): void;
   /** The session's citation lookup, given once (the `cites` op: the citation under a point of page `k`, in the origins' points; null: none, or no answer). */
   citesBy?(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void;
+  /** The session's drawing of part of a page at a zoom of its own, given once: a link's window zoomed in (the `png` op at `scale` pixels a point, around `view`, fractions of the page). */
+  zoomBy?(ask: (k: number, scale: number, view: [number, number, number, number]) => Promise<PageImage | null>): void;
   /** A streamed open: the pages shipped so far (null: it ended). */
   streaming?(s: { pages: number; phase: string } | null): void;
   /** A repaint is on screen, `ms` after the keystroke that made it. */
@@ -546,6 +549,7 @@ export class PreviewSession {
     };
     this.sink = sink;
     sink.citesBy?.((k, x, y) => this.cites(k, x, y));
+    sink.zoomBy?.((k, scale, view) => this.zoomed(k, scale, view));
     this.o = { ...defaults, ...opts };
     host.onOpen((f0, t) => {
       const f = this.known(f0);
@@ -1015,6 +1019,13 @@ export class PreviewSession {
     if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
   }
 
+  /** Part of page `k` (`view`, fractions of it) at `scale` pixels a point, for a link's window zoomed in: not the pages' drawing, which stays as it is. */
+  async zoomed(k: number, scale: number, view: [number, number, number, number]): Promise<PageImage | null> {
+    if (!this.opened) return null;
+    const r = await this.core.request({ op: "png", page: k, dpi: this.dpi(), scale, view }).catch(() => null);
+    return r?.ok ? image(r) : null;
+  }
+
   async showPage(): Promise<void> {
     if (!this.opened) return;
     if (this.sink.layout) return this.layout();
@@ -1245,7 +1256,24 @@ export class PreviewSession {
    * came from, from its first glyph's start to its last's end).
    */
   async selectPage(sel: { k: number; rects: [number, number, number, number][] }[]): Promise<void> {
-    if (!this.opened || !sel.length) return;
+    const best = await this.sourceOf(sel);
+    if (!best) return;
+    const { file, start: lo, end: hi } = best;
+    // (the host has the files: it selects them, as it opens a double-click's)
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
+    const t = this.files[file];
+    if (t === undefined) return;
+    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+  }
+
+  /**
+   * The source of text selected on the pages ([x, y top, w, h] boxes in PDF
+   * points, by page): the file most of its glyphs came from, from its first
+   * glyph's start to its last's end, in bytes (the glyph origins'); null
+   * where none of it came from a file.
+   */
+  async sourceOf(sel: { k: number; rects: [number, number, number, number][] }[]): Promise<{ file: string; start: number; end: number } | null> {
+    if (!this.opened || !sel.length) return null;
     const by = new Map<string, { lo: number; hi: number; n: number }>();
     for (const { k, rects } of sel) {
       for (const g of this.cached(k) ?? (await this.glyphsOf(k))) {
@@ -1259,13 +1287,16 @@ export class PreviewSession {
     }
     const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
     this.tr("select→source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return;
+    if (!best) return null;
     const [file, { lo, hi }] = best;
-    // (the host has the files: it selects them, as it opens a double-click's)
-    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
-    const t = this.files[file];
-    if (t === undefined) return;
-    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+    return { file, start: lo, end: hi };
+  }
+
+  /** The source place nearest (x, y) on page `k` (PDF points from its top left): a spot with no text of its own, a figure's. */
+  async spotOf(k: number, x: number, y: number): Promise<{ file: string; start: number } | null> {
+    if (!this.opened) return null;
+    const g = nearest(this.cached(k) ?? (await this.glyphsOf(k)), x, y);
+    return g?.file ? { file: g.file, start: g.start } : null;
   }
 
   /**
@@ -1617,6 +1648,9 @@ export class PreviewSession {
 
   /** The watch joined (or joined again): its pages, outline and last problems. */
   private async watchJoined(): Promise<void> {
+    // (a build running as the tab joins: its `building` event was sent before)
+    const s = await this.core.request({ op: "status" });
+    if (s.ok && typeof s.json?.building === "boolean") this.watchBusy(s.json.building);
     await this.layout();
     this.status();
     void this.watchOutline();
@@ -1642,8 +1676,8 @@ export class PreviewSession {
     switch (e.event) {
       case "page": {
         // (a page shipped while the build runs: shown before the build is in,
-        // the PDF's page replacing it when it settles)
-        this.watchBusy(true);
+        // the PDF's page replacing it when it settles. Busy is the `building`
+        // event's alone: a page or a progress record says nothing of it)
         const hs = [...this.hashes];
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
@@ -1659,7 +1693,6 @@ export class PreviewSession {
         return;
       }
       case "progress":
-        this.watchBusy(true);
         // (a pack the build fetches, the engine's own Shelf, native or wasm: as a host's fetch.
         // The loading card lists the file asked for ("amsmath.sty", as $/progress's
         // "Fetching amsmath.sty (12 of 40)" says it), so it goes as `pack`, the card's item;
@@ -1676,7 +1709,16 @@ export class PreviewSession {
         this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
         return;
       case "superseded":
-        this.watchBusy(true);
+        return;
+      // (a build of the watch's began or ended, the document's or Compare's
+      // diff's: the status's "Typesetting…" from one to the other. Taken
+      // from the progress records and pages, a record after the build was
+      // in (a fetch's, a worker's last page, Compare's diff built in the
+      // background, which says no `settled`) put it back on, and nothing
+      // took it off: "Typesetting…" for ever, the CLI's build long done)
+      case "building":
+        this.watchBusy(e.on);
+        this.sink.preparing?.(e.on);
         return;
       case "diagnostics":
         this.watchDiags = e.items.map(asDiagnostic);
