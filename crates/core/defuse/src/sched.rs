@@ -2892,10 +2892,14 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             crate::lock::wait_so_far(),
         )
     });
+    // (`PHITEX_INTERMED_LOG`: what the run publishes as it goes, a parked
+    // state's definitions, is its node's to wake with)
+    let im_was = crate::obs::im_committing(n.raw() + 1);
     let r = match stands {
         Some(out) => Ok(Ok(out)),
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
+    crate::obs::im_committing(im_was);
     if let Some((cpu0, hw0, wait0)) = rc {
         // (a run that ends with products: the one its commit keeps, unless
         // a later run of the node replaces it)

@@ -115,7 +115,11 @@ def counted(r):
 
 def producing_run(D, d, t):
     """The run of node d whose commit is the last to end at or before t, or
-    the one committing at t; with that commit's end."""
+    the one committing at t; with that commit's end. A run of d in flight
+    at t (what it publishes as it goes): that run, and t."""
+    for x in D['byn'].get(d, []):
+        if x['t0'] <= t < x['t1']:
+            return x, t
     cs = D['commits'].get(d, [])
     j = bisect.bisect_left(cs, t)
     # (committing at t: the commit that ends first after t, if its run ended before t)
@@ -149,9 +153,9 @@ def enabler(D, r):
             j = bisect.bisect_right(D['fronts'], (r['t0'], 1 << 62)) - 1
             if j >= 0:
                 t, by = D['fronts'][j]
-                x, _ = producing_run(D, by, t)
+                x, _ = producing_run(D, by, t) if by > 0 else (None, None)
                 if x is not None:
-                    cands.append((t, x, 'frontier'))
+                    cands.append((min(t, max(x['done'] or x['t1'], x['t1'])), x, 'frontier'))
     # the last wake before it began (after its last run began)
     lo = pr['t0'] if pr is not None else -1
     ws = D['wk'].get(n, [])
@@ -161,7 +165,8 @@ def enabler(D, r):
     if qs:
         # (the last made by a commit: one queued by none is a release, of a
         # park or at a quiet point, which those give)
-        ws = [w for w in qs if (w[9] >= 0 and w[9] != n) or (len(w) > 10 and w[10] >= 0 and w[10] != n)]
+        ws = [w for w in qs if (w[9] >= 0 and w[9] != n) or (len(w) > 10 and w[10] >= 0 and w[10] != n)
+              or (w[9] < 0 and w[5] >= 0 and w[5] != n)]
     j = bisect.bisect_right(ws, (r['t0'], 1 << 62)) - 1
     if qs:
         pk = D['pk'].get(n, [])
@@ -173,9 +178,11 @@ def enabler(D, r):
                 k = bisect.bisect_right(D['fronts'], (r['t0'], 1 << 62)) - 1
                 if k >= 0 and D['fronts'][k][0] >= t_p:
                     t, by = D['fronts'][k]
-                    x, _ = producing_run(D, by, t)
+                    # (by 0: a quiet point's, which `quiet_ts` gives)
+                    x, _ = producing_run(D, by, t) if by > 0 else (None, None)
                     if x is not None:
-                        cands.append((t, x, 'frontier'))
+                        # (moved after its commit, by a release: the rest queue)
+                        cands.append((min(t, max(x['done'] or x['t1'], x['t1'])), x, 'frontier'))
             elif on >= 0:
                 x, t = producing_run(D, on, r['t0'])
                 if x is not None and t is not None and t >= t_p:
@@ -184,7 +191,7 @@ def enabler(D, r):
         w = ws[j]
         c = w[9]
         h = w[10] if len(w) > 10 else -1
-        by = c if c >= 0 and c != n else (h if h >= 0 and h != n else -1)
+        by = c if c >= 0 and c != n else (h if h >= 0 and h != n else (w[5] if c < 0 else -1))
         if by >= 0:
             x, _ = producing_run(D, by, w[0])
             if x is not None:
@@ -316,10 +323,12 @@ def critical_path(D, cls):
     cp = Counter(); cpn = Counter(); how = Counter()
     seen = set(); queue = 0; commit = 0; quiet = 0; stale = 0; links = 0
     chain = []
+    upto = cur['t1']
     while cur is not None and cur['i'] not in seen:
         seen.add(cur['i']); links += 1
         c = cls[cur['i']]
-        cp[c] += cur['t1'] - cur['t0']; cpn[c] += 1
+        # (a run whose publication in flight let the next go: up to then)
+        cp[c] += max(0, min(cur['t1'], upto) - cur['t0']); cpn[c] += 1
         chain.append(cur['i'])
         e = enabler(D, cur)
         if e is None:
@@ -339,6 +348,8 @@ def critical_path(D, cls):
                 quiet += cur['t0'] - (x['done'] or x['t1'])
             else:
                 queue += cur['t0'] - (x['done'] or x['t1'])
+            commit += max(0, (x['done'] or x['t1']) - x['t1'])
+            upto = x['t1']
             cur = x
             continue
         if kind == 'stale' and cur['k'] > 0:
@@ -351,6 +362,7 @@ def critical_path(D, cls):
         else:
             queue += cur['t0'] - t
         commit += max(0, t - x['t1'])
+        upto = t
         cur = x
     return dict(end_ms=t_end / MS, run_ms={c: cp[c] / MS for c in cp}, run_n=dict(cpn),
                 queue_ms=queue / MS, commit_ms=commit / MS, quiet_ms=quiet / MS, stale_ms=stale / MS, links=links,
