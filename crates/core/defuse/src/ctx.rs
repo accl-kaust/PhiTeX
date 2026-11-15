@@ -2363,6 +2363,15 @@ impl<'a> Ctx<'a> {
         Some(output)
     }
 
+    /// Whether this run is on the worker that asks the evaluation's edit
+    /// source (`Engine::evaluate_absorbing`): no edit is taken there until
+    /// the run ends. (Not the caller's thread: the evaluation runs on a
+    /// thread of the engine's own, `Engine::evaluate_with`.)
+    #[must_use]
+    pub fn asks_edits(&self) -> bool {
+        crate::sched::asks_edits()
+    }
+
     /// Whether I ran before in this evaluation (this run is not my first
     /// of it): what my last run left is of this evaluation's inputs, not
     /// of the build before an edit.

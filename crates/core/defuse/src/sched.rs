@@ -1486,7 +1486,29 @@ impl Pool {
     }
 }
 
-fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn EditSource>) {
+thread_local! {
+    /// Whether this thread's worker asks the evaluation's edit source
+    /// (`Ctx::asks_edits`).
+    static ASKS_EDITS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the worker on this thread asks the evaluation's edit source.
+pub(crate) fn asks_edits() -> bool {
+    ASKS_EDITS.with(std::cell::Cell::get)
+}
+
+fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, src: Option<&mut dyn EditSource>) {
+    struct Unmark(bool);
+    impl Drop for Unmark {
+        fn drop(&mut self) {
+            ASKS_EDITS.with(|a| a.set(self.0));
+        }
+    }
+    let _unmark = Unmark(ASKS_EDITS.with(|a| a.replace(src.is_some())));
+    work_loop(eng, pool, w, src);
+}
+
+fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn EditSource>) {
     let mut last_absorb = Instant::now();
     loop {
         if pool.shared.stop.load(Ordering::SeqCst) {

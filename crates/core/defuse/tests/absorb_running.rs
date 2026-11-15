@@ -4,9 +4,8 @@
 //! keeps away; what the edit changes under the running node stops the
 //! run at its next check, and it runs again on the edited input.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::ThreadId;
 use std::time::{Duration, Instant};
 
 use phitex_defuse::{Ctx, EditSource, Engine, Field, NodeId, OpId, Operation, Stop, ValueId};
@@ -29,7 +28,7 @@ impl Operation for Def {
 }
 
 /// `[]`: a run that checks in for 2 ms: what waits behind it on the
-/// caller's thread goes to another worker (an evaluation's next node runs
+/// worker asking the edits goes to another worker (an evaluation's next node runs
 /// where the one before it ran, unless it waits).
 struct Pause;
 
@@ -50,10 +49,12 @@ impl Operation for Pause {
 
 /// `[f]`: reads f; on 1, spins (a TeX loop on a stale state) for
 /// [`SPIN`], checking the engine (`Ctx::tick`) as a TeX run does every
-/// few thousand expansions, unless it runs on `caller` (the thread that
-/// asks the edit source, which cannot ask while it runs).
+/// few thousand expansions, unless it runs on the worker that asks the
+/// edit source (`Ctx::asks_edits`), which cannot ask while it runs. (Not
+/// the test's thread, which only waits: it was taken for that worker,
+/// and a run that spun there kept the edit out for all of [`SPIN`], "the
+/// edit was not taken", 2 in 30 under load on 4 cores.)
 struct Spin {
-    caller: Mutex<Option<ThreadId>>,
     /// Whether a run spins now, and the runs that spun on another thread.
     spinning: Arc<AtomicBool>,
     spun: AtomicU64,
@@ -72,7 +73,7 @@ impl Operation for Spin {
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let x = cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT);
-        if cx.values().as_int(x) != Some(1) || *self.caller.lock().unwrap() == Some(std::thread::current().id()) {
+        if cx.values().as_int(x) != Some(1) || cx.asks_edits() {
             return Ok(x);
         }
         self.spun.fetch_add(1, Ordering::Relaxed);
@@ -123,12 +124,14 @@ fn an_edit_is_taken_while_a_run_spins_on_another_worker() {
     let mut tried = 0;
     loop {
         tried += 1;
-        assert!(tried <= 50, "the spinning run never ran off the caller's thread");
+        assert!(
+            tried <= 50,
+            "the spinning run never ran off the worker that asks the edits"
+        );
         let e = Engine::new();
         let def = e.register(Arc::new(Def));
         let spinning = Arc::new(AtomicBool::new(false));
         let spin = Arc::new(Spin {
-            caller: Mutex::new(Some(std::thread::current().id())),
             spinning: spinning.clone(),
             spun: AtomicU64::new(0),
             every: Duration::from_millis(1),
@@ -154,7 +157,7 @@ fn an_edit_is_taken_while_a_run_spins_on_another_worker() {
         let rep = e.evaluate_absorbing(2, &mut src).unwrap();
         let took = t.elapsed();
         if spin.spun.load(Ordering::Relaxed) == 0 {
-            // (it ran on the caller's thread: nothing to show)
+            // (it ran on the worker that asks the edits: nothing to show)
             continue;
         }
         assert!(src.sent, "the edit was not taken");
@@ -178,12 +181,14 @@ fn a_reader_re_asked_while_it_spins_is_stopped_at_its_next_check() {
     let mut tried = 0;
     loop {
         tried += 1;
-        assert!(tried <= 50, "the spinning run never ran off the caller's thread");
+        assert!(
+            tried <= 50,
+            "the spinning run never ran off the worker that asks the edits"
+        );
         let e = Engine::new();
         let def = e.register(Arc::new(Def));
         let spinning = Arc::new(AtomicBool::new(false));
         let spin = Arc::new(Spin {
-            caller: Mutex::new(Some(std::thread::current().id())),
             spinning: spinning.clone(),
             spun: AtomicU64::new(0),
             every: Duration::from_millis(1),
@@ -203,7 +208,7 @@ fn a_reader_re_asked_while_it_spins_is_stopped_at_its_next_check() {
         e.replace(w, pause, vec![]);
         e.replace(d, def, vec![f.0, v.int(1)]);
         // (the reader queued too, its record kept: it runs on the other
-        // worker as the caller's runs the definition)
+        // worker as the one asking the edits runs the definition)
         e.replace(r, sp, vec![f.0]);
         let mut src = Edit {
             node: d,
