@@ -516,6 +516,6 @@ ms, acm 942, Grail 6155), commits (amsldoc 476 ms, 16 %), and queue,
 which on amsldoc is mostly links waiting on a worker free of runs while
 the others idle (125 ms over 316 links: the wake's latency) and on
 Grail links waiting through a busy worker's heap while others idle (380
-ms over 31 links). Tools: bench/intermed (parse, classify), and in the
-agent's scratchpad cpq.py (path split), hop2.py (hop classes), qd.py
-(queue gaps), cpcost.py (path runs against -j1).
+ms over 31 links). Tools: bench/intermed: parse.py, classify.py, cpq.py
+(the path's split), hop2.py (hop classes), qd.py (queue gaps), cpcost.py
+(the path's kept runs against the same nodes' at -j1).
