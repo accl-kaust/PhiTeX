@@ -166,3 +166,96 @@ fn a_record_that_placed_is_not_taken_again() {
     assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(10), "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[k]`: reads `x`, outputs k x.
+struct Scaled;
+
+impl Operation for Scaled {
+    fn name(&self) -> &'static str {
+        "scaled"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let k = v.as_int(cx.args()[0]).unwrap_or(0);
+        let x = cx.read(v.field("x"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        Ok(v.int(k * x))
+    }
+}
+
+/// A record made before an edit of its node is not taken again, though
+/// every read of it gives what it gave: a run is a function of its text
+/// and its reads (`RunRecord::made_from`). The edited reader's next run
+/// on a value its run before the edit read made what that run made, with
+/// the old text (phitex-live's edit that streamed no page, and a
+/// `\write18` listing edited that printed what the old one did).
+#[test]
+fn a_record_made_before_an_edit_is_not_taken_again() {
+    for threads in [1, 4] {
+        let e = Engine::new();
+        let v = e.values();
+        let def = e.register(Arc::new(Def));
+        let scaled = e.register(Arc::new(Scaled));
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![v.int(1)]);
+        let r = e.push(u, scaled, vec![v.int(10)]);
+        e.evaluate(threads).unwrap();
+        e.replace(d, def, vec![v.int(2)]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(20));
+        // (the reader edited, and x moved: its run reads x = 1 with k = 100)
+        e.replace(r, scaled, vec![v.int(100)]);
+        e.replace(d, def, vec![v.int(1)]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(100), "threads {threads}");
+        // (x back to 2: the record before the last read 2, with k = 10)
+        e.replace(d, def, vec![v.int(2)]);
+        let rep = e.evaluate(threads).unwrap();
+        assert_eq!(
+            e.output(r).and_then(|x| v.as_int(x)),
+            Some(200),
+            "threads {threads}: {rep:?}"
+        );
+        assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    }
+}
+
+/// `[]`: reads `x`, tells the client (`Ctx::told_outside`), outputs x;
+/// counts its runs.
+struct Telling(AtomicU64);
+
+impl Operation for Telling {
+    fn name(&self) -> &'static str {
+        "telling"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let x = cx.read(cx.values().field("x"))?.unwrap_or(ValueId::UNIT);
+        cx.told_outside();
+        Ok(x)
+    }
+}
+
+/// A run that told the client something (a page streamed) is not taken
+/// again from an older record: taken, it would tell nothing. It runs.
+#[test]
+fn a_record_that_told_the_client_is_not_taken_again() {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let op = Arc::new(Telling(AtomicU64::new(0)));
+    let telling = e.register(op.clone());
+    let u = e.new_unit();
+    let d = e.push(u, def, vec![v.int(1)]);
+    let r = e.push(u, telling, vec![]);
+    e.evaluate(1).unwrap();
+    e.replace(d, def, vec![v.int(2)]);
+    e.evaluate(1).unwrap();
+    let runs = op.0.load(Ordering::SeqCst);
+    e.replace(d, def, vec![v.int(1)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(op.0.load(Ordering::SeqCst), runs + 1, "{rep:?}");
+    assert_eq!(e.output(r), Some(v.int(1)), "{rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

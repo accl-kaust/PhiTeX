@@ -665,16 +665,35 @@ pub(crate) struct RunRecord {
     pub(crate) scope_gen: u64,
     /// The same for the relocations counted (`Engine::moves_gen`).
     pub(crate) moves_gen: u64,
+    /// The operation and arguments its run began with; None for a
+    /// prediction. A run is a function of its text and its reads: a
+    /// record stands for a run of the same text alone
+    /// ([`RunRecord::made_from`]).
+    pub(crate) text: Option<(OpId, Arc<[ValueId]>)>,
+    /// Its run told the client something outside the engine
+    /// (`Ctx::told_outside`): taken again for a later run, it would tell
+    /// nothing.
+    pub(crate) told: bool,
 }
 
 impl RunRecord {
+    /// Whether its run began with `text`: one made before an edit of the
+    /// node (`Engine::replace`) is not the run of its text now, whatever
+    /// its reads give.
+    pub(crate) fn made_from(&self, text: &(OpId, Arc<[ValueId]>)) -> bool {
+        self.text
+            .as_ref()
+            .is_some_and(|(op, args)| *op == text.0 && (Arc::ptr_eq(args, &text.1) || **args == *text.1))
+    }
+
     /// Whether this record, replaced by a later commit, may be taken as a
-    /// run's again (`Node::prior`): it placed, claimed, parked and waited
-    /// for nothing, and every read of it is of a field, an environment
-    /// value or a fold (no placement's output, sibling, hole or next
-    /// contribution, which name the structure it stood in).
+    /// run's again (`Node::prior`): it placed, claimed, parked, waited for
+    /// and told the client nothing, and every read of it is of a field,
+    /// an environment value or a fold (no placement's output, sibling,
+    /// hole or next contribution, which name the structure it stood in).
     pub(crate) fn may_stand_again(&self) -> bool {
         !self.provisional
+            && !self.told
             && self.state.is_none()
             && self.placed.is_empty()
             && self.claim == 0
@@ -779,6 +798,8 @@ impl RunRecord {
             waits: Box::default(),
             scope_gen: 0,
             moves_gen: 0,
+            text: None,
+            told: false,
         }
     }
 }
@@ -1038,4 +1059,9 @@ pub(crate) struct Product {
     /// `Ctx::last_run_stands`: the last run's record, every read of which
     /// still holds; nothing ran ([`crate::commit::commit_stood`]).
     pub(crate) stood: Option<Arc<RunRecord>>,
+    /// The operation and arguments the run began with: what its record
+    /// was made from (`RunRecord::text`).
+    pub(crate) text: (OpId, Arc<[ValueId]>),
+    /// `Ctx::told_outside`.
+    pub(crate) told: bool,
 }

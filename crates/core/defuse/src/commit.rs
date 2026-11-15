@@ -1302,6 +1302,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Some(r) if p.unchanged || p.resumed.get() => p.moves_gen.min(r.moves_gen),
             _ => p.moves_gen,
         },
+        text: Some(p.text.clone()),
+        told: p.told,
     });
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
         r.as_ref().map_or_else(Default::default, |r| {
@@ -5551,6 +5553,8 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         waits: r.waits.clone(),
         scope_gen: r.scope_gen,
         moves_gen: r.moves_gen,
+        text: r.text.clone(),
+        told: r.told,
     }));
 }
 

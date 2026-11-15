@@ -1993,6 +1993,7 @@ impl phitex_defuse::Operation for XdvPage {
             progress.clone(),
             self.start.clone(),
         );
+        cx.told_outside();
         progress.stream_page_beside(k, hash, Box::new(move |start, last| {
             let progress = prog;
             let t0 = std::time::Instant::now();

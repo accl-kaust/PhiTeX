@@ -123,11 +123,12 @@ fn stop() -> Stop {
 
 impl<'a> Ctx<'a> {
     pub(crate) fn new(eng: &'a Engine, worker: Option<&'a Worker>, me: &'a Arc<Node>) -> Ctx<'a> {
+        let args = me.args();
         Ctx {
             eng,
             worker,
             me,
-            args: me.args(),
+            args: args.clone(),
             product: Product {
                 output: ValueId::UNIT,
                 defs: Vec::new(),
@@ -156,6 +157,8 @@ impl<'a> Ctx<'a> {
                 frontier: None,
                 parked_on: None,
                 stood: None,
+                text: (me.op(), args),
+                told: false,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -2180,6 +2183,17 @@ impl<'a> Ctx<'a> {
         self.eng.values.epoch()
     }
 
+    /// This run told the client something outside the engine (a page
+    /// streamed to a viewer as it was made): its record is not taken
+    /// again for a later run ([`Ctx::last_run_stands`]'s record before the
+    /// last, `RunRecord::may_stand_again`), which would make its output
+    /// the node's again and tell nothing. A streamed page that moved and
+    /// moved back (a page put in, then the one before it taken out) was
+    /// the build's page again, never streamed.
+    pub fn told_outside(&mut self) {
+        self.product.told = true;
+    }
+
     /// This run publishes nothing new: what my last run defined,
     /// contributed, placed and output stands as it is, and only this
     /// run's reads are filed, so a change to one (a node it stopped at
@@ -2323,10 +2337,11 @@ impl<'a> Ctx<'a> {
         {
             return None;
         }
-        let r = self
-            .last
-            .as_ref()
-            .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
+        let r = self.last.as_ref().filter(|r| {
+            !r.provisional
+                && (r.state.is_none() || self.me.parked_on.lock().is_none())
+                && r.made_from(&self.product.text)
+        })?;
         let mut memo = crate::node::HoldMemo::default();
         let moved = r.scope_moved(self.eng);
         if let Some(i) = r
@@ -2376,7 +2391,7 @@ impl<'a> Ctx<'a> {
     /// end of the build).
     fn prior_run_stands(&mut self) -> Option<ValueId> {
         let p = self.me.prior.lock().clone()?;
-        if !p.may_stand_again() {
+        if !p.may_stand_again() || !p.made_from(&self.product.text) {
             return None;
         }
         let eng = self.eng;
