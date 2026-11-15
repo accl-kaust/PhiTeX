@@ -9844,7 +9844,7 @@ var preambleOf = (t) => {
   return end < 0 ? t ?? "" : t.slice(0, end);
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
 var PENDING_CAP_MS = 1e4;
 var NEAR_CULPRIT = 64;
 function place3(t, pos) {
@@ -11025,6 +11025,8 @@ var PreviewSession = class {
   }
   /** The watch joined (or joined again): its pages, outline and last problems. */
   async watchJoined() {
+    const s = await this.core.request({ op: "status" });
+    if (s.ok && typeof s.json?.building === "boolean") this.watchBusy(s.json.building);
     await this.layout();
     this.status();
     void this.watchOutline();
@@ -11046,7 +11048,6 @@ var PreviewSession = class {
   onWatch(e) {
     switch (e.event) {
       case "page": {
-        this.watchBusy(true);
         const hs = [...this.hashes];
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
@@ -11060,7 +11061,6 @@ var PreviewSession = class {
         return;
       }
       case "progress":
-        this.watchBusy(true);
         if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
         if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
           this.pkg.done = [...this.pkg.done ?? [], ...this.pkg.loading];
@@ -11072,7 +11072,16 @@ var PreviewSession = class {
         this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
         return;
       case "superseded":
-        this.watchBusy(true);
+        return;
+      // (a build of the watch's began or ended, the document's or Compare's
+      // diff's: the status's "Typesetting…" from one to the other. Taken
+      // from the progress records and pages, a record after the build was
+      // in (a fetch's, a worker's last page, Compare's diff built in the
+      // background, which says no `settled`) put it back on, and nothing
+      // took it off: "Typesetting…" for ever, the CLI's build long done)
+      case "building":
+        this.watchBusy(e.on);
+        this.sink.preparing?.(e.on);
         return;
       case "diagnostics":
         this.watchDiags = e.items.map(asDiagnostic);
