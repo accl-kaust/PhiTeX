@@ -304,3 +304,46 @@ test("a diff's pages streamed into a view that showed the document's", async () 
   assert.deepEqual(laid.at(-1), { hashes: ["f0", "f1", "f2"], previews: [] });
   assert.deepEqual(w.hashes, ["f0", "f1", "f2"]);
 });
+
+// `phitex watch`'s status: busy from the `building` event to its end, and
+// only so. A progress record or a page after the build was in (a fetch's, a
+// worker's last page, Compare's diff built in the background, which says no
+// `settled`) put "Typesetting…" back on with nothing to take it off: the
+// view typesetting for ever, the CLI's build long done.
+test("the watch's busy is its building events', not a late progress record's", async () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  let emit!: (e: unknown) => void;
+  const core = {
+    request: async (r: { op: string }) => (r.op === "pages" ? { ok: true, json: { pages: ["p0"], inexact: [] } } : { ok: false }),
+    onEvent: (cb: (e: unknown) => void) => (emit = cb),
+  };
+  const busy: boolean[] = [];
+  const sink = new Proxy(
+    { busy: (on: boolean) => busy.push(on) },
+    { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) },
+  );
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined, remote: { source: () => undefined } });
+  const w = s as unknown as { opened: boolean; hashes: string[]; chain: Promise<unknown> };
+  w.opened = true;
+  w.hashes = ["p0"];
+  const now = () => busy.at(-1) ?? false;
+  emit({ event: "building", on: true });
+  emit({ event: "progress", pass: 1, pages: 1, phase: "typesetting" });
+  emit({ event: "page", k: 0, hash: "p0", pages: 1, exact: true });
+  assert.equal(now(), true);
+  emit({ event: "settled", since_ms: null, ms: 10 });
+  emit({ event: "building", on: false });
+  assert.equal(now(), false);
+  // (after the build: a fetch's record, a late page, Compare's diff typesetting)
+  emit({ event: "progress", phase: "fetching", pack: "x.sty", name: "x" });
+  emit({ event: "progress", pass: 1, pages: 2, phase: "typesetting" });
+  emit({ event: "page", k: 0, hash: "p0", pages: 1, exact: true });
+  emit({ event: "superseded" });
+  await w.chain;
+  assert.equal(now(), false, `busy: ${busy}`);
+  // (Compare's diff built: its own building events, no settled)
+  emit({ event: "building", on: true });
+  assert.equal(now(), true);
+  emit({ event: "building", on: false });
+  assert.equal(now(), false);
+});

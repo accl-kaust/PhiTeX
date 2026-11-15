@@ -36,7 +36,7 @@ import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
 import type { Entry } from "./outline.ts";
 
 /** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
-const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
 
 /** An editor. Edits are sequential (each against the text just before it), in UTF-16. */
 export interface EditorHost {
@@ -165,6 +165,7 @@ export type WatchEvent =
   | { event: "diagnostics"; items: Problem[] }
   | { event: "settled"; settling?: boolean; pass?: number; ms?: number; since_ms?: number | null; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number }
   | { event: "superseded" }
+  | { event: "building"; on: boolean }
   | { event: "sync"; file: string; lo: number; hi: number; at: number; page?: number; y?: number };
 
 /**
@@ -1647,6 +1648,9 @@ export class PreviewSession {
 
   /** The watch joined (or joined again): its pages, outline and last problems. */
   private async watchJoined(): Promise<void> {
+    // (a build running as the tab joins: its `building` event was sent before)
+    const s = await this.core.request({ op: "status" });
+    if (s.ok && typeof s.json?.building === "boolean") this.watchBusy(s.json.building);
     await this.layout();
     this.status();
     void this.watchOutline();
@@ -1672,8 +1676,8 @@ export class PreviewSession {
     switch (e.event) {
       case "page": {
         // (a page shipped while the build runs: shown before the build is in,
-        // the PDF's page replacing it when it settles)
-        this.watchBusy(true);
+        // the PDF's page replacing it when it settles. Busy is the `building`
+        // event's alone: a page or a progress record says nothing of it)
         const hs = [...this.hashes];
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
@@ -1689,7 +1693,6 @@ export class PreviewSession {
         return;
       }
       case "progress":
-        this.watchBusy(true);
         // (a pack the build fetches, the engine's own Shelf, native or wasm: as a host's fetch.
         // The loading card lists the file asked for ("amsmath.sty", as $/progress's
         // "Fetching amsmath.sty (12 of 40)" says it), so it goes as `pack`, the card's item;
@@ -1706,7 +1709,16 @@ export class PreviewSession {
         this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
         return;
       case "superseded":
-        this.watchBusy(true);
+        return;
+      // (a build of the watch's began or ended, the document's or Compare's
+      // diff's: the status's "Typesetting…" from one to the other. Taken
+      // from the progress records and pages, a record after the build was
+      // in (a fetch's, a worker's last page, Compare's diff built in the
+      // background, which says no `settled`) put it back on, and nothing
+      // took it off: "Typesetting…" for ever, the CLI's build long done)
+      case "building":
+        this.watchBusy(e.on);
+        this.sink.preparing?.(e.on);
         return;
       case "diagnostics":
         this.watchDiags = e.items.map(asDiagnostic);

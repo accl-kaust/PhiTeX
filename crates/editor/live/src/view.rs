@@ -1300,6 +1300,9 @@ impl Viewer {
                     // viewer read it as a part out of fuel)
                     "pending": 0,
                     "undefined_names": [],
+                    // (a build running now: a tab that joins mid-build
+                    // missed its `building` event)
+                    "building": s.building.load(Ordering::Relaxed),
                 }))
             }
             "pages" => {
