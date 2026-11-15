@@ -677,7 +677,9 @@ impl Ready {
             eng.placed_node(NodeId::from_raw(k.3))
                 .is_some_and(|n| n.yielded_to.load(Ordering::Acquire))
         });
-        THIEF_FIRST.with(|c| c.set(long || yielded));
+        if crate::obs::im_on() {
+            THIEF_FIRST.with(|c| c.set(long || yielded));
+        }
         if long || yielded {
             q.pop(eng)
         } else {
@@ -2916,8 +2918,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             crate::lock::wait_so_far(),
         )
     });
-    let took = crate::obs::im_took_now();
-    crate::obs::im_took("-", 0);
+    let took = if crate::obs::im_on() {
+        let t = crate::obs::im_took_now();
+        crate::obs::im_took("-", 0);
+        t
+    } else {
+        ("-", 0)
+    };
     let im = crate::obs::im_on().then(|| {
         let wk = node.woke.lock();
         (
@@ -2936,6 +2943,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
     crate::obs::im_committing(im_was);
+    #[cfg(not(feature = "profile"))]
+    let _ = rc;
+    #[cfg(feature = "profile")]
     if let Some((cpu0, hw0, wait0)) = rc {
         // (a run that ends with products: the one its commit keeps, unless
         // a later run of the node replaces it)

@@ -714,22 +714,27 @@ pub(crate) fn rc_on() -> bool {
 /// (`PHITEX_RUNCOST`) The kept runs' costs by operation, printed and
 /// taken: `runcost\\top\\tnodes\\tcpu cycles instr cref cmiss lockwait reads wall runs`.
 pub(crate) fn runcost_report(eng: &crate::engine::Engine) {
-    let mut by: std::collections::BTreeMap<&'static str, (u64, [u64; 9])> = Default::default();
-    for i in 0..eng.nodes.len() {
-        let Some(n) = eng.nodes.get(i) else { continue };
-        if let Some((op, c)) = n.cost.lock().take() {
-            let e = by.entry(op).or_default();
-            e.0 += 1;
-            for k in 0..9 {
-                e.1[k] += c[k];
+    #[cfg(not(feature = "profile"))]
+    let _ = eng;
+    #[cfg(feature = "profile")]
+    {
+        let mut by: std::collections::BTreeMap<&'static str, (u64, [u64; 9])> = Default::default();
+        for i in 0..eng.nodes.len() {
+            let Some(n) = eng.nodes.get(i) else { continue };
+            if let Some((op, c)) = n.cost.lock().take() {
+                let e = by.entry(op).or_default();
+                e.0 += 1;
+                for (a, b) in e.1.iter_mut().zip(c) {
+                    *a += b;
+                }
             }
         }
-    }
-    for (op, (k, c)) in by {
-        eprintln!(
-            "runcost\t{op}\t{k}\t{}",
-            c.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
-        );
+        for (op, (k, c)) in by {
+            eprintln!(
+                "runcost\t{op}\t{k}\t{}",
+                c.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
+            );
+        }
     }
 }
 
@@ -747,9 +752,15 @@ thread_local! {
     };
 }
 
-/// (profile) One log line into this thread's buffer.
+/// (profile) One log line into this thread's buffer, while the per-run
+/// logs are on (`PHITEX_RUN_LOG`, `PHITEX_INTERMED_LOG`); else to stderr
+/// at once, as `eprintln` (a stuck build's dump, the wake log).
 pub(crate) fn log_line(args: std::fmt::Arguments<'_>) {
     use std::fmt::Write as _;
+    if !(im_on() || crate::sched::run_log()) {
+        eprintln!("{args}");
+        return;
+    }
     LOG_BUF.with(|b| {
         let mut s = b.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = s.write_fmt(args);

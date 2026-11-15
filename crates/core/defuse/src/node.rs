@@ -222,6 +222,7 @@ pub(crate) struct Node {
     /// and `[cpu ns, cycles, instructions, cache refs, cache misses, lock
     /// wait ns, reads, wall ns, runs]`, summed over the kept runs at the
     /// evaluation's end (`obs::runcost_report`).
+    #[cfg(feature = "profile")]
     pub(crate) cost: crate::lock::Mx<Option<(&'static str, [u64; 9])>>,
     /// The run its last commit made, and its run under way, were asked
     /// for by another node's commit in their wave (a re-ask, a
@@ -398,6 +399,7 @@ impl Node {
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
+            #[cfg(feature = "profile")]
             cost: crate::lock::Mx::new(None),
             run_chained: AtomicBool::new(false),
             chain_began: AtomicBool::new(false),
