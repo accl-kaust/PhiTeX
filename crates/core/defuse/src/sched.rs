@@ -2176,7 +2176,7 @@ pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
 pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake) {
     if let Some(x) = eng.placed_node(n) {
-        im_wake(eng, &x, &wake, "held");
+        im_wake(eng, x, &wake, "held");
     }
     eng.held.lock().push((n, wake));
     if let Some(w) = w {
