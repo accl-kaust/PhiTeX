@@ -243,11 +243,11 @@ function search(pages2, q, max = 1e3) {
   if (!needle) return [];
   const out = [];
   for (let k = 0; k < pages2.length && out.length < max; k++) {
-    const lines2 = pages2[k];
+    const lines3 = pages2[k];
     let hay = "";
     const at = [];
     const col = [];
-    lines2.forEach((l, i) => {
+    lines3.forEach((l, i) => {
       if (i) hay += " ", at.push(-1), col.push(-1);
       for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
     });
@@ -256,13 +256,13 @@ function search(pages2, q, max = 1e3) {
       let cur = -1, x = 0, r = 0;
       const flush = () => {
         if (cur < 0) return;
-        const l = lines2[cur];
+        const l = lines3[cur];
         boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
       };
       for (let u = from2; u < from2 + needle.length; u++) {
         const i = at[u];
         if (i < 0) continue;
-        const l = lines2[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
+        const l = lines3[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
         if (i !== cur) flush(), cur = i, x = xl, r = xr;
         else x = Math.min(x, xl), r = Math.max(r, xr);
       }
@@ -272,26 +272,26 @@ function search(pages2, q, max = 1e3) {
   }
   return out;
 }
-function caretAt(lines2, x, y, from2) {
-  if (!lines2.length) return null;
+function caretAt(lines3, x, y, from2) {
+  if (!lines3.length) return null;
   const top = (l2) => l2.y - l2.size * 0.8, bottom = (l2) => l2.y + l2.size * 0.25;
   const dx = (l2) => x < l2.x ? l2.x - x : x > l2.x + l2.w ? x - (l2.x + l2.w) : 0;
   const dy = (l2) => y < top(l2) ? top(l2) - y : y > bottom(l2) ? y - bottom(l2) : 0;
   const inColumn = (l2) => !from2 || l2.x < from2.x + from2.w && from2.x < l2.x + l2.w;
-  const idx = lines2.map((_, i2) => i2);
-  const best = (cands, key) => cands.reduce((a, b) => key(lines2[b]) < key(lines2[a]) ? b : a);
-  const row = idx.filter((i2) => dy(lines2[i2]) === 0);
+  const idx = lines3.map((_, i2) => i2);
+  const best = (cands, key) => cands.reduce((a, b) => key(lines3[b]) < key(lines3[a]) ? b : a);
+  const row = idx.filter((i2) => dy(lines3[i2]) === 0);
   let i;
-  const over = row.filter((i2) => dx(lines2[i2]) === 0);
-  const rowCol = row.filter((i2) => inColumn(lines2[i2]));
+  const over = row.filter((i2) => dx(lines3[i2]) === 0);
+  const rowCol = row.filter((i2) => inColumn(lines3[i2]));
   if (over.length) i = over[0];
   else if (rowCol.length) i = best(rowCol, dx);
   else {
-    const col = idx.filter((i2) => inColumn(lines2[i2]) && dx(lines2[i2]) === 0);
-    const near = col.length ? col : idx.filter((i2) => inColumn(lines2[i2]));
+    const col = idx.filter((i2) => inColumn(lines3[i2]) && dx(lines3[i2]) === 0);
+    const near = col.length ? col : idx.filter((i2) => inColumn(lines3[i2]));
     i = best(near.length ? near : idx, (l2) => dy(l2) * 4 + dx(l2));
   }
-  const l = lines2[i];
+  const l = lines3[i];
   let off = 0;
   if (x >= l.x + l.w) off = l.text.length;
   else if (x > l.x) {
@@ -335,9 +335,9 @@ function waspColours(l) {
   const at = (base, none, more) => base.map((c, i) => s <= 1 ? mix(none, c, s) : mix(c, more[i], s - 1));
   return { light: at(light, "#000000", vivid), dark: at(dark, "#ffffff", vividDark) };
 }
-function bands(lines2, all = false) {
+function bands(lines3, all = false) {
   const count = /* @__PURE__ */ new Map();
-  for (const l of lines2) {
+  for (const l of lines3) {
     const s = Math.round(l.size * 10) / 10;
     count.set(s, (count.get(s) ?? 0) + l.text.replace(/\s/g, "").length);
   }
@@ -345,7 +345,7 @@ function bands(lines2, all = false) {
   for (const [s, n2] of count) if (n2 > most) most = n2, body = s;
   if (!body) return [];
   const em = body;
-  const runs = lines2.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
+  const runs = lines3.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
   if (!runs.length) return [];
   const long = runs.filter((l) => l.w > em * 15);
   const base = long.length ? long : runs;
@@ -422,7 +422,7 @@ function waspOn(page, all = false, length = 1) {
   const text = page.querySelector(":scope > .phx-text");
   if (!text) return;
   ensureText(text);
-  const lines2 = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l) => !!l);
+  const lines3 = [...text.children].map((t) => LAYER_LINES.get(t)).filter((l) => !!l);
   const svg2 = document.createElementNS(SVG, "svg");
   svg2.setAttribute("class", "phx-wasp");
   svg2.setAttribute("viewBox", text.getAttribute("viewBox") ?? "");
@@ -446,7 +446,7 @@ function waspOn(page, all = false, length = 1) {
       defs.append(g);
     }
   svg2.append(defs);
-  for (const b of bands(lines2, all)) {
+  for (const b of bands(lines3, all)) {
     const r = document.createElementNS(SVG, "rect");
     r.setAttribute("x", b.x.toFixed(2));
     r.setAttribute("y", b.y.toFixed(2));
@@ -546,6 +546,13 @@ var Viewer = class _Viewer {
       }
       if (!out.size) return;
       const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+      const ends = this.selectionEnds(sel);
+      if (ends) {
+        const on = (k) => sel2.find((s) => s.k === k) ?? (sel2.push({ k, rects: [] }), sel2.at(-1));
+        on(ends.from.k).from = [ends.from.x, ends.from.y];
+        on(ends.to.k).to = [ends.to.x, ends.to.y];
+        sel2.sort((a, b) => a.k - b.k);
+      }
       const [x, y, w, h] = sel2[0].rects[0];
       this.picked = { k: sel2[0].k, x: x + w / 2, y: y + h / 2 };
       const key = JSON.stringify(sel2);
@@ -1134,17 +1141,17 @@ var Viewer = class _Viewer {
    * \ref's target: the page is shown instead).
    */
   entryAt(k, top) {
-    const lines2 = this.pageLines(k);
-    const i = lines2.findIndex((l) => l.y1 > top + 1);
+    const lines3 = this.pageLines(k);
+    const i = lines3.findIndex((l) => l.y1 > top + 1);
     if (i < 0) return null;
-    const first = lines2[i];
+    const first = lines3[i];
     const labelled = _Viewer.LABEL.exec(first.t);
-    const heading = lines2.slice(0, i).some((l) => /^(references|bibliography|works cited|literature)$/i.test(l.t));
+    const heading = lines3.slice(0, i).some((l) => /^(references|bibliography|works cited|literature)$/i.test(l.t));
     if (!labelled && !heading) return null;
     const out = [first.t];
     const lead = first.y1 - first.y0;
-    for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
-      const l = lines2[j];
+    for (let j = i + 1, last = first; j < lines3.length && out.length < 8; j++) {
+      const l = lines3[j];
       if (_Viewer.LABEL.test(l.t) || l.y0 - last.y1 > lead * 0.9 || /^\d+$/.test(l.t)) break;
       out.push(l.t);
       last = l;
@@ -1306,17 +1313,17 @@ var Viewer = class _Viewer {
    * every card one entry early, the first none.
    */
   entryOn(k, y, aux = null, left = null) {
-    const lines2 = this.pageLines(k).filter((l) => left == null || l.x0 > left - 2 && l.x0 < left + 60);
-    const below = lines2.map((l, j) => [l, j]).filter(([l]) => l.b >= y).sort(([a], [c]) => a.b - c.b || a.x0 - c.x0);
+    const lines3 = this.pageLines(k).filter((l) => left == null || l.x0 > left - 2 && l.x0 < left + 60);
+    const below = lines3.map((l, j) => [l, j]).filter(([l]) => l.b >= y).sort(([a], [c]) => a.b - c.b || a.x0 - c.x0);
     if (!below.length) return null;
     const near = below.slice(0, 4);
     const who = aux ? /\p{L}[\p{L}'’-]+/u.exec(aux)?.[0] : void 0;
     const numbers = (t) => /^[\d\s.,;:–—-]+$/.test(t);
     const pick2 = near.find(([l]) => _Viewer.LABEL.test(l.t)) ?? (who ? near.find(([l]) => l.t.includes(who)) : void 0) ?? near.find(([l]) => !numbers(l.t)) ?? near[0];
     const i = pick2[1];
-    const first = lines2[i], out = [first.t], lead = first.y1 - first.y0;
-    for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
-      const l = lines2[j];
+    const first = lines3[i], out = [first.t], lead = first.y1 - first.y0;
+    for (let j = i + 1, last = first; j < lines3.length && out.length < 8; j++) {
+      const l = lines3[j];
       if (_Viewer.LABEL.test(l.t) || l.y0 - last.y1 > lead * 0.9 || /^\d+$/.test(l.t) || Math.abs(l.x0 - first.x0) < 1 && !_Viewer.LABEL.test(first.t)) break;
       out.push(l.t);
       last = l;
@@ -1479,7 +1486,7 @@ var Viewer = class _Viewer {
     const f = document.createElement("div");
     f.className = "phx-flash";
     const pad = exact ? 2 : 3;
-    Object.assign(f.style, { left: `${(l - pad) / this.size.w * 100}%`, top: `${(t - pad) / this.size.h * 100}%`, width: `${(r - l + 2 * pad) / this.size.w * 100}%`, height: `${(bt - t + 2 * pad) / this.size.h * 100}%` });
+    this.place(f, { x: l - pad, y: t - pad, w: r - l + 2 * pad, h: bt - t + 2 * pad });
     f.addEventListener("animationend", () => f.remove());
     s.el.append(f);
   }
@@ -1603,7 +1610,6 @@ var Viewer = class _Viewer {
    */
   marks(marks) {
     for (const m of this.root.querySelectorAll(".sel")) m.remove();
-    const { w, h } = this.size;
     let first, seen = false;
     const v = this.scroller.getBoundingClientRect();
     for (const { k, boxes: boxes2 } of marks) {
@@ -1613,7 +1619,7 @@ var Viewer = class _Viewer {
       for (const [x, y, bw, bh] of boxes2) {
         const m = document.createElement("div");
         m.className = "mark sel";
-        Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
         first ??= m;
         const r = m.getBoundingClientRect();
@@ -1645,13 +1651,53 @@ var Viewer = class _Viewer {
     ensureText(slot.el);
     const texts = [...slot.el.querySelectorAll("text")].filter((t) => LAYER_LINES.get(t)?.text && t.firstChild);
     if (!texts.length) return null;
-    const lines2 = texts.map((t) => LAYER_LINES.get(t));
+    const lines3 = texts.map((t) => LAYER_LINES.get(t));
     const b = slot.el.getBoundingClientRect();
     const k = Number(slot.el.dataset.k);
     const x = (cx - b.left) / b.width * this.size.w, y = (Math.min(Math.max(cy, b.top), b.bottom) - b.top) / b.height * this.size.h;
-    const c = caretAt(lines2, x, y, from2 && from2.k === k ? from2.line : void 0);
+    const c = caretAt(lines3, x, y, from2 && from2.k === k ? from2.line : void 0);
     if (!c) return null;
-    return { node: texts[c.i].firstChild, off: c.off, k, line: lines2[c.i] };
+    return { node: texts[c.i].firstChild, off: c.off, k, line: lines3[c.i] };
+  }
+  /**
+   * The ends of the text selected on the pages, from the text layer: its
+   * first character's left edge and its last's right edge, each on its
+   * line's baseline (PDF points) and its page. Null: none of it is a page's
+   * text.
+   */
+  selectionEnds(sel) {
+    let from2 = null, to = null;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      for (const s of this.slots) {
+        if (!r.intersectsNode(s.el)) continue;
+        const k = Number(s.el.dataset.k);
+        for (const t of s.el.querySelectorAll("text")) {
+          const l = LAYER_LINES.get(t);
+          if (!l || !l.text || !r.intersectsNode(t)) continue;
+          const node = t.firstChild;
+          const a = node && r.startContainer === node ? r.startOffset : 0;
+          const b = node && r.endContainer === node ? r.endOffset : l.text.length;
+          let i2 = a, j = b - 1;
+          while (i2 <= j && /\s/.test(l.text[i2])) i2++;
+          while (j >= i2 && /\s/.test(l.text[j])) j--;
+          if (j < i2) continue;
+          from2 ??= { k, x: l.xs?.[i2] ?? l.x + l.w * i2 / l.text.length, y: l.y };
+          to = { k, x: l.rs?.[j] ?? l.x + l.w * (j + 1) / l.text.length, y: l.y };
+        }
+      }
+    }
+    return from2 && to ? { from: from2, to } : null;
+  }
+  /**
+   * The place in the pages' text under a point on the screen, kept in the
+   * column of `from` (a place this gave before) on its page, as a drag's end
+   * is (caretAt): its page, its line, the character it is before; a
+   * review handle's drag.
+   */
+  textPlace(cx, cy, from2) {
+    const at = this.caretFrom(cx, cy, from2);
+    return at && { k: at.k, line: at.line, off: at.off };
   }
   /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
   drawSelection() {
@@ -1659,7 +1705,6 @@ var Viewer = class _Viewer {
     const rn = this.root.getRootNode();
     const sel = rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount) return;
-    const { w, h } = this.size;
     for (let i = 0; i < sel.rangeCount; i++) {
       const r = sel.getRangeAt(i);
       for (const s of this.slots) {
@@ -1676,7 +1721,7 @@ var Viewer = class _Viewer {
           const m = document.createElement("div");
           m.className = "mark seltext";
           const top = l.y - l.size * 0.8, ht = l.size * 1.05;
-          Object.assign(m.style, { left: `${x0 / w * 100}%`, top: `${top / h * 100}%`, width: `${(x1 - x0) / w * 100}%`, height: `${ht / h * 100}%` });
+          this.place(m, { x: x0, y: top, w: x1 - x0, h: ht });
           s.el.append(m);
         }
       }
@@ -1699,8 +1744,8 @@ var Viewer = class _Viewer {
    */
   others(marks) {
     for (const m of this.root.querySelectorAll(".peer")) m.remove();
-    const { w, h } = this.size;
-    const at = (m, x, y) => Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%` });
+    const { w } = this.size;
+    const at = (m, x, y, bw, bh) => this.place(m, { x, y, w: bw, h: bh });
     for (const { k, boxes: boxes2, label, hue, file, pos } of marks) {
       const s = this.slots[k];
       if (!s || !boxes2.length) continue;
@@ -1708,8 +1753,7 @@ var Viewer = class _Viewer {
         const m = document.createElement("div");
         m.className = "peer";
         m.style.setProperty("--hue", String(hue));
-        at(m, x, y);
-        Object.assign(m.style, { width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        at(m, x, y, bw, bh);
         s.el.append(m);
       }
       const tag = document.createElement("div");
@@ -1752,20 +1796,19 @@ var Viewer = class _Viewer {
   culprits(marks) {
     this.culpritMarks = marks;
     for (const m of this.root.querySelectorAll(".culprit")) m.remove();
-    const { w, h } = this.size;
     for (const { k, boxes: boxes2, severity, i, rule, amount } of marks) {
       const s = this.slots[k];
       if (!s) continue;
       if (rule && boxes2.length) {
         const [x, y, bw, bh] = boxes2[0];
         ensureText(s.el);
-        const lines2 = [...s.el.querySelectorAll("text")].map((t) => LAYER_LINES.get(t)).filter((l) => !!l && !!l.text).sort((a, b) => a.y - b.y);
+        const lines3 = [...s.el.querySelectorAll("text")].map((t) => LAYER_LINES.get(t)).filter((l) => !!l && !!l.text).sort((a, b) => a.y - b.y);
         const right = (l) => l.rs?.[l.rs.length - 1] ?? l.x + l.w;
-        let at = lines2.findIndex((l) => l.y >= y && l.y - l.size <= y + bh);
-        let line = at >= 0 ? lines2[at] : void 0;
+        let at = lines3.findIndex((l) => l.y >= y && l.y - l.size <= y + bh);
+        let line = at >= 0 ? lines3[at] : void 0;
         if (line && amount) {
           const par = [line];
-          for (let j = at + 1; j < lines2.length && lines2[j].y - lines2[j - 1].y <= lines2[j].size * 1.6; j++) par.push(lines2[j]);
+          for (let j = at + 1; j < lines3.length && lines3[j].y - lines3[j - 1].y <= lines3[j].size * 1.6; j++) par.push(lines3[j]);
           const ends = par.map(right).sort((a, b) => a - b);
           const just = ends[ends.length >> 1];
           line = par.reduce((best, l) => Math.abs(right(l) - just - amount) < Math.abs(right(best) - just - amount) ? l : best, line);
@@ -1776,7 +1819,7 @@ var Viewer = class _Viewer {
         const m = document.createElement("div");
         m.className = `culprit rule ${rule}`;
         if (i !== void 0) m.dataset.i = String(i);
-        Object.assign(m.style, { left: `${(end + 1.5) / w * 100}%`, top: `${top / h * 100}%`, width: `${5 / w * 100}%`, height: `${ht / h * 100}%` });
+        this.place(m, { x: end + 1.5, y: top, w: 5, h: ht });
         s.el.append(m);
         continue;
       }
@@ -1784,7 +1827,7 @@ var Viewer = class _Viewer {
         const m = document.createElement("div");
         m.className = `culprit ${severity}`;
         if (i !== void 0) m.dataset.i = String(i);
-        Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
       }
     }
@@ -1796,13 +1839,31 @@ var Viewer = class _Viewer {
    * away). The whole set, the last one's replaced; never scrolls, never asks
    * for a page (one drawn later keeps them, as paint does).
    */
+  /**
+   * `el` placed on its page at PDF points (any of its left `x`, top `y`,
+   * width `w`, height `h`) as fractions of the pages' size, and placed again
+   * when that size becomes known: a mark drawn before the first page came
+   * (a tab opened on notes, problems, a collaborator's cursor) was laid out
+   * on Letter's size, and on an A4 page stood lines below its text.
+   */
+  place(el, p) {
+    el.dataset.pt = JSON.stringify(p);
+    this.lay(el, p);
+  }
+  lay(el, p) {
+    const { w, h } = this.size, st = {};
+    if (p.x !== void 0) st.left = `${p.x / w * 100}%`;
+    if (p.y !== void 0) st.top = `${p.y / h * 100}%`;
+    if (p.w !== void 0) st.width = `${p.w / w * 100}%`;
+    if (p.h !== void 0) st.height = `${p.h / h * 100}%`;
+    Object.assign(el.style, st);
+  }
   /** A page's size in PDF points (the pages' boxes are in them). */
   pageSize() {
     return this.size;
   }
   reviewMarks(marks) {
     for (const m of this.root.querySelectorAll(".rv")) m.remove();
-    const { w, h } = this.size;
     const pinned = /* @__PURE__ */ new Map();
     for (const mk of marks) {
       const s = this.slots[mk.k];
@@ -1811,7 +1872,7 @@ var Viewer = class _Viewer {
         const m = document.createElement("div");
         m.className = `rv ${mk.cls}`;
         m.dataset.id = mk.id;
-        Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${Math.max(bw, 1.5) / w * 100}%`, height: `${bh / h * 100}%` });
+        this.place(m, { x, y, w: Math.max(bw, 1.5), h: bh });
         s.el.append(m);
       }
       if (mk.pin !== void 0) {
@@ -1826,7 +1887,7 @@ var Viewer = class _Viewer {
         b.dataset.id = mk.id;
         b.textContent = mk.pin;
         if (mk.title) b.title = mk.title, b.setAttribute("aria-label", mk.title);
-        Object.assign(b.style, { top: `${y / h * 100}%` });
+        this.place(b, { y });
         s.el.append(b);
       }
     }
@@ -1847,7 +1908,7 @@ var Viewer = class _Viewer {
         s.el.append(m);
       }
       m.classList.remove("fade");
-      Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+      this.place(m, { x, y, w: bw, h: bh });
     });
     for (const m of have.slice(boxes2.length)) m.remove();
     const top = s.el.offsetTop + boxes2[0][1] / h * s.el.offsetHeight;
@@ -1882,7 +1943,7 @@ var Viewer = class _Viewer {
       for (const [x2, y2, bw, bh] of boxes2) {
         const m = document.createElement("div");
         m.className = i === cur ? "mark fnd cur" : "mark fnd";
-        Object.assign(m.style, { left: `${x2 / w * 100}%`, top: `${y2 / h * 100}%`, width: `${bw / w * 100}%`, height: `${bh / h * 100}%` });
+        this.place(m, { x: x2, y: y2, w: bw, h: bh });
         s2.el.append(m);
       }
     });
@@ -1990,6 +2051,7 @@ var Viewer = class _Viewer {
     if (hash) this.asked.delete(`${k}:${hash}`);
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
+    if (resized) for (const el of this.root.querySelectorAll("[data-pt]")) this.lay(el, JSON.parse(el.dataset.pt));
     s.img = img;
     this.waits(s);
     if (this.startPlace) queueMicrotask(() => this.startIfReady());
@@ -5644,10 +5706,10 @@ function openHunks(x) {
   return x.hunks.filter((h) => (h.state ?? "open") === "open");
 }
 function lineDiff(h) {
-  const lines2 = (t) => (t.endsWith("\n") ? t.slice(0, -1) : t).split("\n");
+  const lines3 = (t) => (t.endsWith("\n") ? t.slice(0, -1) : t).split("\n");
   const pre = h.before.replace(/^…/, "");
   const post = h.after.replace(/…$/, "");
-  return { del: h.whole === "added" ? [] : lines2(pre + h.old + post), add: h.whole === "deleted" ? [] : lines2(pre + h.new + post) };
+  return { del: h.whole === "added" ? [] : lines3(pre + h.old + post), add: h.whole === "deleted" ? [] : lines3(pre + h.new + post) };
 }
 var PATHS = {
   rate_review: "M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z",
@@ -5669,6 +5731,12 @@ function ago(iso, now = Date.now()) {
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return `${Math.round(s / 86400)} d ago`;
+}
+function noteNumbers(notes, where) {
+  const all = notes.filter((n) => !n.hunk && !n.draft);
+  const at = (n) => where.get(n.id) ?? [n.anchor.page ?? 1e9, 0];
+  const placed = all.filter((n) => !n.detached).sort((a, b) => at(a)[0] - at(b)[0] || at(a)[1] - at(b)[1] || a.anchor.file.localeCompare(b.anchor.file) || a.anchor.start - b.anchor.start);
+  return new Map([...placed, ...all.filter((n) => n.detached)].map((n, i) => [n.id, i + 1]));
 }
 function oneLine(s, max = 160) {
   const t = s.replace(/\s+/g, " ").trim();
@@ -5720,6 +5788,7 @@ var REVIEW_CSS = `
 .rside .card.on { border-color: var(--ph-accent); box-shadow: 0 0 0 1px var(--ph-accent); cursor: default; }
 .rside .card.resolved { opacity: .72; }
 .rside .card .top { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ph-fg2); }
+.rside .card .num { font-size: 11px; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; background: var(--ph-accent, #1d3e72); color: #fff; padding: 0 4px; box-sizing: border-box; }
 .rside .chip { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: var(--ph-pill); border: 1px solid currentColor; line-height: 16px; }
 .rside .chip.comment { color: #b25e00; } .rside .chip.note { color: #2f6fd1; } .rside .chip.highlight { color: #8a7300; }
 .rside .chip.draft { color: var(--ph-fg2); } .rside .chip.det { color: var(--ph-warning); } .rside .chip.done { color: #1a7f37; }
@@ -5828,6 +5897,8 @@ var Review = class {
   drawn = 0;
   /** Where each note is on the pages, as last drawn: its page and height (the list's order). */
   where = /* @__PURE__ */ new Map();
+  /** Each note's place in the pages' reading order (its page, its first glyph's place in the order they were set): the list's order and the pins' numbers. */
+  rank = /* @__PURE__ */ new Map();
   /** The proposals shown as source lines (else words). */
   lines = /* @__PURE__ */ new Set();
   /** A comment being written on a proposal (on one of its hunks; asking for changes). */
@@ -5996,6 +6067,10 @@ var Review = class {
     if (ta.value) this.drafts.set(key, ta.value);
     else this.drafts.delete(key);
   }
+  /** Each note's number, as the list shows them and its pin on the page says (noteNumbers, by `rank`): every note counts, whatever the list's filter, so a note keeps its number. */
+  numbers(where) {
+    return noteNumbers(this.s.notes, where);
+  }
   notesView() {
     const all = this.s.notes.filter((n) => !n.hunk);
     const resolved = all.filter((n) => n.status === "resolved").length;
@@ -6006,10 +6081,9 @@ var Review = class {
       return html`${tools}<div class="empty"><b>No notes yet.</b><br>Select text on a page to highlight it, note it, or comment for your agent. <b>Alt+click</b> notes a spot with no text, such as a figure.<br><br>Your agent reads them with <code>phitex session notes</code>.</div>`;
     if (!shown.length)
       return html`${tools}<div class="empty">${this.filter === "open" ? "Every note is resolved." : "No resolved notes."}</div>`;
-    const placed = shown.filter((n) => !n.detached);
+    const order = this.numbers(this.rank);
+    const placed = shown.filter((n) => !n.detached).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     const detached = shown.filter((n) => n.detached);
-    const at = (n) => this.where.get(n.id) ?? [n.anchor.page ?? 1e9, 0];
-    placed.sort((a, b) => at(a)[0] - at(b)[0] || at(a)[1] - at(b)[1] || a.anchor.file.localeCompare(b.anchor.file) || a.anchor.start - b.anchor.start);
     return html`${tools}${placed.map((n) => this.noteCard(n))}${detached.length ? html`<h3>Detached: their text is gone from the source</h3>${detached.map((n) => this.noteCard(n))}` : ""}`;
   }
   /** The box editing note `n`'s words (post `i`; its kind with the first). */
@@ -6019,6 +6093,7 @@ var Review = class {
   }
   noteCard(n, inHunk = false) {
     const on = this.sel === n.id;
+    const num = inHunk ? "" : String(this.numbers(this.rank).get(n.id) ?? "");
     const a = n.anchor;
     const quote = a.quote ? html`<div class="quote ${n.kind}">${oneLine(a.quote, on ? 2e3 : 240)}</div>` : html`<div class="quote spot ${n.kind}">A spot on page ${String((a.page ?? 0) + 1)}</div>`;
     const editingNote = on && this.editing === n.id;
@@ -6028,7 +6103,7 @@ var Review = class {
     const waiting = n.status === "open" && n.kind === "comment" && lastBy !== "agent" && !n.draft && !n.verdict;
     const reply = on && !n.draft && !this.editing?.startsWith(n.id) ? html`<textarea data-focus="reply:${n.id}" data-reply="${n.id}" placeholder="${n.kind === "highlight" ? "Add a note\u2026" : "Reply\u2026"}" aria-label="Reply to this note" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="reply" data-id="${n.id}" data-focus="send:${n.id}">Reply</button>${n.status === "open" ? html`<button type="button" class="btn" data-act="resolve" data-id="${n.id}" data-focus="res:${n.id}">${icon("check", 14)} Resolve</button>` : html`<button type="button" class="btn" data-act="reopen" data-id="${n.id}" data-focus="reo:${n.id}">${icon("undo", 14)} Reopen</button>`}<span class="grow"></span>${inHunk ? "" : html`<button type="button" class="btn" data-act="edit" data-id="${n.id}" data-focus="edit:${n.id}" title="Edit its words or kind (Enter)">${icon("note", 14)} Edit</button>`}<button type="button" class="btn" data-act="delete" data-id="${n.id}" data-focus="del:${n.id}" title="Delete (Delete key)">${icon("delete", 14)} Delete</button></div><div class="hint">Ctrl+Enter replies · Enter on the card edits · Delete deletes · Esc closes</div>` : "";
     const answered = (n.hunks ?? []).length;
-    return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top"><span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
+    return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top">${num ? html`<span class="num" title="${`Its pin on the page says ${num}`}">${num}</span>` : ""}<span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
   }
   post(p) {
     if (p.changes?.length)
@@ -6061,8 +6136,8 @@ var Review = class {
   }
   /** A card's buttons and its compose box (`id`: the proposal, "" the direct batch not named). */
   cardTools(id, open, showing, propose) {
-    const lines2 = this.lines.has(id);
-    return html`<div class="act"><button type="button" class="btn accept" data-pact="accept-all" data-p="${id}" disabled="${!open}" title="Accept every change waiting${propose ? ": applied to your files" : ""}">${icon("check", 14)} Accept all</button><button type="button" class="btn reject" data-pact="reject-all" data-p="${id}" disabled="${!open}" title="${propose ? "Reject every change waiting: your files stay as they are" : "Reject every change: the files get the accepted text back"}">Reject all</button><button type="button" class="btn" data-pact="request" data-p="${id}" title="Ask your agent to change it (it is told at once)">Request changes</button><button type="button" class="btn" data-pact="comment" data-p="${id}">Comment</button></div><div class="act"><label class="hint" title="Typeset it against your text (latexdiff), on the pages"><input type="checkbox" data-pact="show" data-p="${id}" checked="${showing}"> Show diff</label><span class="grow"></span><span class="seg" role="group" aria-label="The source as"><button type="button" data-pact="words" data-p="${id}" aria-pressed="${!lines2}">Words</button><button type="button" data-pact="lines" data-p="${id}" aria-pressed="${lines2}">Lines</button></span></div>${this.composeBox(id)}`;
+    const lines3 = this.lines.has(id);
+    return html`<div class="act"><button type="button" class="btn accept" data-pact="accept-all" data-p="${id}" disabled="${!open}" title="Accept every change waiting${propose ? ": applied to your files" : ""}">${icon("check", 14)} Accept all</button><button type="button" class="btn reject" data-pact="reject-all" data-p="${id}" disabled="${!open}" title="${propose ? "Reject every change waiting: your files stay as they are" : "Reject every change: the files get the accepted text back"}">Reject all</button><button type="button" class="btn" data-pact="request" data-p="${id}" title="Ask your agent to change it (it is told at once)">Request changes</button><button type="button" class="btn" data-pact="comment" data-p="${id}">Comment</button></div><div class="act"><label class="hint" title="Typeset it against your text (latexdiff), on the pages"><input type="checkbox" data-pact="show" data-p="${id}" checked="${showing}"> Show diff</label><span class="grow"></span><span class="seg" role="group" aria-label="The source as"><button type="button" data-pact="words" data-p="${id}" aria-pressed="${!lines3}">Words</button><button type="button" data-pact="lines" data-p="${id}" aria-pressed="${lines3}">Lines</button></span></div>${this.composeBox(id)}`;
   }
   composeBox(id) {
     const c = this.pcompose;
@@ -6091,8 +6166,8 @@ var Review = class {
     return html`<div class="card pcard" data-p="${x.id}"><div class="top"><span class="chip st-${x.status}">${STATUS_WORD[x.status]}</span><span>${x.id}${x.revision > 1 ? ` \xB7 revision ${x.revision}` : ""}</span><span class="grow"></span><span title="${x.updated}">${ago(x.updated)}</span></div><div class="ptitle">${x.title}</div>${x.why && x.why !== x.title ? html`<div class="pwhy">${x.why}</div>` : ""}<div class="pmeta">${x.files.join(", ")} · ${String(x.hunks.length)} change${x.hunks.length === 1 ? "" : "s"}${said2 ? ` (${said2})` : ""}</div>${live ? this.cardTools(x.id, open, this.showing && this.showingP === x.id, true) : ""}${x.thread.map((p) => this.post(p))}${live ? html`<div class="phunks">${x.hunks.map((h) => this.propHunk(x, h))}</div>${this.keysHint()}` : ""}</div>`;
   }
   /** The source of a change: its words (deleted and added in line), or its lines. */
-  source(h, lines2) {
-    if (lines2) {
+  source(h, lines3) {
+    if (lines3) {
       const d = lineDiff(h);
       return html`<div class="ldiff">${d.del.map((l) => html`<div class="d">${l}</div>`)}${d.add.map((l) => html`<div class="a">${l}</div>`)}</div>`;
     }
@@ -6116,7 +6191,7 @@ var Review = class {
       return html`<div class="card hunk past${this.sel === n.id ? " on" : ""}" data-id="${n.id}" tabindex="0" role="button"><div class="top"><span class="file">${placeOf(n.hunk.file, n.hunk.line)}</span>${v ? html`<span class="chip ${v.verdict === "accepted" ? "done" : "det"}">${v.verdict === "accepted" ? "Accepted" : "Rejected"}</span>` : ""}<span class="grow"></span><span>${v ? ago(v.at) : ""}</span></div><div class="diff">${n.hunk.old ? html`<del>${oneLine(n.hunk.old, 200)}</del>` : ""}${n.hunk.new ? html`<ins>${oneLine(n.hunk.new, 200)}</ins>` : ""}</div><div class="comments">${this.noteCard(n, true)}</div></div>`;
     })}`;
   }
-  hunkCard(h, lines2 = false) {
+  hunkCard(h, lines3 = false) {
     const on = this.sel === h.id;
     const comments = this.s.notes.filter((n) => h.comments.includes(n.id));
     let at = h.now[0];
@@ -6127,7 +6202,7 @@ var Review = class {
       return el;
     });
     const what = h.whole === "added" ? " (new file)" : h.whole === "deleted" ? " (file deleted)" : "";
-    const diff2 = lines2 ? this.source(h, true) : h.whole ? html`<div class="diff">${h.whole === "added" ? html`<ins data-at="${String(h.now[0])}">${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>` : html`<div class="diff" data-hunk="${h.id}"><span class="ctx">${h.before}</span>${parts}<span class="ctx">${h.after}</span></div>`;
+    const diff2 = lines3 ? this.source(h, true) : h.whole ? html`<div class="diff">${h.whole === "added" ? html`<ins data-at="${String(h.now[0])}">${oneLine(h.new, 600)}</ins>` : html`<del>${oneLine(h.old, 600)}</del>`}</div>` : html`<div class="diff" data-hunk="${h.id}"><span class="ctx">${h.before}</span>${parts}<span class="ctx">${h.after}</span></div>`;
     const box = on ? html`<textarea data-focus="hc:${h.id}" data-comment="${h.id}" placeholder="Comment on this change (select words in it to comment on them)…" aria-label="Comment on this change" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="comment" data-id="${h.id}">Comment</button><button type="button" class="btn" data-act="draft" data-id="${h.id}" title="Gather it with others and submit them as one review">Add to review</button></div>` : "";
     return html`<div class="card hunk${on ? " on" : ""}" data-id="${h.id}" data-focus="card:${h.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`Change at ${h.file} line ${h.line}${what}`}"><div class="top"><button type="button" class="place" data-goto="${h.file}" data-line="${String(h.line)}" title="Open in the editor"><span class="file">${placeOf(h.file, h.line, h.end_line)}</span></button>${what}<span class="grow"></span><button type="button" class="btn accept" data-act="accept" data-id="${h.id}" title="Accept: ${this.s.git ? "staged in git" : "kept as the accepted text"}" aria-label="Accept this change">${icon("check", 14)} Accept</button><button type="button" class="btn reject" data-act="reject" data-id="${h.id}" title="Reject: the file gets the accepted text back" aria-label="Reject this change">Reject</button></div>${diff2}${comments.length ? html`<div class="comments">${comments.map((c) => this.noteCard(c, true))}</div>` : ""}${box}</div>`;
   }
@@ -6479,7 +6554,7 @@ var Review = class {
     const [file, a, b] = n ? [n.anchor.file, n.anchor.start, n.anchor.end] : h ? [h.file, h.now[0], h.now[1]] : ["", 0, 0];
     if (!file) return;
     if (n && !n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) return void this.p.viewer.scrollToPlace(n.anchor.page, n.anchor.point[1]);
-    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
+    const at = n ? await this.host.extent(file, a, b, n.anchor.page) : await this.host.boxes(file, a, Math.max(b, a + 1));
     if (at.length) this.p.viewer.scrollToPlace(at[0].k, at[0].boxes[0][1]);
     else this.p.msg("Not on the pages (none of its text is typeset)");
   }
@@ -6509,7 +6584,6 @@ var Review = class {
     if (!n || !n.anchor.quote || n.hunk) return;
     const mine = out.filter((m) => m.id === n.id && m.boxes.length);
     if (!mine.length) return;
-    const size2 = this.p.viewer.pageSize();
     const first = mine[0], last = mine.at(-1);
     const put = (k, b, end) => {
       const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
@@ -6517,35 +6591,55 @@ var Review = class {
       const h = document.createElement("div");
       h.className = `rv rv-h ${end ? "end" : "start"}`;
       h.title = end ? "Drag to move the note's end" : "Drag to move the note's start";
-      Object.assign(h.style, { left: `${(end ? b[0] + b[2] : b[0]) / size2.w * 100}%`, top: `${b[1] / size2.h * 100}%`, height: `${b[3] / size2.h * 100}%` });
+      this.p.viewer.place(h, { x: end ? b[0] + b[2] : b[0], y: b[1], h: b[3] });
       h.addEventListener("pointerdown", (e) => this.drag(e, h, n, end));
       slot.append(h);
     };
-    put(first.k, first.boxes[0], false);
-    put(last.k, last.boxes.at(-1), true);
+    put(first.k, first.boxes[first.first ?? 0] ?? first.boxes[0], false);
+    put(last.k, last.boxes[last.last ?? last.boxes.length - 1] ?? last.boxes.at(-1), true);
   }
+  /**
+   * A handle dragged: it moves over the text as a selection's end does,
+   * a character's edge at a time and in its column (viewer.textPlace, the
+   * column rule of a drag's), and where it is let go the note's end moves
+   * to that character's source (the host snaps it to its word).
+   */
   drag(e, h, n, end) {
     e.preventDefault();
     e.stopPropagation();
-    h.setPointerCapture(e.pointerId);
+    const v = this.p.viewer;
+    const hb = h.getBoundingClientRect();
+    const on = v.textPlace(hb.left + hb.width / 2, hb.top + hb.height / 2);
+    const col = on ? { k: on.k, line: on.line } : void 0;
+    let place4 = null;
+    const char = (l, off) => {
+      const c = end ? Math.max(0, Math.min(off, l.text.length) - 1) : Math.min(off, l.text.length - 1);
+      const n2 = l.text.length;
+      return [l.xs?.[c] ?? l.x + l.w * c / n2, l.rs?.[c] ?? l.x + l.w * (c + 1) / n2];
+    };
     const move = (m) => {
-      const slot = h.parentElement.getBoundingClientRect();
-      h.style.left = `${(m.clientX - slot.left) / slot.width * 100}%`;
-      h.style.top = `${(m.clientY - slot.top) / slot.height * 100 - 1}%`;
+      if (m.pointerId !== e.pointerId) return;
+      place4 = v.textPlace(m.clientX, m.clientY, col);
+      if (!place4) return;
+      const slot = this.p.stage.querySelector(`.slot[data-k="${place4.k}"]`);
+      if (!slot) return;
+      if (h.parentElement !== slot) slot.append(h);
+      const l = place4.line, [x0, x1] = char(l, place4.off);
+      v.place(h, { x: end ? x1 : x0, y: l.y - 8, h: 11 });
     };
     const up = async (u) => {
-      h.removeEventListener("pointermove", move);
-      h.removeEventListener("pointerup", up);
-      const slot = (this.p.root.elementsFromPoint?.(u.clientX, u.clientY) ?? []).map((x) => x.closest?.(".slot")).find(Boolean);
-      if (!slot) return void this.marks();
-      const r = slot.getBoundingClientRect();
-      const size2 = this.p.viewer.pageSize();
-      const at = await this.host.spot(Number(slot.dataset.k), (u.clientX - r.left) / r.width * size2.w, (u.clientY - r.top) / r.height * size2.h);
+      if (u.pointerId !== e.pointerId) return;
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", up);
+      if (!place4) return void this.marks();
+      const l = place4.line, [x0, x1] = char(l, place4.off), n0 = l.text.length;
+      const at = await this.host.source([{ k: place4.k, rects: [], from: [end ? l.xs?.[0] ?? l.x : x0, l.y], to: [end ? x1 : l.rs?.[n0 - 1] ?? l.x + l.w, l.y] }]);
       if (!at || at.file !== n.anchor.file) return void (this.p.msg("Not in the note's file there", true), this.marks());
-      if (await this.req("review_anchor", end ? { id: n.id, end: Math.max(at.start + 1, n.anchor.start + 1), snap: true } : { id: n.id, start: Math.min(at.start, n.anchor.end - 1), snap: true })) this.select(n.id);
+      if (await this.req("review_anchor", end ? { id: n.id, end: Math.max(at.end, n.anchor.start + 1), snap: true } : { id: n.id, start: Math.min(at.start, n.anchor.end - 1), snap: true })) this.select(n.id);
+      else this.marks();
     };
-    h.addEventListener("pointermove", move);
-    h.addEventListener("pointerup", up);
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", up);
   }
   // ---- the marks on the pages ----
   async marks() {
@@ -6554,22 +6648,19 @@ var Review = class {
     if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     const out = [];
     const cls = (n) => n.status === "resolved" ? "n-resolved" : `n-${n.kind}`;
-    let i = 0;
+    const rank = /* @__PURE__ */ new Map();
     for (const n of this.s.notes) {
-      if (n.hunk || n.draft) continue;
-      i++;
-      if (n.detached) continue;
-      const said2 = n.thread.filter((p) => p.text).length;
-      const pin = n.status === "resolved" ? "\u2713" : n.kind === "highlight" && !said2 ? "" : String(said2 || "\u2022");
-      const title = `${KIND_WORD[n.kind]}: ${oneLine(n.thread[0]?.text || n.anchor.quote, 80)}`;
-      if (!n.anchor.quote && n.anchor.point && n.anchor.page !== void 0) {
+      if (n.hunk || n.draft || n.detached) continue;
+      const spot = !n.anchor.quote && n.anchor.point && n.anchor.page !== void 0;
+      const at = await this.host.extent(n.anchor.file, n.anchor.start, spot ? n.anchor.start + 1 : n.anchor.end, n.anchor.page);
+      if (turn !== this.drawn) return;
+      if (at[0]?.order !== void 0) rank.set(n.id, [at[0].k, at[0].order]);
+      if (spot) {
         const [x, y] = n.anchor.point;
-        out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id, pin, title });
+        out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id });
         continue;
       }
-      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1));
-      if (turn !== this.drawn) return;
-      at.forEach((p, j) => out.push({ ...p, cls: cls(n), id: n.id, ...j === 0 && pin !== "" ? { pin, title } : {} }));
+      at.forEach(({ order: _, ...p }) => out.push({ ...p, cls: cls(n), id: n.id }));
     }
     for (const h of this.s.hunks) {
       if (h.whole === "deleted") continue;
@@ -6578,15 +6669,26 @@ var Review = class {
       if (turn !== this.drawn) return;
       at.forEach((p) => out.push({ k: p.k, boxes: empty ? p.boxes.slice(0, 1).map(([x, y, , bh]) => [x, y, 2, bh]) : p.boxes, cls: empty ? "h-del" : "h-add", id: h.id }));
     }
-    void i;
+    const where = /* @__PURE__ */ new Map();
+    for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
+    const num = this.numbers(rank), pinned = /* @__PURE__ */ new Set();
+    for (const m of out) {
+      const n = this.s.notes.find((x) => x.id === m.id);
+      if (!n || n.hunk || pinned.has(n.id)) continue;
+      pinned.add(n.id);
+      const said2 = n.thread.filter((p) => p.text).length;
+      if (n.kind === "highlight" && !said2) continue;
+      const replies = n.thread.slice(1).filter((p) => p.text).length;
+      m.pin = String(num.get(n.id) ?? "\u2022");
+      m.title = `${KIND_WORD[n.kind]} ${m.pin}${n.status === "resolved" ? " (resolved)" : ""}: ${oneLine(n.thread[0]?.text || n.anchor.quote, 80)}${replies ? ` (${replies} repl${replies === 1 ? "y" : "ies"})` : ""}`;
+    }
     this.p.viewer.reviewMarks(out);
     this.lastOut = out;
     this.handles(out);
     this.outline();
-    const where = /* @__PURE__ */ new Map();
-    for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
-    const moved = [...where].some(([id, w]) => this.where.get(id)?.join() !== w.join());
+    const moved = [...rank].some(([id, w]) => this.rank.get(id)?.join() !== w.join()) || rank.size !== this.rank.size;
     this.where = where;
+    this.rank = rank;
     this.scrollbar(where);
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
@@ -7829,7 +7931,7 @@ var Panel = class {
     const file = p?.file ?? d.file, line = p?.line ?? d.line;
     const main = this.lastStatus?.main ?? this.mainFiles.main;
     const source2 = async (f) => (await this.ev.onSource(f).catch(() => null))?.split("\n") ?? null;
-    const numbered = (lines3, from2, to, at) => lines3.slice(from2 - 1, to).map((t, i) => `${String(from2 + i).padStart(4)}${from2 + i === at ? ">" : " "} ${t}`);
+    const numbered = (lines4, from2, to, at) => lines4.slice(from2 - 1, to).map((t, i) => `${String(from2 + i).padStart(4)}${from2 + i === at ? ">" : " "} ${t}`);
     const parts = [
       `I'm writing a LaTeX document (typeset by PhiTeX, a pdfLaTeX/XeLaTeX-compatible engine) and the build reports this ${d.severity}. What is wrong, and how do I fix it in my source?`,
       "",
@@ -7840,10 +7942,10 @@ var Panel = class {
     if (p?.context.length) parts.push(`TeX was inside: ${p.context.map((m) => `\\${m.name.replace(/^\\/, "")} (${m.before}\u2038${m.after})`).join(" \u2190 ")}`);
     if (p?.included.length) parts.push(`Its file was included from: ${p.included.map((i) => `${i.file}:${i.line}`).join(" \u2190 ")}`);
     if (p?.help.length || p?.suggestions.length) parts.push(`PhiTeX's hint: ${[...p?.help ?? [], ...p?.suggestions ?? []].join(" ")}`);
-    const lines2 = file ? await source2(file) : null;
-    if (lines2 && line) parts.push("", `## ${file}, lines around ${line}`, "```latex", ...numbered(lines2, Math.max(1, line - 15), Math.min(lines2.length, line + 15), line), "```");
+    const lines3 = file ? await source2(file) : null;
+    if (lines3 && line) parts.push("", `## ${file}, lines around ${line}`, "```latex", ...numbered(lines3, Math.max(1, line - 15), Math.min(lines3.length, line + 15), line), "```");
     else if (p?.excerpt) parts.push("", "## The source line", "```latex", p.excerpt.text, "```");
-    const mainLines = main ? main === file ? lines2 : await source2(main) : null;
+    const mainLines = main ? main === file ? lines3 : await source2(main) : null;
     if (main && mainLines) {
       const end = mainLines.findIndex((l) => /\\begin\s*\{document\}/.test(l));
       const upto = Math.min(end >= 0 ? end + 1 : 60, 120);
@@ -9742,20 +9844,120 @@ function widths(all) {
   widthsOf.set(all, next);
   return next;
 }
-function boxes(gs, all) {
-  const next = widths(all);
-  const lines2 = /* @__PURE__ */ new Map();
-  for (const g of gs) {
-    const k = Math.round(g.y * 2) / 2;
-    const r = lines2.get(k), e = g.x + (next.get(g) ?? 5);
-    lines2.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
+var linesOf = /* @__PURE__ */ new WeakMap();
+function lines2(all) {
+  let out = linesOf.get(all);
+  if (out) return out;
+  out = /* @__PURE__ */ new Map();
+  const recent = [];
+  let cur = null, next = 0;
+  const goesOn = (r, g) => Math.abs(g.y - r.y) < 0.5 && g.x >= r.x - 6 && g.x - r.x < LINE_GAP2;
+  for (const g of all) {
+    if (!cur || !goesOn(cur, g)) {
+      if (cur) recent.unshift(cur), recent.length > 4 && recent.pop();
+      const back = recent.find((r) => goesOn(r, g));
+      if (back) recent.splice(recent.indexOf(back), 1);
+      cur = back ?? { id: next++, y: g.y, x: g.x };
+    }
+    cur.x = Math.max(cur.x, g.x);
+    out.set(g, cur.id);
   }
-  return [...lines2].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
+  linesOf.set(all, out);
+  return out;
 }
-function lineAt2(hits, at) {
+var LINE_GAP2 = 40;
+function boxes(gs, all) {
+  return lineBoxes(gs, all).boxes;
+}
+function lineBoxes(gs, all) {
+  const next = widths(all), line = lines2(all);
+  const out = /* @__PURE__ */ new Map();
+  for (const g of gs) {
+    const k = line.get(g) ?? -1 - out.size;
+    const r = out.get(k), e = g.x + (next.get(g) ?? 5);
+    out.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e), r[2]] : [g.x, e, Math.round(g.y * 2) / 2]);
+  }
+  return { boxes: [...out.values()].map(([a, b, y]) => [a - 1, y - 8, b - a + 2, 11]), ids: [...out.keys()] };
+}
+function lineAt2(hits, at, all) {
   let best = null;
   for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
-  return best ? hits.filter((g) => Math.abs(g.y - best.y) < 0.5) : [];
+  if (!best) return [];
+  const line = lines2(all), id = line.get(best);
+  return hits.filter((g) => line.get(g) === id);
+}
+function glyphAt(all, x, y, edge) {
+  let best = -1, d = Infinity;
+  for (let i = 0; i < all.length; i++) {
+    const g = all[i];
+    if (Math.abs(g.y - y) >= 1) continue;
+    const e = edge === "right" ? g.x < x - 0.1 ? x - g.x : Infinity : g.x <= x + 0.5 ? x - g.x : 2 * (g.x - x) + 1;
+    if (e < d) d = e, best = i;
+  }
+  return best < 0 ? null : best;
+}
+function sourceBetween(pages2, a, b) {
+  if (b.k < a.k || b.k === a.k && b.i < a.i) [a, b] = [b, a];
+  const by = /* @__PURE__ */ new Map();
+  for (let k = a.k; k <= b.k; k++) {
+    const all = pages2(k);
+    for (let i = k === a.k ? a.i : 0; i <= (k === b.k ? b.i : all.length - 1); i++) {
+      const g = all[i];
+      if (!g?.file || g.synth) continue;
+      const r2 = by.get(g.file);
+      if (r2) r2.last = g, r2.lo = Math.min(r2.lo, g.start), r2.hi = Math.max(r2.hi, g.end), r2.n++;
+      else by.set(g.file, { first: g, last: g, lo: g.start, hi: g.end, n: 1 });
+    }
+  }
+  const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
+  if (!best) return null;
+  const [file, r] = best;
+  return r.last.end > r.first.start ? { file, start: r.first.start, end: r.last.end, n: r.n } : { file, start: r.lo, end: r.hi, n: r.n };
+}
+function extent(pages2, file, start, end, page) {
+  end = Math.max(end, start + 1);
+  const mine = (g) => g.file === file && !g.synth;
+  const order = page !== void 0 && page < pages2.length ? [page, ...pages2.keys()] : [...pages2.keys()];
+  let a = null;
+  for (const k of order) {
+    const i = pages2[k].findIndex((g) => mine(g) && g.start <= start && g.end > start);
+    if (i >= 0) {
+      a = { k, i };
+      break;
+    }
+  }
+  const inSpan = (g) => mine(g) && g.start < end && g.end > start;
+  if (!a) {
+    let lo = Infinity;
+    for (let k = 0; k < pages2.length; k++)
+      for (let i = 0; i < pages2[k].length; i++) {
+        const g = pages2[k][i];
+        if (inSpan(g) && g.start < lo) lo = g.start, a = { k, i };
+      }
+  }
+  if (!a) return [];
+  const from2 = a;
+  let b = null, far = from2, farEnd = -Infinity;
+  for (let k = from2.k; k < pages2.length && !b; k++) {
+    const gs = pages2[k];
+    for (let i = k === from2.k ? from2.i : 0; i < gs.length; i++) {
+      const g = gs[i];
+      if (!inSpan(g)) continue;
+      if (g.end >= end) {
+        b = { k, i };
+        break;
+      }
+      if (g.end > farEnd) farEnd = g.end, far = { k, i };
+    }
+  }
+  b ??= far;
+  const out = [];
+  for (let k = from2.k; k <= b.k; k++) {
+    const i = k === from2.k ? from2.i : 0;
+    const gs = pages2[k].slice(i, k === b.k ? b.i + 1 : void 0);
+    if (gs.length) out.push({ k, gs, i });
+  }
+  return out;
 }
 function wordNear(text, at, lo, hi) {
   const here = wordBytes(text, at);
@@ -10445,6 +10647,7 @@ var PreviewSession = class {
   previews = /* @__PURE__ */ new Set();
   async layout(given) {
     if (!this.sink.layout) return;
+    const had = this.hashes.length > 0;
     if (given) this.hashes = given;
     else {
       const r = await this.core.request({ op: "pages" });
@@ -10455,6 +10658,7 @@ var PreviewSession = class {
     }
     this.tr("layout", { pages: this.hashes.length });
     this.setPages(this.hashes.length);
+    if (!had && this.hashes.length) this.sink.origins?.();
     if (this.hashes.length) this.sink.layout(this.hashes, this.previews);
     this.drawPeers();
     void this.peerPages();
@@ -10687,28 +10891,59 @@ var PreviewSession = class {
     this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
   }
   /**
-   * The source of text selected on the pages ([x, y top, w, h] boxes in PDF
-   * points, by page): the file most of its glyphs came from, from its first
-   * glyph's start to its last's end, in bytes (the glyph origins'); null
-   * where none of it came from a file.
+   * The source of text selected on the pages (sync.ts PageSel): its glyphs
+   * are those from its first character's to its last's in the order they
+   * were set (the characters' edges given, else the first and last glyph
+   * its boxes hold); of them, the file most came from, from the first's
+   * start to the last's end, in bytes (the glyph origins'); null where none
+   * of it came from a file. Not the least and greatest bytes of every glyph
+   * in its boxes: a box a glyph over cut the next line's or column's in.
    */
   async sourceOf(sel) {
     if (!this.opened || !sel.length) return null;
-    const by = /* @__PURE__ */ new Map();
-    for (const { k, rects } of sel) {
-      for (const g of this.cached(k) ?? await this.glyphsOf(k)) {
-        if (!g.file || g.synth) continue;
-        const [gx, gy] = [g.x + 1, g.y - 2];
-        if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) continue;
-        const r = by.get(g.file) ?? { lo: Infinity, hi: -Infinity, n: 0 };
-        by.set(g.file, { lo: Math.min(r.lo, g.start), hi: Math.max(r.hi, g.end), n: r.n + 1 });
-      }
+    const pages2 = /* @__PURE__ */ new Map();
+    for (const { k } of sel) pages2.set(k, this.cached(k) ?? await this.glyphsOf(k));
+    const ks = [...pages2.keys()].sort((x, y) => x - y);
+    for (let k = ks[0]; k <= ks.at(-1); k++) if (!pages2.has(k)) pages2.set(k, this.cached(k) ?? await this.glyphsOf(k));
+    const glyphsOn = (k) => pages2.get(k) ?? [];
+    let a = null, b = null;
+    const f = sel.find((s) => s.from), t = sel.find((s) => s.to);
+    if (f?.from && t?.to) {
+      const i = glyphAt(glyphsOn(f.k), f.from[0], f.from[1], "left"), j = glyphAt(glyphsOn(t.k), t.to[0], t.to[1], "right");
+      if (i !== null && j !== null) a = { k: f.k, i }, b = { k: t.k, i: j };
     }
-    const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
-    this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return null;
-    const [file, { lo, hi }] = best;
-    return { file, start: lo, end: hi };
+    if (!a || !b) {
+      for (const { k, rects } of [...sel].sort((x, y) => x.k - y.k))
+        glyphsOn(k).forEach((g, i) => {
+          if (!g.file || g.synth) return;
+          const [gx, gy] = [g.x + 1, g.y - 2];
+          if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) return;
+          a ??= { k, i };
+          b = { k, i };
+        });
+    }
+    const best = a && b ? sourceBetween(glyphsOn, a, b) : null;
+    this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.file, glyphs: best?.n ?? 0 });
+    return best && { file: best.file, start: best.start, end: best.end };
+  }
+  /**
+   * Where a span of `file` chosen on the pages is (a note's, bytes [start,
+   * end)): its glyphs from its first to its last in the order they were set
+   * (sync.ts extent: not a float's or a footnote's text from its bytes, nor
+   * its paragraph's lines in another column), boxed a printed line each, by
+   * page; `page`, where it was chosen. [] where none of it is set.
+   */
+  async extentOf(file, start, end, page) {
+    if (!this.opened) return [];
+    const n = this.hashes.length;
+    const pages2 = [];
+    for (let k = 0; k < n; k++) pages2.push(this.cached(k) ?? await this.glyphsOf(k));
+    const ext = extent(pages2, file.replace(/^\.\//, ""), start, end, page);
+    return ext.map(({ k, gs, i: at }, i) => {
+      const { boxes: bs, ids } = lineBoxes(gs, pages2[k]), line = lines2(pages2[k]);
+      const on = (g) => ids.indexOf(line.get(g) ?? NaN);
+      return { k, boxes: bs, ...i === 0 ? { first: on(gs[0]), order: at } : {}, ...i === ext.length - 1 ? { last: on(gs.at(-1)) } : {} };
+    });
   }
   /** The source place nearest (x, y) on page `k` (PDF points from its top left): a spot with no text of its own, a figure's. */
   async spotOf(k, x, y) {
@@ -10804,7 +11039,7 @@ var PreviewSession = class {
       const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
       word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
     }
-    return word.length ? word : lineAt2(onLine, at);
+    return word.length ? word : lineAt2(onLine, at, all);
   }
   /**
    * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
@@ -10914,7 +11149,7 @@ var PreviewSession = class {
     const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
     for (const k of order) {
       const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = lineAt2(from(all, file, a, b), byteOffset(t, pos));
+      const hit = lineAt2(from(all, file, a, b), byteOffset(t, pos), all);
       if (hit.length) {
         this.tr("sync\u2192page", { file, pos, k, glyphs: hit.length });
         this.sink.mark?.(k, boxes(hit, all));
@@ -11106,7 +11341,7 @@ var PreviewSession = class {
     const first = hint ?? this.page;
     for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
       const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = lineAt2(from(all, file, lo, hi), at);
+      const hit = lineAt2(from(all, file, lo, hi), at, all);
       if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
     }
   }
@@ -11397,13 +11632,13 @@ function pagewise(px) {
   return clone ? clone(px, window) : px;
 }
 var SVG2 = "http://www.w3.org/2000/svg";
-function textLayer(lines2, w, h) {
+function textLayer(lines3, w, h) {
   const svg2 = document.createElementNS(SVG2, "svg");
   svg2.setAttribute("class", "phx-text");
   svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
   svg2.setAttribute("preserveAspectRatio", "none");
   deferText(svg2, () => {
-    for (const l of lines2.map(composeLine)) {
+    for (const l of lines3.map(composeLine)) {
       const t = document.createElementNS(SVG2, "text");
       t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
       t.setAttribute("y", String(l.y));
@@ -11792,7 +12027,7 @@ var Commits = class {
     const ti = this.to ? this.find(this.to) : -1;
     const tree = this.from !== null && !this.to;
     const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: To, the files as they are"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
-    const lines2 = this.commits.map((c, i) => {
+    const lines3 = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
       const marks = r.down.map(([a, b]) => svg`<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
@@ -11807,7 +12042,7 @@ click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
       return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago2(c.time)}</span></span></div>`;
     });
     const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
-    return html`${top}${lines2}${more}`;
+    return html`${top}${lines3}${more}`;
   }
 };
 
@@ -11998,7 +12233,7 @@ var Pages = class {
   /** Where `q` is in the build's pages (their text as the watch reads it). */
   async find(q) {
     this.texts ??= this.sock.request({ op: "text" }).then(
-      (r) => r.ok ? (r.json?.pages ?? []).map((lines2) => lines2.map(composeLine)) : []
+      (r) => r.ok ? (r.json?.pages ?? []).map((lines3) => lines3.map(composeLine)) : []
     );
     return search(await this.texts, q);
   }
@@ -12049,6 +12284,7 @@ var review = {
     sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json)));
   },
   boxes: (file, start, end) => session.boxesOf(file, start, end),
+  extent: (file, start, end, page) => session.extentOf(file, start, end, page),
   source: (sel) => session.sourceOf(sel),
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),

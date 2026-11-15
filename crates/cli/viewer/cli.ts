@@ -360,6 +360,7 @@ const review: ReviewHost = {
     sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState)));
   },
   boxes: (file, start, end) => session.boxesOf(file, start, end),
+  extent: (file, start, end, page) => session.extentOf(file, start, end, page),
   source: (sel) => session.sourceOf(sel),
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),

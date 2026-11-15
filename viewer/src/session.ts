@@ -28,7 +28,7 @@ const preambleOf = (t: string | undefined) => {
   return end < 0 ? (t ?? "") : t!.slice(0, end);
 };
 const usesMinted = (t: string) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-import { boxes, from, glyphNear, glyphs, lineAt, nearest, wordBytes, wordNear, type Glyph } from "./sync.ts";
+import { boxes, extent, from, glyphAt, lineBoxes, lines, glyphNear, glyphs, lineAt, nearest, sourceBetween, wordBytes, wordNear, type At, type Glyph, type PageSel } from "./sync.ts";
 import { diagnose, type Diagnostic, type TexError } from "./diagnostics.ts";
 import { plainWhy } from "./words.ts";
 import { DELIVERED, isPackageFile, referenced, noPackages, type PackageSource, type PackageState } from "./packages.ts";
@@ -248,7 +248,12 @@ export interface PreviewSink {
   goto?(file: string, from: number, to: number, focus?: boolean): void;
   /** The editor's selection, highlighted on its pages until it changes ([] clears). */
   marks?(marks: { k: number; boxes: [number, number, number, number][] }[]): void;
-  /** The pages' glyph origins came, or changed (a watch makes a build's after it is announced): what was looked up on them before is looked up again. */
+  /**
+   * The pages' glyph origins came, or changed (a watch makes a build's after
+   * it is announced), or the pages became known (a tab opened or reloaded on
+   * a build made before it: no origins event comes): what was looked up on
+   * them before is looked up again.
+   */
   origins?(): void;
   /**
    * Whether the document's outline is shown (the contents beside the
@@ -981,6 +986,7 @@ export class PreviewSession {
 
   private async layout(given?: string[]): Promise<void> {
     if (!this.sink.layout) return;
+    const had = this.hashes.length > 0;
     if (given) this.hashes = given;
     else {
       const r = await this.core.request({ op: "pages" });
@@ -992,6 +998,10 @@ export class PreviewSession {
     }
     this.tr("layout", { pages: this.hashes.length });
     this.setPages(this.hashes.length);
+    // (the pages known at last: what was looked up with none (a note's marks,
+    // a problem's underline, asked as the tab opened) looked up on them; a
+    // build made before the tab sends no origins event to say so)
+    if (!had && this.hashes.length) this.sink.origins?.();
     // (no page shipped: the view keeps what it shows, dimmed; see the sink)
     if (this.hashes.length) this.sink.layout(this.hashes, this.previews);
     // (the collaborators on the new pages)
@@ -1256,7 +1266,7 @@ export class PreviewSession {
    * page): the editor selects the source it came from (the file most of it
    * came from, from its first glyph's start to its last's end).
    */
-  async selectPage(sel: { k: number; rects: [number, number, number, number][] }[]): Promise<void> {
+  async selectPage(sel: PageSel[]): Promise<void> {
     const best = await this.sourceOf(sel);
     if (!best) return;
     const { file, start: lo, end: hi } = best;
@@ -1268,29 +1278,64 @@ export class PreviewSession {
   }
 
   /**
-   * The source of text selected on the pages ([x, y top, w, h] boxes in PDF
-   * points, by page): the file most of its glyphs came from, from its first
-   * glyph's start to its last's end, in bytes (the glyph origins'); null
-   * where none of it came from a file.
+   * The source of text selected on the pages (sync.ts PageSel): its glyphs
+   * are those from its first character's to its last's in the order they
+   * were set (the characters' edges given, else the first and last glyph
+   * its boxes hold); of them, the file most came from, from the first's
+   * start to the last's end, in bytes (the glyph origins'); null where none
+   * of it came from a file. Not the least and greatest bytes of every glyph
+   * in its boxes: a box a glyph over cut the next line's or column's in.
    */
-  async sourceOf(sel: { k: number; rects: [number, number, number, number][] }[]): Promise<{ file: string; start: number; end: number } | null> {
+  async sourceOf(sel: PageSel[]): Promise<{ file: string; start: number; end: number } | null> {
     if (!this.opened || !sel.length) return null;
-    const by = new Map<string, { lo: number; hi: number; n: number }>();
-    for (const { k, rects } of sel) {
-      for (const g of this.cached(k) ?? (await this.glyphsOf(k))) {
-        if (!g.file || g.synth) continue;
-        // (a glyph's body: just right of and above its origin)
-        const [gx, gy] = [g.x + 1, g.y - 2];
-        if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) continue;
-        const r = by.get(g.file) ?? { lo: Infinity, hi: -Infinity, n: 0 };
-        by.set(g.file, { lo: Math.min(r.lo, g.start), hi: Math.max(r.hi, g.end), n: r.n + 1 });
-      }
+    const pages = new Map<number, Glyph[]>();
+    for (const { k } of sel) pages.set(k, this.cached(k) ?? (await this.glyphsOf(k)));
+    const ks = [...pages.keys()].sort((x, y) => x - y);
+    for (let k = ks[0]; k <= ks.at(-1)!; k++) if (!pages.has(k)) pages.set(k, this.cached(k) ?? (await this.glyphsOf(k)));
+    const glyphsOn = (k: number) => pages.get(k) ?? [];
+    let a: At | null = null, b: At | null = null;
+    const f = sel.find((s) => s.from), t = sel.find((s) => s.to);
+    if (f?.from && t?.to) {
+      const i = glyphAt(glyphsOn(f.k), f.from[0], f.from[1], "left"), j = glyphAt(glyphsOn(t.k), t.to[0], t.to[1], "right");
+      if (i !== null && j !== null) (a = { k: f.k, i }), (b = { k: t.k, i: j });
     }
-    const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
-    this.tr("select→source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return null;
-    const [file, { lo, hi }] = best;
-    return { file, start: lo, end: hi };
+    if (!a || !b) {
+      // (no characters' edges: the first and last glyph with a source in its boxes)
+      for (const { k, rects } of [...sel].sort((x, y) => x.k - y.k))
+        glyphsOn(k).forEach((g, i) => {
+          if (!g.file || g.synth) return;
+          // (a glyph's body: just right of and above its origin)
+          const [gx, gy] = [g.x + 1, g.y - 2];
+          if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) return;
+          a ??= { k, i };
+          b = { k, i };
+        });
+    }
+    const best = a && b ? sourceBetween(glyphsOn, a, b) : null;
+    this.tr("select→source", { pages: sel.map((s) => s.k), file: best?.file, glyphs: best?.n ?? 0 });
+    return best && { file: best.file, start: best.start, end: best.end };
+  }
+
+  /**
+   * Where a span of `file` chosen on the pages is (a note's, bytes [start,
+   * end)): its glyphs from its first to its last in the order they were set
+   * (sync.ts extent: not a float's or a footnote's text from its bytes, nor
+   * its paragraph's lines in another column), boxed a printed line each, by
+   * page; `page`, where it was chosen. [] where none of it is set.
+   */
+  async extentOf(file: string, start: number, end: number, page?: number): Promise<{ k: number; boxes: [number, number, number, number][]; first?: number; last?: number; order?: number }[]> {
+    if (!this.opened) return [];
+    const n = this.hashes.length;
+    const pages: Glyph[][] = [];
+    for (let k = 0; k < n; k++) pages.push(this.cached(k) ?? (await this.glyphsOf(k)));
+    const ext = extent(pages, file.replace(/^\.\//, ""), start, end, page);
+    // (the boxes its first and last glyphs are in: where its ends are, for handles; a script's box, set after its line's start, is not the line's)
+    // (`order`: its first glyph's place in its page's, the reading order: a list of notes in it)
+    return ext.map(({ k, gs, i: at }, i) => {
+      const { boxes: bs, ids } = lineBoxes(gs, pages[k]), line = lines(pages[k]);
+      const on = (g: Glyph) => ids.indexOf(line.get(g) ?? NaN);
+      return { k, boxes: bs, ...(i === 0 ? { first: on(gs[0]), order: at } : {}), ...(i === ext.length - 1 ? { last: on(gs.at(-1)!) } : {}) };
+    });
   }
 
   /** The source place nearest (x, y) on page `k` (PDF points from its top left): a spot with no text of its own, a figure's. */
@@ -1392,7 +1437,7 @@ export class PreviewSession {
       const gw = g && t !== undefined ? wordBytes(new TextEncoder().encode(t), g.start) : null;
       word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
     }
-    return word.length ? word : lineAt(onLine, at);
+    return word.length ? word : lineAt(onLine, at, all);
   }
 
   /**
@@ -1519,7 +1564,7 @@ export class PreviewSession {
     const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
     for (const k of order) {
       const all = this.cached(k) ?? (await this.glyphsOf(k));
-      const hit = lineAt(from(all, file, a, b), byteOffset(t, pos));
+      const hit = lineAt(from(all, file, a, b), byteOffset(t, pos), all);
       if (hit.length) {
         this.tr("sync→page", { file, pos, k, glyphs: hit.length });
         this.sink.mark?.(k, boxes(hit, all));
@@ -1750,7 +1795,7 @@ export class PreviewSession {
     const first = hint ?? this.page;
     for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
       const all = this.cached(k) ?? (await this.glyphsOf(k));
-      const hit = lineAt(from(all, file, lo, hi), at);
+      const hit = lineAt(from(all, file, lo, hi), at, all);
       if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
     }
   }

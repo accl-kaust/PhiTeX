@@ -540,3 +540,121 @@ test("a link's window zooms: Ctrl+wheel and a trackpad's pinch at the pointer, t
   assert.deepEqual(t.errors, []);
   await w.stop();
 });
+
+/** Text of `n` sentences, its words drawn from a fixed list by a seeded generator (every line its own: no two lines of the page alike). */
+function prose(n, seed) {
+  const words = "incremental typesetting rebuilds only what an edit touches dependency records which macros registers fonts node read change invalidates exactly readers hyphenation interword glue page builder decisions replayed deterministically output identical conventional sources nevertheless characteristically unpredictable implementations occasionally misrepresent responsibilities measure everything twice before believing anything column baseline justification typographical considerations notwithstanding experimental evaluation demonstrates substantially improved latency across representative workloads".split(" ");
+  const rnd = (k) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % k);
+  return Array.from({ length: n }, (_, i) => {
+    const ws = Array.from({ length: 12 + rnd(8) }, () => words[rnd(words.length)]);
+    if (i % 3 === 0) ws.splice(3, 0, `\\emph{${words[rnd(words.length)]}}`);
+    if (i % 3 === 1) ws.splice(4, 0, `$x_{${i}}^2 + \\alpha$`);
+    if (i % 4 === 2) ws.splice(2, 0, `${words[rnd(words.length)]}~\\cite{k}`);
+    return ws.join(" ") + ".";
+  }).join("\n");
+}
+
+test("a note made in one column of a two-column paper is drawn in that column, as selected, its handles at its ends, after a reload too; a handle dragged past its line keeps to the column; pins numbered as the list (notes in two columns)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const at = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  execFileSync(process.env.PHITEX_BIN ?? "phitex", ["config", "experimental-review", "on"], { env: { ...process.env, HOME: at, XDG_CONFIG_HOME: join(at, ".config") } });
+  // (a paragraph with a footnote, a float between it and the next, the column
+  // full: the selection's bytes hold the footnote's and the float's text, set
+  // at the column's foot and atop the other column)
+  const body = `${prose(14, 3)}\n\n${prose(9, 5)}\\footnote{Footnote text typeset at the foot of the column.}\n\\begin{figure}[t]\\centering\\fbox{Figure}\\caption{A caption typeset where the float lands.}\\end{figure}\n\n${prose(9, 7)}\n\n${prose(40, 11)}\n\\begin{thebibliography}{1}\\bibitem{k} D. Knuth. 1984.\\end{thebibliography}`;
+  const { w, t } = await open({ "main.tex": `\\documentclass[twocolumn]{article}\n\\begin{document}\n${body}\n\\end{document}\n` }, { at });
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 1700, deviceScaleFactor: 1, mobile: false });
+  await sleep(1500);
+  await t.until(`$$(".slot text").length > 50`, "the first page's text");
+  // (places on the first page as fractions of it: the review's side opening
+  // narrows the pages; `F` maps a screen box to them)
+  const F = `const S = $(".slot").getBoundingClientRect(); const F = (b) => [(b.left - S.left) / S.width, (b.right - S.left) / S.width, (b.top - S.top) / S.height, (b.bottom - S.top) / S.height];`;
+  // (a line of its text: `col` "L" or "R", the `li`th from the top, its `ci`th
+  // character (from the end if negative): the screen point at its left edge or
+  // right, `f` the same as a fraction of the page; `mid` where the right column starts)
+  const line = (col, li, ci, right = false) =>
+    t.q(`(() => { $(".slot").scrollIntoView({ block: "start" }); ${F} const all = [...$(".slot").querySelectorAll("text")].filter((x) => x.textContent.length > 30).map((x) => [x, x.getBoundingClientRect()]); const mid = Math.min(...all.map(([, b]) => b.left).filter((l) => l > S.left + S.width / 2)); const ls = all.filter(([, b]) => (${JSON.stringify(col)} === "L") === (b.left < mid)).sort((a, b) => a[1].top - b[1].top); const [x] = ls.at(${li}) ?? []; if (!x) return null; const n = x.textContent.length, off = ${ci} < 0 ? n + ${ci} : ${ci}; const r = document.createRange(); r.setStart(x.firstChild, off); r.setEnd(x.firstChild, off + 1); const b = r.getBoundingClientRect(); const px = ${right} ? b.right - 1 : b.left + 1, py = (b.top + b.bottom) / 2; return { x: px, y: py, f: [(px - S.left) / S.width, (py - S.top) / S.height], mid: (mid - S.left) / S.width, hyphen: x.textContent.trimEnd().endsWith("-") }; })()`);
+  // (from the paragraph with the footnote to the one after the float, all in the left column)
+  const first = await line("L", 18, 4), last = await line("L", 30, -5, true);
+  assert.ok(first && last && last.y > first.y, "the lines are there");
+  const mid = first.mid;
+  await t.drag(first.x, first.y, last.x, last.y);
+  await sleep(400);
+  const blocks = await t.q(`(() => { ${F} return $$(".mark.seltext").map((m) => F(m.getBoundingClientRect())); })()`);
+  assert.ok(blocks.length >= 10 && blocks.every(([, r]) => r < mid), `the selection in the left column (it starts at ${mid}): ${JSON.stringify(blocks)}`);
+  await t.until(`$(".rv-pop [data-k='note']")`, "the note's button");
+  await t.click(".rv-pop [data-k='note']");
+  await t.until(`$(".rv-compose textarea")`, "the note's box");
+  await t.q(`(() => { const a = $(".rv-compose textarea"); a.value = "Two columns"; a.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+  await t.click(".rv-compose [data-save]");
+  const marks = () =>
+    t.until(`(() => { ${F} const ms = $$(".slot .rv.n-note:not(.rv-pin):not(.rv-h)").map((m) => F(m.getBoundingClientRect())); const hs = $$(".slot .rv-h").map((h) => { const b = h.getBoundingClientRect(), f = F(b); return { end: h.classList.contains("end"), x: (f[0] + f[1]) / 2, top: f[2], bottom: f[3], sx: b.left + b.width / 2, sy: (b.top + b.bottom) / 2, on: b.top >= 0 && b.bottom <= innerHeight }; }); return ms.length && hs.length === 2 ? { ms, hs } : null; })()`, "the note's marks and its two handles");
+  const top = Math.min(...blocks.map((b) => b[2])), bottom = Math.max(...blocks.map((b) => b[3]));
+  const rows = (bs) => new Set(bs.map((b) => Math.round((b[2] + b[3]) * 200))).size;
+  const near = (h, p) => Math.abs(h.x - p.f[0]) < 0.008 && h.top <= p.f[1] && h.bottom >= p.f[1];
+  const check = async (what) => {
+    const { ms, hs } = await marks();
+    // (every mark in the left column, between the selection's first and last
+    // lines: not the footnote's text at the column's foot, nor the float's in
+    // the right column, nor a bar across both columns)
+    assert.ok(ms.every(([, r, mt, mb]) => r < mid && mt >= top - 0.004 && mb <= bottom + 0.004), `${what}: the marks where the selection was (${top}-${bottom}, left of ${mid}): ${JSON.stringify(ms)}`);
+    assert.ok(Math.abs(rows(ms) - rows(blocks)) <= 2, `${what}: a mark a selected line (${rows(ms)} rows, the selection ${rows(blocks)})`);
+    const s = hs.find((h) => !h.end), e = hs.find((h) => h.end);
+    assert.ok(near(s, first), `${what}: the start handle at the first character: ${JSON.stringify(s)} vs ${JSON.stringify(first.f)}`);
+    assert.ok(near(e, last), `${what}: the end handle at the last character: ${JSON.stringify(e)} vs ${JSON.stringify(last.f)}`);
+    assert.ok(s.on && e.on, `${what}: both handles on screen`);
+    return e;
+  };
+  await check("saved");
+  const notes = JSON.parse(w.read(".phitex/notes.json"));
+  const note = (notes.notes ?? notes).find((n) => n.thread?.[0]?.text === "Two columns");
+  assert.doesNotMatch(note.anchor.quote, /^\s/, "the anchor starts at the first character selected");
+  // (a reload: the note drawn again from its anchor alone, selected by a click on its mark)
+  await t.go(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0 && $$(".slot .rv.n-note").length > 0`, "the note's marks after a reload", 120000);
+  await sleep(800);
+  await line("L", 0, 0);
+  const m = await t.q(`(() => { const b = $(".slot .rv.n-note:not(.rv-pin)").getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+  await t.mouse(m[0], m[1]);
+  const e = await check("after a reload");
+  // (the end handle dragged two lines down, past its line's end into the gap
+  // between the columns: the note ends on that line, in the left column)
+  const to = await line("L", 32, -1, true);
+  const gap = await t.q(`(() => { const S = $(".slot").getBoundingClientRect(); return S.left + ${mid} * S.width - 3; })()`);
+  await t.drag(e.sx, e.sy, gap, to.y, 16);
+  for (const end = Date.now() + 20000; ; await sleep(100)) {
+    const n = JSON.parse(w.read(".phitex/notes.json"));
+    if ((n.notes ?? n).find((x) => x.id === note.id).anchor.end > note.anchor.end) break;
+    assert.ok(Date.now() < end, "the note's end moved");
+  }
+  await sleep(800);
+  const { ms, hs } = await marks();
+  const moved = hs.find((h) => h.end);
+  // (snapped to its word's end: a word a break hyphenated ends on the next line)
+  const below = await line("L", 33, 0);
+  const on = to.hyphen ? below : to;
+  assert.ok(moved.x < mid && moved.top <= on.f[1] && moved.bottom >= on.f[1], `the end on the line it was let go beside (its word's end), in the left column: ${JSON.stringify(moved)} vs ${JSON.stringify(on.f)} (hyphenated: ${to.hyphen})`);
+  assert.ok(ms.every(([, r]) => r < mid), `the marks still in the left column: ${JSON.stringify(ms)}`);
+  // (two notes more, written after it: one in the right column, one above it;
+  // the pins number them as they come in the pages, as the list does, not
+  // by their posts (each had one: every pin said 1))
+  for (const [a, b, text] of [[["R", 4, 2], ["R", 6, -3, true], "Right"], [["L", 3, 2], ["L", 5, -3, true], "Above"]]) {
+    const p = await line(...a), q = await line(...b);
+    await t.drag(p.x, p.y, q.x, q.y);
+    await t.until(`$(".rv-pop [data-k='note']")`, "the note's button");
+    await t.click(".rv-pop [data-k='note']");
+    await t.until(`$(".rv-compose textarea")`, "the note's box");
+    await t.q(`(() => { const a = $(".rv-compose textarea"); a.value = ${JSON.stringify(text)}; a.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+    await t.click(".rv-compose [data-save]");
+    await t.until(`$$(".slot .rv-pin").length === ${text === "Right" ? 2 : 3}`, `${text}'s pin`);
+  }
+  await sleep(500);
+  const all = JSON.parse(w.read(".phitex/notes.json"));
+  const id = (text) => (all.notes ?? all).find((n) => n.thread?.[0]?.text === text).id;
+  const pins = await t.q(`Object.fromEntries($$(".slot .rv-pin").map((p) => [p.dataset.id, p.textContent]))`);
+  assert.deepEqual([pins[id("Above")], pins[id("Two columns")], pins[id("Right")]], ["1", "2", "3"], `the pins in reading order: ${JSON.stringify(pins)}`);
+  const cards = await t.q(`$$(".rside .card.note").map((c) => [c.dataset.id, c.querySelector(".num")?.textContent])`);
+  assert.deepEqual(cards, [[id("Above"), "1"], [id("Two columns"), "2"], [id("Right"), "3"]], "the list in the same order, the same numbers");
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});

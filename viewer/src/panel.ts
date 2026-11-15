@@ -33,6 +33,7 @@ import { hintsFor, keyed } from "./hints.ts";
 import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./sheetline.ts";
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
+import type { PageSel } from "./sync.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -189,7 +190,7 @@ export interface PanelEvents {
   /** The editor to `file`'s [from, to) (UTF-16 offsets); `focus` false keeps the focus on the page. */
   onGotoRange?(file: string, from: number, to: number, focus?: boolean): void;
   /** Text selected on the pages (boxes by page, PDF points): to its source. */
-  onSelectPage?(sel: { k: number; rects: [number, number, number, number][] }[]): void;
+  onSelectPage?(sel: PageSel[]): void;
   /** Alt+Shift+P: return true if the host handled it (docked: PDF ⇄ PhiTeX); else the window collapses. */
   onShortcut?(): boolean;
   /** "Take the tour" (settings). */

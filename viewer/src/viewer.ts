@@ -7,6 +7,7 @@ import type { Link, PageImage } from "./types.ts";
 import type { CiteAnswer } from "./session.ts";
 import { LAYER_LINES, caretAt, ensureText, holdText, textPending } from "./text.ts";
 import type { TextLine } from "./text.ts";
+import type { PageSel } from "./sync.ts";
 import { waspLength, waspOff, waspOn } from "./wasp.ts";
 
 export interface ViewerHost {
@@ -32,7 +33,7 @@ export interface ViewerHost {
   /** CSS pixels per PDF point at the current zoom (1 is 100%). */
   scale(): number;
   /** Text selected on the pages: its boxes by page, in PDF points from each page's top left. */
-  selected?(sel: { k: number; rects: [number, number, number, number][] }[]): void;
+  selected?(sel: PageSel[]): void;
   /** A double-click at (x, y) on page `k`, in PDF points from its top left. */
   dbl?(k: number, x: number, y: number): void;
   /** A click on a collaborator's name: their cursor, at `pos` (UTF-16) in `file`. */
@@ -217,7 +218,15 @@ export class Viewer {
           }
         }
         if (!out.size) return;
-        const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+        const sel2: PageSel[] = [...out].map(([k, rects]) => ({ k, rects }));
+        // (its first and last characters' edges: its source is from the one to the other)
+        const ends = this.selectionEnds(sel);
+        if (ends) {
+          const on = (k: number) => sel2.find((s) => s.k === k) ?? (sel2.push({ k, rects: [] }), sel2.at(-1)!);
+          on(ends.from.k).from = [ends.from.x, ends.from.y];
+          on(ends.to.k).to = [ends.to.x, ends.to.y];
+          sel2.sort((a, b) => a.k - b.k);
+        }
         const [x, y, w, h] = sel2[0].rects[0];
         this.picked = { k: sel2[0].k, x: x + w / 2, y: y + h / 2 };
         // (as the drag goes: told again only when it changed)
@@ -1334,7 +1343,7 @@ export class Viewer {
     const f = document.createElement("div");
     f.className = "phx-flash";
     const pad = exact ? 2 : 3;
-    Object.assign(f.style, { left: `${((l - pad) / this.size.w) * 100}%`, top: `${((t - pad) / this.size.h) * 100}%`, width: `${((r - l + 2 * pad) / this.size.w) * 100}%`, height: `${((bt - t + 2 * pad) / this.size.h) * 100}%` });
+    this.place(f, { x: l - pad, y: t - pad, w: r - l + 2 * pad, h: bt - t + 2 * pad });
     f.addEventListener("animationend", () => f.remove());
     s.el.append(f);
   }
@@ -1479,7 +1488,6 @@ export class Viewer {
    */
   marks(marks: { k: number; boxes: [number, number, number, number][] }[]): void {
     for (const m of this.root.querySelectorAll(".sel")) m.remove();
-    const { w, h } = this.size;
     let first: HTMLElement | undefined, seen = false;
     const v = this.scroller.getBoundingClientRect();
     for (const { k, boxes } of marks) {
@@ -1489,7 +1497,7 @@ export class Viewer {
       for (const [x, y, bw, bh] of boxes) {
         const m = document.createElement("div");
         m.className = "mark sel";
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
         first ??= m;
         const r = m.getBoundingClientRect();
@@ -1532,13 +1540,56 @@ export class Viewer {
     return { node: texts[c.i].firstChild!, off: c.off, k, line: lines[c.i] };
   }
 
+  /**
+   * The ends of the text selected on the pages, from the text layer: its
+   * first character's left edge and its last's right edge, each on its
+   * line's baseline (PDF points) and its page. Null: none of it is a page's
+   * text.
+   */
+  private selectionEnds(sel: Selection): { from: { k: number; x: number; y: number }; to: { k: number; x: number; y: number } } | null {
+    type End = { k: number; x: number; y: number };
+    let from: End | null = null, to: End | null = null;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      for (const s of this.slots) {
+        if (!r.intersectsNode(s.el)) continue;
+        const k = Number(s.el.dataset.k);
+        for (const t of s.el.querySelectorAll("text")) {
+          const l = LAYER_LINES.get(t);
+          if (!l || !l.text || !r.intersectsNode(t)) continue;
+          const node = t.firstChild;
+          const a = node && r.startContainer === node ? r.startOffset : 0;
+          const b = node && r.endContainer === node ? r.endOffset : l.text.length;
+          // (its characters, not the spaces at its ends: a space is no glyph)
+          let i = a, j = b - 1;
+          while (i <= j && /\s/.test(l.text[i])) i++;
+          while (j >= i && /\s/.test(l.text[j])) j--;
+          if (j < i) continue;
+          from ??= { k, x: l.xs?.[i] ?? l.x + (l.w * i) / l.text.length, y: l.y };
+          to = { k, x: l.rs?.[j] ?? l.x + (l.w * (j + 1)) / l.text.length, y: l.y };
+        }
+      }
+    }
+    return from && to ? { from, to } : null;
+  }
+
+  /**
+   * The place in the pages' text under a point on the screen, kept in the
+   * column of `from` (a place this gave before) on its page, as a drag's end
+   * is (caretAt): its page, its line, the character it is before; a
+   * review handle's drag.
+   */
+  textPlace(cx: number, cy: number, from?: { k: number; line: TextLine }): { k: number; line: TextLine; off: number } | null {
+    const at = this.caretFrom(cx, cy, from);
+    return at && { k: at.k, line: at.line, off: at.off };
+  }
+
   /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
   private drawSelection(): void {
     for (const m of this.root.querySelectorAll(".seltext")) m.remove();
     const rn = this.root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
     const sel = rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount) return;
-    const { w, h } = this.size;
     for (let i = 0; i < sel.rangeCount; i++) {
       const r = sel.getRangeAt(i);
       for (const s of this.slots) {
@@ -1555,7 +1606,7 @@ export class Viewer {
           const m = document.createElement("div");
           m.className = "mark seltext";
           const top = l.y - l.size * 0.8, ht = l.size * 1.05;
-          Object.assign(m.style, { left: `${(x0 / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${((x1 - x0) / w) * 100}%`, height: `${(ht / h) * 100}%` });
+          this.place(m, { x: x0, y: top, w: x1 - x0, h: ht });
           s.el.append(m);
         }
       }
@@ -1580,8 +1631,8 @@ export class Viewer {
    */
   others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number }[]): void {
     for (const m of this.root.querySelectorAll(".peer")) m.remove();
-    const { w, h } = this.size;
-    const at = (m: HTMLElement, x: number, y: number) => Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` });
+    const { w } = this.size;
+    const at = (m: HTMLElement, x: number, y: number, bw?: number, bh?: number) => this.place(m, { x, y, w: bw, h: bh });
     for (const { k, boxes, label, hue, file, pos } of marks) {
       const s = this.slots[k];
       if (!s || !boxes.length) continue;
@@ -1589,8 +1640,7 @@ export class Viewer {
         const m = document.createElement("div");
         m.className = "peer";
         m.style.setProperty("--hue", String(hue));
-        at(m, x, y);
-        Object.assign(m.style, { width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        at(m, x, y, bw, bh);
         s.el.append(m);
       }
       const tag = document.createElement("div");
@@ -1639,7 +1689,6 @@ export class Viewer {
   culprits(marks: { k: number; boxes: [number, number, number, number][]; severity: "error" | "warning"; i?: number; rule?: "overfull" | "underfull"; amount?: number }[]): void {
     this.culpritMarks = marks;
     for (const m of this.root.querySelectorAll(".culprit")) m.remove();
-    const { w, h } = this.size;
     for (const { k, boxes, severity, i, rule, amount } of marks) {
       const s = this.slots[k];
       if (!s) continue;
@@ -1671,7 +1720,7 @@ export class Viewer {
         const m = document.createElement("div");
         m.className = `culprit rule ${rule}`;
         if (i !== undefined) m.dataset.i = String(i);
-        Object.assign(m.style, { left: `${((end + 1.5) / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${(5 / w) * 100}%`, height: `${(ht / h) * 100}%` });
+        this.place(m, { x: end + 1.5, y: top, w: 5, h: ht });
         s.el.append(m);
         continue;
       }
@@ -1680,7 +1729,7 @@ export class Viewer {
         m.className = `culprit ${severity}`;
         // (the caller's own index, the problem it is: the panel's hover says its message)
         if (i !== undefined) m.dataset.i = String(i);
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
       }
     }
@@ -1693,6 +1742,27 @@ export class Viewer {
    * away). The whole set, the last one's replaced; never scrolls, never asks
    * for a page (one drawn later keeps them, as paint does).
    */
+  /**
+   * `el` placed on its page at PDF points (any of its left `x`, top `y`,
+   * width `w`, height `h`) as fractions of the pages' size, and placed again
+   * when that size becomes known: a mark drawn before the first page came
+   * (a tab opened on notes, problems, a collaborator's cursor) was laid out
+   * on Letter's size, and on an A4 page stood lines below its text.
+   */
+  place(el: HTMLElement, p: { x?: number; y?: number; w?: number; h?: number }): void {
+    el.dataset.pt = JSON.stringify(p);
+    this.lay(el, p);
+  }
+
+  private lay(el: HTMLElement, p: { x?: number; y?: number; w?: number; h?: number }): void {
+    const { w, h } = this.size, st: Record<string, string> = {};
+    if (p.x !== undefined) st.left = `${(p.x / w) * 100}%`;
+    if (p.y !== undefined) st.top = `${(p.y / h) * 100}%`;
+    if (p.w !== undefined) st.width = `${(p.w / w) * 100}%`;
+    if (p.h !== undefined) st.height = `${(p.h / h) * 100}%`;
+    Object.assign(el.style, st);
+  }
+
   /** A page's size in PDF points (the pages' boxes are in them). */
   pageSize(): { w: number; h: number } {
     return this.size;
@@ -1700,7 +1770,6 @@ export class Viewer {
 
   reviewMarks(marks: { k: number; boxes: [number, number, number, number][]; cls: string; id: string; pin?: string; title?: string }[]): void {
     for (const m of this.root.querySelectorAll(".rv")) m.remove();
-    const { w, h } = this.size;
     const pinned = new Map<number, number[]>();
     for (const mk of marks) {
       const s = this.slots[mk.k];
@@ -1709,7 +1778,7 @@ export class Viewer {
         const m = document.createElement("div");
         m.className = `rv ${mk.cls}`;
         m.dataset.id = mk.id;
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(Math.max(bw, 1.5) / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: Math.max(bw, 1.5), h: bh });
         s.el.append(m);
       }
       if (mk.pin !== undefined) {
@@ -1725,7 +1794,7 @@ export class Viewer {
         b.dataset.id = mk.id;
         b.textContent = mk.pin;
         if (mk.title) (b.title = mk.title), b.setAttribute("aria-label", mk.title);
-        Object.assign(b.style, { top: `${(y / h) * 100}%` });
+        this.place(b, { y });
         s.el.append(b);
       }
     }
@@ -1750,7 +1819,7 @@ export class Viewer {
         s.el.append(m);
       }
       m.classList.remove("fade");
-      Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+      this.place(m, { x, y, w: bw, h: bh });
     });
     for (const m of have.slice(boxes.length)) m.remove();
     // (the first box in the middle of the view, unless it is in view already;
@@ -1791,7 +1860,7 @@ export class Viewer {
       for (const [x, y, bw, bh] of boxes) {
         const m = document.createElement("div");
         m.className = i === cur ? "mark fnd cur" : "mark fnd";
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
       }
     });
@@ -1911,6 +1980,8 @@ export class Viewer {
     if (hash) this.asked.delete(`${k}:${hash}`);
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
+    // (the marks placed at the size before, at this one)
+    if (resized) for (const el of this.root.querySelectorAll<HTMLElement>("[data-pt]")) this.lay(el, JSON.parse(el.dataset.pt!));
     s.img = img;
     this.waits(s);
     // (a tab opened at a place: there once the pages have their size)

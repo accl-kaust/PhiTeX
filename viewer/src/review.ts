@@ -25,6 +25,8 @@
 
 import { html } from "./html.ts";
 import type { Viewer } from "./viewer.ts";
+import type { PageSel } from "./sync.ts";
+import type { TextLine } from "./text.ts";
 
 type Box = [number, number, number, number];
 
@@ -129,8 +131,14 @@ export interface ReviewHost {
   onState(cb: (s: ReviewState) => void): void;
   /** Where bytes [start, end) of `file` are on the pages: the glyphs that came from them. */
   boxes(file: string, start: number, end: number): Promise<{ k: number; boxes: Box[] }[]>;
-  /** The source of text selected on the pages. */
-  source(sel: { k: number; rects: Box[] }[]): Promise<{ file: string; start: number; end: number } | null>;
+  /**
+   * Where a note's span [start, end) of `file` is on the pages: its glyphs
+   * from its first to its last in the order they were set (what was
+   * selected), not every glyph of its bytes; `page`, where it was made.
+   */
+  extent(file: string, start: number, end: number, page?: number): Promise<{ k: number; boxes: Box[]; first?: number; last?: number; order?: number }[]>;
+  /** The source of text selected on the pages: from its first character to its last (PageSel's ends). */
+  source(sel: PageSel[]): Promise<{ file: string; start: number; end: number } | null>;
   /** The source place nearest a point of a page. */
   spot(k: number, x: number, y: number): Promise<{ file: string; start: number } | null>;
   /** The editor to `file`'s `line`. */
@@ -197,6 +205,19 @@ export function ago(iso: string, now = Date.now()): string {
   return `${Math.round(s / 86400)} d ago`;
 }
 
+/**
+ * The notes' numbers, as the side's list and their pins on the pages say
+ * them: in reading order (`where`: a note's page and its first glyph's place
+ * in the order they were set, the left column before the right; then file
+ * and place), the detached last; changes' comments and drafts not counted.
+ */
+export function noteNumbers(notes: ReviewNote[], where: Map<string, [number, number]>): Map<string, number> {
+  const all = notes.filter((n) => !n.hunk && !n.draft);
+  const at = (n: ReviewNote) => where.get(n.id) ?? [n.anchor.page ?? 1e9, 0];
+  const placed = all.filter((n) => !n.detached).sort((a, b) => at(a)[0] - at(b)[0] || at(a)[1] - at(b)[1] || a.anchor.file.localeCompare(b.anchor.file) || a.anchor.start - b.anchor.start);
+  return new Map([...placed, ...all.filter((n) => n.detached)].map((n, i) => [n.id, i + 1]));
+}
+
 /** A source quote on one line, its runs of white space one space, cut to `max` characters. */
 export function oneLine(s: string, max = 160): string {
   const t = s.replace(/\s+/g, " ").trim();
@@ -256,6 +277,7 @@ export const REVIEW_CSS = `
 .rside .card.on { border-color: var(--ph-accent); box-shadow: 0 0 0 1px var(--ph-accent); cursor: default; }
 .rside .card.resolved { opacity: .72; }
 .rside .card .top { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ph-fg2); }
+.rside .card .num { font-size: 11px; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; background: var(--ph-accent, #1d3e72); color: #fff; padding: 0 4px; box-sizing: border-box; }
 .rside .chip { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: var(--ph-pill); border: 1px solid currentColor; line-height: 16px; }
 .rside .chip.comment { color: #b25e00; } .rside .chip.note { color: #2f6fd1; } .rside .chip.highlight { color: #8a7300; }
 .rside .chip.draft { color: var(--ph-fg2); } .rside .chip.det { color: var(--ph-warning); } .rside .chip.done { color: #1a7f37; }
@@ -366,6 +388,8 @@ export class Review {
   private drawn = 0;
   /** Where each note is on the pages, as last drawn: its page and height (the list's order). */
   private where = new Map<string, [number, number]>();
+  /** Each note's place in the pages' reading order (its page, its first glyph's place in the order they were set): the list's order and the pins' numbers. */
+  private rank = new Map<string, [number, number]>();
   /** The proposals shown as source lines (else words). */
   private lines = new Set<string>();
   /** A comment being written on a proposal (on one of its hunks; asking for changes). */
@@ -378,7 +402,7 @@ export class Review {
   /** The change to focus once drawn (the next after one decided: the state comes after the op). */
   private wantFocus: string | null = null;
   /** The marks drawn last: the selected note's handles from them. */
-  private lastOut: { k: number; boxes: Box[]; id: string }[] = [];
+  private lastOut: { k: number; boxes: Box[]; id: string; first?: number; last?: number }[] = [];
 
   constructor(p: ReviewPanel, host: ReviewHost) {
     this.p = p;
@@ -555,6 +579,11 @@ export class Review {
     else this.drafts.delete(key);
   }
 
+  /** Each note's number, as the list shows them and its pin on the page says (noteNumbers, by `rank`): every note counts, whatever the list's filter, so a note keeps its number. */
+  private numbers(where: Map<string, [number, number]>): Map<string, number> {
+    return noteNumbers(this.s.notes, where);
+  }
+
   private notesView(): DocumentFragment {
     const all = this.s.notes.filter((n) => !n.hunk);
     const resolved = all.filter((n) => n.status === "resolved").length;
@@ -565,12 +594,9 @@ export class Review {
       return html`${tools}<div class="empty"><b>No notes yet.</b><br>Select text on a page to highlight it, note it, or comment for your agent. <b>Alt+click</b> notes a spot with no text, such as a figure.<br><br>Your agent reads them with <code>phitex session notes</code>.</div>`;
     if (!shown.length)
       return html`${tools}<div class="empty">${this.filter === "open" ? "Every note is resolved." : "No resolved notes."}</div>`;
-    const placed = shown.filter((n) => !n.detached);
+    const order = this.numbers(this.rank);
+    const placed = shown.filter((n) => !n.detached).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
     const detached = shown.filter((n) => n.detached);
-    // (in the order they are in the files)
-    // (as they come in the pages: by page where known, then file and place)
-    const at = (n: ReviewNote) => this.where.get(n.id) ?? [n.anchor.page ?? 1e9, 0];
-    placed.sort((a, b) => at(a)[0] - at(b)[0] || at(a)[1] - at(b)[1] || a.anchor.file.localeCompare(b.anchor.file) || a.anchor.start - b.anchor.start);
     return html`${tools}${placed.map((n) => this.noteCard(n))}${detached.length ? html`<h3>Detached: their text is gone from the source</h3>${detached.map((n) => this.noteCard(n))}` : ""}`;
   }
 
@@ -582,6 +608,8 @@ export class Review {
 
   private noteCard(n: ReviewNote, inHunk = false): DocumentFragment {
     const on = this.sel === n.id;
+    // (its number, as its pin on the page says it)
+    const num = inHunk ? "" : String(this.numbers(this.rank).get(n.id) ?? "");
     const a = n.anchor;
     const quote = a.quote
       ? html`<div class="quote ${n.kind}">${oneLine(a.quote, on ? 2000 : 240)}</div>`
@@ -596,7 +624,7 @@ export class Review {
       ? html`<textarea data-focus="reply:${n.id}" data-reply="${n.id}" placeholder="${n.kind === "highlight" ? "Add a note…" : "Reply…"}" aria-label="Reply to this note" rows="2"></textarea><div class="act"><button type="button" class="btn primary" data-act="reply" data-id="${n.id}" data-focus="send:${n.id}">Reply</button>${n.status === "open" ? html`<button type="button" class="btn" data-act="resolve" data-id="${n.id}" data-focus="res:${n.id}">${icon("check", 14)} Resolve</button>` : html`<button type="button" class="btn" data-act="reopen" data-id="${n.id}" data-focus="reo:${n.id}">${icon("undo", 14)} Reopen</button>`}<span class="grow"></span>${inHunk ? "" : html`<button type="button" class="btn" data-act="edit" data-id="${n.id}" data-focus="edit:${n.id}" title="Edit its words or kind (Enter)">${icon("note", 14)} Edit</button>`}<button type="button" class="btn" data-act="delete" data-id="${n.id}" data-focus="del:${n.id}" title="Delete (Delete key)">${icon("delete", 14)} Delete</button></div><div class="hint">Ctrl+Enter replies · Enter on the card edits · Delete deletes · Esc closes</div>`
       : "";
     const answered = (n.hunks ?? []).length;
-    return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top"><span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
+    return html`<div class="card note${on ? " on" : ""}${n.status === "resolved" ? " resolved" : ""}" data-id="${n.id}" data-focus="card:${n.id}" tabindex="0" role="button" aria-expanded="${on}" aria-label="${`${KIND_WORD[n.kind]} at ${a.file} line ${a.line}${n.status === "resolved" ? ", resolved" : ""}`}"><div class="top">${num ? html`<span class="num" title="${`Its pin on the page says ${num}`}">${num}</span>` : ""}<span class="chip ${n.kind}">${KIND_WORD[n.kind]}</span>${n.draft ? html`<span class="chip draft">Pending</span>` : ""}${n.detached ? html`<span class="chip det" title="Its text was edited away: shown where it was">Detached</span>` : ""}${n.status === "resolved" ? html`<span class="chip done">Resolved</span>` : ""}${inHunk ? "" : html`<button type="button" class="place" data-goto="${a.file}" data-line="${String(a.line)}" title="Open in the editor">${placeOf(a.file, a.line)}</button>`}<span class="grow"></span><span title="${n.updated}">${ago(n.updated)}</span></div>${inHunk ? "" : quote}${thread}${!on && waiting ? html`<div class="more">Waiting for your agent</div>` : ""}${!on && answered ? html`<div class="more">${String(answered)} change${answered === 1 ? "" : "s"} answer this note: see Changes</div>` : ""}${reply}</div>`;
   }
 
   private post(p: ReviewPost): DocumentFragment {
@@ -1095,7 +1123,7 @@ export class Review {
     const [file, a, b] = n ? [n.anchor.file, n.anchor.start, n.anchor.end] : h ? [h.file, h.now[0], h.now[1]] : ["", 0, 0];
     if (!file) return;
     if (n && !n.anchor.quote && n.anchor.point && n.anchor.page !== undefined) return void this.p.viewer.scrollToPlace(n.anchor.page, n.anchor.point[1]);
-    const at = await this.host.boxes(file, a, Math.max(b, a + 1));
+    const at = n ? await this.host.extent(file, a, b, n.anchor.page) : await this.host.boxes(file, a, Math.max(b, a + 1));
     if (at.length) this.p.viewer.scrollToPlace(at[0].k, at[0].boxes[0][1]);
     else this.p.msg("Not on the pages (none of its text is typeset)");
   }
@@ -1122,13 +1150,12 @@ export class Review {
   }
 
   /** The selected note's ends on the pages: handles that move them (a drag, then its source place). */
-  private handles(out: { k: number; boxes: Box[]; id: string }[]): void {
+  private handles(out: { k: number; boxes: Box[]; id: string; first?: number; last?: number }[]): void {
     for (const h of this.p.stage.querySelectorAll(".rv-h")) h.remove();
     const n = this.sel ? this.s.notes.find((x) => x.id === this.sel) : undefined;
     if (!n || !n.anchor.quote || n.hunk) return;
     const mine = out.filter((m) => m.id === n.id && m.boxes.length);
     if (!mine.length) return;
-    const size = this.p.viewer.pageSize();
     const first = mine[0], last = mine.at(-1)!;
     const put = (k: number, b: Box, end: boolean) => {
       const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
@@ -1136,38 +1163,63 @@ export class Review {
       const h = document.createElement("div");
       h.className = `rv rv-h ${end ? "end" : "start"}`;
       h.title = end ? "Drag to move the note's end" : "Drag to move the note's start";
-      Object.assign(h.style, { left: `${((end ? b[0] + b[2] : b[0]) / size.w) * 100}%`, top: `${(b[1] / size.h) * 100}%`, height: `${(b[3] / size.h) * 100}%` });
+      this.p.viewer.place(h, { x: end ? b[0] + b[2] : b[0], y: b[1], h: b[3] });
       h.addEventListener("pointerdown", (e) => this.drag(e, h, n, end));
       slot.append(h);
     };
-    put(first.k, first.boxes[0], false);
-    put(last.k, last.boxes.at(-1)!, true);
+    // (at its first and last glyphs' boxes, as the host says: its first and last lines')
+    put(first.k, first.boxes[first.first ?? 0] ?? first.boxes[0], false);
+    put(last.k, last.boxes[last.last ?? last.boxes.length - 1] ?? last.boxes.at(-1)!, true);
   }
 
+  /**
+   * A handle dragged: it moves over the text as a selection's end does,
+   * a character's edge at a time and in its column (viewer.textPlace, the
+   * column rule of a drag's), and where it is let go the note's end moves
+   * to that character's source (the host snaps it to its word).
+   */
   private drag(e: PointerEvent, h: HTMLElement, n: ReviewNote, end: boolean): void {
     e.preventDefault();
     e.stopPropagation();
-    h.setPointerCapture(e.pointerId);
-    const move = (m: PointerEvent) => {
-      const slot = h.parentElement!.getBoundingClientRect();
-      h.style.left = `${((m.clientX - slot.left) / slot.width) * 100}%`;
-      h.style.top = `${((m.clientY - slot.top) / slot.height) * 100 - 1}%`;
+    const v = this.p.viewer;
+    const hb = h.getBoundingClientRect();
+    // (the line the handle is on: the drag keeps to its column)
+    const on = v.textPlace(hb.left + hb.width / 2, hb.top + hb.height / 2);
+    const col = on ? { k: on.k, line: on.line } : undefined;
+    let place: { k: number; line: TextLine; off: number } | null = null;
+    // (the character the handle is at: the first it starts, the last it ends)
+    const char = (l: TextLine, off: number): [number, number] => {
+      const c = end ? Math.max(0, Math.min(off, l.text.length) - 1) : Math.min(off, l.text.length - 1);
+      const n = l.text.length;
+      return [l.xs?.[c] ?? l.x + (l.w * c) / n, l.rs?.[c] ?? l.x + (l.w * (c + 1)) / n];
     };
+    const move = (m: PointerEvent) => {
+      if (m.pointerId !== e.pointerId) return;
+      place = v.textPlace(m.clientX, m.clientY, col);
+      if (!place) return;
+      const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${place.k}"]`);
+      if (!slot) return;
+      if (h.parentElement !== slot) slot.append(h);
+      const l = place.line, [x0, x1] = char(l, place.off);
+      v.place(h, { x: end ? x1 : x0, y: l.y - 8, h: 11 });
+    };
+    // (the window's moves, not the handle's: it moves under the pointer, and the marks drawn again meanwhile replace it)
     const up = async (u: PointerEvent) => {
-      h.removeEventListener("pointermove", move);
-      h.removeEventListener("pointerup", up);
-      // (the page under the pointer, and the source place nearest it there)
-      const slot = (this.p.root.elementsFromPoint?.(u.clientX, u.clientY) ?? []).map((x) => (x as HTMLElement).closest?.(".slot")).find(Boolean) as HTMLElement | undefined;
-      if (!slot) return void this.marks();
-      const r = slot.getBoundingClientRect();
-      const size = this.p.viewer.pageSize();
-      const at = await this.host.spot(Number(slot.dataset.k), ((u.clientX - r.left) / r.width) * size.w, ((u.clientY - r.top) / r.height) * size.h);
+      if (u.pointerId !== e.pointerId) return;
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", up);
+      if (!place) return void this.marks();
+      // (the source from the line's start to that character (an end), or from it to the line's end (a start): a
+      // character with none, a hyphen a break made, takes the nearest with one on its line)
+      const l = place.line, [x0, x1] = char(l, place.off), n0 = l.text.length;
+      const at = await this.host.source([{ k: place.k, rects: [], from: [end ? (l.xs?.[0] ?? l.x) : x0, l.y], to: [end ? x1 : (l.rs?.[n0 - 1] ?? l.x + l.w), l.y] }]);
       if (!at || at.file !== n.anchor.file) return void (this.p.msg("Not in the note's file there", true), this.marks());
       // (to the word's end or start there: the host snaps it)
-      if (await this.req("review_anchor", end ? { id: n.id, end: Math.max(at.start + 1, n.anchor.start + 1), snap: true } : { id: n.id, start: Math.min(at.start, n.anchor.end - 1), snap: true })) this.select(n.id);
+      if (await this.req("review_anchor", end ? { id: n.id, end: Math.max(at.end, n.anchor.start + 1), snap: true } : { id: n.id, start: Math.min(at.start, n.anchor.end - 1), snap: true })) this.select(n.id);
+      else this.marks();
     };
-    h.addEventListener("pointermove", move);
-    h.addEventListener("pointerup", up);
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", up);
   }
 
   // ---- the marks on the pages ----
@@ -1177,24 +1229,22 @@ export class Review {
     if (!this.enabled) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     // (the typeset comparison shown: its own marks, latexdiff's; the pages' origins are the diff's)
     if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
-    const out: Parameters<Viewer["reviewMarks"]>[0] = [];
+    const out: (Parameters<Viewer["reviewMarks"]>[0][number] & { first?: number; last?: number })[] = [];
     const cls = (n: ReviewNote) => (n.status === "resolved" ? "n-resolved" : `n-${n.kind}`);
-    let i = 0;
+    // (each note's place in reading order: a spot's, the glyph its source is)
+    const rank = new Map<string, [number, number]>();
     for (const n of this.s.notes) {
-      if (n.hunk || n.draft) continue;
-      i++;
-      if (n.detached) continue;
-      const said = n.thread.filter((p) => p.text).length;
-      const pin = n.status === "resolved" ? "✓" : n.kind === "highlight" && !said ? "" : String(said || "•");
-      const title = `${KIND_WORD[n.kind]}: ${oneLine(n.thread[0]?.text || n.anchor.quote, 80)}`;
-      if (!n.anchor.quote && n.anchor.point && n.anchor.page !== undefined) {
-        const [x, y] = n.anchor.point;
-        out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id, pin, title });
+      if (n.hunk || n.draft || n.detached) continue;
+      const spot = !n.anchor.quote && n.anchor.point && n.anchor.page !== undefined;
+      const at = await this.host.extent(n.anchor.file, n.anchor.start, spot ? n.anchor.start + 1 : n.anchor.end, n.anchor.page);
+      if (turn !== this.drawn) return;
+      if (at[0]?.order !== undefined) rank.set(n.id, [at[0].k, at[0].order]);
+      if (spot) {
+        const [x, y] = n.anchor.point!;
+        out.push({ k: n.anchor.page!, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id });
         continue;
       }
-      const at = await this.host.boxes(n.anchor.file, n.anchor.start, Math.max(n.anchor.end, n.anchor.start + 1));
-      if (turn !== this.drawn) return;
-      at.forEach((p, j) => out.push({ ...p, cls: cls(n), id: n.id, ...(j === 0 && pin !== "" ? { pin, title } : {}) }));
+      at.forEach(({ order: _, ...p }) => out.push({ ...p, cls: cls(n), id: n.id }));
     }
     for (const h of this.s.hunks) {
       if (h.whole === "deleted") continue;
@@ -1203,16 +1253,29 @@ export class Review {
       if (turn !== this.drawn) return;
       at.forEach((p) => out.push({ k: p.k, boxes: empty ? p.boxes.slice(0, 1).map(([x, y, , bh]) => [x, y, 2, bh] as Box) : p.boxes, cls: empty ? "h-del" : "h-add", id: h.id }));
     }
-    void i;
+    // (the list in the pages' order, where it changed)
+    const where = new Map<string, [number, number]>();
+    for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
+    // (each note's pin, beside its first box: its number in the list, the
+    // same order; a plain highlight none; its replies in its title)
+    const num = this.numbers(rank), pinned = new Set<string>();
+    for (const m of out) {
+      const n = this.s.notes.find((x) => x.id === m.id);
+      if (!n || n.hunk || pinned.has(n.id)) continue;
+      pinned.add(n.id);
+      const said = n.thread.filter((p) => p.text).length;
+      if (n.kind === "highlight" && !said) continue;
+      const replies = n.thread.slice(1).filter((p) => p.text).length;
+      m.pin = String(num.get(n.id) ?? "•");
+      m.title = `${KIND_WORD[n.kind]} ${m.pin}${n.status === "resolved" ? " (resolved)" : ""}: ${oneLine(n.thread[0]?.text || n.anchor.quote, 80)}${replies ? ` (${replies} repl${replies === 1 ? "y" : "ies"})` : ""}`;
+    }
     this.p.viewer.reviewMarks(out);
     this.lastOut = out;
     this.handles(out);
     this.outline();
-    // (the list in the pages' order, where it changed)
-    const where = new Map<string, [number, number]>();
-    for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
-    const moved = [...where].some(([id, w]) => this.where.get(id)?.join() !== w.join());
+    const moved = [...rank].some(([id, w]) => this.rank.get(id)?.join() !== w.join()) || rank.size !== this.rank.size;
     this.where = where;
+    this.rank = rank;
     this.scrollbar(where);
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
@@ -1254,7 +1317,7 @@ export class Review {
   // ---- making a note ----
 
   /** Text selected on the pages, as the panel tells it (each drag's frame). */
-  selected(sel: { k: number; rects: Box[] }[]): void {
+  selected(sel: PageSel[]): void {
     this.picked = sel;
     if (!this.pointerDown) setTimeout(() => this.offer(), 0);
   }
@@ -1323,7 +1386,7 @@ export class Review {
   }
 
   /** A note of `kind` on the selection `picked` (its source looked up now). */
-  private async make(kind: ReviewNote["kind"], picked: { k: number; rects: Box[] }[], end: DOMRect): Promise<void> {
+  private async make(kind: ReviewNote["kind"], picked: PageSel[], end: DOMRect): Promise<void> {
     const src = await this.host.source(picked);
     if (!src) return void (this.closePop(), this.p.msg("That text came from no file of the project (a header, a number the class made): Alt+click notes a spot instead", true));
     const anchor = { file: src.file, start: src.start, end: src.end, page: picked[0].k };

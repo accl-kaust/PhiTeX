@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ago, groupHunks, lineDiff, oneLine, openHunks, placeOf, type ReviewHunk, type ReviewNote, type ReviewProposal, type ReviewState } from "../src/review.ts";
+import { ago, groupHunks, noteNumbers, lineDiff, oneLine, openHunks, placeOf, type ReviewHunk, type ReviewNote, type ReviewProposal, type ReviewState } from "../src/review.ts";
 
 const note = (id: string, kind: ReviewNote["kind"], text: string, quote = "the words"): ReviewNote => ({
   id,
@@ -76,4 +76,13 @@ test("a change as source lines: the old lines, then the new, with the line aroun
   assert.deepEqual(lineDiff(h), { del: ["The quick fox."], add: ["The swift", "and sure fox."] });
   assert.deepEqual(lineDiff({ ...h, before: "…ver the ", after: " dog…" }).del, ["ver the quick dog"]);
   assert.deepEqual(lineDiff({ ...h, whole: "added", before: "", after: "", new: "A new file.\n" }), { del: [], add: ["A new file."] });
+});
+
+test("notes are numbered as they come in the pages, as their pins and the list say: every note its own number, not its posts' count", () => {
+  const a = note("a", "note", "first written"), b = note("b", "comment", "second"), c = note("c", "note", "third"), d = { ...note("d", "note", "gone"), detached: true };
+  const h = { ...note("h", "comment", "on a change"), hunk: { id: "h1", file: "main.tex", line: 1, old: "", new: "x" } };
+  // (written a, b, c; on the pages: c, then a lower on page 1, then b on page 2)
+  const where = new Map<string, [number, number]>([["a", [0, 400]], ["b", [1, 100]], ["c", [0, 120]]]);
+  const n = noteNumbers([a, b, c, d, h], where);
+  assert.deepEqual([...n], [["c", 1], ["a", 2], ["b", 3], ["d", 4]]);
 });
