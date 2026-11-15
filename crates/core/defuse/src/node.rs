@@ -479,13 +479,33 @@ impl Node {
     }
 
     pub(crate) fn cas_state(&self, from: State, to: State) -> bool {
-        self.state
+        let ok = self
+            .state
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if ok && matches!(to, State::Gone | State::Inert | State::RunningInert) {
+            self.im_gone(to);
+        }
+        ok
     }
 
     pub(crate) fn set_state(&self, s: State) {
         self.state.store(s as u8, Ordering::Release);
+        if matches!(s, State::Gone | State::Inert | State::RunningInert) {
+            self.im_gone(s);
+        }
+    }
+
+    /// (`PHITEX_INTERMED_LOG`) The node left the line or was taken by a
+    /// claim: its runs are not kept.
+    fn im_gone(&self, s: State) {
+        if crate::obs::im_on() {
+            eprintln!(
+                "img\t{}\t{}\t{s:?}",
+                crate::sched::log_clock(std::time::Instant::now()),
+                self.id.raw()
+            );
+        }
     }
 
     /// The node whose claim holds it.
