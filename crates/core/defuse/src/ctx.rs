@@ -2353,7 +2353,7 @@ impl<'a> Ctx<'a> {
                     show(now)
                 );
             }
-            return None;
+            return self.prior_run_stands();
         }
         let output = r.output;
         // (its reads are the record's, filed as its readers: the commit
@@ -2361,6 +2361,60 @@ impl<'a> Ctx<'a> {
         self.product.stood = Some(r.clone());
         self.product.unchanged = true;
         Some(output)
+    }
+
+    /// [`Ctx::last_run_stands`] where my last run's reads moved: the
+    /// record that run replaced (`Node::prior`), where every read of it
+    /// gives what it gave, is this run's (a run is a function of its
+    /// reads), committed as a run's products: its reads filed anew, its
+    /// definitions and contributions in place of the last run's. A value
+    /// that moved and moved back runs nothing: Grail's citations are
+    /// bold question marks in the first pass, numbers in the second and
+    /// the third, and the picture after them that loads the bold font
+    /// first in the second pass alone ran three times, once a pass, for
+    /// the output of its first run (0.65 s at -j1 and at -j8, at the
+    /// end of the build).
+    fn prior_run_stands(&mut self) -> Option<ValueId> {
+        let p = self.me.prior.lock().clone()?;
+        if !p.may_stand_again() {
+            return None;
+        }
+        let eng = self.eng;
+        // (each field's change count before its read is checked, as a
+        // run reads it: a change after the check is the commit's to see)
+        let epochs: Vec<u64> = p
+            .reads
+            .iter()
+            .map(|rd| rd.kind().field().map_or(u64::MAX, |f| eng.field_epoch(f)))
+            .collect();
+        let mut memo = crate::node::HoldMemo::default();
+        let moved = p.scope_moved(eng);
+        if !p
+            .reads
+            .iter()
+            .all(|rd| p.read_holds(eng, self.me, &rd, moved, &mut memo))
+        {
+            return None;
+        }
+        self.product.reads = p
+            .reads
+            .iter()
+            .zip(epochs)
+            .map(|(rd, e)| ReadRec::from_parts(*rd.kind(), rd.path(), false, e, rd.seen_raw()))
+            .collect();
+        self.product.defs = p.defs.clone();
+        self.product.contribs = p.contribs.clone();
+        self.product.sources = p.sources.to_vec();
+        self.product.effect = Some(p.effect);
+        if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
+            eprintln!(
+                "stands: node {} woken by {:?}: the record before its last stands ({} reads)",
+                self.me.id.raw(),
+                self.woke,
+                p.reads.len()
+            );
+        }
+        Some(p.output)
     }
 
     /// Whether this run is on the worker that asks the evaluation's edit

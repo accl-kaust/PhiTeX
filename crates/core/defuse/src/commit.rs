@@ -2104,6 +2104,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             &mut placed,
         );
         let old = node.last.lock().replace(rec.clone());
+        // (the record replaced, kept where it may stand again, `Node::prior`)
+        *node.prior.lock() = old.clone().filter(|o| !Arc::ptr_eq(o, &rec) && o.may_stand_again());
         // (its record published: a placer that looked at it before this
         // sees the sequence moved, or this commit's read of the placer's
         // record below comes after the placer's, `waited_holds`)
@@ -4865,6 +4867,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         inner.guarded.len(),
     );
     *node.last.lock() = None;
+    *node.prior.lock() = None;
     inner.replaced = inner.replaced.saturating_add(1);
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
@@ -5899,6 +5902,7 @@ pub(crate) fn relocate(
             flush_unwalked(eng, w, &m, st);
             m.set_state(State::Gone);
             let rec = m.last.lock().take();
+            *m.prior.lock() = None;
             lifted_walks(eng, w, &m, left, st);
             unfile_placed(eng, w, rec.as_deref());
             // (a node removed claims nothing: what it holds goes back)

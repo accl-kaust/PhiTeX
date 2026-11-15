@@ -25,6 +25,7 @@ mod placed_edit;
 mod placed_guess;
 mod placed_wait;
 mod predict;
+mod prior;
 mod ranked;
 mod relocate;
 mod resumed_reread;

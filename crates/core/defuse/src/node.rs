@@ -73,6 +73,13 @@ pub(crate) struct Node {
     /// What the last commit left, diffed against by the next; a record
     /// filed before any run (`provisional`) holds predictions only.
     pub(crate) last: Mx<Option<Arc<RunRecord>>>,
+    /// The record its last commit replaced, where that one placed, claimed
+    /// and parked nothing ([`RunRecord::may_stand_again`]): a run woken
+    /// for a read that moved finds it standing again where every read of
+    /// it gives what it gave (`Ctx::last_run_stands`), a value that moved
+    /// and moved back (a citation's first pass and its last, the font the
+    /// pass between loaded first).
+    pub(crate) prior: Mx<Option<Arc<RunRecord>>>,
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
     /// A re-ask that came while it ran (`sched::mark_stale` leaves a
@@ -425,6 +432,7 @@ impl Node {
             parked_on: Mx::new(None),
             serial: AtomicU32::new(0),
             last: Mx::new(None),
+            prior: Mx::new(None),
             woke: Mx::new(None),
             stale_wake: Mx::new(None),
             filed_floor: AtomicU32::new(0),
@@ -654,6 +662,26 @@ pub(crate) struct RunRecord {
 }
 
 impl RunRecord {
+    /// Whether this record, replaced by a later commit, may be taken as a
+    /// run's again (`Node::prior`): it placed, claimed, parked and waited
+    /// for nothing, and every read of it is of a field, an environment
+    /// value or a fold (no placement's output, sibling, hole or next
+    /// contribution, which name the structure it stood in).
+    pub(crate) fn may_stand_again(&self) -> bool {
+        !self.provisional
+            && self.state.is_none()
+            && self.placed.is_empty()
+            && self.claim == 0
+            && !self.claim_all
+            && self.waits.is_empty()
+            && self.reads.iter().all(|rd| {
+                !matches!(
+                    rd.kind(),
+                    ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Next { .. } | ReadKind::Hole
+                )
+            })
+    }
+
     /// Whether its read `rd` still gives what it gave: unchecked where
     /// nothing of its field changed since it read (a read at a place
     /// that stands, its field's change count as it was, no scope moved),
