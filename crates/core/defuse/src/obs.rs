@@ -545,3 +545,65 @@ pub(crate) fn im_committing(n: u64) -> u64 {
 pub(crate) fn im_committing_now() -> u64 {
     IM_COMMITTING.with(std::cell::Cell::get)
 }
+
+/// (`PHITEX_INTERMED_LOG`, profile, Linux) This thread's hardware counts
+/// since its first call, `[cycles, instructions, cache references, cache
+/// misses]`, user and kernel, from one perf group opened per thread
+/// (`perf_event_open`, pid 0, any cpu); zeros where the kernel refuses it
+/// (`perf_event_paranoid` above 2). Observe only: a run's cost split into
+/// work (instructions), memory (misses, IPC) and clock (cycles per ns).
+#[allow(unsafe_code)]
+pub(crate) fn hw() -> [u64; 4] {
+    #[cfg(all(feature = "profile", target_os = "linux"))]
+    {
+        thread_local! {
+            static FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-2) };
+        }
+        fn open(config: u64, group: i32) -> i32 {
+            // perf_event_attr, VER5 (112 bytes), in a zeroed buffer
+            let mut a = [0u64; 16];
+            // type PERF_TYPE_HARDWARE (0), size 112
+            a[0] = 112u64 << 32;
+            a[1] = config;
+            // read_format: PERF_FORMAT_GROUP (8)
+            a[4] = 8;
+            // flags: exclude_hv (bit 6)
+            a[5] = 1 << 6;
+            // SAFETY: a valid attr buffer for the syscall's lifetime.
+            unsafe { libc::syscall(libc::SYS_perf_event_open, a.as_ptr(), 0i32, -1i32, group, 0u64) as i32 }
+        }
+        let fd = FD.with(|c| {
+            if c.get() == -2 {
+                let l = open(0, -1);
+                if l >= 0 {
+                    for k in 1..4 {
+                        open(k, l);
+                    }
+                }
+                c.set(l);
+            }
+            c.get()
+        });
+        if fd < 0 {
+            return [0; 4];
+        }
+        let mut b = [0u64; 5];
+        // SAFETY: reading the group's values into a buffer of 5 u64.
+        let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 40) };
+        if n == 40 {
+            return [b[1], b[2], b[3], b[4]];
+        }
+    }
+    [0; 4]
+}
+
+/// (`PHITEX_INTERMED_LOG`, profile, Linux) The CPU this thread is on now
+/// (`sched_getcpu`), -1 elsewhere.
+#[allow(unsafe_code)]
+pub(crate) fn cpu_now() -> i32 {
+    #[cfg(all(feature = "profile", target_os = "linux"))]
+    // SAFETY: no arguments, no memory.
+    return unsafe { libc::sched_getcpu() };
+    #[cfg(not(all(feature = "profile", target_os = "linux")))]
+    -1
+}

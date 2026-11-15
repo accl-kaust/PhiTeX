@@ -44,6 +44,9 @@ def main(path, out):
                          cby=int(ck[2]) - 1, wby=int(p[10]) - 1, goes_on=p[11] == '1',
                          q0=int(p[12]), epoch=int(p[13]), first=p[14] == '1', settles=p[15] == '1',
                          reads=reads_of(p[16]) if len(p) > 16 else [])
+                if len(p) > 19 and p[17].startswith('hw '):
+                    h = [int(x) for x in p[17].split()[1:]]
+                    r.update(cyc=h[0], ins=h[1], cref=h[2], cmiss=h[3], lw=int(p[18]), cpuid=int(p[19]))
                 runs.append(r)
                 ops[r['node']] = r['op']
             elif line.startswith('imc\t'):

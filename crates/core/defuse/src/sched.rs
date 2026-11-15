@@ -2838,13 +2838,15 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             crate::obs::im_cause(eng, wk.as_ref().map(|w| &w.cause)),
             wk.as_ref().and_then(|w| w.by).map_or(0, |b| b.raw() + 1),
             crate::lock::thread_cpu_ns(),
+            crate::obs::hw(),
+            crate::lock::wait_so_far(),
         )
     });
     let r = match stands {
         Some(out) => Ok(Ok(out)),
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
-    if let Some((cause, by, cpu0)) = im {
+    if let Some((cause, by, cpu0, hw0, wait0)) = im {
         let how = match &r {
             Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
             Ok(Ok(_)) => "ok".to_owned(),
@@ -2888,7 +2890,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             };
         }
         eprintln!(
-            "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}\thw {} {} {}",
             n.raw(),
             op.name(),
             node.pos_hint().0,
@@ -2901,7 +2903,19 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             pool.epoch,
             u8::from(first),
             u8::from(op.settles_at_quiet()),
-            rd
+            rd,
+            {
+                let h = crate::obs::hw();
+                format!(
+                    "{} {} {} {}",
+                    h[0] - hw0[0],
+                    h[1] - hw0[1],
+                    h[2] - hw0[2],
+                    h[3] - hw0[3]
+                )
+            },
+            crate::lock::wait_so_far().saturating_sub(wait0),
+            crate::obs::cpu_now()
         );
     }
     if long {
