@@ -506,7 +506,7 @@ impl Node {
     /// claim: its runs are not kept.
     fn im_gone(&self, s: State) {
         if crate::obs::im_on() {
-            eprintln!(
+            elog!(
                 "img\t{}\t{}\t{s:?}",
                 crate::sched::log_clock(std::time::Instant::now()),
                 self.id.raw()

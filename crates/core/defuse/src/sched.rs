@@ -1361,7 +1361,7 @@ impl Pool {
         // for 194 fires in some builds, mc 84169)
         earliest.frontier_pass.store(true, Ordering::Release);
         if run_log() {
-            eprintln!(
+            elog!(
                 "frontier: pass {} at {} t {}",
                 earliest.id.raw(),
                 fr.saturating_sub(1),
@@ -1671,7 +1671,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
                                 })
                                 .collect()
                         });
-                        eprintln!(
+                        elog!(
                             "held: pass {} node {} ({}) at {}: {}",
                             w.held_passes.load(Ordering::Relaxed) + 1,
                             n.raw(),
@@ -1763,7 +1763,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
             }
             let (k, pass) = crate::commit::publish_finals(eng, w);
             if run_log() {
-                eprintln!("quiet: {} re-asked {k} pass {pass}", log_clock(Instant::now()));
+                elog!("quiet: {} re-asked {k} pass {pass}", log_clock(Instant::now()));
             }
             if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1915,7 +1915,7 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
     if let Cause::Changed { field, .. } = wake.cause
         && crate::commit::ftrace(eng, field)
     {
-        eprintln!(
+        elog!(
             "ftrace: mark-stale {} node {} state {:?} held {} woke {:?} t {}",
             eng.values().as_str(field.0).unwrap_or_default(),
             n.id.raw(),
@@ -2381,7 +2381,7 @@ fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
     if !crate::obs::im_on() {
         return;
     }
-    eprintln!(
+    elog!(
         "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}",
         log_clock(Instant::now()),
         n.id.raw(),
@@ -2412,7 +2412,7 @@ pub(crate) fn log_frontier(eng: &Engine, old: u64, new: u64, by: Option<NodeId>,
             .and_then(|r| eng.placed_node(NodeId::from_raw(r)))
             .map_or(0, |x| x.pos_hint().0)
     };
-    eprintln!(
+    elog!(
         "frontier: {} -> {} (at {}) by {} {why} t {}",
         old.saturating_sub(1),
         new.saturating_sub(1),
@@ -2487,7 +2487,7 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             };
             format!("{} {} {eff} {may}", b.raw(), op.name())
         });
-        eprintln!(
+        elog!(
             "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked} by {by}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
             n.id.raw(),
             n.op(),
@@ -2511,7 +2511,7 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
                 .filter(|l| l.contains("defuse::") && !l.contains("{closure") && !l.contains("catch_unwind"))
                 .take(10)
                 .collect();
-            eprintln!("wake-bt: node {} {}", n.id.raw(), fns.join(" < "));
+            elog!("wake-bt: node {} {}", n.id.raw(), fns.join(" < "));
         }
     }
     match w {
@@ -2742,7 +2742,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_definer_before(eng, node))
     {
         if run_log() {
-            eprintln!("long: node {} waits for {}", n.raw(), x.raw());
+            elog!("long: node {} waits for {}", n.raw(), x.raw());
         }
         node.held.store(true, Ordering::Release);
         park_waiting(eng, pool, w, node, Some(x));
@@ -2759,7 +2759,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         && let Some(x) = hold_for(eng, node)
     {
         if run_log() {
-            eprintln!("chain: node {} waits for {}", n.raw(), x.raw());
+            elog!("chain: node {} waits for {}", n.raw(), x.raw());
         }
         node.held.store(true, Ordering::Release);
         park_waiting(eng, pool, w, node, Some(x));
@@ -2919,7 +2919,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 crate::node::ReadKind::Hole => write!(rd, " H={seen}"),
             };
         }
-        eprintln!(
+        elog!(
             "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}\thw {} {} {}",
             n.raw(),
             op.name(),
@@ -2971,7 +2971,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             .unwrap_or_default();
         // (and when: its start and end on the process's clock, ns, and
         // its worker, for a timeline of the runs)
-        eprintln!(
+        elog!(
             "run: node {} ({}) at {}: {how}; goes on {}, woken by {:?}, parked on {parked:?}\tt {} {} w {} e {}",
             n.raw(),
             op.name(),
@@ -2993,13 +2993,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             _ => None,
         };
         if let Some(wf) = wf {
-            eprintln!("runf: node {} field {wf}", n.raw());
+            elog!("runf: node {} field {wf}", n.raw());
         }
         // (the reads it computed again on a moved layout, and the reads it
         // filed)
         // (and its time on the CPU and waiting for locks, ns: a run
         // slow on a busy pool is told from one slow alone)
-        eprintln!(
+        elog!(
             "runr: node {} retries {} reads {} cpu {} lockwait {}",
             n.raw(),
             crate::read::retries() - retries0,
@@ -3206,7 +3206,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             node.run_chained
                 .store(node.chain_began.load(Ordering::SeqCst), Ordering::SeqCst);
             if run_log() {
-                eprintln!(
+                elog!(
                     "commit: node {} done {} commit {} reask {} walked {} woken {}",
                     n.raw(),
                     log_clock(Instant::now()),
@@ -3736,7 +3736,7 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
     m.push(node.id);
     drop(m);
     if run_log() {
-        eprintln!(
+        elog!(
             "frontier: hold {} at {} t {}",
             node.id.raw(),
             eng.frontier.load(Ordering::Acquire).saturating_sub(1),
@@ -3772,7 +3772,7 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
         go
     };
     if run_log() && !go.is_empty() {
-        eprintln!(
+        elog!(
             "frontier: released {} at {} t {}",
             go.len(),
             fr.saturating_sub(1),

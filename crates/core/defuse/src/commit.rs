@@ -260,7 +260,7 @@ fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8, rank: u64) -> 
     let bad = !matches!(t, Some(t) if t <= s)
         || (s == 1 && rank > 0 && t == Some(1) && sib_under(eng, x, a).is_some_and(|d| eng.node(d).rank() > rank));
     if bad && crate::obs::enabled() && crate::sched::wake_log() {
-        eprintln!(
+        elog!(
             "stranded: anchor {} slot {s}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
             a.raw(),
             x.raw(),
@@ -1119,7 +1119,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             d.value = rel_value_at(eng, d.f, node.id, c);
             if ftrace(eng, d.f) {
                 let i = reaching_at(eng, d.f, node.id, false);
-                eprintln!(
+                elog!(
                     "ftrace: rel-file {} by {} pos {} input-by {:?} input {} value {} t {}",
                     eng.values().as_str(d.f.0).unwrap_or_default(),
                     node.id.raw(),
@@ -1993,7 +1993,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         for (f, r, witness) in here_reads.drain(..) {
             let a = eng.node(r.anchor());
             if walk_trace(eng, f) {
-                eprintln!(
+                elog!(
                     "walk-trace: commit of node {} serial {} files a read anchored at {} (pos {} seg {}) in seg {} lo {} hi {}: {}",
                     node.id.raw(),
                     r.serial,
@@ -2119,7 +2119,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let Some(f) = r.kind().field()
                 && ftrace(eng, f)
             {
-                eprintln!(
+                elog!(
                     "ftrace: read {} by {} ({}) serial {serial} seen {} filed {} {:?} t {}",
                     eng.values().as_str(f.0).unwrap_or_default(),
                     node.id.raw(),
@@ -2133,7 +2133,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         for d in rec.defs.iter().filter(|_| crate::obs::enabled()) {
             if ftrace(eng, d.f) {
-                eprintln!(
+                elog!(
                     "ftrace: def {} by {} ({}) serial {serial} pos {} rel {:?} value {} changed {} t {}",
                     eng.values().as_str(d.f.0).unwrap_or_default(),
                     node.id.raw(),
@@ -2175,7 +2175,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             for &f in &changed_contribs {
                 let _ = write!(c, " {}", crate::obs::im_field(eng, f));
             }
-            eprintln!(
+            elog!(
                 "imc\t{}\t{serial}\t{}\t{}\t{}\t{}\t{d}\t{c}",
                 node.id.raw(),
                 crate::sched::log_clock(std::time::Instant::now()),
@@ -2196,7 +2196,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     .iter()
                     .zip(&rec.defs)
                     .all(|(a, b)| a.f == b.f && a.value == b.value && a.rel == b.rel);
-            eprintln!(
+            elog!(
                 "redo:\t{}\t{}\t{}",
                 node.id.raw(),
                 eng.op(node.op()).name(),
@@ -2214,7 +2214,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     && let Some(name) = eng.values().as_str(f.0)
                     && (keys.is_empty() || keys.contains(&name))
                 {
-                    eprintln!(
+                    elog!(
                         "kread:\t{}\t{}\t{name}\t{}",
                         node.id.raw(),
                         pos.0,
@@ -3205,7 +3205,7 @@ fn walk_here(
             _ => read::rel_plain(eng, c, Some(i.value)),
         };
         if ftrace(eng, f) {
-            eprintln!(
+            elog!(
                 "ftrace: walk-here {} by {} rel {} pos {} input-by {} old {} new {} t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 by.raw(),
@@ -3271,7 +3271,7 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
         match inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
             Some(e) if e.by == by && e.rel == Some(c) => {
                 if ftrace(eng, f) {
-                    eprintln!(
+                    elog!(
                         "ftrace: settle {} by {} pos {} old {} new {} t {}",
                         eng.values().as_str(f.0).unwrap_or_default(),
                         by.raw(),
@@ -3585,7 +3585,7 @@ pub(crate) fn reask_from(
     let mut passed = false;
     let trace = walk_trace(eng, f);
     if trace {
-        eprintln!(
+        elog!(
             "walk-trace: from {} seg {} by {:?} stop_op {:?} level {level}",
             from.0,
             seg.0,
@@ -3632,7 +3632,7 @@ pub(crate) fn reask_from(
                 }
             }
             if trace {
-                eprintln!(
+                elog!(
                     "walk-trace:   seg {cur:?} holds readers of the field: [{}]",
                     readers
                         .iter()
@@ -3649,7 +3649,7 @@ pub(crate) fn reask_from(
             (readers, next, hole, deeper)
         };
         if trace {
-            eprintln!(
+            elog!(
                 "walk-trace:   seg {cur:?} lo {} from {} readers [{}] next {:?} hole {:?} deeper {}",
                 s.lo.0,
                 from.0,
@@ -3917,7 +3917,7 @@ fn walk_stopped(
     let fs = std::mem::take(&mut *node.stopped.lock());
     for (f, level) in fs {
         if walk_trace(eng, f) {
-            eprintln!(
+            elog!(
                 "walk-trace: stopped walks at node {} go on from {} (level {level}; its own: {})",
                 node.id.raw(),
                 pos.0,
@@ -3937,7 +3937,7 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     let rs = eng.ranges.ends(f, u, |x| live(eng, x.node(), x.serial));
     if rs.is_empty() {
         if ftrace(eng, f) {
-            eprintln!(
+            elog!(
                 "ftrace: end-walk {} by {} no reader t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 by.map_or(0, NodeId::raw),
@@ -3958,7 +3958,7 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     for r in rs {
         if tr {
             let n = eng.node(r.node());
-            eprintln!(
+            elog!(
                 "ftrace: end-walk {} by {} reader {} serial {} (now {}) state {:?} seen {} now {} t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 by.map_or(0, NodeId::raw),
@@ -4068,7 +4068,7 @@ fn note_refute(
         )
     };
     let op = |n: NodeId| eng.op(eng.node(n).op()).name();
-    eprintln!(
+    elog!(
         "refute:\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{at}\t{}\t{}",
         v.as_str(f.0).unwrap_or_default(),
         reader.raw(),
@@ -4088,7 +4088,7 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     if walk_trace(eng, f) {
         let alive = live(eng, r.node(), r.serial);
         let now = if alive { reader_answer(eng, f, r) } else { None };
-        eprintln!(
+        elog!(
             "walk-trace:     reader {} serial {} anchor {} live {alive} seen {} now {}",
             r.node().raw(),
             r.serial,
@@ -4117,7 +4117,7 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         note_refute(eng, f, r.node(), by, r.seen(), now);
         // (`PHITEX_INTERMED_LOG`: the value the reader is re-asked by)
         if crate::obs::im_on() {
-            eprintln!(
+            elog!(
                 "imv\t{}\t{}\t{}\t{}\t{}\t{}",
                 crate::sched::log_clock(std::time::Instant::now()),
                 r.node().raw(),
@@ -4266,7 +4266,7 @@ fn reask_ranges_in(
     let mut asked = 0usize;
     let mut starts: Vec<Option<NodeId>> = Vec::new();
     if walk_trace(eng, f) {
-        eprintln!(
+        elog!(
             "walk-trace: ranges at {} by {} fixed {fixed}: [{}]",
             at.0,
             by.raw(),
@@ -4302,7 +4302,7 @@ fn reask_ranges_in(
     // (`PHITEX_REASK_TRACE`, profile: a re-ask of 10 ms or more, its
     // field, the readers held, those asked and their starts)
     if crate::obs::enabled() && t0.elapsed().as_millis() >= 10 && std::env::var_os("PHITEX_REASK_TRACE").is_some() {
-        eprintln!(
+        elog!(
             "reask-trace: {} by {} at {}: {held} held, {asked} asked from {} starts, {:?}",
             eng.values().render(f.0),
             by.raw(),
@@ -4940,7 +4940,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     }
     for f in changed_defs {
         if ftrace(eng, f) {
-            eprintln!(
+            elog!(
                 "ftrace: retract {} by {} ({}) t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 node.id.raw(),
@@ -5515,7 +5515,7 @@ pub(crate) fn place(
 /// and slot, its label, and the node it went after or before.
 fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
     if crate::obs::enabled() && crate::sched::wake_log() {
-        eprintln!(
+        elog!(
             "placed: node {} op {:?} parent {:?} anchor {:?} slot {} at {:?} {how} {} (at {:?})",
             node.id.raw(),
             node.op(),
@@ -6029,7 +6029,7 @@ pub(crate) fn relocate(
         }
     }
     if crate::obs::enabled() && crate::sched::wake_log() {
-        eprintln!(
+        elog!(
             "relocated: node {} op {:?} by {} with {} of its subtree, after {} (at {:?})",
             k.id.raw(),
             k.op(),
@@ -6050,7 +6050,7 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left,
     let (pos, seg) = old_place(eng, &left);
     for &f in &left.defs {
         if walk_trace(eng, f) {
-            eprintln!(
+            elog!(
                 "walk-trace: lifted node {} from {} seg {} (lifted at {} seg {}) hole {}",
                 m.id.raw(),
                 pos.0,
@@ -6447,7 +6447,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
     node.restated.fetch_add(1, Ordering::AcqRel);
     if bracket_trace() {
         let o = old.unwrap_or_default();
-        eprintln!(
+        elog!(
             "bracket-trace: file node {} ({}) pos {} old ({},{}) new ({},{}) gen {g} t {}",
             node.id.raw(),
             eng.op(node.op()).name(),
@@ -7165,7 +7165,7 @@ fn reask_after_effect_with(
     }
     st.scope_asked += readers.len() as u64;
     if bracket_trace() {
-        eprintln!(
+        elog!(
             "bracket-trace: walk by {} at {} old ({},{}) new ({},{}) end {:?} raced {:?} all {} readers {} t {}",
             by.id.raw(),
             at.0,

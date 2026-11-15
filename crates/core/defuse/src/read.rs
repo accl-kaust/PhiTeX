@@ -390,7 +390,7 @@ pub(crate) fn trace_inverted(
         return;
     }
     let name = |n: Option<NodeId>| n.map(|n| (n.raw(), eng.op(eng.node(n).op()).name()));
-    eprintln!(
+    elog!(
         "fold-trace: {at}: reader {} {} reads {} from {:?} at {:?} to {:?} at {:?}",
         me.id.raw(),
         eng.op(me.op()).name(),

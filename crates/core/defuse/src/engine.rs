@@ -1843,6 +1843,9 @@ impl Engine {
         if crate::obs::rc_on() {
             crate::obs::runcost_report(self);
         }
+        if crate::obs::enabled() {
+            crate::obs::log_flush();
+        }
         rep.absorbed = workers
             .iter()
             .flat_map(|w| std::mem::take(&mut w.log.lock().absorbed))

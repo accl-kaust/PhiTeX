@@ -497,7 +497,7 @@ pub(crate) fn im_field(eng: &crate::engine::Engine, f: crate::values::Field) -> 
     let raw = f.0.raw();
     let new = SEEN.lock().get_or_insert_with(Default::default).insert(raw);
     if new {
-        eprintln!(
+        elog!(
             "imf\t{raw}\t{}",
             eng.values().as_str(f.0).unwrap_or_default().replace(['\t', '\n'], " ")
         );
@@ -637,5 +637,46 @@ pub(crate) fn runcost_report(eng: &crate::engine::Engine) {
             "runcost\t{op}\t{k}\t{}",
             c.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
         );
+    }
+}
+
+/// (profile) The per-run logs' lines, kept per thread and written at the
+/// evaluation's end (or past 8 MB), not one `eprintln` each: the stderr
+/// lock and a write per line made a logged -j8 build 4x slower and its
+/// runs' clocks low (`log_line`).
+static LOG_BUFS: Mx<Vec<std::sync::Arc<std::sync::Mutex<String>>>> = Mx::new(Vec::new());
+
+thread_local! {
+    static LOG_BUF: std::sync::Arc<std::sync::Mutex<String>> = {
+        let b = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        LOG_BUFS.lock().push(b.clone());
+        b
+    };
+}
+
+/// (profile) One log line into this thread's buffer.
+pub(crate) fn log_line(args: std::fmt::Arguments<'_>) {
+    use std::fmt::Write as _;
+    LOG_BUF.with(|b| {
+        let mut s = b.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = s.write_fmt(args);
+        s.push('\n');
+        if s.len() > 8 << 20 {
+            use std::io::Write as _;
+            let _ = std::io::stderr().lock().write_all(s.as_bytes());
+            s.clear();
+        }
+    });
+}
+
+/// (profile) Every thread's buffered lines, written.
+pub(crate) fn log_flush() {
+    use std::io::Write as _;
+    let bufs = LOG_BUFS.lock().clone();
+    let mut e = std::io::stderr().lock();
+    for b in bufs {
+        let mut s = b.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = e.write_all(s.as_bytes());
+        s.clear();
     }
 }
