@@ -525,3 +525,23 @@ pub(crate) fn im_cause(eng: &crate::engine::Engine, c: Option<&crate::api::Cause
         by.map_or(0, |b| b.raw() + 1)
     )
 }
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) The node whose commit this thread makes
+    /// (raw id plus one, 0 none).
+    static IM_COMMITTING: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// (`PHITEX_INTERMED_LOG`) Sets the node whose commit this thread makes;
+/// the one before.
+pub(crate) fn im_committing(n: u64) -> u64 {
+    if !im_on() {
+        return 0;
+    }
+    IM_COMMITTING.with(|c| c.replace(n))
+}
+
+/// (`PHITEX_INTERMED_LOG`) The node whose commit this thread makes.
+pub(crate) fn im_committing_now() -> u64 {
+    IM_COMMITTING.with(std::cell::Cell::get)
+}

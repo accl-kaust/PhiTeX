@@ -4108,6 +4108,18 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     let now = reader_answer(eng, f, r);
     if now != r.seen() {
         note_refute(eng, f, r.node(), by, r.seen(), now);
+        // (`PHITEX_INTERMED_LOG`: the value the reader is re-asked by)
+        if crate::obs::im_on() {
+            eprintln!(
+                "imv\t{}\t{}\t{}\t{}\t{}\t{}",
+                crate::sched::log_clock(std::time::Instant::now()),
+                r.node().raw(),
+                crate::obs::im_field(eng, f),
+                r.seen().map_or(-1, |x| i128::from(x.raw())),
+                now.map_or(-1, |x| i128::from(x.raw())),
+                by.map_or(0, |b| b.raw() + 1)
+            );
+        }
         // (a run made ahead of the frontier refuted: the speculation window
         // narrows, docs/spec-window.md)
         // (by the page layer's own change, a routine's give-back or a page

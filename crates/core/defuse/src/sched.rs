@@ -2382,13 +2382,14 @@ fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
         return;
     }
     eprintln!(
-        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}",
+        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}",
         log_clock(Instant::now()),
         n.id.raw(),
         n.state(),
         crate::obs::im_cause(eng, Some(&wake.cause)),
         wake.by.map_or(0, |b| b.raw() + 1),
-        eng.quiets.load(Ordering::Relaxed)
+        eng.quiets.load(Ordering::Relaxed),
+        crate::obs::im_committing_now()
     );
 }
 
@@ -3116,11 +3117,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             // (commits under way at once, `Report::commits_at_once`)
             let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
             eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
+            let im_was = crate::obs::im_committing(n.raw() + 1);
             let st = match product.stood.clone() {
                 Some(r) => crate::commit::commit_stood(eng, w, node, &r, product.scope_gen, product.struct_gen),
                 None => None,
             }
             .unwrap_or_else(|| commit(eng, w, node, product));
+            crate::obs::im_committing(im_was);
             eng.committing.fetch_sub(1, Ordering::Relaxed);
             // (the store past the collection's mark: the workers called to
             // its barrier as their runs end)
