@@ -42,6 +42,10 @@ pub(crate) struct Node {
     pub(crate) op: AtomicU32,
     pub(crate) text: Lock<Arc<[ValueId]>>,
     pub(crate) parent: Option<NodeId>,
+    /// Its parent's depth plus one; 0 for a node with no parent. An
+    /// ancestor sits that many steps above it, found without a walk
+    /// to the line's top (`read::SiblingParents`).
+    pub(crate) depth: u32,
     /// Its segment and label, written under the owning segment's write
     /// lock (a relabel, a split), read under its read lock. A lock-free read
     /// (`pos_hint`) is good enough to find the segment to lock.
@@ -367,6 +371,7 @@ impl Node {
         op: OpId,
         args: Vec<ValueId>,
         parent: Option<NodeId>,
+        depth: u32,
         seg: SegId,
         pos: Pos,
     ) -> Node {
@@ -421,6 +426,7 @@ impl Node {
             op: AtomicU32::new(op.0),
             text: Lock::new(args.into()),
             parent,
+            depth,
             seg: AtomicU32::new(seg.0),
             pos: AtomicU64::new(pos.0),
             state: AtomicU8::new(State::Dirty as u8),

@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
+use crate::values::{Field, FxHashMap, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -1068,13 +1068,21 @@ fn following_from(
 
 /// The parents a sibling of `me` may have: `me`'s, then its parent's,
 /// up to the line's top (a placed node's siblings are the later
-/// placements of its parent and, past them, its parent's siblings); the
-/// chain above `me`'s parent found once, when a candidate needs it.
+/// placements of its parent and, past them, its parent's siblings). A
+/// candidate parent is one of those by its depth (`Node::depth`): one as
+/// deep as `me`'s parent or deeper, `me`'s own placements among them, is
+/// none, and one above is the ancestor that many steps up. The chain above
+/// `me`'s parent is walked only as far as a candidate needs, once: a
+/// node deep in a continuation chain (each step its predecessor's
+/// placement) checked against its own placements walks none of it.
 pub(crate) struct SiblingParents {
     me: NodeId,
     at: Pos,
     parent: Option<NodeId>,
-    above: Option<FxHashSet<NodeId>>,
+    /// `parent`'s depth
+    depth: u32,
+    /// `parent`'s ancestors found so far, nearest first
+    above: Vec<NodeId>,
 }
 
 impl SiblingParents {
@@ -1083,7 +1091,8 @@ impl SiblingParents {
             me: me.id,
             at: me.pos_hint(),
             parent: me.parent,
-            above: None,
+            depth: me.depth.saturating_sub(1),
+            above: Vec::new(),
         }
     }
 
@@ -1094,20 +1103,22 @@ impl SiblingParents {
         if p == self.parent {
             return true;
         }
-        let parent = self.parent;
-        self.above
-            .get_or_insert_with(|| {
-                let mut s = FxHashSet::default();
-                let mut p = parent;
-                while let Some(x) = p {
-                    p = eng.node(x).parent;
-                    if let Some(y) = p {
-                        s.insert(y);
-                    }
-                }
-                s
-            })
-            .contains(&q)
+        let Some(parent) = self.parent else {
+            return false;
+        };
+        let dq = eng.node(q).depth;
+        if dq >= self.depth {
+            return false;
+        }
+        let up = (self.depth - dq) as usize;
+        while self.above.len() < up {
+            let from = self.above.last().copied().unwrap_or(parent);
+            let Some(x) = eng.node(from).parent else {
+                return false;
+            };
+            self.above.push(x);
+        }
+        self.above[up - 1] == q
     }
 
     /// Whether `n` is a sibling of `me` whatever its state and claimer: one

@@ -4690,7 +4690,8 @@ pub(crate) fn built(
     id: NodeId,
 ) -> (Arc<Node>, Predicted) {
     let pred = predict(eng, op, &args);
-    let n = Node::new(id, unit, op, args, parent, SegId(0), Pos(0));
+    let depth = parent.map_or(0, |p| eng.node(p).depth + 1);
+    let n = Node::new(id, unit, op, args, parent, depth, SegId(0), Pos(0));
     n.effect.store(pack_effect(pred.effect), Ordering::Release);
     (Arc::new(n), pred)
 }
