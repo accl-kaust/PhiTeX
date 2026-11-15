@@ -363,13 +363,22 @@ def critical_path(D, cls):
             pe = max(t, min(pr['done'] or pr['t1'], cur['t0']))
             stale += pe - t
             queue += cur['t0'] - pe
+            xd = max(x['done'] or x['t1'], x['t1'])
+            commit += max(0, min(t, xd) - x['t1'])
+            late += max(0, t - xd)
         else:
-            queue += cur['t0'] - t
-        # (a definer's walk after its commit (fields left unwalked, a
-        # release): the commit up to its end, the rest late)
-        xd = max(x['done'] or x['t1'], x['t1'])
-        commit += max(0, min(t, xd) - x['t1'])
-        late += max(0, t - xd)
+            # (queued in its definer's commit: the rest of that commit, then
+            # queue; a walk after the commit (fields left unwalked, a
+            # release): late)
+            xd = max(x['done'] or x['t1'], x['t1'])
+            if t <= xd:
+                ce = min(xd, cur['t0'])
+                commit += max(0, ce - x['t1'])
+                queue += cur['t0'] - ce
+            else:
+                commit += xd - x['t1']
+                late += t - xd
+                queue += cur['t0'] - t
         upto = t
         cur = x
     return dict(end_ms=t_end / MS, run_ms={c: cp[c] / MS for c in cp}, run_n=dict(cpn),
