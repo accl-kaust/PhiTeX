@@ -575,8 +575,21 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   const body = `${prose(14, 3)}\n\n${prose(9, 5)}\\footnote{Footnote text typeset at the foot of the column.}\n\\begin{figure}[t]\\centering\\fbox{Figure}\\caption{A caption typeset where the float lands.}\\end{figure}\n\n${prose(9, 7)}\n\n${prose(40, 11)}\n\\begin{thebibliography}{1}\\bibitem{k} D. Knuth. 1984.\\end{thebibliography}`;
   const { w, t } = await open({ "main.tex": `\\documentclass[twocolumn]{article}\n\\begin{document}\n${body}\n\\end{document}\n` }, { at });
   await t.send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 1700, deviceScaleFactor: 1, mobile: false });
-  await sleep(1500);
+  // (the pages' layout at rest: the first page's box the same for 400 ms. A
+  // resize, or the review's side opening, fits the pages to the narrower stage
+  // a moment later; a place measured before it is not where the page is
+  // after, and a press there falls on the text, not on a handle)
+  const settled = async () => {
+    let last = null, same = 0;
+    for (const end = Date.now() + 20000; same < 2; await sleep(200)) {
+      assert.ok(Date.now() < end, "the pages' layout at rest");
+      const now = await t.q(`(() => { const b = $(".slot")?.getBoundingClientRect(); return b ? [b.left, b.top, b.width, b.height].map(Math.round).join() : null; })()`);
+      same = now && now === last ? same + 1 : 0;
+      last = now;
+    }
+  };
   await t.until(`$$(".slot text").length > 50`, "the first page's text");
+  await settled();
   // (places on the first page as fractions of it: the review's side opening
   // narrows the pages; `F` maps a screen box to them)
   const F = `const S = $(".slot").getBoundingClientRect(); const F = (b) => [(b.left - S.left) / S.width, (b.right - S.left) / S.width, (b.top - S.top) / S.height, (b.bottom - S.top) / S.height];`;
@@ -616,6 +629,7 @@ test("a note made in one column of a two-column paper is drawn in that column, a
     assert.ok(s.on && e.on, `${what}: both handles on screen`);
     return e;
   };
+  await settled();
   await check("saved");
   const notes = JSON.parse(w.read(".phitex/notes.json"));
   const note = (notes.notes ?? notes).find((n) => n.thread?.[0]?.text === "Two columns");
@@ -627,11 +641,15 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   await line("L", 0, 0);
   const m = await t.q(`(() => { const b = $(".slot .rv.n-note:not(.rv-pin)").getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
   await t.mouse(m[0], m[1]);
-  const e = await check("after a reload");
+  // (the note selected opens the review's side: the pages fitted again)
+  await settled();
+  await check("after a reload");
   // (the end handle dragged two lines down, past its line's end into the gap
   // between the columns: the note ends on that line, in the left column)
   const to = await line("L", 32, -1, true);
   const gap = await t.q(`(() => { const S = $(".slot").getBoundingClientRect(); return S.left + ${mid} * S.width - 3; })()`);
+  // (the handle where it is now, after line()'s scroll)
+  const e = await t.q(`(() => { const b = $(".slot .rv-h.end").getBoundingClientRect(); return { sx: b.left + b.width / 2, sy: (b.top + b.bottom) / 2 }; })()`);
   await t.drag(e.sx, e.sy, gap, to.y, 16);
   for (const end = Date.now() + 20000; ; await sleep(100)) {
     const n = JSON.parse(w.read(".phitex/notes.json"));
@@ -650,6 +668,7 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   // the pins number them as they come in the pages, as the list does, not
   // by their posts (each had one: every pin said 1))
   for (const [a, b, text] of [[["R", 4, 2], ["R", 6, -3, true], "Right"], [["L", 3, 2], ["L", 5, -3, true], "Above"]]) {
+    await settled();
     const p = await line(...a), q = await line(...b);
     await t.drag(p.x, p.y, q.x, q.y);
     await t.until(`$(".rv-pop [data-k='note']")`, "the note's button");
