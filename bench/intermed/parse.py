@@ -23,7 +23,7 @@ def main(path, out):
     runs = []          # dicts
     commits = defaultdict(list)   # node -> [done t]
     imc = defaultdict(list)       # node -> [(t, serial, defs{f:v}, contribs[f], outchg, quiets)]
-    wakes = []         # (t, reader, state, kind, field, by, wby, how, quiets)
+    wakes = []         # (t, reader, state, kind, field, by, wby, how, quiets, committing, hint)
     quiets = []        # (t, pass)
     ops = {}
     rcom = re.compile(r'^commit: node (\d+) done (\d+)')
@@ -47,6 +47,9 @@ def main(path, out):
                 if len(p) > 17 and p[17].startswith('hw '):
                     h = [int(x) for x in p[17].split()[1:]]
                     r.update(cyc=h[0], ins=h[1], cref=h[2], cmiss=h[3], lw=h[4], cpuid=h[5])
+                if len(p) > 18 and p[18].startswith('tk '):
+                    t = p[18].split()
+                    r.update(took=t[1], tfrom=int(t[2]))
                 runs.append(r)
                 ops[r['node']] = r['op']
             elif line.startswith('imc\t'):
@@ -62,7 +65,8 @@ def main(path, out):
                 p = line.rstrip('\n').split('\t')
                 ck = p[4].split()
                 wakes.append((int(p[1]), int(p[2]), p[3], ck[0], int(ck[1]), int(ck[2]) - 1,
-                              int(p[5]) - 1, p[6], int(p[7]), int(p[8]) - 1 if len(p) > 8 else -1))
+                              int(p[5]) - 1, p[6], int(p[7]), int(p[8]) - 1 if len(p) > 8 else -1,
+                              int(p[9]) - 1 if len(p) > 9 else -1))
             elif line.startswith('imv\t'):
                 p = line.rstrip('\n').split('\t')
                 vals.append((int(p[1]), int(p[2]), int(p[3]), int(p[4]), int(p[5]), int(p[6]) - 1))

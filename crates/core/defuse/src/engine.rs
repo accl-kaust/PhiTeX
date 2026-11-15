@@ -425,6 +425,7 @@ impl Engine {
     /// ([`Engine::struct_gen`]).
     pub(crate) fn structure_changed(&self) {
         self.struct_gen.fetch_add(1, Ordering::SeqCst);
+        crate::obs::im_changed(crate::obs::IM_STRUCTURE);
     }
 
     pub(crate) fn scope_changed(&self) -> u64 {

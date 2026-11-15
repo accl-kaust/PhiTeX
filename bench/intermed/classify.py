@@ -153,7 +153,15 @@ def enabler(D, r):
     if j >= 0 and ws[j][0] >= lo:
         w = ws[j]
         c = w[9] if len(w) > 9 else -1
-        if c >= 0:
+        h = w[10] if len(w) > 10 else -1
+        if (c < 0 or c == n) and h >= 0 and h != n:
+            # (a re-ask with no node of its own, by the node's own commit
+            # check: the definer whose commit moved a read of the run in
+            # flight; the run's tail and its commit lie between)
+            x, t = producing_run(D, h, w[0])
+            if x is not None and t is not None:
+                cands.append((t, x, 'stale'))
+        elif c >= 0:
             x, _ = producing_run(D, c, w[0])
             if x is not None:
                 cands.append((w[0], x, 'wake'))
@@ -171,6 +179,11 @@ def enabler(D, r):
     cands = [c for c in cands if c[0] <= r['t0']]
     if not cands:
         return None
+    # (a re-ask by the node's own commit check follows the definer that
+    # moved the read, not the node's own run before, which it refutes)
+    st = [c for c in cands if c[2] == 'stale']
+    if st and max(cands, key=lambda c: c[0])[2] in ('own', 'wake'):
+        return max(st, key=lambda c: c[0])
     return max(cands, key=lambda c: c[0])
 
 
@@ -258,7 +271,7 @@ def critical_path(D, cls):
     cur = max(runs, key=lambda r: (r['done'] or r['t1']))
     t_end = cur['done'] or cur['t1']
     cp = Counter(); cpn = Counter(); how = Counter()
-    seen = set(); queue = 0; commit = 0; quiet = 0; links = 0
+    seen = set(); queue = 0; commit = 0; quiet = 0; stale = 0; links = 0
     chain = []
     while cur is not None and cur['i'] not in seen:
         seen.add(cur['i']); links += 1
@@ -285,11 +298,19 @@ def critical_path(D, cls):
                 queue += cur['t0'] - (x['done'] or x['t1'])
             cur = x
             continue
-        queue += cur['t0'] - t
+        if kind == 'stale' and cur['k'] > 0:
+            # the node's run in flight when the definer committed, then its
+            # own commit, which re-asked it: wasted, then queued
+            pr = D['byn'][cur['node']][cur['k'] - 1]
+            pe = max(t, min(pr['done'] or pr['t1'], cur['t0']))
+            stale += pe - t
+            queue += cur['t0'] - pe
+        else:
+            queue += cur['t0'] - t
         commit += max(0, t - x['t1'])
         cur = x
     return dict(end_ms=t_end / MS, run_ms={c: cp[c] / MS for c in cp}, run_n=dict(cpn),
-                queue_ms=queue / MS, commit_ms=commit / MS, quiet_ms=quiet / MS, links=links,
+                queue_ms=queue / MS, commit_ms=commit / MS, quiet_ms=quiet / MS, stale_ms=stale / MS, links=links,
                 enablers=dict(how)), chain
 
 

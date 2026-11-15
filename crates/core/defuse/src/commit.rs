@@ -2155,6 +2155,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // value)
         if crate::obs::im_on() {
             use std::fmt::Write as _;
+            for f in changed_defs.iter().chain(&changed_contribs) {
+                crate::obs::im_changed(f.0.raw());
+            }
             let mut d = String::new();
             // (a commit of thousands of definitions, the preamble's: their
             // count alone)
@@ -2856,6 +2859,19 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Cause::Changed { field, .. } => read::reaching_at(eng, *field, node.id, false).and_then(|r| r.by),
             _ => None,
         };
+        // (`PHITEX_INTERMED_LOG`: the wake below has no node; the log
+        // names the one whose commit moved the read, the definer reaching
+        // it, else the last to move its field or the line's structure)
+        let _hint = crate::obs::im_on().then(|| {
+            let key = match &cause {
+                Cause::Changed { field, .. } | Cause::Range { field, .. } | Cause::Environment { field } => {
+                    field.0.raw()
+                }
+                _ => crate::obs::IM_STRUCTURE,
+            };
+            let h = by.map_or_else(|| crate::obs::im_changer(key), |b| b.raw() + 1);
+            ImHint(crate::obs::im_hint(if h == node.id.raw() + 1 { 0 } else { h }))
+        });
         // (its definer's walk came before this run filed the read: it
         // moved the read all the same)
         crate::sched::note_move(eng, by, node, &cause);
@@ -2898,6 +2914,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     st.reask_ns = ns(t0).saturating_sub(st.commit_ns);
     st
+}
+
+/// (`PHITEX_INTERMED_LOG`) Restores the wake hint set before it.
+struct ImHint(u64);
+
+impl Drop for ImHint {
+    fn drop(&mut self) {
+        crate::obs::im_hint(self.0);
+    }
 }
 
 /// The commit of a run that did not run: every read of its last run still

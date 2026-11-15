@@ -651,6 +651,7 @@ impl Ready {
             eng.placed_node(NodeId::from_raw(k.3))
                 .is_some_and(|n| n.yielded_to.load(Ordering::Acquire))
         });
+        THIEF_FIRST.with(|c| c.set(long || yielded));
         if long || yielded { q.pop(eng) } else { q.pop_second(eng) }
     }
 
@@ -682,6 +683,23 @@ impl Ready {
 
     fn len(&self) -> usize {
         self.len.load(Ordering::Relaxed)
+    }
+}
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) Whether this thread's last steal took its
+    /// victim's first node (its owner in a long run, or it yielded), not the
+    /// one after it.
+    static THIEF_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// (`PHITEX_INTERMED_LOG`) A steal's name, by whether it took the first.
+fn thief_took(how: &'static str) -> &'static str {
+    match (how, THIEF_FIRST.with(std::cell::Cell::get)) {
+        ("steal", true) => "steal1",
+        ("steal", false) => "steal2",
+        (_, true) => "stealw1",
+        (_, false) => "stealw2",
     }
 }
 
@@ -1085,30 +1103,40 @@ impl Pool {
         // page's break on its routine's state before that page and again
         // as each finisher came)
         let me = w.ready();
-        if w.block.is_empty() {
-            w.take_dealt();
-        }
+        let dealt = w.block.is_empty() && w.take_dealt();
+        let own = |how: &'static str| crate::obs::im_took(if dealt { "deal" } else { how }, w.ix);
         match (me.first_key(eng), w.block.pop()) {
             (Some(k), Some((b, run))) => {
                 if eng.node(b).pos_hint().0 < k {
+                    own("block");
                     return Some(b);
                 }
                 w.block.push((b, run));
                 if let Some(n) = me.pop(eng) {
-                    return Some(self.keep_longest(eng, w, n));
+                    let m = self.keep_longest(eng, w, n);
+                    crate::obs::im_took(if m == n { "own" } else { "keep" }, w.ix);
+                    return Some(m);
                 }
             }
             (Some(_), None) => {
                 if let Some(n) = me.pop(eng) {
-                    return Some(self.keep_longest(eng, w, n));
+                    let m = self.keep_longest(eng, w, n);
+                    crate::obs::im_took(if m == n { "own" } else { "keep" }, w.ix);
+                    return Some(m);
                 }
             }
-            (None, Some((b, _))) => return Some(b),
+            (None, Some((b, _))) => {
+                own("block");
+                return Some(b);
+            }
             (None, None) => {}
         }
         loop {
             match self.shared.injector.steal() {
-                Steal::Success(n) => return Some(n),
+                Steal::Success(n) => {
+                    crate::obs::im_took("inj", w.ix);
+                    return Some(n);
+                }
                 Steal::Empty => break,
                 Steal::Retry => {}
             }
@@ -1118,6 +1146,7 @@ impl Pool {
             let v = (w.ix + k) % n;
             if let Some(x) = self.shared.ready[v].steal(eng, self.shared.long_run[v].load(Ordering::Relaxed)) {
                 Worker::add(&w.steals, 1);
+                crate::obs::im_took(thief_took("steal"), v);
                 // (one woken at a time, each for what is left)
                 if self.shared.ready[v].len() > 0 {
                     self.shared.wake_one();
@@ -1130,6 +1159,7 @@ impl Pool {
             let v = (w.ix + k) % n;
             if let Some(x) = self.shared.ready[v].steal_waiting(eng, self.shared.long_run[v].load(Ordering::Relaxed)) {
                 Worker::add(&w.steals, 1);
+                crate::obs::im_took(thief_took("stealw"), v);
                 if self.shared.ready[v].len() > 0 {
                     self.shared.wake_one();
                 }
@@ -1218,6 +1248,7 @@ impl Pool {
             for x in taken {
                 w.block.push((x.0, run));
             }
+            crate::obs::im_took("blocksteal", v);
             return Some(last);
         }
         None
@@ -2369,9 +2400,8 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
 /// the node, its operation and place, and how it ended.
 pub(crate) fn run_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| {
-        crate::obs::enabled() && std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0")
-    })
+    crate::obs::enabled()
+        && *F.get_or_init(|| std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// (`PHITEX_INTERMED_LOG`) A wake delivered to `n`: the time, the
@@ -2382,14 +2412,15 @@ fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
         return;
     }
     elog!(
-        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}",
+        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}\t{}",
         log_clock(Instant::now()),
         n.id.raw(),
         n.state(),
         crate::obs::im_cause(eng, Some(&wake.cause)),
         wake.by.map_or(0, |b| b.raw() + 1),
         eng.quiets.load(Ordering::Relaxed),
-        crate::obs::im_committing_now()
+        crate::obs::im_committing_now(),
+        crate::obs::im_hint_now()
     );
 }
 
@@ -2839,6 +2870,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             crate::lock::wait_so_far(),
         )
     });
+    let took = crate::obs::im_took_now();
+    crate::obs::im_took("-", 0);
     let im = crate::obs::im_on().then(|| {
         let wk = node.woke.lock();
         (
@@ -2920,7 +2953,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             };
         }
         elog!(
-            "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}\thw {} {} {}",
+            "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}\thw {} {} {}\ttk {} {}",
             n.raw(),
             op.name(),
             node.pos_hint().0,
@@ -2945,7 +2978,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 )
             },
             crate::lock::wait_so_far().saturating_sub(wait0),
-            crate::obs::cpu_now()
+            crate::obs::cpu_now(),
+            took.0,
+            took.1
         );
     }
     if long {

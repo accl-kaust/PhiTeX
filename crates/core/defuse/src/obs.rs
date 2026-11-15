@@ -488,7 +488,80 @@ pub fn counting_allocs() -> bool {
 /// names once each (`imf`); docs/note-intermediate-reruns.md. Observe only.
 pub(crate) fn im_on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| enabled() && std::env::var_os("PHITEX_INTERMED_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+    // (`enabled` first: a constant, so a build without probes has none)
+    enabled() && *F.get_or_init(|| std::env::var_os("PHITEX_INTERMED_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// (`PHITEX_INTERMED_LOG`) The key of the line's structure in
+/// [`im_changed`]: no field's raw id.
+pub(crate) const IM_STRUCTURE: u64 = u64::MAX;
+
+/// (`PHITEX_INTERMED_LOG`) The node whose commit last moved each field's
+/// definitions or contributions, or the line's structure
+/// ([`IM_STRUCTURE`]): raw id plus one.
+static IM_CHANGERS: Mx<Option<std::collections::HashMap<u64, u64>>> = Mx::new(None);
+
+/// (`PHITEX_INTERMED_LOG`) The node committing on this thread moved `key`
+/// (a field's raw id, or [`IM_STRUCTURE`]).
+pub(crate) fn im_changed(key: u64) {
+    if !im_on() {
+        return;
+    }
+    let by = im_committing_now();
+    if by == 0 {
+        return;
+    }
+    IM_CHANGERS.lock().get_or_insert_with(Default::default).insert(key, by);
+}
+
+/// (`PHITEX_INTERMED_LOG`) The node whose commit last moved `key` (raw id
+/// plus one, 0 none).
+pub(crate) fn im_changer(key: u64) -> u64 {
+    if !im_on() {
+        return 0;
+    }
+    IM_CHANGERS
+        .lock()
+        .as_ref()
+        .and_then(|m| m.get(&key).copied())
+        .unwrap_or(0)
+}
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) The node whose commit moved what a wake made
+    /// on this thread with no node of its own is for (raw id plus one, 0
+    /// none): a commit's check of its own reads re-asks the run with no
+    /// `by`, and the log names the definer that moved the read.
+    static IM_HINT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// (`PHITEX_INTERMED_LOG`) How this thread's worker took the node it
+    /// runs next, and from which worker's queue.
+    static IM_TOOK: std::cell::Cell<(&'static str, usize)> = const { std::cell::Cell::new(("-", 0)) };
+}
+
+/// (`PHITEX_INTERMED_LOG`) Sets the wake hint ([`IM_HINT`]); the one before.
+pub(crate) fn im_hint(n: u64) -> u64 {
+    if !im_on() {
+        return 0;
+    }
+    IM_HINT.with(|c| c.replace(n))
+}
+
+/// (`PHITEX_INTERMED_LOG`) The wake hint.
+pub(crate) fn im_hint_now() -> u64 {
+    IM_HINT.with(std::cell::Cell::get)
+}
+
+/// (`PHITEX_INTERMED_LOG`) The node taken next on this thread was taken
+/// `how`, from worker `from`'s queues.
+pub(crate) fn im_took(how: &'static str, from: usize) {
+    if im_on() {
+        IM_TOOK.with(|c| c.set((how, from)));
+    }
+}
+
+/// (`PHITEX_INTERMED_LOG`) How the node at work on this thread was taken.
+pub(crate) fn im_took_now() -> (&'static str, usize) {
+    IM_TOOK.with(std::cell::Cell::get)
 }
 
 /// (`PHITEX_INTERMED_LOG`) Field `f`'s raw id, its name printed once.
@@ -615,7 +688,7 @@ pub(crate) fn cpu_now() -> i32 {
 /// -j8 build 4x).
 pub(crate) fn rc_on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| enabled() && std::env::var_os("PHITEX_RUNCOST").is_some_and(|v| !v.is_empty() && v != "0"))
+    enabled() && *F.get_or_init(|| std::env::var_os("PHITEX_RUNCOST").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// (`PHITEX_RUNCOST`) The kept runs' costs by operation, printed and
