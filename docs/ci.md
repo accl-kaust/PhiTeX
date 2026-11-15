@@ -174,7 +174,9 @@ there is no override.
    **The frontends' checks** (`.github/workflows/frontends.yml`) must pass
    before the release job (and a dry run's signing) runs: the x86_64 Linux
    binary just built, its viewer in it, with Emacs, Neovim 0.11 and VS
-   Code's native engine (the frontends' `test/editors/run.sh`), and the
+   Code's native engine (the frontends' `test/editors/run.sh`), the
+   watch's own viewer in headless Chrome (`viewer/browser/watch.test.mjs`:
+   what a person clicks in it, each test a reported bug), and the
    browser build of the same commit (the wasm core, the extension, the
    demo) in Chrome: the Overleaf extension on the mock Overleaf, the demo
    served locally, VS Code's built-in wasm engine. Each opens a project,
