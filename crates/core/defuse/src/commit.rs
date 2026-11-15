@@ -2150,6 +2150,33 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             node.filed_floor.store(serial, Ordering::Release);
         }
         node.serial.store(serial, Ordering::Release);
+        // (`PHITEX_INTERMED_LOG`: the commit, its fields whose
+        // definitions and contributions moved, each changed definition's
+        // value)
+        if crate::obs::im_on() {
+            use std::fmt::Write as _;
+            let mut d = String::new();
+            for x in rec.defs.iter().filter(|x| changed_defs.contains(&x.f)) {
+                let _ = write!(d, " {}={}", crate::obs::im_field(eng, x.f), x.value.raw());
+            }
+            for &f in &changed_defs {
+                if !rec.defs.iter().any(|x| x.f == f) {
+                    let _ = write!(d, " {}=-", crate::obs::im_field(eng, f));
+                }
+            }
+            let mut c = String::new();
+            for &f in &changed_contribs {
+                let _ = write!(c, " {}", crate::obs::im_field(eng, f));
+            }
+            eprintln!(
+                "imc\t{}\t{serial}\t{}\t{}\t{}\t{}\t{d}\t{c}",
+                node.id.raw(),
+                crate::sched::log_clock(std::time::Instant::now()),
+                u8::from(old.as_ref().is_some_and(|o| o.output != rec.output)),
+                u8::from(old.as_ref().is_none_or(|o| o.provisional)),
+                eng.quiets.load(Ordering::Relaxed)
+            );
+        }
         // (`PHITEX_REFUTE_LOG`: a run again whose products are its last
         // run's, defined, contributed and output alike: a cutoff's)
         if refute_log()

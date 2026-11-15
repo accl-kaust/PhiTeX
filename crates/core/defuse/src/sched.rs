@@ -1911,6 +1911,7 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
     if asked_before(eng, n, &wake) {
         return false;
     }
+    im_wake(eng, n, &wake, "stale");
     if let Cause::Changed { field, .. } = wake.cause
         && crate::commit::ftrace(eng, field)
     {
@@ -2054,6 +2055,7 @@ pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
     if asked_before(eng, n, &wake) {
         return false;
     }
+    im_wake(eng, n, &wake, "dirty");
     if held_edge(eng, &wake, n) {
         hold_wake(eng, w, n.id, wake);
         return false;
@@ -2173,6 +2175,9 @@ pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
 pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake) {
+    if let Some(x) = eng.placed_node(n) {
+        im_wake(eng, &x, &wake, "held");
+    }
     eng.held.lock().push((n, wake));
     if let Some(w) = w {
         Worker::add(&w.held_deferred, 1);
@@ -2367,6 +2372,24 @@ pub(crate) fn run_log() -> bool {
     *F.get_or_init(|| {
         crate::obs::enabled() && std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0")
     })
+}
+
+/// (`PHITEX_INTERMED_LOG`) A wake delivered to `n`: the time, the
+/// reader, its state, the cause, the node whose commit asked (plus one,
+/// 0 none) and the path that took it.
+fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
+    if !crate::obs::im_on() {
+        return;
+    }
+    eprintln!(
+        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}",
+        log_clock(Instant::now()),
+        n.id.raw(),
+        n.state(),
+        crate::obs::im_cause(eng, Some(&wake.cause)),
+        wake.by.map_or(0, |b| b.raw() + 1),
+        eng.quiets.load(Ordering::Relaxed)
+    );
 }
 
 /// (`PHITEX_RUN_LOG`) `t` on the run log's clock: ns since the first
@@ -2808,10 +2831,78 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     if long {
         pool.shared.long_run[w.ix].store(true, Ordering::Relaxed);
     }
+    let im = crate::obs::im_on().then(|| {
+        let wk = node.woke.lock();
+        (
+            crate::obs::im_cause(eng, wk.as_ref().map(|w| &w.cause)),
+            wk.as_ref().and_then(|w| w.by).map_or(0, |b| b.raw() + 1),
+            crate::lock::thread_cpu_ns(),
+        )
+    });
     let r = match stands {
         Some(out) => Ok(Ok(out)),
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
+    if let Some((cause, by, cpu0)) = im {
+        let how = match &r {
+            Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
+            Ok(Ok(_)) => "ok".to_owned(),
+            Ok(Err(_)) if cx.wait_frontier => "frontier".to_owned(),
+            Ok(Err(_)) if cx.wait_on.is_some() && cx.waits_only => "waitsonly".to_owned(),
+            Ok(Err(_)) if cx.wait_on.is_some() => "waits".to_owned(),
+            Ok(Err(_)) => "stopped".to_owned(),
+            Err(_) => "panicked".to_owned(),
+        };
+        let mut rd = String::new();
+        for x in &cx.product.reads {
+            use std::fmt::Write as _;
+            let nid = |n: Option<NodeId>| n.map_or(0, |n| n.raw() + 1);
+            let seen = x.seen_raw();
+            let _ = match *x.kind() {
+                crate::node::ReadKind::Field { f, at } => {
+                    let a = match at {
+                        crate::node::Anchor::Me => "m".to_owned(),
+                        crate::node::Anchor::Before(n) => format!("b{}", n.raw()),
+                        crate::node::Anchor::AfterOwn(n) => format!("a{}", n.raw()),
+                        crate::node::Anchor::End(_) => "e".to_owned(),
+                        crate::node::Anchor::Final => "f".to_owned(),
+                    };
+                    write!(rd, " F{}:{a}={seen}", crate::obs::im_field(eng, f))
+                }
+                crate::node::ReadKind::Env { f } => write!(rd, " E{}={seen}", crate::obs::im_field(eng, f)),
+                crate::node::ReadKind::Fold { f, from, to, incl } => write!(
+                    rd,
+                    " O{}:{}:{}:{}={seen}",
+                    crate::obs::im_field(eng, f),
+                    nid(from),
+                    nid(to),
+                    u8::from(incl)
+                ),
+                crate::node::ReadKind::Next { f, after } => {
+                    write!(rd, " N{}:{}={seen}", crate::obs::im_field(eng, f), nid(after))
+                }
+                crate::node::ReadKind::Placed { i, .. } => write!(rd, " P{i}={seen}"),
+                crate::node::ReadKind::Following { i } => write!(rd, " W{i}={seen}"),
+                crate::node::ReadKind::Hole => write!(rd, " H={seen}"),
+            };
+        }
+        eprintln!(
+            "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}",
+            n.raw(),
+            op.name(),
+            node.pos_hint().0,
+            log_clock(t),
+            log_clock(Instant::now()),
+            crate::lock::thread_cpu_ns().saturating_sub(cpu0),
+            w.ix,
+            u8::from(cx.goes_on),
+            node.run_began.load(Ordering::Relaxed),
+            pool.epoch,
+            u8::from(first),
+            u8::from(op.settles_at_quiet()),
+            rd
+        );
+    }
     if long {
         pool.shared.long_run[w.ix].store(false, Ordering::Relaxed);
     }

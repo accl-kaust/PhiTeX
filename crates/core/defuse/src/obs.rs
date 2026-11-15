@@ -481,3 +481,47 @@ pub fn counting_allocs() -> bool {
     #[cfg(not(feature = "profile"))]
     false
 }
+
+/// (`PHITEX_INTERMED_LOG`, profile) Whether the intermediate-rerun probe
+/// prints: every wake delivered (`imw`), every run with its wake and its
+/// reads (`imr`), every commit's changed fields (`imc`), and the fields'
+/// names once each (`imf`); docs/note-intermediate-reruns.md. Observe only.
+pub(crate) fn im_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| enabled() && std::env::var_os("PHITEX_INTERMED_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// (`PHITEX_INTERMED_LOG`) Field `f`'s raw id, its name printed once.
+pub(crate) fn im_field(eng: &crate::engine::Engine, f: crate::values::Field) -> u64 {
+    static SEEN: Mx<Option<std::collections::HashSet<u64>>> = Mx::new(None);
+    let raw = f.0.raw();
+    let new = SEEN.lock().get_or_insert_with(Default::default).insert(raw);
+    if new {
+        eprintln!(
+            "imf\t{raw}\t{}",
+            eng.values().as_str(f.0).unwrap_or_default().replace(['\t', '\n'], " ")
+        );
+    }
+    raw
+}
+
+/// (`PHITEX_INTERMED_LOG`) A cause as `kind field by`.
+pub(crate) fn im_cause(eng: &crate::engine::Engine, c: Option<&crate::api::Cause>) -> String {
+    use crate::api::Cause;
+    let Some(c) = c else { return "none 0 0".to_owned() };
+    let (k, f, by) = match c {
+        Cause::Rebind { field, to, .. } => ("Rebind", Some(*field), *to),
+        Cause::Changed { field, site } => ("Changed", Some(*field), *site),
+        Cause::Range { field, by } => ("Range", Some(*field), Some(*by)),
+        Cause::Environment { field } => ("Environment", Some(*field), None),
+        Cause::Output { of } => ("Output", None, Some(*of)),
+        Cause::Structure => ("Structure", None, None),
+        Cause::Created { by } => ("Created", None, *by),
+        Cause::Edited => ("Edited", None, None),
+    };
+    format!(
+        "{k} {} {}",
+        f.map_or(0, |f| im_field(eng, f)),
+        by.map_or(0, |b| b.raw() + 1)
+    )
+}
