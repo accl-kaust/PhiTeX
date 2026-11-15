@@ -1553,6 +1553,21 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 /// page's PDF side stands before it; the gate's latexmk_minted at -j1
 /// and -j8 past 300 s, lectures and handin-doc at -j1 "ran N times").
 pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    unsettled_before_where(eng, me, |_| true)
+}
+
+/// [`unsettled_before`] but for nodes whose operation may define nothing
+/// (`Operation::may_define`): their run moves no read of mine. One whose
+/// output its placer takes (a picture's child) moves the placer, which is
+/// to run again from that child's commit and is waited for then.
+pub(crate) fn unsettled_definer_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let v = eng.values();
+    unsettled_before_where(eng, me, |n| {
+        !matches!(eng.op(n.op()).may_define(&n.args(), v), crate::api::MayDefine::Nothing)
+    })
+}
+
+fn unsettled_before_where(eng: &Engine, me: &Node, counts: impl Fn(&Node) -> bool) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
     let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
@@ -1570,6 +1585,7 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
                     && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
                     && !eng.op(n.op()).final_only()
                     && !n.held_panic.load(Ordering::Acquire)
+                    && counts(n)
                 {
                     return Some(*id);
                 }

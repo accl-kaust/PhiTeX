@@ -2556,7 +2556,9 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
 /// values among finishers that were still running, where -j1 ran neither,
 /// accl 23609). One asked for a change that holds then runs once; one
 /// whose reads have come back runs nothing (`Ctx::last_run_stands`). The
-/// order of the runs only: what they make is what they read.
+/// order of the runs only: what they make is what they read. Not for a node
+/// whose operation may define nothing (`read::unsettled_definer_before`):
+/// what moves after its run is its placer's, waited for once re-asked.
 const LONG_RUN_NS: u64 = 100_000_000;
 
 /// `by`'s definition moved what `reader` read: a node to wait for from now
@@ -2713,7 +2715,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // (a long run waits for the nodes before it: `LONG_RUN_NS`)
     if node.full_ns.load(Ordering::Relaxed) >= LONG_RUN_NS
         && node.run_record().is_some_and(|r| r.state.is_none())
-        && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_before(eng, node))
+        && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_definer_before(eng, node))
     {
         if run_log() {
             eprintln!("long: node {} waits for {}", n.raw(), x.raw());

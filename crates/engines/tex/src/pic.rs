@@ -1722,6 +1722,16 @@ impl Operation for Pic {
     fn contributes(&self, _: &[ValueId], _: &phitex_defuse::Values, _: Field) -> bool {
         false
     }
+    /// Nothing: what it defines is in its output, its parent's to define
+    /// where the picture stands ([`Run::pic_apply`]). So a long run after
+    /// it does not wait for it to settle (`sched`'s `LONG_RUN_NS`), only
+    /// for its parent, re-asked by its commit where its output moved:
+    /// Grail's last picture re-asked by the citations' second pass waited
+    /// for the picture before it, re-asked too, whose output came out the
+    /// same (-j8, 0.65 s at the build's end).
+    fn may_define(&self, _: &[ValueId], _: &phitex_defuse::Values) -> phitex_defuse::MayDefine {
+        phitex_defuse::MayDefine::Nothing
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new("pic", cx.node().raw());
         let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 1, cx.node().raw());
