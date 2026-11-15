@@ -485,15 +485,13 @@ impl Worker {
 /// routine run before the text after its page), on more the earliest work
 /// first, the critical path's.
 /// A queued node's order: its place, text after the settling
-/// layer at one place, the order it was queued in, its raw id; then when
-/// it was queued (ns on the pool's clock, [`Ready::steal`]), which the
-/// order never reaches (the order it was queued in is its own).
-type ReadyKey = (u64, bool, u64, u64, u64);
+/// layer at one place, the order it was queued in, its raw id.
+type ReadyKey = (u64, bool, u64, u64);
 
 /// A queued node whose work is at the settling layer's frontier
 /// (`Operation::works_at_frontier`): its label, the order it was queued
-/// in, its raw id, when it was queued.
-type FrontierKey = (u64, u64, u64, u64);
+/// in, its raw id.
+type FrontierKey = (u64, u64, u64);
 
 /// [`Ready`]'s two queues.
 #[derive(Default)]
@@ -517,8 +515,8 @@ impl Queues {
     fn first(&self, eng: &Engine) -> Option<(ReadyKey, bool)> {
         let placed = self.placed.peek().map(|x| x.0);
         let front = self.at_frontier.peek().map(|x| {
-            let (p, s, id, at) = x.0;
-            ((frontier_place(eng).map_or(p, |f| p.min(f)), false, s, id, at), true)
+            let (p, s, id) = x.0;
+            ((frontier_place(eng).map_or(p, |f| p.min(f)), false, s, id), true)
         });
         match (placed, front) {
             (Some(a), Some((b, f))) if b < a => Some((b, f)),
@@ -550,32 +548,12 @@ impl Queues {
     }
 
     /// The node after the first, the first left in place: a thief's while
-    /// the owner, in no long run, takes the first next. None where that
-    /// node was queued less than [`offer_ns`] before `now`: its owner, done
-    /// with the first by then most often, runs it where what it reads was
-    /// just written ([`Ready::steal`]).
-    fn pop_second(&mut self, eng: &Engine, now: u64) -> Option<NodeId> {
+    /// the owner, in no long run, takes the first next.
+    fn pop_second(&mut self, eng: &Engine) -> Option<NodeId> {
         let (_, first) = self.take(eng)?;
-        let second = self.take(eng).and_then(|(id, t)| {
-            if t.queued_at().saturating_add(offer_ns()) <= now {
-                Some(id)
-            } else {
-                self.put_back(t);
-                None
-            }
-        });
+        let second = self.pop(eng);
         self.put_back(first);
         second
-    }
-}
-
-impl Taken {
-    /// When the entry was queued.
-    fn queued_at(&self) -> u64 {
-        match *self {
-            Taken::Front(k) => k.3,
-            Taken::Placed(k) => k.4,
-        }
     }
 }
 
@@ -616,12 +594,8 @@ impl Ready {
         let p = n.pos_hint().0;
         let s = self.seq.fetch_add(1, Ordering::Relaxed);
         let op = eng.op(n.op());
-        let at = ns(self.t0);
         if op.works_at_frontier() {
-            self.heap
-                .lock()
-                .at_frontier
-                .push(std::cmp::Reverse((p, s, n.id.raw(), at)));
+            self.heap.lock().at_frontier.push(std::cmp::Reverse((p, s, n.id.raw())));
         } else {
             // (at one place the settling layer first: TeX builds the page
             // after the paragraph that ends there, before the text after it)
@@ -629,10 +603,10 @@ impl Ready {
             self.heap
                 .lock()
                 .placed
-                .push(std::cmp::Reverse((p, text, s, n.id.raw(), at)));
+                .push(std::cmp::Reverse((p, text, s, n.id.raw())));
         }
         if self.len.fetch_add(1, Ordering::Relaxed) == 0 {
-            self.since.store(at, Ordering::Relaxed);
+            self.since.store(ns(self.t0), Ordering::Relaxed);
         }
     }
 
@@ -680,11 +654,7 @@ impl Ready {
         if crate::obs::im_on() {
             THIEF_FIRST.with(|c| c.set(long || yielded));
         }
-        if long || yielded {
-            q.pop(eng)
-        } else {
-            q.pop_second(eng, ns(self.t0))
-        }
+        if long || yielded { q.pop(eng) } else { q.pop_second(eng) }
     }
 
     /// The node a `pop` takes next, if any: a peek.
