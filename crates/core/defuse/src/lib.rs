@@ -63,6 +63,13 @@
 #![deny(unsafe_code)]
 #![allow(clippy::many_single_char_names, clippy::too_many_lines, clippy::too_many_arguments)]
 
+/// (profile) A diagnostic line, buffered per thread (`obs::log_line`).
+macro_rules! elog {
+    ($($t:tt)*) => {
+        crate::obs::log_line(format_args!($($t)*))
+    };
+}
+
 mod api;
 mod commit;
 mod crew;

@@ -425,6 +425,7 @@ impl Engine {
     /// ([`Engine::struct_gen`]).
     pub(crate) fn structure_changed(&self) {
         self.struct_gen.fetch_add(1, Ordering::SeqCst);
+        crate::obs::im_changed(crate::obs::IM_STRUCTURE);
     }
 
     pub(crate) fn scope_changed(&self) -> u64 {
@@ -1840,6 +1841,12 @@ impl Engine {
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
+        if crate::obs::rc_on() {
+            crate::obs::runcost_report(self);
+        }
+        if crate::obs::enabled() {
+            crate::obs::log_flush();
+        }
         rep.absorbed = workers
             .iter()
             .flat_map(|w| std::mem::take(&mut w.log.lock().absorbed))

@@ -672,7 +672,7 @@ impl<'a> Ctx<'a> {
         eng.frontier_held.fetch_add(1, Relaxed);
         self.me.held_window.store(false, Relaxed);
         if crate::sched::run_log() {
-            eprintln!(
+            elog!(
                 "frontier: read held node {} field {} at {}",
                 self.me.id.raw(),
                 self.values().render(f.0),
@@ -2357,7 +2357,7 @@ impl<'a> Ctx<'a> {
                 let now = crate::read::answer_in(self.eng, self.me, rd.kind(), rd.path(), &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
-                eprintln!(
+                elog!(
                     "stands: node {} woken by {:?} runs: read {i} of {}: {} {:?} seen {} now {}",
                     self.me.id.raw(),
                     self.woke,
@@ -2422,7 +2422,7 @@ impl<'a> Ctx<'a> {
         self.product.sources = p.sources.to_vec();
         self.product.effect = Some(p.effect);
         if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
-            eprintln!(
+            elog!(
                 "stands: node {} woken by {:?}: the record before its last stands ({} reads)",
                 self.me.id.raw(),
                 self.woke,
@@ -2702,7 +2702,7 @@ impl<'a> Ctx<'a> {
         // (`PHITEX_RUN_LOG`, profile: which read stopped the run)
         if crate::sched::run_log() {
             let rd = &self.product.reads[at];
-            eprintln!(
+            elog!(
                 "recheck: node {} read {at} of {} moved: {}",
                 self.me.id.raw(),
                 self.product.reads.len(),

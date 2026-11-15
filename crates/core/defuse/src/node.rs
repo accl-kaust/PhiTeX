@@ -218,6 +218,12 @@ pub(crate) struct Node {
     /// wave than the reader's read (`sched::same_wave`).
     pub(crate) run_start: AtomicU64,
     pub(crate) run_began: AtomicU64,
+    /// (`PHITEX_RUNCOST`, profile) Its last finished run's cost: operation
+    /// and `[cpu ns, cycles, instructions, cache refs, cache misses, lock
+    /// wait ns, reads, wall ns, runs]`, summed over the kept runs at the
+    /// evaluation's end (`obs::runcost_report`).
+    #[cfg(feature = "profile")]
+    pub(crate) cost: crate::lock::Mx<Option<(&'static str, [u64; 9])>>,
     /// The run its last commit made, and its run under way, were asked
     /// for by another node's commit in their wave (a re-ask, a
     /// placement), not by an edit: a link of a chain of re-asks, whose
@@ -393,6 +399,8 @@ impl Node {
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
+            #[cfg(feature = "profile")]
+            cost: crate::lock::Mx::new(None),
             run_chained: AtomicBool::new(false),
             chain_began: AtomicBool::new(false),
             layer_refuted: AtomicU32::new(0),
@@ -479,13 +487,33 @@ impl Node {
     }
 
     pub(crate) fn cas_state(&self, from: State, to: State) -> bool {
-        self.state
+        let ok = self
+            .state
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if ok && matches!(to, State::Gone | State::Inert | State::RunningInert) {
+            self.im_gone(to);
+        }
+        ok
     }
 
     pub(crate) fn set_state(&self, s: State) {
         self.state.store(s as u8, Ordering::Release);
+        if matches!(s, State::Gone | State::Inert | State::RunningInert) {
+            self.im_gone(s);
+        }
+    }
+
+    /// (`PHITEX_INTERMED_LOG`) The node left the line or was taken by a
+    /// claim: its runs are not kept.
+    fn im_gone(&self, s: State) {
+        if crate::obs::im_on() {
+            elog!(
+                "img\t{}\t{}\t{s:?}",
+                crate::sched::log_clock(std::time::Instant::now()),
+                self.id.raw()
+            );
+        }
     }
 
     /// The node whose claim holds it.

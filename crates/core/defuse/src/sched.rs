@@ -651,6 +651,9 @@ impl Ready {
             eng.placed_node(NodeId::from_raw(k.3))
                 .is_some_and(|n| n.yielded_to.load(Ordering::Acquire))
         });
+        if crate::obs::im_on() {
+            THIEF_FIRST.with(|c| c.set(long || yielded));
+        }
         if long || yielded { q.pop(eng) } else { q.pop_second(eng) }
     }
 
@@ -682,6 +685,23 @@ impl Ready {
 
     fn len(&self) -> usize {
         self.len.load(Ordering::Relaxed)
+    }
+}
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) Whether this thread's last steal took its
+    /// victim's first node (its owner in a long run, or it yielded), not the
+    /// one after it.
+    static THIEF_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// (`PHITEX_INTERMED_LOG`) A steal's name, by whether it took the first.
+fn thief_took(how: &'static str) -> &'static str {
+    match (how, THIEF_FIRST.with(std::cell::Cell::get)) {
+        ("steal", true) => "steal1",
+        ("steal", false) => "steal2",
+        (_, true) => "stealw1",
+        (_, false) => "stealw2",
     }
 }
 
@@ -1085,30 +1105,40 @@ impl Pool {
         // page's break on its routine's state before that page and again
         // as each finisher came)
         let me = w.ready();
-        if w.block.is_empty() {
-            w.take_dealt();
-        }
+        let dealt = w.block.is_empty() && w.take_dealt();
+        let own = |how: &'static str| crate::obs::im_took(if dealt { "deal" } else { how }, w.ix);
         match (me.first_key(eng), w.block.pop()) {
             (Some(k), Some((b, run))) => {
                 if eng.node(b).pos_hint().0 < k {
+                    own("block");
                     return Some(b);
                 }
                 w.block.push((b, run));
                 if let Some(n) = me.pop(eng) {
-                    return Some(self.keep_longest(eng, w, n));
+                    let m = self.keep_longest(eng, w, n);
+                    crate::obs::im_took(if m == n { "own" } else { "keep" }, w.ix);
+                    return Some(m);
                 }
             }
             (Some(_), None) => {
                 if let Some(n) = me.pop(eng) {
-                    return Some(self.keep_longest(eng, w, n));
+                    let m = self.keep_longest(eng, w, n);
+                    crate::obs::im_took(if m == n { "own" } else { "keep" }, w.ix);
+                    return Some(m);
                 }
             }
-            (None, Some((b, _))) => return Some(b),
+            (None, Some((b, _))) => {
+                own("block");
+                return Some(b);
+            }
             (None, None) => {}
         }
         loop {
             match self.shared.injector.steal() {
-                Steal::Success(n) => return Some(n),
+                Steal::Success(n) => {
+                    crate::obs::im_took("inj", w.ix);
+                    return Some(n);
+                }
                 Steal::Empty => break,
                 Steal::Retry => {}
             }
@@ -1118,6 +1148,7 @@ impl Pool {
             let v = (w.ix + k) % n;
             if let Some(x) = self.shared.ready[v].steal(eng, self.shared.long_run[v].load(Ordering::Relaxed)) {
                 Worker::add(&w.steals, 1);
+                crate::obs::im_took(thief_took("steal"), v);
                 // (one woken at a time, each for what is left)
                 if self.shared.ready[v].len() > 0 {
                     self.shared.wake_one();
@@ -1130,6 +1161,7 @@ impl Pool {
             let v = (w.ix + k) % n;
             if let Some(x) = self.shared.ready[v].steal_waiting(eng, self.shared.long_run[v].load(Ordering::Relaxed)) {
                 Worker::add(&w.steals, 1);
+                crate::obs::im_took(thief_took("stealw"), v);
                 if self.shared.ready[v].len() > 0 {
                     self.shared.wake_one();
                 }
@@ -1218,6 +1250,7 @@ impl Pool {
             for x in taken {
                 w.block.push((x.0, run));
             }
+            crate::obs::im_took("blocksteal", v);
             return Some(last);
         }
         None
@@ -1361,7 +1394,7 @@ impl Pool {
         // for 194 fires in some builds, mc 84169)
         earliest.frontier_pass.store(true, Ordering::Release);
         if run_log() {
-            eprintln!(
+            elog!(
                 "frontier: pass {} at {} t {}",
                 earliest.id.raw(),
                 fr.saturating_sub(1),
@@ -1451,7 +1484,10 @@ impl Pool {
             if quiet_ends && self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
             }
-            if self.release_past_only(eng, w) || self.release_window_only(eng, w) {
+            let was = crate::obs::im_place("release");
+            let released = self.release_past_only(eng, w) || self.release_window_only(eng, w);
+            crate::obs::im_place(was);
+            if released {
                 continue;
             }
             if edits && t_idle.elapsed() >= ABSORB_EVERY {
@@ -1580,6 +1616,12 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
             eng.quiets.fetch_add(1, Ordering::SeqCst);
+            let _place = ImPlace(crate::obs::im_place("quiet"));
+            if run_log() {
+                // (every quiet point, a pass or not: what it lets go
+                // waited for it)
+                elog!("quiet: {} re-asked 0 pass false", log_clock(Instant::now()));
+            }
             // (no quiet point while a commit's fields are unwalked
             // (`Node::unwalked`): their node, parked, has not committed
             // again; walked now, and the line goes on if they woke any)
@@ -1671,7 +1713,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
                                 })
                                 .collect()
                         });
-                        eprintln!(
+                        elog!(
                             "held: pass {} node {} ({}) at {}: {}",
                             w.held_passes.load(Ordering::Relaxed) + 1,
                             n.raw(),
@@ -1763,7 +1805,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
             }
             let (k, pass) = crate::commit::publish_finals(eng, w);
             if run_log() {
-                eprintln!("quiet: {} re-asked {k} pass {pass}", log_clock(Instant::now()));
+                elog!("quiet: {} re-asked {k} pass {pass}", log_clock(Instant::now()));
             }
             if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1834,6 +1876,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
 /// theirs (`Report::version`, `Settled::version`), and the log has them
 /// with the runs made before (`Report::absorbed`); whether there were any.
 fn absorb(eng: &Engine, pool: &Pool, w: &Worker, s: &mut dyn EditSource) -> bool {
+    let _place = ImPlace(crate::obs::im_place("edit"));
     let Some(v) = s.absorb(eng) else {
         return false;
     };
@@ -1873,6 +1916,9 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
             eng.movers_n.fetch_add(1, Ordering::Release);
         }
     }
+    // (`PHITEX_INTERMED_LOG`: the moment it is runnable, whatever path
+    // queued it)
+    im_wake(eng, n, &wake, "enq");
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) if defer(eng, &w.shared, n.id) => {}
@@ -1911,10 +1957,11 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
     if asked_before(eng, n, &wake) {
         return false;
     }
+    im_wake(eng, n, &wake, "stale");
     if let Cause::Changed { field, .. } = wake.cause
         && crate::commit::ftrace(eng, field)
     {
-        eprintln!(
+        elog!(
             "ftrace: mark-stale {} node {} state {:?} held {} woke {:?} t {}",
             eng.values().as_str(field.0).unwrap_or_default(),
             n.id.raw(),
@@ -1981,6 +2028,7 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
             if n.committing.load(Ordering::SeqCst) {
                 return mark_dirty_now(eng, w, n, wake);
             }
+            im_wake(eng, n, &wake, "note");
             note_stale(n, wake);
         }
         _ => {}
@@ -2054,6 +2102,7 @@ pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
     if asked_before(eng, n, &wake) {
         return false;
     }
+    im_wake(eng, n, &wake, "dirty");
     if held_edge(eng, &wake, n) {
         hold_wake(eng, w, n.id, wake);
         return false;
@@ -2173,6 +2222,9 @@ pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
 pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake) {
+    if let Some(x) = eng.placed_node(n) {
+        im_wake(eng, x, &wake, "held");
+    }
     eng.held.lock().push((n, wake));
     if let Some(w) = w {
         Worker::add(&w.held_deferred, 1);
@@ -2194,6 +2246,7 @@ pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
             }
             State::Running => {
                 if n.cas_state(State::Running, State::RunningDirty) {
+                    im_wake(eng, n, &wake, "rdirty");
                     log_wake(eng, w, n, &wake);
                     *n.woke.lock() = Some(wake);
                     return true;
@@ -2364,9 +2417,29 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
 /// the node, its operation and place, and how it ended.
 pub(crate) fn run_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| {
-        crate::obs::enabled() && std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0")
-    })
+    crate::obs::enabled()
+        && *F.get_or_init(|| std::env::var_os("PHITEX_RUN_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// (`PHITEX_INTERMED_LOG`) A wake delivered to `n`: the time, the
+/// reader, its state, the cause, the node whose commit asked (plus one,
+/// 0 none) and the path that took it.
+fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
+    if !crate::obs::im_on() {
+        return;
+    }
+    elog!(
+        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}\t{}\t{}",
+        log_clock(Instant::now()),
+        n.id.raw(),
+        n.state(),
+        crate::obs::im_cause(eng, Some(&wake.cause)),
+        wake.by.map_or(0, |b| b.raw() + 1),
+        eng.quiets.load(Ordering::Relaxed),
+        crate::obs::im_committing_now(),
+        crate::obs::im_hint_now(),
+        crate::obs::im_place_now()
+    );
 }
 
 /// (`PHITEX_RUN_LOG`) `t` on the run log's clock: ns since the first
@@ -2388,7 +2461,7 @@ pub(crate) fn log_frontier(eng: &Engine, old: u64, new: u64, by: Option<NodeId>,
             .and_then(|r| eng.placed_node(NodeId::from_raw(r)))
             .map_or(0, |x| x.pos_hint().0)
     };
-    eprintln!(
+    elog!(
         "frontier: {} -> {} (at {}) by {} {why} t {}",
         old.saturating_sub(1),
         new.saturating_sub(1),
@@ -2463,7 +2536,7 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             };
             format!("{} {} {eff} {may}", b.raw(), op.name())
         });
-        eprintln!(
+        elog!(
             "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked} by {by}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
             n.id.raw(),
             n.op(),
@@ -2487,7 +2560,7 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
                 .filter(|l| l.contains("defuse::") && !l.contains("{closure") && !l.contains("catch_unwind"))
                 .take(10)
                 .collect();
-            eprintln!("wake-bt: node {} {}", n.id.raw(), fns.join(" < "));
+            elog!("wake-bt: node {} {}", n.id.raw(), fns.join(" < "));
         }
     }
     match w {
@@ -2718,7 +2791,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_definer_before(eng, node))
     {
         if run_log() {
-            eprintln!("long: node {} waits for {}", n.raw(), x.raw());
+            elog!("long: node {} waits for {}", n.raw(), x.raw());
         }
         node.held.store(true, Ordering::Release);
         park_waiting(eng, pool, w, node, Some(x));
@@ -2735,7 +2808,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         && let Some(x) = hold_for(eng, node)
     {
         if run_log() {
-            eprintln!("chain: node {} waits for {}", n.raw(), x.raw());
+            elog!("chain: node {} waits for {}", n.raw(), x.raw());
         }
         node.held.store(true, Ordering::Release);
         park_waiting(eng, pool, w, node, Some(x));
@@ -2808,10 +2881,138 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     if long {
         pool.shared.long_run[w.ix].store(true, Ordering::Relaxed);
     }
+    let rc = crate::obs::rc_on().then(|| {
+        (
+            crate::lock::thread_cpu_ns(),
+            crate::obs::hw(),
+            crate::lock::wait_so_far(),
+        )
+    });
+    let took = if crate::obs::im_on() {
+        let t = crate::obs::im_took_now();
+        crate::obs::im_took("-", 0);
+        t
+    } else {
+        ("-", 0)
+    };
+    let im = crate::obs::im_on().then(|| {
+        let wk = node.woke.lock();
+        (
+            crate::obs::im_cause(eng, wk.as_ref().map(|w| &w.cause)),
+            wk.as_ref().and_then(|w| w.by).map_or(0, |b| b.raw() + 1),
+            crate::lock::thread_cpu_ns(),
+            crate::obs::hw(),
+            crate::lock::wait_so_far(),
+        )
+    });
+    // (`PHITEX_INTERMED_LOG`: what the run publishes as it goes, a parked
+    // state's definitions, is its node's to wake with)
+    let im_was = crate::obs::im_committing(n.raw() + 1);
     let r = match stands {
         Some(out) => Ok(Ok(out)),
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
+    crate::obs::im_committing(im_was);
+    #[cfg(not(feature = "profile"))]
+    let _ = rc;
+    #[cfg(feature = "profile")]
+    if let Some((cpu0, hw0, wait0)) = rc {
+        // (a run that ends with products: the one its commit keeps, unless
+        // a later run of the node replaces it)
+        if matches!(r, Ok(Ok(_))) && stands.is_none() {
+            let h = crate::obs::hw();
+            let c = [
+                crate::lock::thread_cpu_ns().saturating_sub(cpu0),
+                h[0] - hw0[0],
+                h[1] - hw0[1],
+                h[2] - hw0[2],
+                h[3] - hw0[3],
+                crate::lock::wait_so_far().saturating_sub(wait0),
+                cx.product.reads.len() as u64,
+                crate::lock::ns(t),
+                0,
+            ];
+            let mut g = node.cost.lock();
+            let runs = g.map_or(0, |x| x.1[8]);
+            let mut c = c;
+            c[8] = runs + 1;
+            *g = Some((op.name(), c));
+        }
+    }
+    if let Some((cause, by, cpu0, hw0, wait0)) = im {
+        let how = match &r {
+            Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
+            Ok(Ok(_)) => "ok".to_owned(),
+            Ok(Err(_)) if cx.wait_frontier => "frontier".to_owned(),
+            Ok(Err(_)) if cx.wait_on.is_some() && cx.waits_only => "waitsonly".to_owned(),
+            Ok(Err(_)) if cx.wait_on.is_some() => "waits".to_owned(),
+            Ok(Err(_)) => "stopped".to_owned(),
+            Err(_) => "panicked".to_owned(),
+        };
+        let mut rd = String::new();
+        for x in &cx.product.reads {
+            use std::fmt::Write as _;
+            let nid = |n: Option<NodeId>| n.map_or(0, |n| n.raw() + 1);
+            let seen = x.seen_raw();
+            let _ = match *x.kind() {
+                crate::node::ReadKind::Field { f, at } => {
+                    let a = match at {
+                        crate::node::Anchor::Me => "m".to_owned(),
+                        crate::node::Anchor::Before(n) => format!("b{}", n.raw()),
+                        crate::node::Anchor::AfterOwn(n) => format!("a{}", n.raw()),
+                        crate::node::Anchor::End(_) => "e".to_owned(),
+                        crate::node::Anchor::Final => "f".to_owned(),
+                    };
+                    write!(rd, " F{}:{a}={seen}", crate::obs::im_field(eng, f))
+                }
+                crate::node::ReadKind::Env { f } => write!(rd, " E{}={seen}", crate::obs::im_field(eng, f)),
+                crate::node::ReadKind::Fold { f, from, to, incl } => write!(
+                    rd,
+                    " O{}:{}:{}:{}={seen}",
+                    crate::obs::im_field(eng, f),
+                    nid(from),
+                    nid(to),
+                    u8::from(incl)
+                ),
+                crate::node::ReadKind::Next { f, after } => {
+                    write!(rd, " N{}:{}={seen}", crate::obs::im_field(eng, f), nid(after))
+                }
+                crate::node::ReadKind::Placed { i, .. } => write!(rd, " P{i}={seen}"),
+                crate::node::ReadKind::Following { i } => write!(rd, " W{i}={seen}"),
+                crate::node::ReadKind::Hole => write!(rd, " H={seen}"),
+            };
+        }
+        elog!(
+            "imr\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{how}\t{cause}\t{by}\t{}\t{}\t{}\t{}\t{}\t{}\thw {} {} {}\ttk {} {}",
+            n.raw(),
+            op.name(),
+            node.pos_hint().0,
+            log_clock(t),
+            log_clock(Instant::now()),
+            crate::lock::thread_cpu_ns().saturating_sub(cpu0),
+            w.ix,
+            u8::from(cx.goes_on),
+            node.run_began.load(Ordering::Relaxed),
+            pool.epoch,
+            u8::from(first),
+            u8::from(op.settles_at_quiet()),
+            rd,
+            {
+                let h = crate::obs::hw();
+                format!(
+                    "{} {} {} {}",
+                    h[0] - hw0[0],
+                    h[1] - hw0[1],
+                    h[2] - hw0[2],
+                    h[3] - hw0[3]
+                )
+            },
+            crate::lock::wait_so_far().saturating_sub(wait0),
+            crate::obs::cpu_now(),
+            took.0,
+            took.1
+        );
+    }
     if long {
         pool.shared.long_run[w.ix].store(false, Ordering::Relaxed);
     }
@@ -2835,7 +3036,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             .unwrap_or_default();
         // (and when: its start and end on the process's clock, ns, and
         // its worker, for a timeline of the runs)
-        eprintln!(
+        elog!(
             "run: node {} ({}) at {}: {how}; goes on {}, woken by {:?}, parked on {parked:?}\tt {} {} w {} e {}",
             n.raw(),
             op.name(),
@@ -2857,13 +3058,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             _ => None,
         };
         if let Some(wf) = wf {
-            eprintln!("runf: node {} field {wf}", n.raw());
+            elog!("runf: node {} field {wf}", n.raw());
         }
         // (the reads it computed again on a moved layout, and the reads it
         // filed)
         // (and its time on the CPU and waiting for locks, ns: a run
         // slow on a busy pool is told from one slow alone)
-        eprintln!(
+        elog!(
             "runr: node {} retries {} reads {} cpu {} lockwait {}",
             n.raw(),
             crate::read::retries() - retries0,
@@ -3025,11 +3226,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             // (commits under way at once, `Report::commits_at_once`)
             let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
             eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
+            let im_was = crate::obs::im_committing(n.raw() + 1);
             let st = match product.stood.clone() {
                 Some(r) => crate::commit::commit_stood(eng, w, node, &r, product.scope_gen, product.struct_gen),
                 None => None,
             }
             .unwrap_or_else(|| commit(eng, w, node, product));
+            crate::obs::im_committing(im_was);
             eng.committing.fetch_sub(1, Ordering::Relaxed);
             // (the store past the collection's mark: the workers called to
             // its barrier as their runs end)
@@ -3068,7 +3271,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             node.run_chained
                 .store(node.chain_began.load(Ordering::SeqCst), Ordering::SeqCst);
             if run_log() {
-                eprintln!(
+                elog!(
                     "commit: node {} done {} commit {} reask {} walked {} woken {}",
                     n.raw(),
                     log_clock(Instant::now()),
@@ -3266,6 +3469,7 @@ pub(crate) fn starved_by(eng: &Engine, w: &Worker, me: &Node) -> Option<NodeId> 
 /// and at `x`'s commit), the later entry finds it run and counts itself
 /// done.
 fn park_yielder(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, x: NodeId) {
+    im_park(node, "yield", Some(x));
     if node.state() != State::Dirty {
         return;
     }
@@ -3303,6 +3507,7 @@ fn release_yielders(eng: &Engine, w: &Worker, x: &Node) {
 }
 
 fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<NodeId>) {
+    im_park(node, "wait", on);
     let committed = |n: NodeId| settled_node(eng, n);
     if node.state() != State::Running || on.is_none_or(committed) || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
@@ -3580,6 +3785,7 @@ pub(crate) fn frontier_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
 /// queued nowhere, listed in `Shared::frontier_waiting` unless the
 /// frontier passed it meanwhile or the run was re-asked (then queued).
 fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
+    im_park(node, "frontier", None);
     let held = || frontier_holds(eng, node, eng.frontier.load(Ordering::Acquire));
     if node.state() != State::Running || !held() || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
@@ -3598,7 +3804,7 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
     m.push(node.id);
     drop(m);
     if run_log() {
-        eprintln!(
+        elog!(
             "frontier: hold {} at {} t {}",
             node.id.raw(),
             eng.frontier.load(Ordering::Acquire).saturating_sub(1),
@@ -3634,7 +3840,7 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
         go
     };
     if run_log() && !go.is_empty() {
-        eprintln!(
+        elog!(
             "frontier: released {} at {} t {}",
             go.len(),
             fr.saturating_sub(1),
@@ -3664,6 +3870,29 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
         }
     }
     released
+}
+
+/// (`PHITEX_INTERMED_LOG`) Restores the place ([`crate::obs::im_place`])
+/// set before it.
+struct ImPlace(&'static str);
+
+impl Drop for ImPlace {
+    fn drop(&mut self) {
+        crate::obs::im_place(self.0);
+    }
+}
+
+/// (`PHITEX_INTERMED_LOG`) A node taken and set aside before or in its
+/// run: the time, the node, why, the node it waits for (plus one, 0 none).
+fn im_park(node: &Node, why: &str, on: Option<NodeId>) {
+    if crate::obs::im_on() {
+        elog!(
+            "imp\t{}\t{}\t{why}\t{}",
+            log_clock(Instant::now()),
+            node.id.raw(),
+            on.map_or(0, |x| x.raw() + 1)
+        );
+    }
 }
 
 /// The runs waiting for `n`'s commit queued again (`park_waiting`).

@@ -481,3 +481,306 @@ pub fn counting_allocs() -> bool {
     #[cfg(not(feature = "profile"))]
     false
 }
+
+/// (`PHITEX_INTERMED_LOG`, profile) Whether the intermediate-rerun probe
+/// prints: every wake delivered (`imw`), every run with its wake and its
+/// reads (`imr`), every commit's changed fields (`imc`), and the fields'
+/// names once each (`imf`); docs/note-intermediate-reruns.md. Observe only.
+pub(crate) fn im_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // (`enabled` first: a constant, so a build without probes has none)
+    enabled() && *F.get_or_init(|| std::env::var_os("PHITEX_INTERMED_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// (`PHITEX_INTERMED_LOG`) The key of the line's structure in
+/// [`im_changed`]: no field's raw id.
+pub(crate) const IM_STRUCTURE: u64 = u64::MAX;
+
+/// (`PHITEX_INTERMED_LOG`) The node whose commit last moved each field's
+/// definitions or contributions, or the line's structure
+/// ([`IM_STRUCTURE`]): raw id plus one.
+static IM_CHANGERS: Mx<Option<std::collections::HashMap<u64, u64>>> = Mx::new(None);
+
+/// (`PHITEX_INTERMED_LOG`) The node committing on this thread moved `key`
+/// (a field's raw id, or [`IM_STRUCTURE`]).
+pub(crate) fn im_changed(key: u64) {
+    if !im_on() {
+        return;
+    }
+    let by = im_committing_now();
+    if by == 0 {
+        return;
+    }
+    IM_CHANGERS.lock().get_or_insert_with(Default::default).insert(key, by);
+}
+
+/// (`PHITEX_INTERMED_LOG`) The node whose commit last moved `key` (raw id
+/// plus one, 0 none).
+pub(crate) fn im_changer(key: u64) -> u64 {
+    if !im_on() {
+        return 0;
+    }
+    IM_CHANGERS
+        .lock()
+        .as_ref()
+        .and_then(|m| m.get(&key).copied())
+        .unwrap_or(0)
+}
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) The node whose commit moved what a wake made
+    /// on this thread with no node of its own is for (raw id plus one, 0
+    /// none): a commit's check of its own reads re-asks the run with no
+    /// `by`, and the log names the definer that moved the read.
+    static IM_HINT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// (`PHITEX_INTERMED_LOG`) How this thread's worker took the node it
+    /// runs next, and from which worker's queue.
+    static IM_TOOK: std::cell::Cell<(&'static str, usize)> = const { std::cell::Cell::new(("-", 0)) };
+}
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) Where this thread's worker is, outside a run
+    /// and a commit: a quiet point, an idle worker's release, an edit taken.
+    static IM_PLACE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("-") };
+}
+
+/// (`PHITEX_INTERMED_LOG`) Sets where this thread is ([`IM_PLACE`]); the
+/// place before.
+pub(crate) fn im_place(p: &'static str) -> &'static str {
+    if !im_on() {
+        return "-";
+    }
+    IM_PLACE.with(|c| c.replace(p))
+}
+
+/// (`PHITEX_INTERMED_LOG`) Where this thread is.
+pub(crate) fn im_place_now() -> &'static str {
+    IM_PLACE.with(std::cell::Cell::get)
+}
+
+/// (`PHITEX_INTERMED_LOG`) Sets the wake hint ([`IM_HINT`]); the one before.
+pub(crate) fn im_hint(n: u64) -> u64 {
+    if !im_on() {
+        return 0;
+    }
+    IM_HINT.with(|c| c.replace(n))
+}
+
+/// (`PHITEX_INTERMED_LOG`) The wake hint.
+pub(crate) fn im_hint_now() -> u64 {
+    IM_HINT.with(std::cell::Cell::get)
+}
+
+/// (`PHITEX_INTERMED_LOG`) The node taken next on this thread was taken
+/// `how`, from worker `from`'s queues.
+pub(crate) fn im_took(how: &'static str, from: usize) {
+    if im_on() {
+        IM_TOOK.with(|c| c.set((how, from)));
+    }
+}
+
+/// (`PHITEX_INTERMED_LOG`) How the node at work on this thread was taken.
+pub(crate) fn im_took_now() -> (&'static str, usize) {
+    IM_TOOK.with(std::cell::Cell::get)
+}
+
+/// (`PHITEX_INTERMED_LOG`) Field `f`'s raw id, its name printed once.
+pub(crate) fn im_field(eng: &crate::engine::Engine, f: crate::values::Field) -> u64 {
+    static SEEN: Mx<Option<std::collections::HashSet<u64>>> = Mx::new(None);
+    let raw = f.0.raw();
+    let new = SEEN.lock().get_or_insert_with(Default::default).insert(raw);
+    if new {
+        elog!(
+            "imf\t{raw}\t{}",
+            eng.values().as_str(f.0).unwrap_or_default().replace(['\t', '\n'], " ")
+        );
+    }
+    raw
+}
+
+/// (`PHITEX_INTERMED_LOG`) A cause as `kind field by`.
+pub(crate) fn im_cause(eng: &crate::engine::Engine, c: Option<&crate::api::Cause>) -> String {
+    use crate::api::Cause;
+    let Some(c) = c else { return "none 0 0".to_owned() };
+    let (k, f, by) = match c {
+        Cause::Rebind { field, to, .. } => ("Rebind", Some(*field), *to),
+        Cause::Changed { field, site } => ("Changed", Some(*field), *site),
+        Cause::Range { field, by } => ("Range", Some(*field), Some(*by)),
+        Cause::Environment { field } => ("Environment", Some(*field), None),
+        Cause::Output { of } => ("Output", None, Some(*of)),
+        Cause::Structure => ("Structure", None, None),
+        Cause::Created { by } => ("Created", None, *by),
+        Cause::Edited => ("Edited", None, None),
+    };
+    format!(
+        "{k} {} {}",
+        f.map_or(0, |f| im_field(eng, f)),
+        by.map_or(0, |b| b.raw() + 1)
+    )
+}
+
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) The node whose commit this thread makes
+    /// (raw id plus one, 0 none).
+    static IM_COMMITTING: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// (`PHITEX_INTERMED_LOG`) Sets the node whose commit this thread makes;
+/// the one before.
+pub(crate) fn im_committing(n: u64) -> u64 {
+    if !im_on() {
+        return 0;
+    }
+    IM_COMMITTING.with(|c| c.replace(n))
+}
+
+/// (`PHITEX_INTERMED_LOG`) The node whose commit this thread makes.
+pub(crate) fn im_committing_now() -> u64 {
+    IM_COMMITTING.with(std::cell::Cell::get)
+}
+
+/// (`PHITEX_INTERMED_LOG`, profile, Linux) This thread's hardware counts
+/// since its first call, `[cycles, instructions, cache references, cache
+/// misses]`, user and kernel, from one perf group opened per thread
+/// (`perf_event_open`, pid 0, any cpu); zeros where the kernel refuses it
+/// (`perf_event_paranoid` above 2). Observe only: a run's cost split into
+/// work (instructions), memory (misses, IPC) and clock (cycles per ns).
+#[allow(unsafe_code)]
+pub(crate) fn hw() -> [u64; 4] {
+    #[cfg(all(feature = "profile", target_os = "linux"))]
+    {
+        thread_local! {
+            static FD: std::cell::Cell<i32> = const { std::cell::Cell::new(-2) };
+        }
+        fn open(config: u64, group: i32) -> i32 {
+            // perf_event_attr, VER5 (112 bytes), in a zeroed buffer
+            let mut a = [0u64; 16];
+            // type PERF_TYPE_HARDWARE (0), size 112
+            a[0] = 112u64 << 32;
+            a[1] = config;
+            // read_format: PERF_FORMAT_GROUP (8)
+            a[4] = 8;
+            // flags: exclude_hv (bit 6)
+            a[5] = 1 << 6;
+            // SAFETY: a valid attr buffer for the syscall's lifetime.
+            unsafe { libc::syscall(libc::SYS_perf_event_open, a.as_ptr(), 0i32, -1i32, group, 0u64) as i32 }
+        }
+        let fd = FD.with(|c| {
+            if c.get() == -2 {
+                let l = open(0, -1);
+                if l >= 0 {
+                    for k in 1..4 {
+                        open(k, l);
+                    }
+                }
+                c.set(l);
+            }
+            c.get()
+        });
+        if fd < 0 {
+            return [0; 4];
+        }
+        let mut b = [0u64; 5];
+        // SAFETY: reading the group's values into a buffer of 5 u64.
+        let n = unsafe { libc::read(fd, b.as_mut_ptr().cast(), 40) };
+        if n == 40 {
+            return [b[1], b[2], b[3], b[4]];
+        }
+    }
+    [0; 4]
+}
+
+/// (`PHITEX_INTERMED_LOG`, profile, Linux) The CPU this thread is on now
+/// (`sched_getcpu`), -1 elsewhere.
+#[allow(unsafe_code)]
+pub(crate) fn cpu_now() -> i32 {
+    #[cfg(all(feature = "profile", target_os = "linux"))]
+    // SAFETY: no arguments, no memory.
+    return unsafe { libc::sched_getcpu() };
+    #[cfg(not(all(feature = "profile", target_os = "linux")))]
+    -1
+}
+
+/// (`PHITEX_RUNCOST`, profile) Whether each node's last run with products
+/// keeps its cost (`Node::cost`), summed by operation at the evaluation's
+/// end: the kept runs' CPU, hardware counts and lock waits, with no line
+/// printed per run (the per-run logs' own stderr lock and writes slowed a
+/// -j8 build 4x).
+pub(crate) fn rc_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    enabled() && *F.get_or_init(|| std::env::var_os("PHITEX_RUNCOST").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// (`PHITEX_RUNCOST`) The kept runs' costs by operation, printed and
+/// taken: `runcost\\top\\tnodes\\tcpu cycles instr cref cmiss lockwait reads wall runs`.
+pub(crate) fn runcost_report(eng: &crate::engine::Engine) {
+    #[cfg(not(feature = "profile"))]
+    let _ = eng;
+    #[cfg(feature = "profile")]
+    {
+        let mut by: std::collections::BTreeMap<&'static str, (u64, [u64; 9])> = Default::default();
+        for i in 0..eng.nodes.len() {
+            let Some(n) = eng.nodes.get(i) else { continue };
+            if let Some((op, c)) = n.cost.lock().take() {
+                let e = by.entry(op).or_default();
+                e.0 += 1;
+                for (a, b) in e.1.iter_mut().zip(c) {
+                    *a += b;
+                }
+            }
+        }
+        for (op, (k, c)) in by {
+            eprintln!(
+                "runcost\t{op}\t{k}\t{}",
+                c.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
+            );
+        }
+    }
+}
+
+/// (profile) The per-run logs' lines, kept per thread and written at the
+/// evaluation's end (or past 8 MB), not one `eprintln` each: the stderr
+/// lock and a write per line made a logged -j8 build 4x slower and its
+/// runs' clocks low (`log_line`).
+static LOG_BUFS: Mx<Vec<std::sync::Arc<std::sync::Mutex<String>>>> = Mx::new(Vec::new());
+
+thread_local! {
+    static LOG_BUF: std::sync::Arc<std::sync::Mutex<String>> = {
+        let b = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        LOG_BUFS.lock().push(b.clone());
+        b
+    };
+}
+
+/// (profile) One log line into this thread's buffer, while the per-run
+/// logs are on (`PHITEX_RUN_LOG`, `PHITEX_INTERMED_LOG`); else to stderr
+/// at once, as `eprintln` (a stuck build's dump, the wake log).
+pub(crate) fn log_line(args: std::fmt::Arguments<'_>) {
+    use std::fmt::Write as _;
+    if !(im_on() || crate::sched::run_log()) {
+        eprintln!("{args}");
+        return;
+    }
+    LOG_BUF.with(|b| {
+        let mut s = b.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = s.write_fmt(args);
+        s.push('\n');
+        if s.len() > 8 << 20 {
+            use std::io::Write as _;
+            let _ = std::io::stderr().lock().write_all(s.as_bytes());
+            s.clear();
+        }
+    });
+}
+
+/// (profile) Every thread's buffered lines, written.
+pub(crate) fn log_flush() {
+    use std::io::Write as _;
+    let bufs = LOG_BUFS.lock().clone();
+    let mut e = std::io::stderr().lock();
+    for b in bufs {
+        let mut s = b.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = e.write_all(s.as_bytes());
+        s.clear();
+    }
+}
