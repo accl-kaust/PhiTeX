@@ -218,12 +218,19 @@ async function coldPdf(dir, main = "main.tex") {
 
 test("a figure or a file of any extension replaced on disk rebuilds, as a full build makes it (images, unlisted extensions)", async () => {
   const { spawnSync } = await import("node:child_process");
-  const { writeFileSync, copyFileSync } = await import("node:fs");
+  const { writeFileSync, copyFileSync, renameSync } = await import("node:fs");
+  const { dirname, basename } = await import("node:path");
   // (ImageMagick 7's magick, else 6's convert: an Ubuntu runner has only convert)
   const im = spawnSync("magick", ["-version"]).status === 0 ? "magick" : "convert";
+  // (drawn beside it, then renamed over it: a figure replaced whole, as a
+  // plotting tool's save does. Drawn in place, ImageMagick 6 on the CI runner
+  // left the watch a file it closed before it was whole, and that build
+  // failed reading it (issue #36); this test is about a replaced figure)
   const magick = (args, out) => {
-    const r = spawnSync(im, [...args, out]);
+    const tmp = join(dirname(out), `.tmp-${Date.now()}-${basename(out)}`);
+    const r = spawnSync(im, [...args, tmp]);
     if (r.status !== 0) throw new Error(`${im} failed: ${r.error ?? r.stderr}`);
+    renameSync(tmp, out);
   };
   const tex = doc("Figures.\n\n\\includegraphics{figpng}\n\\includegraphics{figjpg}\n\\includegraphics[width=3cm]{figpdf}\n\n\\input{notes.md}", "\\usepackage{graphicx}\n");
   const dir = project({ "main.tex": tex, "notes.md": "Notes one.\n" });
