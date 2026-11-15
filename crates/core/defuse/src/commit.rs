@@ -2156,11 +2156,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         if crate::obs::im_on() {
             use std::fmt::Write as _;
             let mut d = String::new();
-            for x in rec.defs.iter().filter(|x| changed_defs.contains(&x.f)) {
-                let _ = write!(d, " {}={}", crate::obs::im_field(eng, x.f), x.value.raw());
-            }
-            for &f in &changed_defs {
-                if !rec.defs.iter().any(|x| x.f == f) {
+            // (a commit of thousands of definitions, the preamble's: their
+            // count alone)
+            if changed_defs.len() > 512 {
+                let _ = write!(d, " many={}", changed_defs.len());
+            } else {
+                let ch: std::collections::HashSet<Field> = changed_defs.iter().copied().collect();
+                let mut put = std::collections::HashSet::new();
+                for x in rec.defs.iter().filter(|x| ch.contains(&x.f)) {
+                    put.insert(x.f);
+                    let _ = write!(d, " {}={}", crate::obs::im_field(eng, x.f), x.value.raw());
+                }
+                for &f in changed_defs.iter().filter(|f| !put.contains(*f)) {
                     let _ = write!(d, " {}=-", crate::obs::im_field(eng, f));
                 }
             }
