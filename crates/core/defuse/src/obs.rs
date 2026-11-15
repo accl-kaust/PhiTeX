@@ -607,3 +607,35 @@ pub(crate) fn cpu_now() -> i32 {
     #[cfg(not(all(feature = "profile", target_os = "linux")))]
     -1
 }
+
+/// (`PHITEX_RUNCOST`, profile) Whether each node's last run with products
+/// keeps its cost (`Node::cost`), summed by operation at the evaluation's
+/// end: the kept runs' CPU, hardware counts and lock waits, with no line
+/// printed per run (the per-run logs' own stderr lock and writes slowed a
+/// -j8 build 4x).
+pub(crate) fn rc_on() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| enabled() && std::env::var_os("PHITEX_RUNCOST").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// (`PHITEX_RUNCOST`) The kept runs' costs by operation, printed and
+/// taken: `runcost\\top\\tnodes\\tcpu cycles instr cref cmiss lockwait reads wall runs`.
+pub(crate) fn runcost_report(eng: &crate::engine::Engine) {
+    let mut by: std::collections::BTreeMap<&'static str, (u64, [u64; 9])> = Default::default();
+    for i in 0..eng.nodes.len() {
+        let Some(n) = eng.nodes.get(i) else { continue };
+        if let Some((op, c)) = n.cost.lock().take() {
+            let e = by.entry(op).or_default();
+            e.0 += 1;
+            for k in 0..9 {
+                e.1[k] += c[k];
+            }
+        }
+    }
+    for (op, (k, c)) in by {
+        eprintln!(
+            "runcost\t{op}\t{k}\t{}",
+            c.iter().map(u64::to_string).collect::<Vec<_>>().join(" ")
+        );
+    }
+}

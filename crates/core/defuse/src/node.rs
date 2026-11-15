@@ -218,6 +218,11 @@ pub(crate) struct Node {
     /// wave than the reader's read (`sched::same_wave`).
     pub(crate) run_start: AtomicU64,
     pub(crate) run_began: AtomicU64,
+    /// (`PHITEX_RUNCOST`, profile) Its last finished run's cost: operation
+    /// and `[cpu ns, cycles, instructions, cache refs, cache misses, lock
+    /// wait ns, reads, wall ns, runs]`, summed over the kept runs at the
+    /// evaluation's end (`obs::runcost_report`).
+    pub(crate) cost: crate::lock::Mx<Option<(&'static str, [u64; 9])>>,
     /// The run its last commit made, and its run under way, were asked
     /// for by another node's commit in their wave (a re-ask, a
     /// placement), not by an edit: a link of a chain of re-asks, whose
@@ -393,6 +398,7 @@ impl Node {
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
+            cost: crate::lock::Mx::new(None),
             run_chained: AtomicBool::new(false),
             chain_began: AtomicBool::new(false),
             layer_refuted: AtomicU32::new(0),

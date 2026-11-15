@@ -1840,6 +1840,9 @@ impl Engine {
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
+        if crate::obs::rc_on() {
+            crate::obs::runcost_report(self);
+        }
         rep.absorbed = workers
             .iter()
             .flat_map(|w| std::mem::take(&mut w.log.lock().absorbed))

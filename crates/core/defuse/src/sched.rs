@@ -2832,6 +2832,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     if long {
         pool.shared.long_run[w.ix].store(true, Ordering::Relaxed);
     }
+    let rc = crate::obs::rc_on().then(|| {
+        (
+            crate::lock::thread_cpu_ns(),
+            crate::obs::hw(),
+            crate::lock::wait_so_far(),
+        )
+    });
     let im = crate::obs::im_on().then(|| {
         let wk = node.woke.lock();
         (
@@ -2846,6 +2853,29 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         Some(out) => Ok(Ok(out)),
         None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
     };
+    if let Some((cpu0, hw0, wait0)) = rc {
+        // (a run that ends with products: the one its commit keeps, unless
+        // a later run of the node replaces it)
+        if matches!(r, Ok(Ok(_))) && stands.is_none() {
+            let h = crate::obs::hw();
+            let c = [
+                crate::lock::thread_cpu_ns().saturating_sub(cpu0),
+                h[0] - hw0[0],
+                h[1] - hw0[1],
+                h[2] - hw0[2],
+                h[3] - hw0[3],
+                crate::lock::wait_so_far().saturating_sub(wait0),
+                cx.product.reads.len() as u64,
+                crate::lock::ns(t),
+                0,
+            ];
+            let mut g = node.cost.lock();
+            let runs = g.map_or(0, |x| x.1[8]);
+            let mut c = c;
+            c[8] = runs + 1;
+            *g = Some((op.name(), c));
+        }
+    }
     if let Some((cause, by, cpu0, hw0, wait0)) = im {
         let how = match &r {
             Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
