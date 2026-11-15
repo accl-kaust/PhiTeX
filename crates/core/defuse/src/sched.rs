@@ -1611,6 +1611,11 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
             eng.quiets.fetch_add(1, Ordering::SeqCst);
+            if run_log() {
+                // (every quiet point, a pass or not: what it lets go
+                // waited for it)
+                elog!("quiet: {} re-asked 0 pass false", log_clock(Instant::now()));
+            }
             // (no quiet point while a commit's fields are unwalked
             // (`Node::unwalked`): their node, parked, has not committed
             // again; walked now, and the line goes on if they woke any)
@@ -3444,6 +3449,7 @@ pub(crate) fn starved_by(eng: &Engine, w: &Worker, me: &Node) -> Option<NodeId> 
 /// and at `x`'s commit), the later entry finds it run and counts itself
 /// done.
 fn park_yielder(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, x: NodeId) {
+    im_park(node, "yield", Some(x));
     if node.state() != State::Dirty {
         return;
     }
@@ -3481,6 +3487,7 @@ fn release_yielders(eng: &Engine, w: &Worker, x: &Node) {
 }
 
 fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<NodeId>) {
+    im_park(node, "wait", on);
     let committed = |n: NodeId| settled_node(eng, n);
     if node.state() != State::Running || on.is_none_or(committed) || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
@@ -3758,6 +3765,7 @@ pub(crate) fn frontier_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
 /// queued nowhere, listed in `Shared::frontier_waiting` unless the
 /// frontier passed it meanwhile or the run was re-asked (then queued).
 fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
+    im_park(node, "frontier", None);
     let held = || frontier_holds(eng, node, eng.frontier.load(Ordering::Acquire));
     if node.state() != State::Running || !held() || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
@@ -3842,6 +3850,19 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
         }
     }
     released
+}
+
+/// (`PHITEX_INTERMED_LOG`) A node taken and set aside before or in its
+/// run: the time, the node, why, the node it waits for (plus one, 0 none).
+fn im_park(node: &Node, why: &str, on: Option<NodeId>) {
+    if crate::obs::im_on() {
+        elog!(
+            "imp\t{}\t{}\t{why}\t{}",
+            log_clock(Instant::now()),
+            node.id.raw(),
+            on.map_or(0, |x| x.raw() + 1)
+        );
+    }
 }
 
 /// The runs waiting for `n`'s commit queued again (`park_waiting`).

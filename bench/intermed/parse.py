@@ -32,6 +32,7 @@ def main(path, out):
     gone = []          # (t, node, state)
     vals = []          # (t, reader, field, seen, now, by)
     fronts = []        # (t, by)
+    parks = []         # (t, node, why, on)
     rfr = re.compile(r'^frontier: (\d+) -> (\d+) \(at \d+\) by (\d+) .* t (\d+)')
     rq = re.compile(r'^quiet: (\d+) re-asked (\d+) pass (\w+)')
     with gzip.open(path, 'rt', errors='replace') as fh:
@@ -74,6 +75,9 @@ def main(path, out):
                 m = rfr.match(line)
                 if m:
                     fronts.append((int(m.group(4)), int(m.group(3))))
+            elif line.startswith('imp\t'):
+                p = line.rstrip('\n').split('\t')
+                parks.append((int(p[1]), int(p[2]), p[3], int(p[4]) - 1))
             elif line.startswith('img\t'):
                 p = line.rstrip('\n').split('\t')
                 gone.append((int(p[1]), int(p[2]), p[3]))
@@ -96,7 +100,7 @@ def main(path, out):
                 wall = line.strip()
     runs.sort(key=lambda r: r['t0'])
     pickle.dump(dict(names=names, runs=runs, commits=dict(commits), imc=dict(imc), wakes=wakes,
-                     quiets=quiets, ops=ops, waitfor=waitfor, vals=vals, fronts=fronts, gone=gone), open(out, 'wb'))
+                     quiets=quiets, ops=ops, waitfor=waitfor, vals=vals, fronts=fronts, gone=gone, parks=parks), open(out, 'wb'))
     print(path, len(runs), 'runs', sum(len(v) for v in commits.values()), 'commits', len(wakes), 'wakes')
 
 if __name__ == '__main__':

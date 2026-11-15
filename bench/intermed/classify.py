@@ -101,6 +101,12 @@ def prepare(D):
     fr = sorted(D.get('fronts', []))
     D['fronts'] = fr
     D['quiet_ts'] = sorted(t for t, p in quiets)
+    pk = defaultdict(list)
+    for x in D.get('parks', []):
+        pk[x[1]].append(x)
+    for v in pk.values():
+        v.sort()
+    D['pk'] = pk
 
 
 def counted(r):
@@ -153,8 +159,27 @@ def enabler(D, r):
     # runnable (enq) or told in its run that a read moved (rdirty, note))
     qs = [w for w in ws if w[7] in ('enq', 'rdirty', 'note')]
     if qs:
-        ws = qs
+        # (the last made by a commit: one queued by none is a release, of a
+        # park or at a quiet point, which those give)
+        ws = [w for w in qs if (w[9] >= 0 and w[9] != n) or (len(w) > 10 and w[10] >= 0 and w[10] != n)]
     j = bisect.bisect_right(ws, (r['t0'], 1 << 62)) - 1
+    if qs:
+        pk = D['pk'].get(n, [])
+        i = bisect.bisect_right(pk, (r['t0'], 1 << 62)) - 1
+        tw = ws[j][0] if j >= 0 and ws[j][0] >= lo else lo
+        if i >= 0 and pk[i][0] >= tw:
+            t_p, _, why, on = pk[i]
+            if why == 'frontier':
+                k = bisect.bisect_right(D['fronts'], (r['t0'], 1 << 62)) - 1
+                if k >= 0 and D['fronts'][k][0] >= t_p:
+                    t, by = D['fronts'][k]
+                    x, _ = producing_run(D, by, t)
+                    if x is not None:
+                        cands.append((t, x, 'frontier'))
+            elif on >= 0:
+                x, t = producing_run(D, on, r['t0'])
+                if x is not None and t is not None and t >= t_p:
+                    cands.append((t, x, 'waited'))
     if qs and j >= 0 and ws[j][0] >= lo:
         w = ws[j]
         c = w[9]
@@ -166,8 +191,8 @@ def enabler(D, r):
                 tx = x['done'] or x['t1']
                 inflight = w[7] != 'enq' or c == n
                 cands.append((min(w[0], tx) if inflight else w[0], x, 'stale' if inflight else 'wake'))
-        else:
-            cands.append((w[0], None, 'quiet'))
+        # (queued by no commit: the client's push, runnable from the start,
+        # or a quiet point's release, which `quiet_ts` gives)
     elif j >= 0 and ws[j][0] >= lo:
         w = ws[j]
         c = w[9] if len(w) > 9 else -1
