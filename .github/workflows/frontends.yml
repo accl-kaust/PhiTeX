@@ -81,9 +81,10 @@ jobs:
           cargo build --release --locked -p phitex-cli
           mkdir ../bin && cp target/release/phitex ../bin/
       - run: bin/phitex --version
+      # (imagemagick: the browser suite's figures test draws its PNG and JPEG with it)
       - name: Emacs, Neovim 0.11, Node
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox minisign
+          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox minisign imagemagick
           curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.4/nvim-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@v4
