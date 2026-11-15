@@ -166,7 +166,11 @@ def enabler(D, r):
         # (the last made by a commit: one queued by none is a release, of a
         # park or at a quiet point, which those give)
         ws = [w for w in qs if (w[9] >= 0 and w[9] != n) or (len(w) > 10 and w[10] >= 0 and w[10] != n)
-              or (w[9] < 0 and w[5] >= 0 and w[5] != n)]
+              or (w[9] < 0 and w[5] >= 0 and w[5] != n and (len(w) < 12 or w[11] == '-'))]
+        # (made runnable at a quiet point: it waited for that)
+        for w in qs:
+            if len(w) > 11 and w[11] == 'quiet' and lo <= w[0] <= r['t0']:
+                cands.append((w[0], None, 'quiet'))
     j = bisect.bisect_right(ws, (r['t0'], 1 << 62)) - 1
     if qs:
         pk = D['pk'].get(n, [])
@@ -321,7 +325,7 @@ def critical_path(D, cls):
     cur = max(runs, key=lambda r: (r['done'] or r['t1']))
     t_end = cur['done'] or cur['t1']
     cp = Counter(); cpn = Counter(); how = Counter()
-    seen = set(); queue = 0; commit = 0; quiet = 0; stale = 0; links = 0
+    seen = set(); queue = 0; commit = 0; quiet = 0; stale = 0; late = 0; links = 0
     chain = []
     upto = cur['t1']
     while cur is not None and cur['i'] not in seen:
@@ -361,11 +365,15 @@ def critical_path(D, cls):
             queue += cur['t0'] - pe
         else:
             queue += cur['t0'] - t
-        commit += max(0, t - x['t1'])
+        # (a definer's walk after its commit (fields left unwalked, a
+        # release): the commit up to its end, the rest late)
+        xd = max(x['done'] or x['t1'], x['t1'])
+        commit += max(0, min(t, xd) - x['t1'])
+        late += max(0, t - xd)
         upto = t
         cur = x
     return dict(end_ms=t_end / MS, run_ms={c: cp[c] / MS for c in cp}, run_n=dict(cpn),
-                queue_ms=queue / MS, commit_ms=commit / MS, quiet_ms=quiet / MS, stale_ms=stale / MS, links=links,
+                queue_ms=queue / MS, commit_ms=commit / MS, quiet_ms=quiet / MS, stale_ms=stale / MS, late_ms=late / MS, links=links,
                 enablers=dict(how)), chain
 
 

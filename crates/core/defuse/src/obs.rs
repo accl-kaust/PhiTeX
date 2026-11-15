@@ -538,6 +538,26 @@ thread_local! {
     static IM_TOOK: std::cell::Cell<(&'static str, usize)> = const { std::cell::Cell::new(("-", 0)) };
 }
 
+thread_local! {
+    /// (`PHITEX_INTERMED_LOG`) Where this thread's worker is, outside a run
+    /// and a commit: a quiet point, an idle worker's release, an edit taken.
+    static IM_PLACE: std::cell::Cell<&'static str> = const { std::cell::Cell::new("-") };
+}
+
+/// (`PHITEX_INTERMED_LOG`) Sets where this thread is ([`IM_PLACE`]); the
+/// place before.
+pub(crate) fn im_place(p: &'static str) -> &'static str {
+    if !im_on() {
+        return "-";
+    }
+    IM_PLACE.with(|c| c.replace(p))
+}
+
+/// (`PHITEX_INTERMED_LOG`) Where this thread is.
+pub(crate) fn im_place_now() -> &'static str {
+    IM_PLACE.with(std::cell::Cell::get)
+}
+
 /// (`PHITEX_INTERMED_LOG`) Sets the wake hint ([`IM_HINT`]); the one before.
 pub(crate) fn im_hint(n: u64) -> u64 {
     if !im_on() {

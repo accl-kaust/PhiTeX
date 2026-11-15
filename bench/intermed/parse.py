@@ -67,7 +67,7 @@ def main(path, out):
                 ck = p[4].split()
                 wakes.append((int(p[1]), int(p[2]), p[3], ck[0], int(ck[1]), int(ck[2]) - 1,
                               int(p[5]) - 1, p[6], int(p[7]), int(p[8]) - 1 if len(p) > 8 else -1,
-                              int(p[9]) - 1 if len(p) > 9 else -1))
+                              int(p[9]) - 1 if len(p) > 9 else -1, p[10] if len(p) > 10 else '-'))
             elif line.startswith('imv\t'):
                 p = line.rstrip('\n').split('\t')
                 vals.append((int(p[1]), int(p[2]), int(p[3]), int(p[4]), int(p[5]), int(p[6]) - 1))

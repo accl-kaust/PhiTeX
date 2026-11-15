@@ -1482,7 +1482,10 @@ impl Pool {
             if quiet_ends && self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
             }
-            if self.release_past_only(eng, w) || self.release_window_only(eng, w) {
+            let was = crate::obs::im_place("release");
+            let released = self.release_past_only(eng, w) || self.release_window_only(eng, w);
+            crate::obs::im_place(was);
+            if released {
                 continue;
             }
             if edits && t_idle.elapsed() >= ABSORB_EVERY {
@@ -1611,6 +1614,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
             eng.quiets.fetch_add(1, Ordering::SeqCst);
+            let _place = ImPlace(crate::obs::im_place("quiet"));
             if run_log() {
                 // (every quiet point, a pass or not: what it lets go
                 // waited for it)
@@ -1870,6 +1874,7 @@ fn work_loop(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Edi
 /// theirs (`Report::version`, `Settled::version`), and the log has them
 /// with the runs made before (`Report::absorbed`); whether there were any.
 fn absorb(eng: &Engine, pool: &Pool, w: &Worker, s: &mut dyn EditSource) -> bool {
+    let _place = ImPlace(crate::obs::im_place("edit"));
     let Some(v) = s.absorb(eng) else {
         return false;
     };
@@ -2422,7 +2427,7 @@ fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
         return;
     }
     elog!(
-        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}\t{}",
+        "imw\t{}\t{}\t{:?}\t{}\t{}\t{how}\t{}\t{}\t{}\t{}",
         log_clock(Instant::now()),
         n.id.raw(),
         n.state(),
@@ -2430,7 +2435,8 @@ fn im_wake(eng: &Engine, n: &Node, wake: &Wake, how: &str) {
         wake.by.map_or(0, |b| b.raw() + 1),
         eng.quiets.load(Ordering::Relaxed),
         crate::obs::im_committing_now(),
-        crate::obs::im_hint_now()
+        crate::obs::im_hint_now(),
+        crate::obs::im_place_now()
     );
 }
 
@@ -3854,6 +3860,16 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
         }
     }
     released
+}
+
+/// (`PHITEX_INTERMED_LOG`) Restores the place ([`crate::obs::im_place`])
+/// set before it.
+struct ImPlace(&'static str);
+
+impl Drop for ImPlace {
+    fn drop(&mut self) {
+        crate::obs::im_place(self.0);
+    }
 }
 
 /// (`PHITEX_INTERMED_LOG`) A node taken and set aside before or in its
