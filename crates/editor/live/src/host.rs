@@ -47,6 +47,14 @@ pub trait Host: Send + Sync {
         }
     }
 
+    /// Where the file a finder's key names is now, for a check of where it
+    /// was found before ([`crate::graph`]: a loaded graph's inputs): the
+    /// answer [`Host::locate_key`] gives, which a host may make without
+    /// fetching the file (Shelf's: from the release's index).
+    fn relocate(&self, key: &str) -> Option<PathBuf> {
+        self.locate_key(key)
+    }
+
     /// The bytes of the file at `path` (as [`Host::locate`] found it, or
     /// as a diagnostic names it); none: not readable.
     fn read(&self, path: &Path) -> Option<Vec<u8>>;

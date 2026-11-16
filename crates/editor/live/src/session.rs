@@ -1063,7 +1063,7 @@ impl Session {
             if !found {
                 self.host.look_again(n);
             }
-            let now = self.host.locate_key(n);
+            let now = self.host.relocate(n);
             let moved = match (found, p, &now) {
                 (true, Some(p), Some(q)) if p == q => {
                     !matches!((stamps.get(p), self.host.stamp(p)), (Some(a), Some(b)) if !a.is_empty() && *a == b)
