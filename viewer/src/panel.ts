@@ -3079,6 +3079,8 @@ export class Panel {
 
   private tipAt = -1;
   private tipList: typeof TIPS = [];
+  /** The listener closing the tip shown when its control is used. */
+  private tipUsed?: AbortController;
 
   /**
    * The tips now: those not seen yet, where the host keeps them from showing
@@ -3146,6 +3148,8 @@ export class Panel {
   private tip(i: number): void {
     const el = this.$("#tip");
     this.root.querySelectorAll(".ringed").forEach((e) => e.classList.remove("ringed"));
+    this.tipUsed?.abort();
+    this.tipUsed = undefined;
     this.tipAt = i;
     const t = this.tipList[i];
     if (!t) return void (el.hidden = true);
@@ -3154,6 +3158,10 @@ export class Panel {
     // (a control hidden at this width: the menu that holds it)
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
+    // (the control it points at used: the tip has done its work and goes, the tour
+    // with it; left open, it covered what the control opened, Compare's Next)
+    const used = (this.tipUsed = new AbortController());
+    target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
     el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;

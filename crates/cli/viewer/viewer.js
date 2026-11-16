@@ -9259,6 +9259,8 @@ var Panel = class {
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
   tipAt = -1;
   tipList = [];
+  /** The listener closing the tip shown when its control is used. */
+  tipUsed;
   /**
    * The tips now: those not seen yet, where the host keeps them from showing
    * by themselves (PanelOptions.tips false: after its own); `all`, the tour
@@ -9315,6 +9317,8 @@ var Panel = class {
   tip(i) {
     const el = this.$("#tip");
     this.root.querySelectorAll(".ringed").forEach((e) => e.classList.remove("ringed"));
+    this.tipUsed?.abort();
+    this.tipUsed = void 0;
     this.tipAt = i;
     const t = this.tipList[i];
     if (!t) return void (el.hidden = true);
@@ -9322,6 +9326,8 @@ var Panel = class {
     let target = this.$(t.at);
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
+    const used = this.tipUsed = new AbortController();
+    target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
     el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar2 = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
