@@ -135,3 +135,65 @@ fn a_higher_rank_placed_first_stays_after_a_lower_one_placed_later() {
     line(1, 3, 2);
     line(4, 3, 2);
 }
+
+/// A node kept for a placement after another node than its last
+/// (`commit`'s keep: it stands after the new node with nothing between)
+/// is anchored at the node it is placed after now, so it moves with that
+/// node. Line: A, B, C (`m` := 100), Q placing G after B (rank 1), P
+/// placing F after B (rank 2), a reader. P then places F after G: F
+/// stands after G already, kept. Then Q places G after C: G moves there
+/// and F, placed after G, with it, as a clean evaluation stands them
+/// (C, G, F: G reads 100, F reads G's key, the reader F's). Kept with
+/// its old anchor, F stayed after B: it read nothing, the reader G's key
+/// (revtex-aps-xe's page 6 at -j8, #45: a page's finisher kept after
+/// another piece, anchored at the one it was placed after first; the
+/// bibliography's continuation found it foreign between and was made
+/// anew).
+fn kept_anchor(threads: usize) {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let seen = e.register(Arc::new(Seen {
+        runs: AtomicU64::new(0),
+    }));
+    let placer = e.register(Arc::new(Placer { seen }));
+    let reader = e.register(Arc::new(Reader));
+    let u = e.new_unit();
+    let at = |n: NodeId| v.int(i64::try_from(n.raw()).unwrap());
+    let _a = e.push(u, def, vec![v.field("a").0, v.int(0)]);
+    let b = e.push(u, def, vec![v.field("b").0, v.int(0)]);
+    let c = e.push(u, def, vec![v.field("m").0, v.int(100)]);
+    let q = e.push(u, placer, vec![at(b), v.int(7), v.int(1)]);
+    let p = e.push(u, placer, vec![at(b), v.int(8), v.int(2)]);
+    let r = e.push(u, reader, vec![]);
+    let rep = e.evaluate(threads).unwrap();
+    let g = e.placed_by(q)[0];
+    let f = e.placed_by(p)[0];
+    assert!(e.before(g, f) && e.before(f, c), "B, G, F, C: {rep:?}");
+    assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(100), "{rep:?}");
+
+    // F placed after G: it stands there, kept
+    e.replace(p, placer, vec![at(g), v.int(8), v.int(2)]);
+    let rep = e.evaluate(threads).unwrap();
+    assert_eq!(e.placed_by(p), vec![f], "F kept: {rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+
+    // G placed after C: F, placed after G, goes with it
+    e.replace(q, placer, vec![at(c), v.int(7), v.int(1)]);
+    let rep = e.evaluate(threads).unwrap();
+    assert_eq!(e.placed_by(q), vec![g], "G relocated: {rep:?}");
+    assert!(
+        e.before(c, g) && e.before(g, f),
+        "C, G, F as a clean evaluation stands them: {rep:?}"
+    );
+    assert_eq!(e.output(g).and_then(|x| v.as_int(x)), Some(100), "{rep:?}");
+    assert_eq!(e.output(f).and_then(|x| v.as_int(x)), Some(7), "{rep:?}");
+    assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(8), "{rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+#[test]
+fn a_node_kept_after_another_node_moves_with_it() {
+    kept_anchor(1);
+    kept_anchor(4);
+}

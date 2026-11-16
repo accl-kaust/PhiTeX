@@ -1650,6 +1650,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                             slot
                         );
                     }
+                    // (kept, it is placed after the node it is placed after
+                    // now: what moves that node moves it, `relocate`, and
+                    // the checks of slots under a node, `slot_under`, find
+                    // it under the node it stands under; with its last
+                    // anchor it stayed behind when that one moved, and was
+                    // foreign between its new anchor and its continuation,
+                    // which was made anew, #45)
+                    kn.anchor.store(anchor.raw() + 1, Ordering::Release);
+                    kn.slot.store(slot, Ordering::Release);
                     placed.push(k);
                     kept_end = Some(k);
                     prev = Some(k);
