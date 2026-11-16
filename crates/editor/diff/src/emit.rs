@@ -80,6 +80,15 @@ pub struct Em<'a> {
     /// `out`, length, where in `new`), in order, for the map back to the
     /// user's files ([`crate::DiffOut::map`]).
     pub spans: Vec<(usize, usize, usize)>,
+    /// Where each added token's text was written inside the markup of a
+    /// run of added text (`\DIFadd{…}`): (where in `new`, where in `out`,
+    /// the markup command it is inside, none: at a place outside any),
+    /// in order. A cut there ([`crate::split`]) closes the markup and
+    /// opens it again after the cut.
+    pub adds: Vec<(usize, usize, Option<&'static str>)>,
+    /// The added tokens in the buffer not written yet: where in `new`,
+    /// where in the buffer.
+    pending: Vec<(usize, usize)>,
 }
 
 impl<'a> Em<'a> {
@@ -95,6 +104,15 @@ impl<'a> Em<'a> {
             section: None,
             nl: false,
             spans: Vec::new(),
+            adds: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    /// The added text at `at` in `new` is at `off` in the buffer.
+    fn added(&mut self, side: Side, at: usize, off: usize) {
+        if side == Side::Add {
+            self.pending.push((at, off));
         }
     }
 
@@ -307,11 +325,22 @@ impl<'a> Em<'a> {
                     self.flush(&mut buf, side, ctx);
                     self.comment_out(text);
                 }
-                Kind::Word | Kind::Safe | Kind::Math | Kind::Ws => buf.push_str(text),
+                Kind::Word | Kind::Safe | Kind::Math | Kind::Ws => {
+                    self.added(side, t.start, buf.len());
+                    // (and the white space after it: a file may end there)
+                    if t.cend > t.start && t.cend < t.end {
+                        self.added(side, t.cend, buf.len() + (t.cend - t.start));
+                    }
+                    buf.push_str(text);
+                }
                 Kind::Mbox => {
+                    self.added(side, t.start, buf.len());
                     buf.push_str("\\mbox{");
                     buf.push_str(&src[t.start..t.cend]);
                     buf.push_str("}\\hskip0pt ");
+                    if t.cend < t.end {
+                        self.added(side, t.cend, buf.len());
+                    }
                     buf.push_str(&src[t.cend..t.end]);
                 }
                 Kind::Comment => {
@@ -582,15 +611,30 @@ impl<'a> Em<'a> {
         if buf.is_empty() {
             return;
         }
+        let pending = std::mem::take(&mut self.pending);
         if buf.trim().is_empty() {
             self.push(buf);
+            let at = self.out.len() - buf.len();
+            self.adds
+                .extend(pending.iter().map(|&(n, o)| (n, at + o, None)));
         } else {
-            let cmd = match side {
-                Side::Add => "DIFadd",
-                Side::Del => "DIFdel",
+            let cmd = match (side, ctx.fl) {
+                (Side::Add, false) => "DIFadd",
+                (Side::Add, true) => "DIFaddFL",
+                (Side::Del, false) => "DIFdel",
+                (Side::Del, true) => "DIFdelFL",
             };
-            let fl = if ctx.fl { "FL" } else { "" };
-            self.push(&format!("\\{cmd}{fl}{{{buf}}}"));
+            let s = format!("\\{cmd}{{{buf}}}");
+            self.push(&s);
+            let at = self.out.len() - s.len();
+            let open = cmd.len() + 2;
+            self.adds.extend(pending.iter().map(|&(n, o)| {
+                if o == 0 {
+                    (n, at, None)
+                } else {
+                    (n, at + open + o, Some(cmd))
+                }
+            }));
         }
         buf.clear();
     }

@@ -29,7 +29,8 @@ use crate::emit::{self, Em};
 use crate::myers::patience as lcs;
 use crate::tok::{self, Kind, SECTIONS, Tok};
 use crate::{
-    Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, loads, map_runs,
+    Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, head_spans,
+    loads, map_runs, split,
 };
 use phitex_source::{SyntaxKind, Tree};
 use std::fmt::Write as _;
@@ -128,6 +129,9 @@ struct Run {
     /// The runs of `out` that are the new text as it is (`Em::spans`,
     /// from the run's text's start).
     spans: Vec<(usize, usize, usize)>,
+    /// The added tokens' places in the markup (`Em::adds`, from the
+    /// run's text's start).
+    adds: Vec<(usize, usize, Option<&'static str>)>,
 }
 
 struct RunChange {
@@ -615,6 +619,7 @@ impl Side {
             section,
             changes,
             spans: em.spans,
+            adds: em.adds,
         }
     }
 
@@ -630,6 +635,7 @@ impl Side {
         let mut c = 0;
         // (the runs of `tex` that are the new text as it is, for the map)
         let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        let mut adds: Vec<(usize, usize, Option<&'static str>)> = Vec::new();
         let put = |tex: &mut String, s: &str, nl: &mut bool| -> bool {
             if s.is_empty() {
                 return false;
@@ -664,6 +670,7 @@ impl Side {
                         nl = run.nl;
                     }
                     spans.extend(run.spans.iter().map(|&(o, l, f)| (at + o, l, pos + f)));
+                    adds.extend(run.adds.iter().map(|&(n, o, c)| (pos + n, at + o, c)));
                     for rc in &run.changes {
                         let r = &rc.raw;
                         let new = (pos + r.new.0, pos + r.new.1);
@@ -695,11 +702,18 @@ impl Side {
         if nl {
             tex.push('\n');
         }
+        let flat_spans: Vec<_> = head_spans(self.body, self.head.len())
+            .iter()
+            .chain(&spans)
+            .copied()
+            .collect();
+        let split = split(&tex, &self.flat, &flat_spans, &adds);
         DiffOut {
             tex,
             changes,
             files: self.flat.files.clone(),
             map: map_runs(&spans, &self.flat),
+            split,
         }
     }
 }
