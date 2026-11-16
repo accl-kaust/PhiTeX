@@ -624,12 +624,10 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     # build and loads it into a twin in its process (Build::save,
     # Build::load), which must run no node with nothing changed and give
     # the build's PDF, log and files; the next edit goes to the twin too,
-    # its runs and outputs the build's. Red: a load refused; a loaded
-    # build that ran a node unchanged or gave other bytes; an edit whose
-    # twin differs where the build held no link state the save leaves
-    # out, or one that held it (pdfTeX's pages kept for the link, its
-    # read-time commands: `not saved:` in the load's line), named so: red
-    # until the save keeps it (spec §2.2.4).
+    # its outputs the build's (and at -j 1 its runs). Red: a load refused;
+    # a loaded build that ran a node unchanged or gave other bytes; an
+    # edit whose twin differs. Nothing is carved out: pdfTeX's link state
+    # (its pages and read-time commands) is saved (spec §2.2.4).
     k=$1 n=$2 j=${3:-1}
     fetched
     bin=$w/bin/cli/rel/phitex
@@ -659,15 +657,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
         if grep -aq 'graph-check: load refused\|graph-check: load: DIFFER' "$e"; then
           red "persist: $id: $(grep -a -m1 'graph-check: load refused\|graph-check: load: DIFFER' "$e" | cut -c1-300)"
         elif grep -aq 'graph-check: edit [0-9]*: DIFFER' "$e"; then
-          # (an edit's twin that ran otherwise at -j1: red, named as such;
-          # then one whose output differs, the link state not saved named)
-          if grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep -vq 'runs by op same\|not compared'; then
-            red "persist: $id: $(grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep -v 'runs by op same\|not compared' | head -1 | cut -c1-300)"
-          elif grep -a 'graph-check: load:' "$e" | grep -vq "the link's 0 pages and 0 commands"; then
-            red "persist: $id: an edit after a load differs; the link's state not saved (spec §2.2.4): $(grep -a -o "the link's [0-9]* pages and [0-9]* commands" "$e" | tail -1); $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-200)"
-          else
-            red "persist: $id: $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-300)"
-          fi
+          red "persist: $id: $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-300)"
         fi
       done
       grep -q 'graph-check: load' "$r/graph-check.txt" || red "persist: no graph-check line: PHITEX_GRAPH_CHECK did not reach the watches"

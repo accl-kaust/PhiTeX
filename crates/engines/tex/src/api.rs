@@ -19,7 +19,7 @@ use phitex_source::pass;
 
 use crate::hints::Defs;
 
-mod persist;
+pub(crate) mod persist;
 use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};

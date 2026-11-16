@@ -315,14 +315,15 @@ impl CmdOut {
     }
 }
 
-/// A read-time command's step on the writer, as the link applies it.
-pub(crate) type CmdFn =
-    Box<dyn FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send>;
+mod save;
+pub(crate) mod step;
+pub(crate) use save::{load_link, save_link};
+use step::Step;
 
 /// A read-time command as the build keeps it for the link ([`command`]):
 /// its step, the fonts it names, the writer's parameters where it ran.
 pub(crate) struct Cmd {
-    f: Mutex<CmdFn>,
+    step: Step,
     fonts: Fonts,
     wparams: WParams,
     /// What the command is apart from its fonts (its node, its place
@@ -1195,23 +1196,34 @@ pub(crate) fn form_fonts(r: &mut Run<'_, '_>) -> R<Vec<u32>> {
 /// an image (a page shipped, an `\immediate` image) is given them with
 /// the map.
 pub(crate) fn image_fonts(r: &mut Run<'_, '_>, fonts: &mut Fonts) -> R<()> {
-    let v = r.v;
+    if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
+        eprintln!("  image fonts for node {}", r.cx.node().raw());
+    }
+    let mut a = Recording { r, ans: Vec::new() };
+    image_fonts_with(&mut a, fonts)?;
+    if let Some(rec) = fonts.rec.as_mut() {
+        rec.image = true;
+        rec.ans.extend(a.ans);
+    }
+    Ok(())
+}
+
+/// [`image_fonts`] of a font step ([`FontAsk`]).
+fn image_fonts_with<'v>(r: &mut impl FontAsk<'v>, fonts: &mut Fonts) -> R<()> {
+    let v = r.v();
     let names: Vec<String> = r
-        .get_loc(crate::fields::cell::PDF_IMAGEFILES)?
+        .cell(crate::fields::cell::PDF_IMAGEFILES)?
         .map(|x| list_of(v, x))
         .unwrap_or_default()
         .iter()
         .map(|&n| str_of(v, n))
         .collect();
-    if crate::exec::obs_flag!("PHITEX_PDF_TRACE") {
-        eprintln!("  image fonts for node {}: {names:?}", r.cx.node().raw());
-    }
     if names.is_empty() {
         return Ok(());
     }
-    fonts.ps = default_ps_map(r)?;
+    fonts.ps = default_ps_map_with(r)?;
     for n in names {
-        if let Some(b) = file_bytes(r, &n)? {
+        if let Some(b) = writer_bytes(r, &n)? {
             fonts.files.insert(n.into_bytes(), b);
         }
     }
@@ -1328,6 +1340,9 @@ pub(crate) struct Fonts {
     /// An expandable virtual font's stretch and shrink limits: its local
     /// fonts are expanded where it is read in (`vf_def_font`).
     vf_exp: FxHashMap<FontId, (i32, i32)>,
+    /// What the run that made them read ([`FontsRec`]): none for fonts
+    /// made of no run's reads.
+    pub(crate) rec: Option<Box<FontsRec>>,
 }
 
 /// The first handle of a virtual font's local font in a step's fonts
@@ -1466,7 +1481,12 @@ fn ps_maps() -> &'static PsCache {
 
 /// `pdftex.map` by PostScript name: a pure function's memo.
 pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
-    let v = r.v;
+    default_ps_map_with(&mut Recording { r, ans: Vec::new() })
+}
+
+/// [`default_ps_map`] of a font step ([`FontAsk`]).
+fn default_ps_map_with<'v>(r: &mut impl FontAsk<'v>) -> R<Option<Arc<PsMap>>> {
+    let v = r.v();
     let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
@@ -1585,11 +1605,23 @@ fn store_scaled_f(sq: i32, z: i32) -> i32 {
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
     let v = r.v;
+    Ok(writer_lookup(r, name)?.and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
+}
+
+/// The file the writer reads, found ([`file_bytes`]).
+fn writer_lookup(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
     // (the writer's lookup: a file absent here is no read-back point)
     let was = std::mem::replace(&mut r.writer_lookup, true);
     let found = r.font_file(name);
     r.writer_lookup = was;
-    Ok(found?.and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
+    found
+}
+
+/// [`file_bytes`] of a font step ([`FontAsk`]).
+fn writer_bytes<'v>(r: &mut impl FontAsk<'v>, name: &str) -> R<Option<Arc<[u8]>>> {
+    let v = r.v();
+    Ok(r.writer_file(name)?
+        .and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
 }
 
 /// A file's text `t` as its bytes, one shared copy per text: a pure
@@ -1604,8 +1636,8 @@ pub(crate) fn text_bytes(v: &Values, t: ValueId) -> Arc<[u8]> {
 }
 
 /// `pdftex.map`, parsed.
-fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
-    let v = r.v;
+fn default_map_with<'v>(r: &mut impl FontAsk<'v>) -> R<Option<Arc<Map>>> {
+    let v = r.v();
     let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
@@ -1622,7 +1654,200 @@ fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
 /// The fonts `ids` as the writer asks for them, with the files of the
 /// map lines read so far; `space`: with `pdftexspace` too.
 pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Fonts> {
-    fonts_for_with(r, ids, space, true)
+    fonts_recorded(r, ids, space, true)
+}
+
+/// One answer a font step was given ([`FontAsk`]), in the order it
+/// asked: a value (a font's info, a file found, a cell), an expanded
+/// font's parameters, a PK request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Ans {
+    X(Option<ValueId>),
+    Exp(Option<(i32, i32, i32, bool)>),
+    Pk(String, String),
+}
+
+/// What made a step's fonts ([`Fonts::rec`]): the question
+/// ([`fonts_for_with`]'s arguments, then whether [`image_fonts`] was
+/// asked too) and every answer the run gave, in order. The fonts are a
+/// function of it: a graph loaded makes them again by answering the same
+/// questions from it ([`fonts_again`]): the persisted graph's record of
+/// a page's or a command's fonts (docs/spec-persisted-graph.md §2.2.4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FontsRec {
+    pub ids: Vec<u32>,
+    pub space: bool,
+    pub read_in: bool,
+    pub image: bool,
+    pub ans: Vec<Ans>,
+}
+
+impl FontsRec {
+    /// The values its answers hold.
+    pub(crate) fn values(&self, keep: &mut dyn FnMut(ValueId)) {
+        for a in &self.ans {
+            if let Ans::X(Some(x)) = a {
+                keep(*x);
+            }
+        }
+    }
+}
+
+/// What a font step reads ([`fonts_for_with`], [`image_fonts_with`]):
+/// the run's state (`Recording`, each answer kept), or the answers a
+/// run gave, again (`Replay`).
+pub(crate) trait FontAsk<'v> {
+    fn v(&self) -> &'v Values;
+    /// Font `f`'s info field.
+    fn info(&mut self, f: u32) -> R<Option<ValueId>>;
+    /// A font file found (`Run::font_file`).
+    fn font_file(&mut self, name: &str) -> R<Option<ValueId>>;
+    /// A file the writer reads ([`file_bytes`]'s lookup).
+    fn writer_file(&mut self, name: &str) -> R<Option<ValueId>>;
+    /// `crate::pdfprim::expand_params`.
+    fn expand(&mut self, f: i64) -> R<Option<(i32, i32, i32, bool)>>;
+    /// [`pk_request`].
+    fn pk(&mut self, name: &str, size: i32, dsize: i32) -> R<(String, String)>;
+    /// A static cell (`Run::get_loc`).
+    fn cell(&mut self, c: u32) -> R<Option<ValueId>>;
+}
+
+/// The run's answers, each kept in `ans`.
+struct Recording<'q, 'c, 'a> {
+    r: &'q mut Run<'c, 'a>,
+    ans: Vec<Ans>,
+}
+
+impl<'a> FontAsk<'a> for Recording<'_, '_, 'a> {
+    fn v(&self) -> &'a Values {
+        self.r.v
+    }
+    fn info(&mut self, f: u32) -> R<Option<ValueId>> {
+        let x = self.r.font_get(f, crate::fields::FontCell::Info)?;
+        self.ans.push(Ans::X(x));
+        Ok(x)
+    }
+    fn font_file(&mut self, name: &str) -> R<Option<ValueId>> {
+        let x = self.r.font_file(name)?;
+        self.ans.push(Ans::X(x));
+        Ok(x)
+    }
+    fn writer_file(&mut self, name: &str) -> R<Option<ValueId>> {
+        let x = writer_lookup(self.r, name)?;
+        self.ans.push(Ans::X(x));
+        Ok(x)
+    }
+    fn expand(&mut self, f: i64) -> R<Option<(i32, i32, i32, bool)>> {
+        let x = crate::pdfprim::expand_params(self.r, f)?;
+        self.ans.push(Ans::Exp(x));
+        Ok(x)
+    }
+    fn pk(&mut self, name: &str, size: i32, dsize: i32) -> R<(String, String)> {
+        let (a, b) = pk_request(self.r, name, size, dsize)?;
+        self.ans.push(Ans::Pk(a.clone(), b.clone()));
+        Ok((a, b))
+    }
+    fn cell(&mut self, c: u32) -> R<Option<ValueId>> {
+        let x = self.r.get_loc(c)?;
+        self.ans.push(Ans::X(x));
+        Ok(x)
+    }
+}
+
+/// A run's answers given again, in their order ([`fonts_again`]); `bad`
+/// where a question is not of the kind answered, or none is left.
+struct Replay<'v, 'q> {
+    v: &'v Values,
+    ans: &'q [Ans],
+    i: usize,
+    bad: bool,
+}
+
+impl Replay<'_, '_> {
+    fn next(&mut self) -> Option<&Ans> {
+        let a = self.ans.get(self.i);
+        self.i += 1;
+        if a.is_none() {
+            self.bad = true;
+        }
+        a
+    }
+    fn x(&mut self) -> Option<ValueId> {
+        if let Some(Ans::X(x)) = self.next() {
+            return *x;
+        }
+        self.bad = true;
+        None
+    }
+}
+
+impl<'v> FontAsk<'v> for Replay<'v, '_> {
+    fn v(&self) -> &'v Values {
+        self.v
+    }
+    fn info(&mut self, _: u32) -> R<Option<ValueId>> {
+        Ok(self.x())
+    }
+    fn font_file(&mut self, _: &str) -> R<Option<ValueId>> {
+        Ok(self.x())
+    }
+    fn writer_file(&mut self, _: &str) -> R<Option<ValueId>> {
+        Ok(self.x())
+    }
+    fn expand(&mut self, _: i64) -> R<Option<(i32, i32, i32, bool)>> {
+        if let Some(Ans::Exp(x)) = self.next() {
+            return Ok(*x);
+        }
+        self.bad = true;
+        Ok(None)
+    }
+    fn pk(&mut self, _: &str, _: i32, _: i32) -> R<(String, String)> {
+        if let Some(Ans::Pk(a, b)) = self.next() {
+            return Ok((a.clone(), b.clone()));
+        }
+        self.bad = true;
+        Ok((String::new(), String::new()))
+    }
+    fn cell(&mut self, _: u32) -> R<Option<ValueId>> {
+        Ok(self.x())
+    }
+}
+
+/// [`fonts_for_with`] of the run, its answers kept with the fonts
+/// ([`Fonts::rec`]).
+fn fonts_recorded(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) -> R<Fonts> {
+    let mut a = Recording { r, ans: Vec::new() };
+    let mut out = fonts_for_with(&mut a, ids, space, read_in)?;
+    out.rec = Some(Box::new(FontsRec {
+        ids: ids.to_vec(),
+        space,
+        read_in,
+        image: false,
+        ans: a.ans,
+    }));
+    Ok(out)
+}
+
+/// The fonts of record `rec` made again of `v`'s values: the questions
+/// its run asked, answered as they were. `None` where it asks another
+/// question than its run did, or fewer (the record is not of these
+/// fonts).
+pub(crate) fn fonts_again(v: &Values, rec: FontsRec) -> Option<Fonts> {
+    let mut a = Replay {
+        v,
+        ans: &rec.ans,
+        i: 0,
+        bad: false,
+    };
+    let mut out = fonts_for_with(&mut a, &rec.ids, rec.space, rec.read_in).ok()?;
+    if rec.image {
+        image_fonts_with(&mut a, &mut out).ok()?;
+    }
+    if a.bad || a.i != rec.ans.len() {
+        return None;
+    }
+    out.rec = Some(Box::new(rec));
+    Some(out)
 }
 
 /// [`fonts_for`]; `read_in`: the virtual fonts read in (`do_vf`: their
@@ -1630,8 +1855,13 @@ pub(crate) fn fonts_for(r: &mut Run<'_, '_>, ids: &[u32], space: bool) -> R<Font
 /// step that reads no font in, `\\pdffontattr`'s: the link numbers no
 /// local font for it, [`FontNums::resolve`]).
 #[allow(clippy::too_many_lines)]
-fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) -> R<Fonts> {
-    let v = r.v;
+fn fonts_for_with<'v>(
+    r: &mut impl FontAsk<'v>,
+    ids: &[u32],
+    space: bool,
+    read_in: bool,
+) -> R<Fonts> {
+    let v = r.v();
     let mut out = Fonts::default();
     // (no font asked, a PDF command's (a link, a destination): nothing of
     // the map, the loads' numbers or the fonts read, only the map lines'
@@ -1640,7 +1870,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
         map_line_files(r, &mut out)?;
         return Ok(out);
     }
-    let map = default_map(r)?;
+    let map = default_map_with(r)?;
     // the fonts' fields, defined once at their loads (`[id, name, size,
     // file, size asked]`), then the virtual fonts' local fonts
     // (`vf_def_font`): a local font of a name and size this step has is
@@ -1648,7 +1878,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
     // the document's font table is read, the link numbers the local fonts
     let mut known: Vec<(u32, crate::fonts::Info)> = Vec::new();
     for &f in ids {
-        if let Some(i) = crate::fonts::info(v, r.font_get(f, crate::fields::FontCell::Info)?)
+        if let Some(i) = crate::fonts::info(v, r.info(f)?)
             && i.file.is_some()
             && !known.iter().any(|x| x.0 == f)
         {
@@ -1675,9 +1905,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                 continue;
             };
             if !known.iter().any(|x| x.0 == g) {
-                let Some(i) = crate::fonts::info(v, r.font_get(g, crate::fields::FontCell::Info)?)
-                    .filter(|i| i.file.is_some())
-                else {
+                let Some(i) = crate::fonts::info(v, r.info(g)?).filter(|i| i.file.is_some()) else {
                     continue;
                 };
                 known.push((g, i));
@@ -1702,9 +1930,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                 continue;
             };
             if !known.iter().any(|x| x.0 == g) {
-                let Some(i) = crate::fonts::info(v, r.font_get(g, crate::fields::FontCell::Info)?)
-                    .filter(|i| i.file.is_some())
-                else {
+                let Some(i) = crate::fonts::info(v, r.info(g)?).filter(|i| i.file.is_some()) else {
                     continue;
                 };
                 known.push((g, i));
@@ -1722,13 +1948,13 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             );
             continue;
         }
-        let Some(b) = file_bytes(r, &format!("{name}.vf"))? else {
+        let Some(b) = writer_bytes(r, &format!("{name}.vf"))? else {
             continue;
         };
         let Ok(vf) = phitex_tfm::parse_vf(&b) else {
             continue;
         };
-        if let Some((st, sh, _, _)) = crate::pdfprim::expand_params(r, i64::from(f))? {
+        if let Some((st, sh, _, _)) = r.expand(i64::from(f))? {
             out.vf_exp.insert(f, (st, sh));
         }
         let mut fonts = Vec::new();
@@ -1868,7 +2094,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
         };
         let mut get = |n: Option<&[u8]>| -> R<Option<Arc<[u8]>>> {
             match n {
-                Some(n) => file_bytes(r, &String::from_utf8_lossy(n)),
+                Some(n) => writer_bytes(r, &String::from_utf8_lossy(n)),
                 None => Ok(None),
             }
         };
@@ -1882,8 +2108,8 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             && i.ex.is_none()
             && !out.vfs.contains_key(&id)
         {
-            let (key, request) = pk_request(r, &name, l.at.size, l.at.design_size)?;
-            if let Some(b) = file_bytes(r, &request)? {
+            let (key, request) = r.pk(&name, l.at.size, l.at.design_size)?;
+            if let Some(b) = writer_bytes(r, &request)? {
                 out.files.insert(key.into_bytes(), b);
             }
         }
@@ -1935,10 +2161,10 @@ pub(crate) fn pk_request(
 
 /// The files of the `\pdfmapline`s and `\pdfmapfile`s read so far, into
 /// `out` ([`fonts_for`]).
-fn map_line_files(r: &mut Run<'_, '_>, out: &mut Fonts) -> R<()> {
-    let v = r.v;
+fn map_line_files<'v>(r: &mut impl FontAsk<'v>, out: &mut Fonts) -> R<()> {
+    let v = r.v();
     let maps_cell = r
-        .get_loc(crate::fields::cell::PDF_MAPS)?
+        .cell(crate::fields::cell::PDF_MAPS)?
         .map(|x| list_of(v, x))
         .unwrap_or_default();
     // (`PHITEX_FONTS_TRACE=1`, observe: what a page's font step reads)
@@ -1964,7 +2190,7 @@ fn map_line_files(r: &mut Run<'_, '_>, out: &mut Fonts) -> R<()> {
         let mut lines: Vec<MapEntry> = Vec::new();
         if file {
             let name = t.split(' ').next().unwrap_or_default().to_owned();
-            if let Some(b) = file_bytes(r, &name)? {
+            if let Some(b) = writer_bytes(r, &name)? {
                 out.files.insert(name.into_bytes(), b.clone());
                 lines.extend(parse_map(&b).into_values());
             }
@@ -1974,7 +2200,7 @@ fn map_line_files(r: &mut Run<'_, '_>, out: &mut Fonts) -> R<()> {
         for m in lines {
             for n in [m.ff_name.clone(), m.encname.clone()].into_iter().flatten() {
                 if !out.files.contains_key(&n)
-                    && let Some(b) = file_bytes(r, &String::from_utf8_lossy(&n))?
+                    && let Some(b) = writer_bytes(r, &String::from_utf8_lossy(&n))?
                 {
                     out.files.insert(n, b);
                 }
@@ -2070,7 +2296,7 @@ pub(crate) fn warm_g2u(v: &Values, t: ValueId) {
 }
 
 /// A read-time command on the writer in PDF mode, with the fonts it
-/// names: recorded in the line ([`XPAGES`]) where it runs, its step `f`
+/// names: recorded in the line ([`XPAGES`]) where it runs, its step
 /// kept for the link ([`Cmd`]). Nothing is read back: what TeX reads of
 /// it is the caller's own count, as pdfTeX's counters give it
 /// ([`page_offset`]); always `None`.
@@ -2078,9 +2304,9 @@ pub(crate) fn command(
     r: &mut Run<'_, '_>,
     input: ValueId,
     fonts: &[u32],
-    mut f: impl FnMut(&mut PdfState, &dyn FontSource) -> CmdOut + Send + 'static,
+    step: Step,
 ) -> R<Option<CmdOut>> {
-    command_forms(r, input, fonts, move |st, _, fs, _| f(st, fs))
+    command_with(r, input, fonts, true, step)
 }
 
 /// [`command`] for a step that reads no font in (`\\pdffontattr`,
@@ -2093,37 +2319,25 @@ pub(crate) fn command_unread(
     r: &mut Run<'_, '_>,
     input: ValueId,
     fonts: &[u32],
-    mut f: impl FnMut(&mut PdfState, &dyn FontSource) -> CmdOut + Send + 'static,
+    step: Step,
 ) -> R<Option<CmdOut>> {
-    command_with(r, input, fonts, false, move |st, _, fs, _| f(st, fs))
+    command_with(r, input, fonts, false, step)
 }
 
-/// [`command`], the forms' table in reach, and the read-time numbers
-/// the link numbered otherwise ([`Reloc`]: a number TeX read back that
-/// the command names, `\pdfobj useobjnum`, is the writer's object).
-pub(crate) fn command_forms(
-    r: &mut Run<'_, '_>,
-    input: ValueId,
-    fonts: &[u32],
-    f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send + 'static,
-) -> R<Option<CmdOut>> {
-    command_with(r, input, fonts, true, f)
-}
-
-/// [`command_forms`]; `read_in`: its fonts' virtual files read
+/// [`command`]; `read_in`: its fonts' virtual files read
 /// ([`fonts_for_with`]).
 fn command_with(
     r: &mut Run<'_, '_>,
     input: ValueId,
     fonts: &[u32],
     read_in: bool,
-    f: impl FnMut(&mut PdfState, &mut Forms, &dyn FontSource, &Reloc) -> CmdOut + Send + 'static,
+    step: Step,
 ) -> R<Option<CmdOut>> {
     if r.param("pdfoutput")? <= 0 {
         return Ok(None);
     }
     let v = r.v;
-    let mut fs = fonts_for_with(r, fonts, false, read_in)?;
+    let mut fs = fonts_recorded(r, fonts, false, read_in)?;
     // (an image the command writes: the files its fonts ask for)
     image_fonts(r, &mut fs)?;
     let wparams = writer_params(r)?;
@@ -2148,7 +2362,7 @@ fn command_with(
         &r.ops.pdf_cmds,
         serial,
         Cmd {
-            f: Mutex::new(Box::new(f)),
+            step,
             fonts: fs,
             wparams,
             words: words.into(),
@@ -2189,6 +2403,10 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
     for pc in m.values().filter(|pc| pc.inst == inst) {
         pc.params.iter().chain(&pc.lazy).for_each(|&x| keep(x));
         keep(pc.page);
+        pc.whats.at.iter().for_each(|&(_, x, _)| keep(x));
+        if let Some(r) = &pc.fonts.rec {
+            r.values(keep);
+        }
         pc.base_in
             .g2u
             .into_iter()
@@ -2200,16 +2418,16 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
     forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
 }
 
-/// (the persisted graph, `crate::api::Build::save`) How many pages of the
-/// build of store `v` the link's memo holds ([`pieces`]): kept in the
-/// process only (their fonts and boxes are no values), none saved.
-pub(crate) fn pieces_held(v: &Values) -> usize {
-    let inst = v.instance();
-    pieces()
-        .locked()
-        .values()
-        .filter(|pc| pc.inst == inst)
-        .count()
+/// At a collection: the values the build's read-time commands were made
+/// of ([`Step::values`]) and their fonts read ([`FontsRec`]), given to
+/// `keep`: a build saved after it saves them (`crate::api::Build::save`).
+pub(crate) fn collect_cmds(cmds: &CmdMemo, keep: &mut dyn FnMut(ValueId)) {
+    for c in cmds.locked().values() {
+        c.step.values(keep);
+        if let Some(r) = &c.fonts.rec {
+            r.values(keep);
+        }
+    }
 }
 
 /// At a collection: the link's memos of the last link dropped (the line,
@@ -2459,17 +2677,24 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
     }
 }
 
-/// The writer's whatsit of a node's data as `\shipout` resolves it, or
-/// `None` for what the writer does not see.
-pub(crate) fn writer_whatsit(r: &mut Run<'_, '_>, w: ValueId) -> R<Option<Whatsit>> {
+/// What the writer's whatsit of node data `w` is made of, as `\shipout`
+/// resolves it: a `\special`'s node, the writer's data of a pdfTeX
+/// whatsit, or nothing the writer sees ([`step::form_data`]).
+pub(crate) fn writer_whatsit_src(r: &mut Run<'_, '_>, w: ValueId) -> R<step::WhatSrc> {
     let v = r.v;
     let xs = list_of(v, w);
     if xs.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-        return Ok(Some(Whatsit::Special(bytes_of(
-            &xs.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-        ))));
+        return Ok(step::WhatSrc::Special(w));
     }
-    Ok(crate::pdfprim::writer_data(r, &xs)?.and_then(|d| whatsit(v, d)))
+    Ok(crate::pdfprim::writer_data(r, &xs)?.map_or(step::WhatSrc::None, step::WhatSrc::Data))
+}
+
+/// The writer's whatsit of `\special` node `w`.
+fn special_whatsit(v: &Values, w: ValueId) -> Whatsit {
+    let xs = list_of(v, w);
+    Whatsit::Special(bytes_of(
+        &xs.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+    ))
 }
 
 /// The action of `\pdfcatalog ... openaction` (pdfTeX §1564).
@@ -4511,7 +4736,7 @@ pub(crate) fn object_key(fonts: &Fonts, id: FontId) -> String {
 /// Font `f`'s [`object_key`] as a read-time command sees it.
 pub(crate) fn read_object_key(r: &mut Run<'_, '_>, f: i64) -> R<String> {
     let id = u32::try_from(f).unwrap_or(0);
-    let fs = fonts_for_with(r, &[id], false, false)?;
+    let fs = fonts_recorded(r, &[id], false, false)?;
     Ok(object_key(&fs, id))
 }
 
@@ -5357,7 +5582,7 @@ pub(crate) fn form_whatsit_nums(
     r: &mut Run<'_, '_>,
     raw: &[ValueId],
     data: &mut [Option<Whatsit>],
-) -> R<()> {
+) -> R<Vec<(u64, usize)>> {
     let v = r.v;
     let mut map = Reloc::new();
     for &w in raw {
@@ -5389,7 +5614,7 @@ pub(crate) fn form_whatsit_nums(
             }
         }
     }
-    Ok(())
+    Ok(map.into_iter().collect())
 }
 
 /// Whatsit `w` with its object numbers as the link numbered them.
@@ -6331,10 +6556,7 @@ fn link(
                     if own.is_some() {
                         pad_objects(&mut st, usize::try_from(rt - 1).unwrap_or(0));
                     }
-                    let out = {
-                        let mut g = c.f.locked();
-                        (*g)(&mut st, &mut forms, &src, &reloc)
-                    };
+                    let out = c.step.apply(&mut st, &mut forms, &src, &reloc);
                     if let Some(a) = own
                         && out.nums.first() != Some(&rt)
                     {
@@ -6704,13 +6926,8 @@ mod tests {
     #[test]
     fn commands_whose_serials_meet_stay_apart() {
         let memo = CmdMemo::default();
-        let cmd = |input: u64, n: i64| Cmd {
-            f: Mutex::new(Box::new(
-                move |_: &mut PdfState, _: &mut Forms, _: &dyn FontSource, _: &Reloc| CmdOut {
-                    nums: vec![n],
-                    err: None,
-                },
-            )),
+        let cmd = |input: u64, n: i32| Cmd {
+            step: Step::PageRef { n },
             fonts: Fonts::default(),
             wparams: [0; 6],
             words: vec![1, 1, input].into(),

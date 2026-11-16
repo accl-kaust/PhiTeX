@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 const MAGIC: &[u8; 8] = b"PXBUILD\x01";
 /// The client's encoding's version: any change of its layout bumps it.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HASH_SEED: u64 = 0x7078_6275_696c_6431;
 
 type R<T> = Result<T, String>;
@@ -49,92 +49,79 @@ pub struct LoadStats {
     pub verified: Option<(u64, u64)>,
 }
 
-impl Build {
-    /// The link's state of this build that the saved bytes do not hold:
-    /// the exact PDF's pages kept for the link (`crate::pdfout`'s piece
-    /// memo: a page's box, its fonts as loaded) and the read-time PDF
-    /// commands' steps (`Ops::pdf_cmds`, closures). A build loaded links
-    /// without them, so an edit after a load whose link places these
-    /// differs from the build's (docs/spec-persisted-graph.md §2.2).
-    #[must_use]
-    pub fn unsaved_link_state(&self) -> (usize, usize) {
-        (
-            crate::pdfout::pieces_held(self.g.eng.values()),
-            self.g.ops.pdf_cmds.locked().len(),
-        )
-    }
-}
-
 /// The client's tables written: integers as LEB128, values by their
 /// stable ids, each given to the engine's export as a root.
-struct Enc<'a> {
-    v: &'a Values,
+pub(crate) struct Enc<'a> {
+    pub(crate) v: &'a Values,
     out: Vec<u8>,
     roots: Vec<ValueId>,
 }
 
 impl Enc<'_> {
-    fn u(&mut self, mut x: u64) {
+    pub(crate) fn u(&mut self, mut x: u64) {
         while x >= 0x80 {
             self.out.push(u8::try_from(x & 0x7f).unwrap_or(0) | 0x80);
             x >>= 7;
         }
         self.out.push(u8::try_from(x).unwrap_or(0));
     }
-    fn n(&mut self, x: usize) {
+    pub(crate) fn n(&mut self, x: usize) {
         self.u(x as u64);
     }
     /// A section's mark: a decoder out of step stops at the next one.
-    fn tag(&mut self, k: u8) {
+    pub(crate) fn tag(&mut self, k: u8) {
         self.out.push(0xa0 | k);
     }
-    fn i(&mut self, x: i64) {
+    pub(crate) fn i(&mut self, x: i64) {
         self.u(((x << 1) ^ (x >> 63)).cast_unsigned());
     }
-    fn b(&mut self, x: bool) {
+    pub(crate) fn b(&mut self, x: bool) {
         self.out.push(u8::from(x));
     }
-    fn by(&mut self, b: &[u8]) {
+    pub(crate) fn byte(&mut self, x: u8) {
+        self.out.push(x);
+    }
+    pub(crate) fn by(&mut self, b: &[u8]) {
         self.n(b.len());
         self.out.extend_from_slice(b);
     }
-    fn s(&mut self, s: &str) {
+    pub(crate) fn s(&mut self, s: &str) {
         self.by(s.as_bytes());
     }
-    fn os(&mut self, s: Option<&str>) {
+    pub(crate) fn os(&mut self, s: Option<&str>) {
         self.b(s.is_some());
         if let Some(s) = s {
             self.s(s);
         }
     }
-    fn x(&mut self, x: ValueId) {
+    pub(crate) fn x(&mut self, x: ValueId) {
         self.roots.push(x);
         let s = self.v.stable_raw(x);
         self.u(s);
     }
-    fn ox(&mut self, x: Option<ValueId>) {
+    pub(crate) fn ox(&mut self, x: Option<ValueId>) {
         self.b(x.is_some());
         if let Some(x) = x {
             self.x(x);
         }
     }
-    fn f(&mut self, f: Field) {
+    pub(crate) fn f(&mut self, f: Field) {
         self.x(f.0);
     }
-    fn fxs(&mut self, xs: &[(Field, ValueId)]) {
+    pub(crate) fn fxs(&mut self, xs: &[(Field, ValueId)]) {
         self.n(xs.len());
         for &(f, x) in xs {
             self.f(f);
             self.x(x);
         }
     }
-    fn strs(&mut self, xs: &[String]) {
+    pub(crate) fn strs(&mut self, xs: &[String]) {
         self.n(xs.len());
         for x in xs {
             self.s(x);
         }
     }
-    fn u64s(&mut self, xs: &[u64]) {
+    pub(crate) fn u64s(&mut self, xs: &[u64]) {
         self.n(xs.len());
         for &x in xs {
             self.u(x);
@@ -143,14 +130,14 @@ impl Enc<'_> {
 }
 
 /// The client's tables read back: every read checked against the end.
-struct Dec<'a> {
-    v: &'a Values,
+pub(crate) struct Dec<'a> {
+    pub(crate) v: &'a Values,
     b: &'a [u8],
     i: usize,
 }
 
 impl Dec<'_> {
-    fn u(&mut self) -> R<u64> {
+    pub(crate) fn u(&mut self) -> R<u64> {
         let mut x = 0u64;
         let mut shift = 0;
         loop {
@@ -166,7 +153,7 @@ impl Dec<'_> {
             shift += 7;
         }
     }
-    fn n(&mut self) -> R<usize> {
+    pub(crate) fn n(&mut self) -> R<usize> {
         let x = usize::try_from(self.u()?).map_err(|_| "a count out of range")?;
         if x > self.b.len().saturating_sub(self.i).saturating_mul(8) + 64 {
             return Err(format!(
@@ -179,10 +166,10 @@ impl Dec<'_> {
     }
     /// A place or a length that counts no item of the bytes (a byte
     /// of a text, nodes live).
-    fn z(&mut self) -> R<usize> {
+    pub(crate) fn z(&mut self) -> R<usize> {
         usize::try_from(self.u()?).map_err(|_| "a place out of range".into())
     }
-    fn tag(&mut self, k: u8) -> R<()> {
+    pub(crate) fn tag(&mut self, k: u8) -> R<()> {
         let at = self.i;
         if self.b.get(at) == Some(&(0xa0 | k)) {
             self.i += 1;
@@ -192,19 +179,22 @@ impl Dec<'_> {
             "the client's tables out of step at section {k} (byte {at})"
         ))
     }
-    fn i(&mut self) -> R<i64> {
+    pub(crate) fn i(&mut self) -> R<i64> {
         let x = self.u()?;
         Ok((x >> 1).cast_signed() ^ -(x & 1).cast_signed())
     }
-    fn i32(&mut self) -> R<i32> {
+    pub(crate) fn i32(&mut self) -> R<i32> {
         i32::try_from(self.i()?).map_err(|_| "an i32 out of range".into())
     }
-    fn b(&mut self) -> R<bool> {
+    pub(crate) fn b(&mut self) -> R<bool> {
+        Ok(self.byte()? != 0)
+    }
+    pub(crate) fn byte(&mut self) -> R<u8> {
         let c = *self.b.get(self.i).ok_or("the client's tables cut short")?;
         self.i += 1;
-        Ok(c != 0)
+        Ok(c)
     }
-    fn by(&mut self) -> R<Vec<u8>> {
+    pub(crate) fn by(&mut self) -> R<Vec<u8>> {
         let n = self.n()?;
         let e = self
             .i
@@ -215,35 +205,35 @@ impl Dec<'_> {
         self.i = e;
         Ok(out)
     }
-    fn s(&mut self) -> R<String> {
+    pub(crate) fn s(&mut self) -> R<String> {
         String::from_utf8(self.by()?).map_err(|_| "a string not UTF-8".into())
     }
-    fn os(&mut self) -> R<Option<String>> {
+    pub(crate) fn os(&mut self) -> R<Option<String>> {
         Ok(if self.b()? { Some(self.s()?) } else { None })
     }
-    fn x(&mut self) -> R<ValueId> {
+    pub(crate) fn x(&mut self) -> R<ValueId> {
         let s = self.u()?;
         Ok(self.v.from_stable(s))
     }
-    fn ox(&mut self) -> R<Option<ValueId>> {
+    pub(crate) fn ox(&mut self) -> R<Option<ValueId>> {
         Ok(if self.b()? { Some(self.x()?) } else { None })
     }
-    fn f(&mut self) -> R<Field> {
+    pub(crate) fn f(&mut self) -> R<Field> {
         Ok(Field(self.x()?))
     }
-    fn fxs(&mut self) -> R<Vec<(Field, ValueId)>> {
+    pub(crate) fn fxs(&mut self) -> R<Vec<(Field, ValueId)>> {
         let n = self.n()?;
         (0..n).map(|_| Ok((self.f()?, self.x()?))).collect()
     }
-    fn strs(&mut self) -> R<Vec<String>> {
+    pub(crate) fn strs(&mut self) -> R<Vec<String>> {
         let n = self.n()?;
         (0..n).map(|_| self.s()).collect()
     }
-    fn u64s(&mut self) -> R<Vec<u64>> {
+    pub(crate) fn u64s(&mut self) -> R<Vec<u64>> {
         let n = self.n()?;
         (0..n).map(|_| self.u()).collect()
     }
-    fn node(&mut self) -> R<NodeId> {
+    pub(crate) fn node(&mut self) -> R<NodeId> {
         Ok(NodeId::from_raw(self.u()?))
     }
 }
@@ -770,6 +760,10 @@ impl Build {
         let (refused, many) = crate::pic::learned();
         e.u64s(&refused);
         e.u64s(&many);
+        e.tag(13);
+        // (the link's pages and read-time commands, docs/spec-persisted-graph.md
+        // §2.2.4)
+        crate::pdfout::save_link(e, &o.pdf_cmds);
     }
 
     /// A build of the bytes [`Build::save`] wrote, in this process, with
@@ -1190,6 +1184,8 @@ impl Build {
         let refused = d.u64s()?;
         let many = d.u64s()?;
         crate::pic::learn(&refused, &many);
+        d.tag(13)?;
+        let link = crate::pdfout::load_link(&mut d)?;
         if d.i != client.len() {
             return Err("bytes left after the client's tables".into());
         }
@@ -1224,6 +1220,7 @@ impl Build {
         }
         // (the registry as saved: the analyses registered by the runs too)
         crate::hints::set_registered(&g.ops.hints, reg);
+        link.install(v, &g.ops.pdf_cmds);
         st.analysis_ms = ta.elapsed().as_secs_f64() * 1e3;
         let edits = opts.edits.clone().unwrap_or_default();
         let stats = Stats {

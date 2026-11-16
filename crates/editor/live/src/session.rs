@@ -836,7 +836,6 @@ impl Session {
         let t0 = Instant::now();
         let bytes = b.save();
         let save_ms = t0.elapsed().as_secs_f64() * 1e3;
-        let (pages, cmds) = b.unsaved_link_state();
         let opts = Options {
             edits: Some(phitex_tex::EditSender::default()),
             progress: None,
@@ -863,7 +862,7 @@ impl Session {
                 gc.checks += 1;
                 gc.differ += usize::from(!ok);
                 eprintln!(
-                    "graph-check: load: {}; save {save_ms:.1} ms {} bytes (engine {}, client {}); load {load_ms:.1} ms [import {:.1}, client {:.1} (analyses {:.1})] values {} nodes {} records {} reads {}{}; unchanged: {runs} nodes run ({eval_ms:.1} ms), pdf {}, log {}, files {}; not saved: the link's {pages} pages and {cmds} commands",
+                    "graph-check: load: {}; save {save_ms:.1} ms {} bytes (engine {}, client {}); load {load_ms:.1} ms [import {:.1}, client {:.1} (analyses {:.1})] values {} nodes {} records {} reads {}{}; unchanged: {runs} nodes run ({eval_ms:.1} ms), pdf {}, log {}, files {}",
                     if ok { "same" } else { "DIFFER" },
                     st.bytes,
                     st.engine_bytes,

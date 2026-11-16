@@ -27,8 +27,10 @@
 //! list memberships (`val::clist_projection`), each worker's encoded and
 //! decoded values (`val`), the fields by name (`fields`).
 //!
-//! Holding no value a run decodes: the command steps (`Ops::pdf_cmds`,
-//! closures over bytes), the hints (strings and fields), the package
+//! - the values the read-time commands were made of and their fonts read
+//!   (`Ops::pdf_cmds`, `pdfout::collect_cmds`), which a save keeps.
+//!
+//! Holding no value a run decodes: the hints (strings and fields), the package
 //! records (bytes), the font, map and file memos (keyed by ids, holding
 //! bytes), the output memos (compared by id, made again where one moved).
 
@@ -48,6 +50,7 @@ pub(crate) fn roots(o: &Ops, eng: &Engine, keep: &mut dyn FnMut(ValueId)) {
         .map(|k| u64::from_ne_bytes(k.to_ne_bytes()))
         .collect();
     crate::pdfout::collect_pieces(v, &live, keep);
+    crate::pdfout::collect_cmds(&o.pdf_cmds, keep);
     crate::pdfout::clear_link_memos();
     crate::assemble::clear_line_memos();
     crate::vprof::clear_decoded();
