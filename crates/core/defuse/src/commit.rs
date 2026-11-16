@@ -1634,6 +1634,22 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     && kn.rank() == rank
                     && !stranded(eng, &inner, &others, node.id, anchor, slot, sfloor, kpos, rank)
                 {
+                    if crate::obs::enabled()
+                        && crate::sched::kept_log()
+                        && (kn.anchor() != Some(anchor) || kn.slot() != slot)
+                    {
+                        elog!(
+                            "kept-anchor: node {} (op {:?}) placed by {} kept at {} anchor {:?} slot {}, placed now after {} slot {}",
+                            k.raw(),
+                            kn.op(),
+                            node.id.raw(),
+                            kpos.0,
+                            kn.anchor().map(NodeId::raw),
+                            kn.slot(),
+                            anchor.raw(),
+                            slot
+                        );
+                    }
                     placed.push(k);
                     kept_end = Some(k);
                     prev = Some(k);
