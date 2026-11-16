@@ -97,6 +97,11 @@ def one(args, c):
         # (docs/spec-persisted-graph.md, step 2: the session saves each
         # build and checks a twin loaded of it; its lines on the stderr)
         env["PHITEX_GRAPH_CHECK"] = "1"
+        # (and the caller's debug switches, PHITEX_TEX_TIME and the rest,
+        # for a difference found: what the sweep sets stays)
+        for k, x in os.environ.items():
+            if k.startswith("PHITEX_") and k not in env:
+                env[k] = x
     p = subprocess.Popen([args.bin, "watch", "--no-view", "--json", "--exact-pdf", "--no-synctex",
                           "--engine", c["engine"], "-j", str(args.threads), *args.extra, main], cwd=d, env=env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
