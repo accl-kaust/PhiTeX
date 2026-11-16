@@ -39,7 +39,7 @@ use crate::values::{Field, FxHashMap, Value, ValueId, Values, hash_bytes};
 
 const MAGIC: &[u8; 8] = b"PXGRAPH\x01";
 /// The encoding's version: any change of the bytes' layout bumps it.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HASH_SEED: u64 = 0x7078_6772_6170_6831;
 
 const C_VALUES: u32 = 1;
@@ -205,6 +205,7 @@ const V_LIST: u8 = 5;
 const V_NIL: u8 = 6;
 const V_UNIT_SEQ: u8 = 7;
 const V_CAT: u8 = 8;
+const V_BIG: u8 = 9;
 
 /// The values being written: each distinct value once, numbered in the
 /// order written, its parts (a list's elements, a rope node's halves)
@@ -251,35 +252,50 @@ impl ValueTable<'_> {
             }
             let k = u64::from(self.n);
             let rel = |at: &FxHashMap<ValueId, u32>, e: &ValueId| k - u64::from(at[e]);
+            // (a sequence's id, checked where it is made again; a plain
+            // value's place, where it is put: the importing store holds
+            // every value under the id it had here, `Values::stable_raw`)
             match self.v.seq_split(y) {
                 Some(Ok(e)) => {
                     self.out.push(V_UNIT_SEQ);
                     let d = rel(&self.at, &e);
                     put(&mut self.out, d);
+                    put(&mut self.out, self.v.stable_raw(y));
                 }
                 Some(Err((l, r))) => {
                     self.out.push(V_CAT);
                     let (dl, dr) = (rel(&self.at, &l), rel(&self.at, &r));
                     put(&mut self.out, dl);
                     put(&mut self.out, dr);
+                    put(&mut self.out, self.v.stable_raw(y));
                 }
                 None => {
                     let v = self.v;
+                    let place = v.plain_place(y);
                     v.with(y, |val| match val {
                         Value::Unit => self.out.push(V_UNIT),
                         Value::Bool(b) => self.out.push(if *b { V_TRUE } else { V_FALSE }),
-                        Value::Int(i) => {
-                            self.out.push(V_INT);
-                            put(&mut self.out, zig(*i));
-                        }
+                        Value::Int(i) => match place {
+                            Some(at) => {
+                                self.out.push(V_BIG);
+                                put(&mut self.out, at);
+                                put(&mut self.out, zig(*i));
+                            }
+                            None => {
+                                self.out.push(V_INT);
+                                put(&mut self.out, zig(*i));
+                            }
+                        },
                         Value::Str(s) => {
                             self.out.push(V_STR);
+                            put(&mut self.out, place.unwrap_or(u64::MAX));
                             put(&mut self.out, s.len() as u64);
                             self.out.extend_from_slice(s.as_bytes());
                         }
                         Value::Nil | Value::Seq(_) => self.out.push(V_NIL),
                         Value::List(xs) => {
                             self.out.push(V_LIST);
+                            put(&mut self.out, place.unwrap_or(u64::MAX));
                             put(&mut self.out, xs.len() as u64);
                             for e in xs.iter() {
                                 let d = rel(&self.at, e);
@@ -317,38 +333,64 @@ fn decode_values(store: &Values, b: &[u8]) -> R<Vec<ValueId>> {
             V_UNIT => ValueId::UNIT,
             V_FALSE => store.bool(false),
             V_TRUE => store.bool(true),
-            V_INT => store.int(unzig(c.u()?)),
+            V_INT => {
+                let x = store.int(unzig(c.u()?));
+                if store.plain_place(x).is_some() {
+                    return Err(bad("a big integer without its place"));
+                }
+                x
+            }
+            V_BIG => {
+                let at = c.u()?;
+                let i = unzig(c.u()?);
+                store.place_plain(at, Value::Int(i)).map_err(bad)?
+            }
             V_STR => {
+                let at = c.u()?;
                 let n = c.usize()?;
                 let s = std::str::from_utf8(c.bytes(n)?).map_err(|_| bad("a string not UTF-8"))?;
-                store.str(s)
+                store.place_plain(at, Value::Str(s.into())).map_err(bad)?
             }
             V_LIST => {
+                let at = c.u()?;
                 let n = c.count(1)?;
                 let mut xs = Vec::with_capacity(n);
                 for _ in 0..n {
                     xs.push(back(&vals, c.u()?)?);
                 }
-                store.list(xs)
+                store.place_plain(at, Value::List(xs.into())).map_err(bad)?
             }
             V_NIL => ValueId::NIL,
             V_UNIT_SEQ => {
                 let e = back(&vals, c.u()?)?;
-                store.seq_unit(e)
+                let x = store.seq_unit(e);
+                same_seq(store, x, c.u()?)?
             }
             V_CAT => {
                 let l = back(&vals, c.u()?)?;
                 let r = back(&vals, c.u()?)?;
-                if store.seq_split(l).is_none() || store.seq_split(r).is_none() {
-                    return Err(bad("a sequence's half not a sequence"));
-                }
-                store.seq_concat(l, r)
+                let x = store
+                    .seq_node_exact(l, r)
+                    .ok_or_else(|| bad("a sequence's half not a sequence"))?;
+                same_seq(store, x, c.u()?)?
             }
             k => return Err(bad(format!("a value of unknown kind {k}"))),
         };
         vals.push(x);
     }
     Ok(vals)
+}
+
+/// Sequence `x` as made again here, checked to have the id it had in the
+/// exporting store (`want`, [`Values::stable_raw`]): ids made from
+/// elements at the same places are the same, but for a true collision
+/// of content hashes that the two stores probed past in another order.
+fn same_seq(store: &Values, x: ValueId, want: u64) -> R<ValueId> {
+    if store.stable_raw(x) == want {
+        Ok(x)
+    } else {
+        Err(bad("a sequence's id not the one it had"))
+    }
 }
 
 /// The decoded values, by number.

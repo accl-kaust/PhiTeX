@@ -59,6 +59,14 @@ impl<T> Table<T> {
         );
     }
 
+    /// (import) `x` set at index `i`, whatever was handed out: the
+    /// indices before it not set stay empty, the next handed out after it.
+    pub(crate) fn place(&self, i: usize, x: T) {
+        assert!(i < CHUNK * CHUNKS, "table full");
+        self.set(i, x);
+        self.next.fetch_max(i + 1, Ordering::AcqRel);
+    }
+
     pub(crate) fn push(&self, x: T) -> usize {
         let i = self.reserve();
         self.set(i, x);
