@@ -8473,6 +8473,13 @@ impl Build {
         self.g.queries.clone()
     }
 
+    /// The values the build's store holds (the format's, the runs'): a
+    /// saved graph's size is about 50 bytes each ([`Build::save`]).
+    #[must_use]
+    pub fn values_held(&self) -> usize {
+        self.g.eng.values().len()
+    }
+
     /// The prelude's key: its text and every file it read.
     #[must_use]
     pub fn prelude_key(&self) -> [u8; 32] {

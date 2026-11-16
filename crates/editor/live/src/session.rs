@@ -1245,11 +1245,13 @@ impl Session {
         // docs/spec-persisted-graph.md §4.2 item 6)
         self.sink.keep_same();
         Ok(format!(
-            "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0}; checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}{}",
+            "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0} (the link's {:.0}, the analyses' {:.0}); checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}{}",
             mb(bytes.len()),
             t0.elapsed().as_secs_f64() * 1e3,
             st.import_ms,
             st.client_ms,
+            st.link_ms,
+            st.analysis_ms,
             moved.len(),
             if moved.is_empty() {
                 String::new()
@@ -1292,6 +1294,18 @@ impl Session {
         self.save_graph_locked()
     }
 
+    /// About how many bytes the build's persisted graph takes encoded
+    /// (none: no build): 64 bytes a value its store holds, over the 44-54
+    /// measured (amsldoc, acm, Grail, para4000: docs/spec-persisted-graph.md
+    /// §9). A host whose memory is fixed (the wasm core) asks for room for
+    /// the save first.
+    #[must_use]
+    pub fn graph_bytes_guess(&self) -> Option<usize> {
+        self.build
+            .as_ref()
+            .map(|b| b.values_held().saturating_mul(64))
+    }
+
     /// The persisted graph's file held for a save, against other
     /// processes' loads ([`crate::host::Records::lock_graph`]): a save
     /// begun after this process said it is done is waited for by the
@@ -1307,6 +1321,14 @@ impl Session {
     /// [`Session::save_graph`], the file held already
     /// ([`Session::lock_graph`]).
     pub fn save_graph_locked(&self) -> Option<String> {
+        self.save_graph_until(&|| false)
+    }
+
+    /// [`Session::save_graph_locked`], given up once `stop` says so (an
+    /// edit came: [`Build::save_until`]): nothing stored then, and the line
+    /// says so. A host that saves at idle, while the session takes edits
+    /// (the wasm core), stops it for the next one.
+    pub fn save_graph_until(&self, stop: &dyn Fn() -> bool) -> Option<String> {
         if !self.graph_on {
             return None;
         }
@@ -1322,7 +1344,14 @@ impl Session {
             return Some(l);
         }
         let t0 = Instant::now();
-        let (body, client_ms, engine_ms) = b.save_timed();
+        let Some((body, client_ms, engine_ms)) = b.save_until(stop) else {
+            let l = format!(
+                "graph: not saved: given up after {:.0} ms for what came",
+                t0.elapsed().as_secs_f64() * 1e3
+            );
+            self.note_graph(l.clone());
+            return Some(l);
+        };
         let enc_ms = t0.elapsed().as_secs_f64() * 1e3;
         let m = crate::graph::Manifest {
             text: self.built_text.as_deref().unwrap_or_default().to_owned(),
@@ -1355,10 +1384,11 @@ impl Session {
         let bytes = crate::graph::encode(self.graph_key(), &b.prelude_key(), &m, &body);
         drop(body);
         let t1 = Instant::now();
-        store.put_graph(&bytes);
+        let size = bytes.len();
+        store.put_graph(bytes);
         let l = format!(
             "graph: saved {:.1} MB in {:.0} ms (encoded {enc_ms:.0}: the client's {client_ms:.0}, the engine's {engine_ms:.0}; written {:.0})",
-            mb(bytes.len()),
+            mb(size),
             t0.elapsed().as_secs_f64() * 1e3,
             t1.elapsed().as_secs_f64() * 1e3,
         );

@@ -675,14 +675,34 @@ struct Decoded {
     nodes: Vec<Option<DNode>>,
 }
 
+/// How many nodes [`Engine::export_until`] encodes between two asks of
+/// its `stop` (a node's records: some microseconds to encode).
+const STOP_EVERY: usize = 32;
+
 impl Engine {
     /// The engine as a quiet point leaves it, as bytes
     /// ([`Engine::import`] reads them into a fresh engine), with `roots`,
     /// values the caller holds, written too (given back by the import as
     /// the importing engine's). Call between evaluations, with the line
     /// quiet: every live node clean or taken by a claim.
+    ///
+    /// # Panics
+    ///
+    /// Never: nothing stops it ([`Engine::export_until`]).
     #[must_use]
     pub fn export(&self, roots: &[ValueId]) -> Vec<u8> {
+        self.export_until(roots, &|| false).expect("an export nothing stops")
+    }
+
+    /// [`Engine::export`], given up once `stop` says so (asked between
+    /// nodes, every [`STOP_EVERY`]): none then. A host that saves the
+    /// graph while nothing is asked (the wasm core, at idle) stops it for
+    /// the next edit, which then waits for no save.
+    #[must_use]
+    pub fn export_until(&self, roots: &[ValueId], stop: &dyn Fn() -> bool) -> Option<Vec<u8>> {
+        if stop() {
+            return None;
+        }
         let mut t = ValueTable {
             v: &self.values,
             at: FxHashMap::default(),
@@ -821,6 +841,9 @@ impl Engine {
         let mut recs: Vec<u8> = Vec::new();
         put(&mut nodes, self.nodes.len() as u64);
         for i in 0..self.nodes.len() {
+            if i % STOP_EVERY == 0 && stop() {
+                return None;
+            }
             let Some(n) = self.nodes.get(i) else {
                 nodes.push(EMPTY_SLOT);
                 continue;
@@ -931,7 +954,7 @@ impl Engine {
             out.extend_from_slice(b);
         }
         debug_assert_eq!(out.len(), total);
-        out
+        Some(out)
     }
 
     /// Reads a graph written by [`Engine::export`] into this engine, which

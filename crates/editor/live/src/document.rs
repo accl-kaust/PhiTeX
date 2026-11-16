@@ -480,6 +480,9 @@ impl Document {
             "pages": r.pages(),
             "pages_changed": r.out.pages_changed,
             "wall_ms": r.wall.as_secs_f64() * 1e3,
+            // (the nodes the build ran: none where nothing changed, a
+            // loaded graph's first build too)
+            "ran": r.runs.iter().map(|x| x.commands_run).sum::<u64>(),
             "errors": errors,
         }));
     }
@@ -1159,6 +1162,74 @@ mod tests {
             "{notes:?}"
         );
         assert_eq!((ran, &out), (0, &c));
+    }
+
+    /// A save given up (`Session::save_graph_until`: what a host that
+    /// saves at idle does when an edit comes, the wasm core) stores
+    /// nothing, at any point it is stopped, and the build stands as it
+    /// was: the save after it is whole, and the next session loads it,
+    /// nothing run, the clean build's bytes.
+    #[test]
+    fn a_save_given_up_stores_nothing() {
+        let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{\\vrule width 5pt height 5pt}\\penalty-10000 \\input chap \\hbox{\\vrule width 7pt height 7pt}\\penalty-10000 \\end\n";
+        let disk = Arc::new(Disk::default());
+        disk.put(
+            "chap.tex",
+            "/p/",
+            "\\hbox{\\vrule width 10pt height 5pt}\\penalty-10000 ",
+        );
+        let store = Arc::new(Graphs::default());
+        let key = format!("{:?}", crate::host::Key::Doc("graph"));
+        let mut s = Session::new(
+            job(),
+            Arc::from(text),
+            disk.clone(),
+            Some(store.clone() as Arc<dyn crate::host::Store>),
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        s.keep_graphs(true);
+        let r = s.build();
+        assert!(r.internal.is_none(), "{:?}", r.internal);
+        s.wait_streamed();
+        let cold = r.main_output().map(|(_, b)| b.to_vec()).unwrap_or_default();
+        // (stopped at once, then after 1, 2, ... of its asks: each time nothing stored)
+        let mut asks = 0usize;
+        for after in 0.. {
+            let n = std::sync::atomic::AtomicUsize::new(0);
+            let l = s
+                .save_graph_until(&|| n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= after)
+                .unwrap_or_default();
+            if l.starts_with("graph: saved") {
+                asks = after;
+                break;
+            }
+            assert!(l.contains("not saved: given up"), "{l}");
+            assert!(
+                lock(&store.0).get(&key).is_none(),
+                "stored, stopped after {after}"
+            );
+        }
+        assert!(asks > 2, "the save asked {asks} times");
+        let saved = lock(&store.0).get(&key).cloned().expect("saved whole");
+        assert_eq!(
+            s.save_graph()
+                .as_deref()
+                .map(|l| l.starts_with("graph: saved")),
+            Some(true)
+        );
+        assert_eq!(
+            lock(&store.0).get(&key),
+            Some(&saved),
+            "the same build saves the same bytes"
+        );
+        drop(s);
+        let (out, _, ran, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.starts_with("graph: loaded")),
+            "{notes:?}"
+        );
+        assert_eq!((ran, &out), (0, &cold));
     }
 
     /// The cold build at the first step, an editor's buffer built at the
