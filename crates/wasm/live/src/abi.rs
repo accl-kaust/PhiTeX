@@ -147,6 +147,12 @@ pub extern "C" fn ph_provide(
     });
 }
 
+/// [`session::withdraw`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_withdraw(name: *const u8, name_len: usize) {
+    session::host_turn(|| session::withdraw(&text(name, name_len)));
+}
+
 /// [`session::pack`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_pack(id: *const u8, id_len: usize, data: *const u8, data_len: usize, ok: i32) {

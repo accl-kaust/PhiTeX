@@ -424,6 +424,27 @@ impl Files {
         self.answered.notify_all();
     }
 
+    /// The host takes back `name` (as it gave it, `ph_withdraw`: a file
+    /// deleted from the project): its answer dropped, given or absent,
+    /// and its path no longer the host's, so a Rebuild's stamp sees it
+    /// gone and the name is looked up as one never given: by Shelf's index
+    /// where there is one (a distribution's file the project's copy
+    /// shadowed is Shelf's again, `llncs.cls`), else asked of the host
+    /// again. Absent ([`Files::provide`] with none) is "nowhere", Shelf's
+    /// copy too.
+    pub fn withdraw(&self, name: &str) {
+        let name = name.strip_prefix("./").unwrap_or(name);
+        let mut s = self.lock();
+        // (asked and not answered yet: a thread waits for the answer)
+        if !matches!(s.by_name.get(name), Some(Entry::Given(_))) {
+            return;
+        }
+        if let Some(Entry::Given(Some((p, _)))) = s.by_name.remove(name) {
+            let p = p.strip_prefix("./").unwrap_or(&p).to_owned();
+            s.by_given_path.remove(&p);
+        }
+    }
+
     /// `name` (as TeX names it), which the host said was nowhere, may be
     /// there now (a Rebuild): that answer dropped, the host asked again
     /// at the next lookup, under the name and under each TEXINPUTS
@@ -517,6 +538,46 @@ mod tests {
         f.provide("a.png", None);
         assert_eq!(f.stamp("./a.png"), None);
         assert_eq!(f.read("./a.png"), None);
+    }
+
+    /// A file the host gives shadows the distribution's of its name; given
+    /// as absent it is nowhere (Shelf's copy too); withdrawn
+    /// ([`Files::withdraw`]: deleted from the project) it is looked up as
+    /// one never given, the host asked again (no index here), its stamp
+    /// gone.
+    #[test]
+    fn a_withdrawn_file_is_looked_up_as_never_given() {
+        let host: &'static Now = Box::leak(Box::new(Now {
+            files: OnceLock::new(),
+            has: Mutex::new(vec!["llncs.cls".to_owned()]),
+        }));
+        let f = Arc::new(Files::default());
+        let _ = host.files.set(f.clone());
+        f.set_host(host);
+        f.provide(
+            "llncs.cls",
+            Some(("./llncs.cls".to_owned(), b"mine".to_vec())),
+        );
+        assert!(f.stamp("./llncs.cls").is_some());
+        assert_eq!(
+            f.read("./llncs.cls").as_deref().map(Vec::as_slice),
+            Some(&b"mine"[..])
+        );
+        f.provide("llncs.cls", None);
+        assert_eq!(f.locate("llncs.cls", "pdftex"), None, "absent: nowhere");
+        f.withdraw("./llncs.cls");
+        assert_eq!(f.stamp("./llncs.cls"), None);
+        // (asked of the host again: its own answer, `Now`'s copy)
+        assert_eq!(
+            f.locate("llncs.cls", "pdftex").as_deref(),
+            Some("./llncs.cls")
+        );
+        assert_eq!(
+            f.read("./llncs.cls").as_deref().map(Vec::as_slice),
+            Some(&b"x"[..])
+        );
+        // (a name never given, withdrawn: nothing to drop)
+        f.withdraw("other.sty");
     }
 
     /// A project's font file as kpathsea's `.` finds it: given, by its

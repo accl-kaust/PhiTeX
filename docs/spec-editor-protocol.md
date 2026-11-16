@@ -289,6 +289,24 @@ viewer's `set_file`, `edit`, and `closed` (the file as on disk again).
 While open the buffer owns the file (natively the disk's changes of it
 are not read until it is closed). `didSave` brings nothing.
 
+Files changed outside the editor (created, saved over, deleted: a `git
+checkout`, a figure exported, a `.bib` from a reference manager) are read
+again at the next build, each as a watch's file event is: TeX's own reads
+and the tools' (BibTeX's `.bib` and `.bst`, makeindex's `.ist`, biber's
+data sources) alike, a file no buffer owns. They come as
+`workspace/didChangeWatchedFiles` (each change's `uri`; a file open in the
+editor is skipped, its buffer owns it), the viewer's op
+`{"op": "changed", "files": ["refs.bib", ...]}` (answered
+`{"queued": n}`; names from the project's root), or natively the watch's
+own file events. A Rebuild (the viewer's `rebuild`, `r` in the watch)
+checks every file any build read, by its key (the CLI's stat, the wasm
+core's giving, §4): those whose key moved, those found then and gone now,
+those not found then and found now, the tools' searches included. A file
+created where a found one stays found (the project's copy of a
+distribution's file, made after the build found the distribution's) is
+seen by its event or `changed`, not by a Rebuild, which does not search
+again for names it found.
+
 The cursor: notification `phitex/cursor {textDocument: {uri}, position,
 range?}` (the client sends it as `follow` says, §3.5); a selection is the
 cursor with its `range` (either way round), and a `range` with nothing in
@@ -466,6 +484,21 @@ stays the viewer's `outline` op: it has pages, not source places.)
 - `engine: "wasm"` in `phitex/status`.
 - Files: the core's files are `phitex_shelf::Files` with the host's
   `phitex.fetch` as its `PackSource` (§5).
+- The project's files, as the host has them:
+  `ph_provide(name, name_len, path, path_len, data, data_len, found)`
+  gives file `name` (`found` 1: at `path`, with its bytes; 0: it is
+  nowhere, Shelf's copy of the name too), as the answer to
+  `phitex.want` or before it is asked. Each giving is the file's key (a
+  Rebuild reads a file again when it was given again).
+  `ph_withdraw(name, name_len)` takes a name back (a file deleted from
+  the project): looked up from then on as a name never given, by Shelf's
+  index where there is one (a class the project had a copy of, its
+  copy deleted, is Shelf's again, as a fresh core finds it), else asked
+  of the host by `phitex.want`. A deletion is a withdraw, not an absent
+  answer. After giving or withdrawing, the host tells the session which
+  files changed, `{"op": "changed", "files": [names]}` (each read again,
+  nothing else checked), or asks a `rebuild` (every file's key checked,
+  every name not found looked for again).
 
 ## 5. Shelf (`phitex-shelf`)
 

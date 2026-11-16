@@ -101,6 +101,9 @@ impl MainFeed {
                 *b = None;
                 Ask::Closed { file }
             }
+            // (changed outside the editor: the disk's text where the
+            // editor holds no buffer of it)
+            Ask::Changed { file } if file == self.main && b.is_none() => Ask::Changed { file },
             other => return other,
         };
         // (the text sent under the buffer's lock: versions in the asks'
@@ -3377,5 +3380,454 @@ mod tests {
             Arc::new(Status::default()),
         );
         assert_eq!(Some(out), Some(quiet.build().out.pdf.to_vec()));
+    }
+
+    /// A project over a distribution, as the browser core has them: the
+    /// project's files as the host gave them (`./name`, each keyed by the
+    /// number of its giving), and the distribution's under `/dist/`
+    /// (Shelf's, keyed the same for ever), the project's first; TeX's
+    /// names and the tools' searches alike. A file given again, taken
+    /// away (withdrawn) or given for the first time is what a Rebuild, or
+    /// the viewer's `changed`, reads.
+    #[derive(Default)]
+    struct Layers {
+        project: Mutex<(HashMap<String, (Vec<u8>, u64)>, u64)>,
+        dist: HashMap<String, Vec<u8>>,
+    }
+
+    impl Layers {
+        fn with_dist(dist: &[(&str, &str)]) -> Arc<Layers> {
+            Arc::new(Layers {
+                project: Mutex::default(),
+                dist: dist
+                    .iter()
+                    .map(|(n, t)| ((*n).to_owned(), t.as_bytes().to_vec()))
+                    .collect(),
+            })
+        }
+        fn give(&self, name: &str, text: &str) {
+            let mut p = lock(&self.project);
+            p.1 += 1;
+            let n = p.1;
+            p.0.insert(name.to_owned(), (text.as_bytes().to_vec(), n));
+        }
+        fn take(&self, name: &str) {
+            lock(&self.project).0.remove(name);
+        }
+        fn find(&self, name: &str) -> Option<PathBuf> {
+            let name = name.strip_prefix("./").unwrap_or(name);
+            let p = lock(&self.project);
+            for n in [name.to_owned(), format!("{name}.tex")] {
+                if p.0.contains_key(&n) {
+                    return Some(PathBuf::from(format!("./{n}")));
+                }
+                if self.dist.contains_key(&n) {
+                    return Some(PathBuf::from(format!("/dist/{n}")));
+                }
+            }
+            None
+        }
+    }
+
+    impl Host for Layers {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.find(name)
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            if let Some(n) = p.strip_prefix("/dist/") {
+                return self.dist.get(n).cloned();
+            }
+            let n = p.strip_prefix("./").unwrap_or(&p);
+            lock(&self.project).0.get(n).map(|(b, _)| b.clone())
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            if let Some(n) = p.strip_prefix("/dist/") {
+                return self.dist.contains_key(n).then(|| b"dist".to_vec());
+            }
+            let n = p.strip_prefix("./").unwrap_or(&p);
+            lock(&self.project)
+                .0
+                .get(n)
+                .map(|(_, k)| k.to_le_bytes().to_vec())
+        }
+        fn distribution(&self, path: &Path) -> bool {
+            path.starts_with("/dist")
+        }
+    }
+
+    /// [`Layers`] with its tools' searches: a style's or a database's
+    /// name with its suffix added where it has none, the project's first.
+    struct Tooled(Arc<Layers>);
+
+    impl Host for Tooled {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.0.locate(name)
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.0.read(path)
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            self.0.stamp(path)
+        }
+        fn distribution(&self, path: &Path) -> bool {
+            self.0.distribution(path)
+        }
+        fn tool_finder(&self) -> Option<phitex_tex::ToolFinder> {
+            let l = self.0.clone();
+            Some(Arc::new(
+                move |search: phitex_tex::ToolSearch, name: &str| {
+                    let ext = match search {
+                        phitex_tex::ToolSearch::BibStyle => ".bst",
+                        phitex_tex::ToolSearch::BibData => ".bib",
+                        _ => "",
+                    };
+                    let n = name.strip_prefix("./").unwrap_or(name);
+                    let n = if n.ends_with(ext) {
+                        n.to_owned()
+                    } else {
+                        format!("{n}{ext}")
+                    };
+                    let p = l.find(&n)?;
+                    Some((p.to_string_lossy().into_owned(), l.read(&p)?))
+                },
+            ))
+        }
+    }
+
+    /// One document on `host`, a DVI job (`fixpoint`: its tools run).
+    fn layered(text: &str, host: Arc<dyn Host>) -> Document {
+        Document::new(
+            Session::new(
+                Job {
+                    fixpoint: true,
+                    ..job()
+                },
+                Arc::from(text),
+                host,
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            ),
+            "doc.tex",
+        )
+    }
+
+    /// The build event of a step, which must have built.
+    fn built_ok(d: &mut Document) -> Value {
+        let ev = step(d);
+        let b = ev
+            .iter()
+            .find(|e| e["event"] == "build")
+            .cloned()
+            .unwrap_or_else(|| panic!("no build: {ev:?}"));
+        assert_eq!(b["ok"], true, "{ev:?}");
+        b
+    }
+
+    /// A tool's files changed outside the editor (BibTeX's `.bib` given
+    /// again, the project's `.bst` withdrawn so the distribution's is
+    /// found, a `.bib` made where none was found) are read again by a
+    /// Rebuild, as TeX's own: BibTeX runs again and the pages change,
+    /// each build's DVI a clean build's of the same files; then a Rebuild
+    /// with nothing changed reads nothing. The viewer's `changed` of a
+    /// file does the same for that file. The frontends' disk test: the
+    /// `.bib` edited on disk, a Rebuild, the old title kept.
+    #[test]
+    fn a_tools_file_changed_outside_is_read_by_a_rebuild() {
+        let bst = |tag: &str| {
+            format!(
+                "ENTRY {{ title }} {{}} {{}}\n\
+                 FUNCTION {{book}} {{ \"\\special{{T:{tag}\" title * \"!}}\" * write$ newline$ }}\n\
+                 READ\nITERATE {{call.type$}}\n"
+            )
+        };
+        let bib = |t: &str| format!("@book{{x, title = {{{t}}}}}\n");
+        let doc = |data: &str| {
+            format!(
+                "\\catcode`\\{{=1 \\catcode`\\}}=2 \
+                 \\immediate\\openout1=\\jobname.aux \
+                 \\immediate\\write1{{\\string\\citation{{x}}}}\
+                 \\immediate\\write1{{\\string\\bibstyle{{mine}}}}\
+                 \\immediate\\write1{{\\string\\bibdata{{{data}}}}}\
+                 \\immediate\\closeout1 \
+                 \\setbox0\\hbox{{\\openin2=\\jobname.bbl \\ifeof2 \\special{{none}}\\else\\closein2 \\input\\jobname.bbl \\fi}}\
+                 \\shipout\\box0 \\end\n"
+            )
+        };
+        let dist_bst = bst("dist-");
+        let make = |files: &[(&str, &str)]| {
+            let l = Layers::with_dist(&[("mine.bst", &dist_bst)]);
+            for (n, t) in files {
+                l.give(n, t);
+            }
+            l
+        };
+        let dvi_of = |d: &Document| d.output().map(|(_, b)| b.to_vec()).expect("the DVI");
+        let clean = |data: &str, files: &[(&str, &str)]| {
+            let mut d = layered(&doc(data), Arc::new(Tooled(make(files))));
+            built_ok(&mut d);
+            dvi_of(&d)
+        };
+        let mine = bst("");
+        let l = make(&[("mine.bst", &mine), ("refs.bib", &bib("Tea"))]);
+        let mut d = layered(&doc("refs"), Arc::new(Tooled(l.clone())));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)).as_deref(), Some("Tea"));
+        // (the database given again, a Rebuild)
+        l.give("refs.bib", &bib("Coffee"));
+        d.request(&json!({"id": 1, "op": "rebuild"}));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)).as_deref(), Some("Coffee"));
+        assert!(
+            dvi_of(&d) == clean("refs", &[("mine.bst", &mine), ("refs.bib", &bib("Coffee"))]),
+            "the Rebuild's DVI a clean build's"
+        );
+        // (nothing changed: nothing read again)
+        assert_eq!(d.session_mut().reread_all().1, 0, "nothing moved");
+        // (the database given again, the viewer's `changed` of it)
+        l.give("refs.bib", &bib("Milk"));
+        let r = d.request(&json!({"id": 2, "op": "changed", "files": ["refs.bib"]}));
+        assert_eq!(r["json"]["queued"], 1, "{r}");
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)).as_deref(), Some("Milk"));
+        // (the project's style withdrawn: the distribution's again)
+        l.take("mine.bst");
+        d.request(&json!({"id": 3, "op": "rebuild"}));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)).as_deref(), Some("dist-Milk"));
+        assert!(
+            dvi_of(&d) == clean("refs", &[("refs.bib", &bib("Milk"))]),
+            "the distribution's style: a clean build's DVI"
+        );
+        assert_eq!(d.session_mut().reread_all().1, 0, "nothing moved since");
+        // (the project's style given again: it shadows the distribution's;
+        // told by `changed`, as a Rebuild keys only the files found)
+        l.give("mine.bst", &mine);
+        d.request(&json!({"id": 4, "op": "changed", "files": ["mine.bst"]}));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)).as_deref(), Some("Milk"));
+        // (a database not found, then made)
+        let l = make(&[("mine.bst", &mine)]);
+        let mut d = layered(&doc("late"), Arc::new(Tooled(l.clone())));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)), None, "no database, no entry");
+        l.give("late.bib", &bib("Tea"));
+        d.request(&json!({"id": 5, "op": "rebuild"}));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)).as_deref(), Some("Tea"));
+        // (and removed again)
+        l.take("late.bib");
+        d.request(&json!({"id": 6, "op": "rebuild"}));
+        built_ok(&mut d);
+        assert_eq!(bib_title(&dvi_of(&d)), None, "the database removed");
+    }
+
+    /// A file the build looked for and did not find, given later and found
+    /// by a Rebuild, then removed: gone from the pages at the next
+    /// Rebuild (and by the viewer's `changed` of it), as one found by the
+    /// clean build is. Found first by a Rebuild's staging, its name was
+    /// never marked found, so its removal was no change and its page
+    /// stayed (the frontends' disk test, "that file removed").
+    #[test]
+    fn a_file_found_by_a_rebuild_then_removed_is_gone() {
+        let main = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{\\vrule width 5pt height 5pt}\\penalty-10000 \\openin1=late \\ifeof1 \\else \\closein1 \\input late \\fi \\end\n";
+        let page = "\\hbox{\\vrule width 9pt height 9pt}\\penalty-10000 \n";
+        let clean = |with: bool| {
+            let l = Layers::with_dist(&[]);
+            if with {
+                l.give("late.tex", page);
+            }
+            let mut d = layered(main, l);
+            built_ok(&mut d);
+            d.output().map(|(_, b)| b.to_vec()).expect("the DVI")
+        };
+        for by in ["rebuild", "changed"] {
+            let ask = |d: &mut Document| {
+                if by == "rebuild" {
+                    d.request(&json!({"id": 1, "op": "rebuild"}));
+                } else {
+                    d.request(&json!({"id": 1, "op": "changed", "files": ["late.tex"]}));
+                }
+            };
+            for cold_has in [false, true] {
+                let l = Layers::with_dist(&[]);
+                if cold_has {
+                    l.give("late.tex", page);
+                }
+                let mut d = layered(main, l.clone());
+                let b = built_ok(&mut d);
+                assert_eq!(b["pages"], if cold_has { 2 } else { 1 }, "{by}: cold: {b}");
+                for round in 0..2 {
+                    if !cold_has || round > 0 {
+                        l.give("late.tex", page);
+                        ask(&mut d);
+                        let b = built_ok(&mut d);
+                        assert_eq!(b["pages"], 2, "{by} {cold_has} {round}: given: {b}");
+                    }
+                    l.take("late.tex");
+                    ask(&mut d);
+                    let b = built_ok(&mut d);
+                    assert_eq!(b["pages"], 1, "{by} {cold_has} {round}: removed: {b}");
+                    let out = d.output().map(|(_, b)| b.to_vec());
+                    assert!(
+                        out == Some(clean(false)),
+                        "{by} {cold_has} {round}: a clean build's"
+                    );
+                    assert_eq!(d.session_mut().reread_all().1, 0, "nothing moved since");
+                }
+                assert_ne!(clean(true), clean(false), "the file shows");
+            }
+        }
+    }
+
+    /// A distribution's file the project had a copy of (a class shipped
+    /// beside the document, `llncs.cls`), the copy withdrawn: the
+    /// distribution's read at the next Rebuild, as a fresh session reads
+    /// it, and nothing read again after (its place now the
+    /// distribution's, not the copy's that has no key).
+    #[test]
+    fn a_projects_copy_withdrawn_is_the_distributions_again() {
+        let main = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\input llncs \\end\n";
+        let ours = "\\hbox{\\vrule width 10pt height 5pt}\\penalty-10000 \n";
+        let theirs =
+            "\\hbox{\\vrule width 20pt height 5pt}\\penalty-10000 \\hbox{}\\penalty-10000 \n";
+        let fresh = |copy: bool| {
+            let l = Layers::with_dist(&[("llncs.tex", theirs)]);
+            if copy {
+                l.give("llncs.tex", ours);
+            }
+            l
+        };
+        let clean = |copy: bool| {
+            let mut d = layered(main, fresh(copy));
+            built_ok(&mut d);
+            d.output().map(|(_, b)| b.to_vec()).expect("the DVI")
+        };
+        let l = fresh(true);
+        let mut d = layered(main, l.clone());
+        let b = built_ok(&mut d);
+        assert_eq!(b["pages"], 1, "the project's: {b}");
+        l.take("llncs.tex");
+        d.request(&json!({"id": 1, "op": "rebuild"}));
+        let b = built_ok(&mut d);
+        assert_eq!(b["pages"], 2, "the distribution's: {b}");
+        assert_eq!(
+            d.output().map(|(_, b)| b.to_vec()),
+            Some(clean(false)),
+            "a fresh session's"
+        );
+        assert_eq!(d.session_mut().reread_all().1, 0, "nothing moved since");
+        // (given again: the project's shadows it once more, told by
+        // `changed`: a Rebuild keys the files found where they were found)
+        l.give("llncs.tex", ours);
+        d.request(&json!({"id": 2, "op": "changed", "files": ["llncs.tex"]}));
+        let b = built_ok(&mut d);
+        assert_eq!(b["pages"], 1, "the project's again: {b}");
+        assert_eq!(
+            d.output().map(|(_, b)| b.to_vec()),
+            Some(clean(true)),
+            "a fresh session's"
+        );
+    }
+
+    /// A 2×2 PNG of one colour (stored deflate, no compression).
+    fn png_of(rgb: [u8; 3]) -> Vec<u8> {
+        fn crc(b: &[u8]) -> u32 {
+            let mut c = 0xffff_ffff_u32;
+            for &x in b {
+                c ^= u32::from(x);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        0xedb8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        }
+        let chunk = |out: &mut Vec<u8>, ty: &[u8], data: &[u8]| {
+            out.extend_from_slice(&u32::try_from(data.len()).expect("small").to_be_bytes());
+            let mut body = ty.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc(&body).to_be_bytes());
+        };
+        // (two rows, each its filter byte and two samples)
+        let row = [&[0][..], &rgb, &rgb].concat();
+        let raw = [&row[..], &row].concat();
+        let (mut a, mut b) = (1_u32, 0_u32);
+        for &x in &raw {
+            a = (a + u32::from(x)) % 65521;
+            b = (b + a) % 65521;
+        }
+        let n = u16::try_from(raw.len()).expect("small");
+        let mut z = vec![0x78, 0x01, 0x01];
+        z.extend_from_slice(&n.to_le_bytes());
+        z.extend_from_slice(&(!n).to_le_bytes());
+        z.extend_from_slice(&raw);
+        z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&2_u32.to_be_bytes());
+        ihdr.extend_from_slice(&2_u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// A picture saved over again and again, each time a Rebuild: each
+    /// build's PDF a clean build's of the picture then (the frontends'
+    /// disk test, "an image replaced by a rename (its second change)":
+    /// the second change kept the first's picture).
+    #[test]
+    fn a_picture_saved_over_twice_is_drawn_each_time() {
+        let main = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\pdfpagewidth=50pt \\pdfpageheight=50pt \\hoffset=-1in \\voffset=-1in \\shipout\\hbox{\\pdfximage width 20pt {fig.png}\\pdfrefximage\\pdflastximage}\\end\n";
+        let give = |l: &Layers, rgb: [u8; 3]| {
+            let b = png_of(rgb);
+            let mut p = lock(&l.project);
+            p.1 += 1;
+            let n = p.1;
+            p.0.insert("fig.png".to_owned(), (b, n));
+        };
+        let clean = |rgb: [u8; 3]| {
+            let l = Layers::with_dist(&[]);
+            give(&l, rgb);
+            let mut d = layered(main, l);
+            built_ok(&mut d);
+            d.output().map(|(_, b)| b.to_vec()).expect("the PDF")
+        };
+        // (the colour the viewer draws the picture in: its page's frame and
+        // strips, as the preview shows it)
+        let drawn = |d: &Document| {
+            let f = d.viewer().frame_with(0, 1.0, "").expect("a frame");
+            [[220, 30, 30], [30, 30, 220], [30, 200, 30], [200, 200, 30]]
+                .into_iter()
+                .filter(|c: &[u8; 3]| f.windows(4).any(|w| w[..3] == c[..] && w[3] == 255))
+                .collect::<Vec<_>>()
+        };
+        let l = Layers::with_dist(&[]);
+        give(&l, [220, 30, 30]);
+        let mut d = layered(main, l.clone());
+        built_ok(&mut d);
+        for (k, rgb) in [[30, 30, 220], [30, 200, 30], [200, 200, 30]]
+            .into_iter()
+            .enumerate()
+        {
+            give(&l, rgb);
+            d.request(&json!({"id": k, "op": "rebuild"}));
+            built_ok(&mut d);
+            let out = d.output().map(|(_, b)| b.to_vec()).expect("the PDF");
+            assert!(
+                out == clean(rgb),
+                "change {}: not a clean build's PDF",
+                k + 1
+            );
+            assert_eq!(drawn(&d), [rgb], "change {}: the picture drawn", k + 1);
+        }
     }
 }

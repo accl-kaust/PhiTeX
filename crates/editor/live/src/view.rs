@@ -225,6 +225,14 @@ pub enum Ask {
     Closed {
         file: String,
     },
+    /// File `file` changed outside the editor (on disk, or as the host
+    /// gave it: created, saved over, removed): read again at the next
+    /// build where the editor has no buffer of it, as a watch's file
+    /// event is (the viewer's `changed`, LSP's
+    /// `workspace/didChangeWatchedFiles`).
+    Changed {
+        file: String,
+    },
     /// The editor's cursor at byte `at` of `file`'s text (the glyph
     /// origins' offsets), in word `word` (bytes; none: not in a word) of
     /// line `line` (bytes, without its end), and its selection `select`
@@ -1492,6 +1500,22 @@ impl Viewer {
             "rebuild" => {
                 s.ask(Ask::Rebuild);
                 ok(json!({}))
+            }
+            // (`{"op":"changed","files":[...]}`: files changed outside the
+            // editor, each read again, not every file a Rebuild checks)
+            "changed" => {
+                let files: Vec<String> = req
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| f.as_str().map(str::to_owned))
+                    .collect();
+                let n = files.len();
+                for file in files {
+                    s.ask(Ask::Changed { file });
+                }
+                ok(json!({"queued": n}))
             }
             // (Clean rebuild: the build dropped, made again from nothing)
             "cold" => {

@@ -191,6 +191,15 @@ pub(crate) fn provide(name: &str, file: Option<(String, Vec<u8>)>) {
     files().provide(name, file);
 }
 
+/// The host takes back the file it gave as `name` (deleted from the
+/// project): looked up from now on as if never given, by the default
+/// search (Shelf's, where the project's copy shadowed one), the host
+/// asked again where there is no index ([`Files::withdraw`]). A Rebuild,
+/// or the viewer's `changed` of the name, then builds without it.
+pub(crate) fn withdraw(name: &str) {
+    files().withdraw(name);
+}
+
 /// The host's answer to `fetch`: Shelf's pack `id` gunzipped (natively, by
 /// the host, off this module), or `ok` 0 (it could not be had).
 pub(crate) fn pack(id: &str, data: Option<&[u8]>) {
