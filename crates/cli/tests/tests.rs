@@ -8,3 +8,4 @@ mod hints_check;
 mod ladder;
 mod tikzman_repros;
 mod ux;
+mod watch_files;

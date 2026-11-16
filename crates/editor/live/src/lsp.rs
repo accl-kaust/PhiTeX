@@ -277,7 +277,24 @@ pub enum Trouble {
 /// `p` as a `file:` URI (its bytes past the unreserved ones and `/`
 /// percent-encoded).
 pub fn uri_of(p: &Path) -> String {
-    format!("file://{}", encode(&p.to_string_lossy()))
+    let s = p.to_string_lossy();
+    // (Windows's: `C:\x` (or `\\?\C:\x`, as a canonical path is) is
+    // `file:///C%3A/x`, a share's `\\host\share` `file://host/share`)
+    if cfg!(windows) {
+        let s = s.replace('\\', "/");
+        let s = s
+            .strip_prefix("//?/UNC/")
+            .map_or(s.clone(), |r| format!("//{r}"));
+        let s = s.strip_prefix("//?/").unwrap_or(&s);
+        if let Some(share) = s.strip_prefix("//") {
+            return format!("file://{}", encode(share));
+        }
+        if !s.starts_with('/') {
+            return format!("file:///{}", encode(s));
+        }
+        return format!("file://{}", encode(s));
+    }
+    format!("file://{}", encode(&s))
 }
 
 /// `s` with its bytes past the unreserved ones and `/` percent-encoded.
@@ -318,7 +335,22 @@ fn decode(s: &str) -> String {
 pub fn path_of(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    Some(PathBuf::from(decode(rest)))
+    let p = decode(rest);
+    // (Windows's: `file:///c%3A/x` (VS Code's) is `c:/x`, not the
+    // current drive's `/c:/x`; `file://host/share/x` a share's)
+    if cfg!(windows) {
+        return Some(PathBuf::from(windows_path(&p)));
+    }
+    Some(PathBuf::from(p))
+}
+
+/// The Windows path of a `file:` URI's decoded path `p` (past `file://`).
+fn windows_path(p: &str) -> String {
+    match p.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => p[1..].to_owned(),
+        [b'/', ..] => p.to_owned(),
+        _ => format!("//{p}"),
+    }
 }
 
 /// The UTF-16 offset in `text` of LSP position `line`, `character` (a
@@ -1646,6 +1678,33 @@ mod tests {
             Path::new("/x/y.tex")
         );
         assert!(path_of("untitled:1").is_none());
+    }
+
+    #[test]
+    fn windows_uris() {
+        assert_eq!(windows_path("/c:/a b/x.tex"), "c:/a b/x.tex");
+        assert_eq!(windows_path("/D:/x.tex"), "D:/x.tex");
+        assert_eq!(windows_path("host/share/x.tex"), "//host/share/x.tex");
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                uri_of(Path::new(r"D:\a b\x.tex")),
+                "file:///D%3A/a%20b/x.tex"
+            );
+            assert_eq!(uri_of(Path::new(r"\\?\D:\a\x.tex")), "file:///D%3A/a/x.tex");
+            assert_eq!(
+                uri_of(Path::new(r"\\host\share\x.tex")),
+                "file://host/share/x.tex"
+            );
+            assert_eq!(
+                path_of("file:///d%3A/a%20b/x.tex").unwrap(),
+                Path::new(r"d:\a b\x.tex")
+            );
+            assert_eq!(
+                path_of(&uri_of(Path::new(r"D:\x\y.tex"))).unwrap(),
+                Path::new(r"D:\x\y.tex")
+            );
+        }
     }
 
     #[test]
