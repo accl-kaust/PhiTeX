@@ -59,6 +59,11 @@ enum Event {
     /// The editor's settings changed (`--lsp`): a new session where they
     /// change the threads or the main file.
     Configure(phitex_live::lsp::Settings),
+    /// The main file changed between its first read (the target resolved,
+    /// [`modern::Target::main_read`]) and the watcher's start, a write no
+    /// event told: the target resolved again (its engine is chosen by the
+    /// text), the files read again.
+    ReadEarly,
 }
 
 /// What the watch keeps from one session to the next (the editor's
@@ -1392,6 +1397,8 @@ fn build_of(t: &Target) -> String {
     t.review_mode = review_mode;
     t.review_accept_disk = review_accept_disk;
     t.watch_ask_write = watch_ask_write;
+    // (when the main file was read: no part of what is built)
+    t.main_read = None;
     format!("{t:?}")
 }
 
@@ -1853,6 +1860,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     watching
         .borrow_mut()
         .add(&wanted.lock().unwrap_or_else(PoisonError::into_inner));
+    // (the main file written since it was read, before the watcher ran: no
+    // event will say so. A save that ended as the watch started (the file
+    // truncated, then filled) had the target resolved on its empty text,
+    // plain TeX, and the watch built that for good)
+    if let Some((was, p)) = &t.main_read
+        && modern::stamp(p).as_ref() != Some(was)
+    {
+        let _ = tx.send((Instant::now(), Event::ReadEarly));
+    }
     let raw = !on_stdio && !ui.json && keys::raw();
     let building = kept.building.clone();
     let at_wait = kept.waiting.clone();
@@ -3341,6 +3357,22 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 // (a build's end is taken by the loop that waits on it)
                 Event::Built => {}
+                Event::ReadEarly => {
+                    let why_now = "the main file changed as the watch started";
+                    match modern::resolve_again(o) {
+                        Ok((t2, dir)) if (build_of(&t2), Some(dir.clone())) != resolved => {
+                            if next.is_none() {
+                                next = Some(((t2, o.clone(), dir), why_now));
+                            }
+                        }
+                        // (the same target: its text read again, as a change's)
+                        _ => {
+                            main_changed = true;
+                            again = true;
+                            why.push(why_now.to_owned());
+                        }
+                    }
+                }
                 // (the file on disk is exact: written now (true), or
                 // already (false: nothing to compact, or a build since,
                 // which leaves it not exact and says nothing))

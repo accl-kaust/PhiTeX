@@ -753,6 +753,11 @@ pub struct Target {
     /// those they `do`. A watch resolves its target again when one
     /// changes.
     pub config_files: Vec<PathBuf>,
+    /// The main file's length and modification time before it was first
+    /// read, and where it is (absolute): a watch reads the file before its
+    /// watcher runs, and a write that ends in between is told by no event,
+    /// so the watch compares them once it does.
+    pub main_read: Option<((u64, std::time::SystemTime), PathBuf)>,
 }
 
 impl Target {
@@ -945,11 +950,22 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .map_err(|e| format!("can't read {f}: {e}"))
     };
+    // (the main file's length and time as it was before it was read: a
+    // watch compares them once its watcher runs, `Target::main_read`)
+    let read_at = |f: &str| {
+        let p = [PathBuf::from(f), PathBuf::from(format!("{f}.tex"))]
+            .into_iter()
+            .find(|p| p.is_file())
+            .and_then(|p| std::path::absolute(p).ok())?;
+        Some((stamp(&p)?, p))
+    };
+    let mut main_read = read_at(&file);
     let mut text = read(&file, false)?;
     let (mut program, root_comment) = config::magic_comments(&text);
     if let Some(r) = root_comment {
         let dir = Path::new(&file).parent().unwrap_or(Path::new(""));
         file = dir.join(r).to_string_lossy().into_owned();
+        main_read = read_at(&file);
         text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
     }
@@ -1100,7 +1116,15 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         warnings: [cfg.warnings, rc_warnings].concat(),
         inputs,
         config_files,
+        main_read,
     })
+}
+
+/// A file's length and modification time (none: not there), as a watch
+/// compares them ([`Target::main_read`]).
+pub fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok()?))
 }
 
 fn copy_dir(c: &config::CopyPdf, cwd: &Path, base: &Path) -> Option<PathBuf> {
