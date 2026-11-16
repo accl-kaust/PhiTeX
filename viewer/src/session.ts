@@ -668,6 +668,8 @@ export class PreviewSession {
    * the last job but the packages already fetched.
    */
   async clean(files: Record<string, string>): Promise<void> {
+    // (the project's files as they are: one removed or renamed is gone from the open too)
+    for (const f of Object.keys(this.files)) if (!(f in files) && f !== this.open) delete this.files[f];
     for (const [f, t] of Object.entries(files)) if (f !== this.open) this.files[f] = t;
     for (const n of [...this.pkg.unavailable, ...(this.pkg.failed ?? []).map((f) => f.name)]) this.asked.delete(n);
     this.pkg.unavailable = [];

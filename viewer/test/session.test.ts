@@ -386,3 +386,21 @@ test("the watch's busy is its building events', not a late progress record's", a
   emit({ event: "building", on: false });
   assert.equal(now(), false);
 });
+
+test("a clean rebuild opens the project's files as they are: one removed or renamed is not opened again", async () => {
+  const project: Record<string, string> = { "main.tex": "\\input part\n\\bye\n", "part.tex": "part\n", "old.tex": "old\n" };
+  const host: EditorHost = { loadProject: async () => ({ ...project }), onOpen: () => {}, onChanges: () => {} };
+  const opens: Record<string, string>[] = [];
+  const core = {
+    request: async (r: { op: string; files?: Record<string, string> }) => (r.op === "open" && opens.push(r.files!), { ok: true, json: { pages: 1, pending: 0, build_ms: 1 } }),
+  };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  const s = new PreviewSession(host, core as never, sink as never, { checkEveryMs: 0, schedule: () => undefined, now: () => 0 });
+  await s.start();
+  assert.ok("old.tex" in opens.at(-1)!);
+  // (old.tex deleted, part.tex edited: the files as the host has them now)
+  await s.clean({ "main.tex": "\\input part\n\\bye\n", "part.tex": "part two\n" });
+  const tex = Object.keys(opens.at(-1)!).filter((f) => f.endsWith(".tex")).sort();
+  assert.deepEqual(tex, ["main.tex", "part.tex"]);
+  assert.equal(opens.at(-1)!["part.tex"], "part two\n");
+});
