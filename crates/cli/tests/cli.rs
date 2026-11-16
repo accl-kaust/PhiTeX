@@ -3043,8 +3043,9 @@ fn build_rounds_are_latexmks_runs() {
     ] {
         let dir = scratch(&format!("latexmk-rounds-{name}"));
         std::fs::write(dir.join(format!("{name}.tex")), src).expect("the document");
-        let build = || {
+        let build = |graph: &str| {
             let out = command(bin, &dir)
+                .env("PHITEX_GRAPH", graph)
                 .args(["build", "--json", &format!("{name}.tex")])
                 .output()
                 .expect("phitex runs");
@@ -3061,13 +3062,22 @@ fn build_rounds_are_latexmks_runs() {
             let pdf = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the PDF");
             (ev["rounds"].as_u64().expect("its rounds"), pdf)
         };
-        let (cold, pdf) = build();
+        let (cold, pdf) = build("1");
         assert_eq!(cold, cold_rounds, "{name}: the rounds from nothing");
-        let (again, pdf2) = build();
+        // (with no graph kept: one round, its files read back as they are)
+        let (again, pdf2) = build("0");
         assert_eq!(again, 1, "{name}: the rounds rebuilt with its files");
         assert!(
             pdf == pdf2,
             "{name}: the rebuild's PDF is not the first build's"
+        );
+        // (the graph the first build kept, loaded: nothing changed, no
+        // round; `phitex build` keeps it by default)
+        let (loaded, pdf3) = build("1");
+        assert_eq!(loaded, 0, "{name}: the rounds rebuilt from its graph");
+        assert!(
+            pdf == pdf3,
+            "{name}: the loaded rebuild's PDF is not the first build's"
         );
     }
 }

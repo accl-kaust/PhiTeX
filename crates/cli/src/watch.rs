@@ -2006,7 +2006,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // unless a load changed them)
         s.flush_records();
         // (the persisted graph's load at the first build, or why not)
-        modern::graph_notes(&s, o, ui);
+        modern::graph_notes(s, o, ui);
         // (an edit the build took while it ran: timed from it)
         let since = match (since, s.absorbed_at()) {
             (Some(a), Some(b)) => Some(a.max(b)),
