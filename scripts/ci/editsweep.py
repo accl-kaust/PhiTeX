@@ -6,7 +6,7 @@ the history's PDF against a cold build of the final text.
 
     editsweep.py --list ci/research.json --doc DIR --bin PHITEX --out DIR
                  [--shard K/N] [--engines pdflatex,xelatex] [--tools ...]
-                 [--par 4] [--timeout 600] [--threads 1]
+                 [--par 4] [--timeout 600] [--threads 1] [--graph-check]
 
 Red (one line each on stdout, `editsweep: ...`; exit 1 if any):
 - the history's PDF is not the cold build's;
@@ -93,6 +93,10 @@ def one(args, c):
         return res
     picks = [cand[int(f * (len(cand) - 1))] for f in PLACES]
     err = open(d.parent / f"{tag}.err", "w")
+    if args.graph_check:
+        # (docs/spec-persisted-graph.md, step 2: the session saves each
+        # build and checks a twin loaded of it; its lines on the stderr)
+        env["PHITEX_GRAPH_CHECK"] = "1"
     p = subprocess.Popen([args.bin, "watch", "--no-view", "--json", "--exact-pdf", "--no-synctex",
                           "--engine", c["engine"], "-j", str(args.threads), main], cwd=d, env=env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
@@ -205,6 +209,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=600)
     # (the watch's and the cold build's threads: 1 unless asked)
     ap.add_argument("--threads", type=int, default=1)
+    # (the watch with PHITEX_GRAPH_CHECK=1: gate-shard.sh persist)
+    ap.add_argument("--graph-check", action="store_true")
     args = ap.parse_args()
     items = shards.docs("edits", manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))

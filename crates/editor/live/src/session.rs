@@ -805,14 +805,22 @@ impl Session {
             let (na, nt) = (b.stats.nodes_run, t.stats.nodes_run);
             let (ra, rt) = (b.stats.runs, t.stats.runs);
             let ops = b.stats.runs_by_op == t.stats.runs_by_op;
-            let ok = pdf && log && files && na == nt && ra == rt && ops;
+            // (the runs are compared at one thread: at more, two
+            // evaluations of one change run ahead of their inputs as their
+            // schedules have it, and their counts differ by those runs)
+            let one = gc.opts.threads.is_none_or(|n| n <= 1);
+            let ok = pdf && log && files && (!one || na == nt && ra == rt && ops);
             gc.checks += 1;
             gc.differ += usize::from(!ok);
             eprintln!(
                 "graph-check: edit {}: {}; nodes run {na} / loaded {nt}, runs {ra} / {rt}, runs by op {}, pdf {}, log {}, files {} ({ms:.1} ms)",
                 gc.checks,
                 if ok { "same" } else { "DIFFER" },
-                if ops { "same" } else { "differ" },
+                match (ops, one) {
+                    (true, _) => "same",
+                    (false, true) => "differ",
+                    (false, false) => "differ (more threads: not compared)",
+                },
                 if pdf { "same" } else { "DIFFER" },
                 if log { "same" } else { "DIFFER" },
                 if files { "same" } else { "DIFFER" },

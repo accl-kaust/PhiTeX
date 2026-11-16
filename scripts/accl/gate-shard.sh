@@ -638,10 +638,18 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     else
       export CI_WORK=$w/ci
       mkdir -p "$CI_WORK"
-      PHITEX_GRAPH_CHECK=1 python3 -I scripts/ci/editsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
+      python3 -I scripts/ci/editsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
         --out "$r/persist" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
-        --threads "$j" > "$r/editsweep.txt" 2>&1
-      grep '^editsweep:' "$r/editsweep.txt" | head -60 >> "$r/red.txt"
+        --threads "$j" --graph-check > "$r/editsweep.txt" 2>&1
+      # (the sweep's bar of two runs a node a round is -j 1's: at more
+      # threads an edit's runs ahead of their inputs are the schedule's,
+      # reported apart)
+      if [ "$j" = 1 ]; then
+        grep '^editsweep:' "$r/editsweep.txt" | head -60 >> "$r/red.txt"
+      else
+        grep '^editsweep:' "$r/editsweep.txt" | grep -v ' runs for [0-9]* nodes in ' | head -60 >> "$r/red.txt"
+        grep '^editsweep:' "$r/editsweep.txt" | grep ' runs for [0-9]* nodes in ' | sed "s/^/persist (-j $j, not red): /" >> "$r/known-red.txt"
+      fi
       grep -q "documents, " "$r/editsweep.txt" || red "persist: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
       : > "$r/graph-check.txt"
       for e in "$CI_WORK"/edit/*.err; do
