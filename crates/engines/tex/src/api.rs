@@ -3041,6 +3041,13 @@ struct Graph {
     reads: Vec<(String, u64)>,
     /// The finder's answers since the last evaluation began.
     queries: Vec<(String, bool)>,
+    /// The finder's answers to the files staged since the last evaluation
+    /// ([`Build::stage_file`]): the next one's first [`Graph::queries`].
+    /// Dropped with the others when it began, a name staged was never
+    /// among [`Build::reads`]: a file found first by a Rebuild's staging
+    /// stayed "not found" in the session's inputs, and its removal was no
+    /// change (a deleted `\\input` file kept on the page).
+    staged_queries: Vec<(String, bool)>,
     /// The names a tool's search was asked for (`tfile:` fields: a
     /// `.bib`, a `.bst`, an `.ist`), and whether found: a watch rebuilds
     /// when one of them changes ([`Build::tool_reads`]).
@@ -3577,6 +3584,7 @@ impl Graph {
             files: Vec::new(),
             reads: Vec::new(),
             queries: Vec::new(),
+            staged_queries: Vec::new(),
             tool_reads: Vec::new(),
             absent: Vec::new(),
             written: Vec::new(),
@@ -7425,7 +7433,7 @@ impl Build {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.g.watch.clone());
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
-        self.g.queries.clear();
+        self.g.queries = std::mem::take(&mut self.g.staged_queries);
         self.g.ops.pkg_log.locked().clear();
         self.g.ops.rec_ran.locked().clear();
         let loads = self.g.loads.clone();
@@ -7643,6 +7651,9 @@ impl Build {
             )),
             None => (self.opts.finder)(name),
         };
+        self.g
+            .staged_queries
+            .push((name.to_owned(), found.is_some()));
         // (the same bytes at the same path, or still no file: no field, no
         // record and no node changes, a cut file's included. `r` in a
         // watch stages every file the build read, and an editor may save
@@ -7887,22 +7898,18 @@ impl Build {
 
     /// File `name` staged where a tool's search found it in the project
     /// (`tfile:<search>:<name>`, a `.bib` BibTeX or biber read, a `.bst`,
-    /// an `.ist`): its new text there (`text`, else the finder's), or gone,
-    /// or come where the search had found none (its first element is the
-    /// current directory, `./`). A tool's files are not `file:` fields, so
+    /// an `.ist`): its new text there (`text`, an editor's), or come where
+    /// the search had found none (its first element is the current
+    /// directory, `./`); no text, as the searches find it now
+    /// ([`Build::reask_tool_file`]). A tool's files are not `file:` fields, so
     /// a database edited during a watch was read as it was at the first
     /// build. Whether one changed.
     fn stage_tool_file(&mut self, name: &str, text: Option<&[u8]>) -> bool {
+        let Some(b) = text else {
+            return self.reask_tool_file(name);
+        };
         let v = self.g.eng.values();
         let mut changed = false;
-        let mut now: Option<Option<Vec<u8>>> = None;
-        let mut read = |b: &Self| -> Option<Vec<u8>> {
-            now.get_or_insert_with(|| match text {
-                Some(t) => Some(t.to_vec()),
-                None => (b.opts.finder)(name).map(|(_, b)| b),
-            })
-            .clone()
-        };
         for search in ToolSearch::ALL {
             let f = crate::tools::support_field(v, search, name);
             if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
@@ -7914,30 +7921,22 @@ impl Build {
                 if path.trim_start_matches("./") != name {
                     continue;
                 }
-                if let Some(b) = read(self) {
-                    // (the same text: compared in place, no value made)
-                    let same = match list_of(v, self.g.files[k].1)[..] {
-                        [_, t] => v.with_str(t, |s| latin1_is(s, &b)) == Some(true),
-                        _ => false,
-                    };
-                    if same {
-                        continue;
-                    }
-                    let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
-                    if self.g.files[k].1 != x {
-                        self.g.files[k].1 = x;
-                        changed = true;
-                    }
-                } else {
-                    self.g.files.remove(k);
-                    self.g.absent.push(f);
+                // (the same text: compared in place, no value made)
+                let same = match list_of(v, self.g.files[k].1)[..] {
+                    [_, t] => v.with_str(t, |s| latin1_is(s, b)) == Some(true),
+                    _ => false,
+                };
+                if same {
+                    continue;
+                }
+                let x = v.list(vec![v.str(&path), v.str(&latin1(b))]);
+                if self.g.files[k].1 != x {
+                    self.g.files[k].1 = x;
                     changed = true;
                 }
-            } else if self.g.absent.contains(&f)
-                && let Some(b) = read(self)
-            {
+            } else if self.g.absent.contains(&f) {
                 self.g.absent.retain(|g| *g != f);
-                let x = v.list(vec![v.str(&format!("./{name}")), v.str(&latin1(&b))]);
+                let x = v.list(vec![v.str(&format!("./{name}")), v.str(&latin1(b))]);
                 self.g.files.push((f, x));
                 changed = true;
             }
@@ -7961,12 +7960,67 @@ impl Build {
             if str_of(v, p).trim_start_matches("./") != plain {
                 continue;
             }
-            // (gone: the search's answer stands until a build asks again)
-            let Some(b) = read(self) else { continue };
-            if v.with_str(t, |s| latin1_is(s, &b)) == Some(true) {
+            if v.with_str(t, |s| latin1_is(s, b)) == Some(true) {
                 continue;
             }
-            self.g.files[k].1 = v.list(vec![p, v.str(&latin1(&b))]);
+            self.g.files[k].1 = v.list(vec![p, v.str(&latin1(b))]);
+            changed = true;
+        }
+        changed
+    }
+
+    /// [`Build::stage_tool_file`] of a file as it is now (no text given):
+    /// every tool's search that asked for `name`, or found its file at
+    /// `name`, asked of the provider again (the client's search for tools,
+    /// [`Options::tool_finder`]), as a loaded build's are
+    /// ([`Build::reask_environment`]); one whose answer moved, came or
+    /// went taken. Read at the path it had, a file removed kept the old
+    /// answer ("the search's answer stands"), and one found nowhere was
+    /// looked for with TeX's finder, not the tool's search: a `.bst` of
+    /// the project's removed was not the distribution's again, a `.bib`
+    /// removed stayed in the bibliography. Whether one changed.
+    fn reask_tool_file(&mut self, name: &str) -> bool {
+        let plain = name.trim_start_matches("./");
+        let hits: Vec<(Field, Option<ValueId>)> = {
+            let v = self.g.eng.values();
+            let asked = |f: Field| {
+                v.with_str(f.0, |n| {
+                    n.strip_prefix("tfile:")
+                        .and_then(|r| r.split_once(':'))
+                        .is_some_and(|(_, a)| a.trim_start_matches("./") == plain)
+                }) == Some(true)
+            };
+            let tool = |f: Field| v.with_str(f.0, |n| n.starts_with("tfile:")) == Some(true);
+            let at = |x: ValueId| match list_of(v, x)[..] {
+                [p, _] => v.with_str(p, |s| s.trim_start_matches("./") == plain) == Some(true),
+                _ => false,
+            };
+            self.g
+                .files
+                .iter()
+                .filter(|&&(f, x)| tool(f) && (asked(f) || at(x)))
+                .map(|&(f, x)| (f, Some(x)))
+                .chain(
+                    self.g
+                        .absent
+                        .iter()
+                        .filter(|&&f| tool(f) && asked(f))
+                        .map(|&f| (f, None)),
+                )
+                .collect()
+        };
+        let mut changed = false;
+        for (f, held) in hits {
+            let now = self.g.eng.ask_provider(f);
+            if now == held {
+                continue;
+            }
+            self.g.files.retain(|&(h, _)| h != f);
+            self.g.absent.retain(|&h| h != f);
+            match now {
+                Some(x) => self.g.files.push((f, x)),
+                None => self.g.absent.push(f),
+            }
             changed = true;
         }
         changed

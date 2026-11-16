@@ -181,7 +181,10 @@ there is no override.
    demo) in Chrome: the Overleaf extension on the mock Overleaf, the demo
    served locally, VS Code's built-in wasm engine. Each opens a project,
    waits for its first page, types words and finds them on the page, and
-   fails on an exception or console error. The frontends' scripts are
+   fails on an exception or console error. VS Code's engine also follows
+   the disk (`apps/vscode/test/disk.ts`): files saved over, made and
+   removed outside the editor, a `.bib` among them, each build's pages a
+   clean build's of the folder as it is then. The frontends' scripts are
    those of the PhiTeX-frontends commit `ci/frontends.commit` pins (moved
    on with them; a push to the branch `frontends-check` runs the checks
    alone). No job reaches overleaf.com or deploys anything. The gate runs

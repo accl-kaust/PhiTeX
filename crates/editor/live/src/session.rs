@@ -558,6 +558,13 @@ pub struct Session {
     /// are at most that new. Empty: read twice under two keys (changed
     /// while a build read it), unknown.
     stamps: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
+    /// Every search the tools made since the last clean build (BibTeX's
+    /// `.bib` and `.bst`, makeindex's `.ist`, ...: [`Session::tool_finder`]):
+    /// the search, the name asked for, and the file it found (none: none),
+    /// whose key is among [`Session::stamps`]. A Rebuild or `r` checks them
+    /// as TeX's own reads ([`Session::reread_all`]): unchecked, a `.bib`
+    /// changed outside the editor was never read again.
+    tool_reads: ToolReads,
     /// [`Session::inputs`] by name, and by the names a change of each
     /// comes as.
     inputs_by: InputIndex,
@@ -769,6 +776,7 @@ impl Session {
             reported: None,
             inputs_by: InputIndex::default(),
             stamps: Arc::default(),
+            tool_reads: Arc::default(),
             records_dirty: false,
             absorb: Absorb::default(),
             absorbed_at: None,
@@ -1490,9 +1498,45 @@ impl Session {
             })
             .map(|(n, ..)| plain_name(n))
             .collect();
+        // (the tools' files as TeX's: one found whose key moved, or found
+        // nowhere then and found by its search now; staged by the path
+        // its search found, or by the name asked for, and asked of the
+        // search again, [`phitex_tex::Build::stage_file`])
+        let tools = self
+            .tool_reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let search = self.host.tool_finder();
+        let mut stale = stale;
+        for (s, n, p) in &tools {
+            let moved = if let Some(p) = p {
+                !matches!(
+                    (stamps.get(p), self.host.stamp(p)),
+                    (Some(a), Some(b)) if !a.is_empty() && *a == b
+                )
+            } else {
+                self.host.look_again(n);
+                search.as_ref().is_some_and(|f| f(*s, n).is_some())
+            };
+            if trace {
+                eprintln!(
+                    "reread: tool's {n}: {}",
+                    if moved { "read again" } else { "kept" }
+                );
+            }
+            if moved {
+                let c = p
+                    .as_ref()
+                    .map_or_else(|| plain_name(n), |p| plain_name(&p.to_string_lossy()));
+                if !stale.contains(&c) {
+                    stale.push(c);
+                }
+            }
+        }
         drop(stamps);
         let r = Reread {
-            checked: self.inputs.len(),
+            checked: self.inputs.len() + tools.len(),
             changed: stale.len(),
             looked_up,
             keys,
@@ -1844,27 +1888,27 @@ impl Session {
                             m.remove(p);
                         }
                     }
+                    for name in &tool_reread {
+                        m.remove(Path::new(name));
+                    }
                 }
                 for name in &reread {
                     b.stage_file(name, None);
                     staged.push((name.clone(), None));
                 }
-                // (a tool's file by the path its search found it at, staged
-                // with its text as the session has it: the editor's buffer,
-                // else the host's file at that path. Looked up by the job's
+                // (a tool's file by the path its search found it at, or by
+                // the name it asked for, staged as its search finds it now:
+                // asked of the tools' finder again, the editor's buffer
+                // first ([`Session::tool_finder`]). Looked up by the job's
                 // finder, a path is no name a browser host was given,
                 // `./refs.bib`: no file, and the tool's run kept the text it
                 // read first, the old entry until the session was opened
-                // again)
-                let found = b.tool_paths();
+                // again; read at the path it had, a file removed was kept,
+                // a distribution's file the project's copy had shadowed not
+                // found again)
                 for name in &tool_reread {
-                    let now = found
-                        .iter()
-                        .any(|(_, p)| p == name)
-                        .then(|| tool_file(&self.host, &self.buffers, name))
-                        .flatten();
-                    b.stage_file(name, now.as_deref());
-                    staged.push((name.clone(), now));
+                    b.stage_file(name, None);
+                    staged.push((name.clone(), None));
                 }
                 // (sent as a version of its own: what another thread sends
                 // while it runs is taken between the engine's steps)
@@ -1897,6 +1941,11 @@ impl Session {
                         differ: 0,
                     });
                 }
+                // (the tools' searches are this build's from now on)
+                self.tool_reads
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clear();
                 let b = Build::with(opts, prelude.as_deref(), &text);
                 phitex_tex::timeline::lap("engine: the build returned");
                 self.store_prelude(&b, prelude.as_deref(), cached_key);
@@ -1943,14 +1992,23 @@ impl Session {
             // (each name looked up by the index, not compared with every
             // input: every build's reads against every input was
             // quadratic, Grail's 335 inputs)
+            // (a name found now that was not, or staged again: where the
+            // host has it now, the path its key is kept by. A file first
+            // found by a Rebuild's staging, its place unknown, was "not
+            // found" still, and removing it no change; one of the project's
+            // withdrawn, found in the distribution now, kept the project's
+            // path, with no key there for ever)
             for (n, found) in b.reads() {
                 if let Some(&i) = self.inputs_by.name.get(&n) {
                     let e = &mut self.inputs[i];
-                    if found && e.2.is_none() {
-                        e.2 = self.host.locate_key(&n);
-                        if let Some(p) = &e.2 {
-                            e.3 = !self.host.distribution(p);
-                            self.inputs_by.key(plain_name(&p.to_string_lossy()), i);
+                    if found && (e.2.is_none() || !e.1 || reread.contains(&n)) {
+                        let now = self.host.locate_key(&n);
+                        if now != e.2 {
+                            e.2 = now;
+                            e.3 = e.2.as_ref().is_some_and(|p| !self.host.distribution(p));
+                            if let Some(p) = &e.2 {
+                                self.inputs_by.key(plain_name(&p.to_string_lossy()), i);
+                            }
                         }
                     }
                     e.1 = found;
@@ -3005,16 +3063,63 @@ impl Session {
     /// one first, as [`Session::finder`] gives TeX's: a tool reads the
     /// text TeX would (BibTeX's `.bib` as the editor has it, at a cold
     /// build too, a Clean rebuild's).
+    ///
+    /// Each search is kept ([`Session::tool_reads`]) with the key of the
+    /// file it found ([`Session::stamps`]), taken before the bytes the
+    /// tool is given are read, as TeX's are: a Rebuild or `r` reads it
+    /// again when its key moved. A name its search does not find that the
+    /// editor has a buffer of (a `.bib` made in the editor, not saved) is
+    /// the buffer's, at `./name`, as TeX's finder finds one.
     fn tool_finder(&self) -> Option<phitex_tex::ToolFinder> {
         let search = self.host.tool_finder()?;
         let (host, buffers) = (self.host.clone(), self.buffers.clone());
+        let (stamps, reads) = (self.stamps.clone(), self.tool_reads.clone());
         Some(Arc::new(move |s: phitex_tex::ToolSearch, name: &str| {
-            let (p, bytes) = search(s, name)?;
-            let bytes = match buffered(&*host, &buffers, &p) {
-                Some(t) => tex::bytes(&t),
-                None => bytes,
+            let found = search(s, name);
+            {
+                let path = found.as_ref().map(|(p, _)| PathBuf::from(p));
+                let mut r = reads.lock().unwrap_or_else(PoisonError::into_inner);
+                match r.iter_mut().find(|(t, n, _)| *t == s && n == name) {
+                    Some(e) => e.2 = path,
+                    None => r.push((s, name.to_owned(), path)),
+                }
+            }
+            let Some((p, bytes)) = found else {
+                let plain = plain_name(name);
+                let bufs = buffers.lock().unwrap_or_else(PoisonError::into_inner);
+                let t = bufs.iter().rev().find(|(b, _)| *b == plain)?.1.as_ref()?;
+                return Some((format!("./{plain}"), tex::bytes(t)));
             };
-            host.fed(Path::new(&p), &bytes);
+            let path = PathBuf::from(&p);
+            let bytes = if let Some(t) = buffered(&*host, &buffers, &p) {
+                // (an editor's text: no key of the disk's holds for it)
+                stamps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&path);
+                tex::bytes(&t)
+            } else if let Some(k) = host.stamp(&path) {
+                // (read again after the key, the project's: what the search
+                // read before it may be older than the key says; the
+                // distribution's files do not change)
+                let bytes = if host.distribution(&path) {
+                    bytes
+                } else {
+                    host.read(&path).unwrap_or(bytes)
+                };
+                let mut m = stamps.lock().unwrap_or_else(PoisonError::into_inner);
+                match m.get_mut(&path) {
+                    Some(old) if *old != k => old.clear(),
+                    Some(_) => {}
+                    None => {
+                        m.insert(path.clone(), k);
+                    }
+                }
+                bytes
+            } else {
+                bytes
+            };
+            host.fed(&path, &bytes);
             Some((p, bytes))
         }))
     }
@@ -3397,6 +3502,9 @@ impl InputIndex {
     }
 }
 
+/// [`Session::tool_reads`]' type: each search, the name, the file found.
+type ToolReads = Arc<Mutex<Vec<(phitex_tex::ToolSearch, String, Option<PathBuf>)>>>;
+
 fn plain_name(n: &str) -> String {
     n.strip_prefix("./").unwrap_or(n).to_owned()
 }
@@ -3416,20 +3524,6 @@ fn buffered(
         .rev()
         .find(|(n, _)| *n == key || host.same_file(n, &key))
         .and_then(|(_, t)| t.clone())
-}
-
-/// A tool's file at `path` (where its search found it) as the session
-/// has it now: the editor's buffer, else the host's file there; none: the
-/// job's finder looks it up.
-fn tool_file(
-    host: &Arc<dyn Host>,
-    buffers: &Mutex<Vec<(String, Option<String>)>>,
-    path: &str,
-) -> Option<Vec<u8>> {
-    match buffered(&**host, buffers, path) {
-        Some(t) => Some(tex::bytes(&t)),
-        None => host.read(Path::new(path)),
-    }
 }
 
 /// Shared bytes of a report's output, for the viewer.

@@ -30,7 +30,7 @@
 //! starts at 2 GiB too and grows as it needs, never sealed: with one
 //! thread nothing races a growth.
 
-const EXPORTS: [&str; 20] = [
+const EXPORTS: [&str; 21] = [
     "ph_grow",
     "ph_seal",
     "ph_alloc",
@@ -40,6 +40,7 @@ const EXPORTS: [&str; 20] = [
     "ph_request",
     "ph_lsp",
     "ph_provide",
+    "ph_withdraw",
     "ph_pack",
     "ph_stored",
     "ph_set_index",

@@ -24,6 +24,9 @@
 //!   are [`Ask::SetFile`], [`Ask::Edit`] and [`Ask::Closed`] (the file as
 //!   on disk again); while a file is open its buffer owns it
 //!   ([`Server::owns`]). `didSave` brings nothing the buffer did not.
+//!   `workspace/didChangeWatchedFiles` is [`Ask::Changed`] for each file
+//!   no buffer owns (created, changed or deleted outside the editor: read
+//!   again at the next build, as a watch's file event is).
 //! - **Builds.** [`Server::building`] (a build began),
 //!   [`Server::progress`] (its records) and [`Server::built`]: the
 //!   problems published by file (`textDocument/publishDiagnostics`, the
@@ -1211,10 +1214,17 @@ impl Server {
                 }
             }
             // (notifications of no interest)
-            "$/cancelRequest"
-            | "$/setTrace"
-            | "textDocument/didSave"
-            | "workspace/didChangeWatchedFiles" => {}
+            "$/cancelRequest" | "$/setTrace" | "textDocument/didSave" => {}
+            // (changed outside the editor: those no buffer here owns)
+            "workspace/didChangeWatchedFiles" => {
+                for c in p["changes"].as_array().into_iter().flatten() {
+                    if let Some(file) = c["uri"].as_str().and_then(|u| self.name(u))
+                        && !lock(&self.st).docs.contains_key(&file)
+                    {
+                        self.host.ask(Ask::Changed { file });
+                    }
+                }
+            }
             "workspace/didChangeConfiguration" => {
                 let given = &p["settings"]["phitex"];
                 if given.is_object() {
@@ -1795,6 +1805,38 @@ mod tests {
         assert_eq!(
             lock(&sent).last().unwrap()["params"]["uri"],
             "overleaf://p1/ch%201.tex"
+        );
+    }
+
+    /// Files changed outside the editor (`workspace/didChangeWatchedFiles`)
+    /// are each read again at the next build ([`Ask::Changed`]), but one
+    /// the editor holds open: its buffer owns it.
+    #[test]
+    fn watched_files_changed_are_read_again_unless_open() {
+        let (s, host, _) = server();
+        init(&s, "file:///p", false);
+        s.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": "a"}}}));
+        lock(&host.0).clear();
+        s.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {"changes": [
+            {"uri": "file:///p/refs.bib", "type": 2},
+            {"uri": "file:///p/a.tex", "type": 2},
+            {"uri": "file:///p/fig/new.png", "type": 1},
+            {"uri": "file:///p/old.tex", "type": 3},
+            {"uri": "file:///elsewhere/x.tex", "type": 2}
+        ]}}));
+        assert_eq!(
+            *lock(&host.0),
+            [
+                Ask::Changed {
+                    file: "refs.bib".into()
+                },
+                Ask::Changed {
+                    file: "fig/new.png".into()
+                },
+                Ask::Changed {
+                    file: "old.tex".into()
+                },
+            ]
         );
     }
 

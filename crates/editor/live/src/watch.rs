@@ -177,6 +177,8 @@ impl Edits {
                 self.buffers.remove(&file);
                 file
             }
+            // (the buffer, where the editor holds one, stands)
+            Ask::Changed { file } => file,
             Ask::Cursor {
                 file,
                 at,
