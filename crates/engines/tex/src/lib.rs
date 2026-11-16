@@ -85,7 +85,8 @@ pub use api::{
     font_name, terminal_banner,
 };
 pub use exec::{
-    Progress, SpawnWorker, StreamHook, StreamedPage, cpus as exec_cpus, set_spawn_worker,
+    Progress, SpawnWorker, StreamHook, StreamedPage, cpus as exec_cpus, end_threads,
+    set_spawn_worker,
 };
 pub use native::NativeFonts;
 
