@@ -2046,7 +2046,7 @@ impl Run<'_, '_> {
         self.ops
             .fin_defs_start
             .locked()
-            .get(&fin_key_class(hint, pen))
+            .get(&fin_key_class(v, hint, pen))
             .and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
             // (`\deadcycles` guessed 0, its register maps kept)
             .map_or_else(empty, |x| rtn_as_guess(v, x))

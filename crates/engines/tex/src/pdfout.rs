@@ -2133,7 +2133,7 @@ fn command_with(
     // its input, the fonts and parameters it runs with), never a count
     // of the commands made so far, which the threads' schedule orders;
     // two runs that make the same handle made the same command)
-    let mut words = vec![r.cx.node().raw(), r.pdf_occ as u64, input.raw()];
+    let mut words = vec![r.cx.node().raw(), r.pdf_occ as u64, v.stable_raw(input)];
     words.extend(wparams.iter().map(|&p| u64::from(p.cast_unsigned())));
     let serial = phitex_defuse::hash_words(0x6364_6d73_6572_0001, &words);
     let serial = phitex_defuse::hash_words(serial, &[fs.digest()]);
@@ -2191,6 +2191,18 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
     }
     let mut rs = records().locked();
     forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
+}
+
+/// (the persisted graph, `crate::api::Build::save`) How many pages of the
+/// build of store `v` the link's memo holds ([`pieces`]): kept in the
+/// process only (their fonts and boxes are no values), none saved.
+pub(crate) fn pieces_held(v: &Values) -> usize {
+    let inst = v.instance();
+    pieces()
+        .locked()
+        .values()
+        .filter(|pc| pc.inst == inst)
+        .count()
 }
 
 /// At a collection: the link's memos of the last link dropped (the line,
@@ -2661,18 +2673,20 @@ fn ship_apart(
     };
     // the key: what the piece is made of, by the values' identities
     // (interned: equal values, equal ids), not by their bytes
-    let maps = r
-        .get_loc(crate::fields::cell::PDF_MAPS)?
-        .map_or(0, ValueId::raw);
-    let pdfmap = r.font_file("pdftex.map")?.map_or(0, ValueId::raw);
+    // (by their ids as every store holding them at their places has them,
+    // `Values::stable_raw`: a graph loaded into another store,
+    // `crate::api::Build::load`, makes the key the page had)
+    let sid = |x: Option<ValueId>| x.map_or(0, |x| v.stable_raw(x));
+    let maps = sid(r.get_loc(crate::fields::cell::PDF_MAPS)?);
+    let pdfmap = sid(r.font_file("pdftex.map")?);
     let b = &pc.base_in;
     let mut words = vec![
-        page_v.raw(),
+        v.stable_raw(page_v),
         u64::from(!b.first),
         phitex_defuse::hash_bytes(0, b.date.as_bytes()),
         phitex_defuse::hash_bytes(0, b.jobname.as_bytes()),
-        b.g2u.map_or(0, ValueId::raw),
-        b.stacks.map_or(0, ValueId::raw),
+        sid(b.g2u),
+        sid(b.stacks),
         maps,
         pdfmap,
         u64::from(pc.fonts.space.is_some()),

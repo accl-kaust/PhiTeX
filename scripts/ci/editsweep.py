@@ -6,7 +6,7 @@ the history's PDF against a cold build of the final text.
 
     editsweep.py --list ci/research.json --doc DIR --bin PHITEX --out DIR
                  [--shard K/N] [--engines pdflatex,xelatex] [--tools ...]
-                 [--par 4] [--timeout 600]
+                 [--par 4] [--timeout 600] [--threads 1]
 
 Red (one line each on stdout, `editsweep: ...`; exit 1 if any):
 - the history's PDF is not the cold build's;
@@ -94,7 +94,7 @@ def one(args, c):
     picks = [cand[int(f * (len(cand) - 1))] for f in PLACES]
     err = open(d.parent / f"{tag}.err", "w")
     p = subprocess.Popen([args.bin, "watch", "--no-view", "--json", "--exact-pdf", "--no-synctex",
-                          "--engine", c["engine"], "-j", "1", main], cwd=d, env=env,
+                          "--engine", c["engine"], "-j", str(args.threads), main], cwd=d, env=env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
 
     def build(timeout):
@@ -161,7 +161,7 @@ def one(args, c):
     ccache.mkdir(parents=True)
     os.symlink(WORK / "fcache" / "formats", ccache / "formats")
     cenv = manuals.side_env(c["engine"], {"PHITEX_CACHE_DIR": str(ccache)}, phitex=True)
-    common.run([args.bin, "build", "--exact-pdf", "--no-synctex", "--engine", c["engine"], "-j", "1", main],
+    common.run([args.bin, "build", "--exact-pdf", "--no-synctex", "--engine", c["engine"], "-j", str(args.threads), main],
                cold, cenv, args.timeout, out=cold / "term.txt")
     res["history_md5"], res["cold_md5"] = hist, md5(cold / f"{job}.pdf")
     if len(res["edits"]) == len(PLACES) and hist != res["cold_md5"]:
@@ -203,6 +203,8 @@ def main():
     ap.add_argument("--tools", default="bibtex,biber,makeindex,glossaries")
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=600)
+    # (the watch's and the cold build's threads: 1 unless asked)
+    ap.add_argument("--threads", type=int, default=1)
     args = ap.parse_args()
     items = shards.docs("edits", manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))

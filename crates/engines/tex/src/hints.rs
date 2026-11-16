@@ -4308,6 +4308,27 @@ pub(crate) fn register_text(reg: &Registry, name: ValueId, t: &Arc<TextHints>) {
 /// its chunks are, not joined again at every edit.
 pub(crate) type Chunks = Arc<[(usize, Arc<TextHints>)]>;
 
+/// (the persisted graph, `crate::api::Build::save`) Every text's analysis
+/// registered: its name's id (`ValueId::raw`) and its chunks.
+pub(crate) fn registered(reg: &Registry) -> Vec<(u64, Chunks)> {
+    let mut xs: Vec<(u64, Chunks)> = reg
+        .by_name
+        .locked()
+        .iter()
+        .map(|(&k, c)| (k, c.clone()))
+        .collect();
+    xs.sort_unstable_by_key(|x| x.0);
+    xs
+}
+
+/// (the persisted graph, `crate::api::Build::load`) The registry's
+/// analyses as [`registered`] gave them, the names' ids this store's.
+pub(crate) fn set_registered(reg: &Registry, xs: Vec<(u64, Chunks)>) {
+    let mut bn = reg.by_name.locked();
+    bn.clear();
+    bn.extend(xs);
+}
+
 /// [`register_text`] of a text analysed in chunks (`chunks`, by start).
 pub(crate) fn register_chunks(reg: &Registry, name: ValueId, chunks: Chunks) {
     reg.by_name.locked().insert(name.raw(), chunks);

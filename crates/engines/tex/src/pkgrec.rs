@@ -59,6 +59,18 @@ pub(crate) type RecValues = Vec<(String, bool, Vec<u8>)>;
 /// Records by key ([`node_key`]).
 pub(crate) type Recs = FxHashMap<String, Rec>;
 
+/// [`LoadHints::persisted`]: the records' bytes ([`serialise`]), the
+/// keys asked and changed, the files' hashes, the predictions given, the
+/// counts.
+pub(crate) struct PkgState {
+    pub recs: Vec<u8>,
+    pub asked: Vec<String>,
+    pub changed: Vec<String>,
+    pub now: Vec<(String, u64)>,
+    pub predicted: Vec<(String, RecValues)>,
+    pub given: [u64; 3],
+}
+
 /// The key of a slice that is a package load: its text up to the end
 /// of its arguments, blanks and comment lines dropped; `None` for any
 /// other slice.
@@ -555,6 +567,53 @@ impl LoadHints {
 
     /// The records with `fresh` (load key, record) replacing theirs;
     /// those that differ noted as changed ([`Self::changed`]).
+    /// (the persisted graph, `crate::api::Build::save`) What the build
+    /// learnt of the loads: every record, the keys asked of the source and
+    /// those merged, the files' hashes asked, the predictions given and
+    /// the counts.
+    pub(crate) fn persisted(&self) -> PkgState {
+        let sorted = |s: &FxHashSet<String>| {
+            let mut v: Vec<String> = s.iter().cloned().collect();
+            v.sort();
+            v
+        };
+        let mut now: Vec<(String, u64)> = self
+            .now
+            .locked()
+            .iter()
+            .map(|(k, &h)| (k.clone(), h))
+            .collect();
+        now.sort();
+        let mut predicted: Vec<(String, RecValues)> = self
+            .predicted
+            .locked()
+            .iter()
+            .map(|(k, r)| (k.clone(), r.clone()))
+            .collect();
+        predicted.sort_by(|a, b| a.0.cmp(&b.0));
+        PkgState {
+            recs: serialise(&self.recs.locked()),
+            asked: sorted(&self.asked.locked()),
+            changed: sorted(&self.changed.locked()),
+            now,
+            predicted,
+            given: std::array::from_fn(|i| self.given[i].load(Ordering::Relaxed)),
+        }
+    }
+
+    /// (the persisted graph, `crate::api::Build::load`) [`Self::persisted`]'s
+    /// state put back.
+    pub(crate) fn restore(&self, s: PkgState) {
+        *self.recs.locked() = parse(&s.recs);
+        *self.asked.locked() = s.asked.into_iter().collect();
+        *self.changed.locked() = s.changed.into_iter().collect();
+        *self.now.locked() = s.now.into_iter().collect();
+        *self.predicted.locked() = s.predicted.into_iter().collect();
+        for (g, x) in self.given.iter().zip(s.given) {
+            g.store(x, Ordering::Relaxed);
+        }
+    }
+
     pub(crate) fn merge(&self, fresh: Vec<(String, Rec)>) {
         for (k, x) in fresh {
             // (the kept record asked first: one equal to it is not new)

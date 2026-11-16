@@ -8292,10 +8292,13 @@ pub(crate) fn dline_field(v: &Values, n: u64) -> Field {
 /// top-level node's its own; a piece of a cut file's, its text's frames: a
 /// reader that runs again makes the node anew, and a file two nodes read
 /// has the same lines under both (the client gives them,
-/// `DocFile::dlines`; a sequence's id never is a node's).
+/// `DocFile::dlines`; a sequence's id never is a node's). The frames by
+/// their id as every store holding them at their place has it
+/// (`Values::stable_raw`): the lines a graph loaded holds
+/// (`crate::api::Build::load`) are given under the fields its runs read.
 pub(crate) fn lines_owner(v: &Values, node: u64, args: &[ValueId]) -> u64 {
     match args {
-        [frames, top, ..] if int_of(v, *top) != 3 => frames.raw(),
+        [frames, top, ..] if int_of(v, *top) != 3 => v.stable_raw(*frames),
         _ => node,
     }
 }

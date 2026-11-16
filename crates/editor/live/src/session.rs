@@ -589,6 +589,22 @@ pub struct Session {
     synctex_due: std::sync::atomic::AtomicBool,
     /// The main text's lines counted by block ([`LineMarks`]).
     lines: LineMarks,
+    /// `PHITEX_GRAPH_CHECK=1` (docs/spec-persisted-graph.md, step 2): the
+    /// build saved after each evaluation and loaded into a twin in this
+    /// process ([`Build::save`], [`Build::load`]), which must run nothing
+    /// with nothing changed and the next change as the build runs it.
+    graph_check: Option<GraphCheck>,
+}
+
+/// [`Session::graph_check`]: the options and format the cold build had,
+/// the twin loaded from the build's last save, and its sender of texts.
+struct GraphCheck {
+    opts: Options,
+    prelude: Option<String>,
+    twin: Option<(Build, phitex_tex::EditSender)>,
+    /// Checks made, and those that found a difference.
+    checks: usize,
+    differ: usize,
 }
 
 /// The lines before each block of [`LineMarks::BLOCK`] bytes of the
@@ -721,6 +737,7 @@ impl Session {
             synctex: Mutex::default(),
             synctex_due: std::sync::atomic::AtomicBool::new(false),
             lines: LineMarks::default(),
+            graph_check: None,
         }
     }
 
@@ -749,6 +766,118 @@ impl Session {
             .as_ref()
             .map(|b| b.stats.runs_by_op.clone())
             .unwrap_or_default()
+    }
+
+    /// `PHITEX_GRAPH_CHECK` (docs/spec-persisted-graph.md, step 2): the
+    /// twin loaded from the last save given the change the build was given
+    /// (`staged`, `text` with its `hint`), its runs and outputs compared
+    /// with the build's; then the build saved, a new twin loaded of it, and
+    /// evaluated with nothing changed: no node run, the same outputs. One
+    /// line each on stderr, `graph-check:`.
+    fn graph_check(
+        &mut self,
+        staged: &[(String, Option<Vec<u8>>)],
+        text: &Arc<str>,
+        hint: Option<phitex_tex::Hint>,
+        cold: bool,
+    ) {
+        let Some(b) = &self.build else {
+            self.graph_check = None;
+            return;
+        };
+        let Some(gc) = &mut self.graph_check else {
+            return;
+        };
+        let same_out = |a: &Build, t: &Build| -> (bool, bool, bool) {
+            let (pa, la) = a.output_shared();
+            let (pt, lt) = t.output_shared();
+            (pa == pt, la == lt, *a.files_shared() == *t.files_shared())
+        };
+        if let (false, Some((t, tx))) = (cold, gc.twin.as_mut()) {
+            let t0 = Instant::now();
+            for (name, now) in staged {
+                t.stage_file(name, now.as_deref());
+            }
+            tx.send_edit(text.clone(), hint);
+            t.absorb_pending();
+            let ms = t0.elapsed().as_secs_f64() * 1e3;
+            let (pdf, log, files) = same_out(b, t);
+            let (na, nt) = (b.stats.nodes_run, t.stats.nodes_run);
+            let (ra, rt) = (b.stats.runs, t.stats.runs);
+            let ops = b.stats.runs_by_op == t.stats.runs_by_op;
+            let ok = pdf && log && files && na == nt && ra == rt && ops;
+            gc.checks += 1;
+            gc.differ += usize::from(!ok);
+            eprintln!(
+                "graph-check: edit {}: {}; nodes run {na} / loaded {nt}, runs {ra} / {rt}, runs by op {}, pdf {}, log {}, files {} ({ms:.1} ms)",
+                gc.checks,
+                if ok { "same" } else { "DIFFER" },
+                if ops { "same" } else { "differ" },
+                if pdf { "same" } else { "DIFFER" },
+                if log { "same" } else { "DIFFER" },
+                if files { "same" } else { "DIFFER" },
+            );
+            if !ops {
+                eprintln!(
+                    "graph-check:   runs by op {:?} / loaded {:?}",
+                    b.stats.runs_by_op, t.stats.runs_by_op
+                );
+            }
+        }
+        gc.twin = None;
+        let t0 = Instant::now();
+        let bytes = b.save();
+        let save_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let (pages, cmds) = b.unsaved_link_state();
+        let tx = phitex_tex::EditSender::default();
+        let opts = Options {
+            edits: Some(tx.clone()),
+            progress: None,
+            on_page_settled: None,
+            ..gc.opts.clone()
+        };
+        let t1 = Instant::now();
+        match Build::load(opts, gc.prelude.as_deref(), &bytes) {
+            Err(e) => {
+                gc.checks += 1;
+                gc.differ += 1;
+                eprintln!("graph-check: load refused: {e}");
+                if let Some(p) = std::env::var_os("PHITEX_GRAPH_DUMP") {
+                    let _ = std::fs::write(p, &bytes);
+                }
+            }
+            Ok((mut t, st)) => {
+                let load_ms = t1.elapsed().as_secs_f64() * 1e3;
+                let t2 = Instant::now();
+                let runs = t.evaluate_unchanged();
+                let eval_ms = t2.elapsed().as_secs_f64() * 1e3;
+                let (pdf, log, files) = same_out(b, &t);
+                let ok = runs == 0 && pdf && log && files;
+                gc.checks += 1;
+                gc.differ += usize::from(!ok);
+                eprintln!(
+                    "graph-check: load: {}; save {save_ms:.1} ms {} bytes (engine {}, client {}); load {load_ms:.1} ms [import {:.1}, client {:.1} (analyses {:.1})] values {} nodes {} records {} reads {}{}; unchanged: {runs} nodes run ({eval_ms:.1} ms), pdf {}, log {}, files {}; not saved: the link's {pages} pages and {cmds} commands",
+                    if ok { "same" } else { "DIFFER" },
+                    st.bytes,
+                    st.engine_bytes,
+                    st.client_bytes,
+                    st.import_ms,
+                    st.client_ms,
+                    st.analysis_ms,
+                    st.values,
+                    st.nodes,
+                    st.records,
+                    st.reads,
+                    st.verified
+                        .map(|(r, f)| format!(", verified {r} reads, {f} failed"))
+                        .unwrap_or_default(),
+                    if pdf { "same" } else { "DIFFER" },
+                    if log { "same" } else { "DIFFER" },
+                    if files { "same" } else { "DIFFER" },
+                );
+                gc.twin = Some((t, tx));
+            }
+        }
     }
 
     /// (observe) docs/spec-persisted-graph.md §9: the build's persisted
@@ -997,6 +1126,9 @@ impl Session {
             pages_before,
             threads: n_threads,
         };
+        // (the files staged and the text sent, for the graph check's twin)
+        let mut staged: Vec<(String, Option<Vec<u8>>)> = Vec::new();
+        let hint = ends.as_ref().map(|(old, (p, s))| (old.clone(), *p, *s));
         let ran = crate::panics::catch(|| -> Result<(), String> {
             if let Some(b) = &mut self.build {
                 let progress = b.progress();
@@ -1022,6 +1154,7 @@ impl Session {
                 }
                 for name in &reread {
                     b.stage_file(name, None);
+                    staged.push((name.clone(), None));
                 }
                 // (a tool's file by the path its search found it at, staged
                 // with its text as the session has it: the editor's buffer,
@@ -1038,6 +1171,7 @@ impl Session {
                         .then(|| tool_file(&self.host, &self.buffers, name))
                         .flatten();
                     b.stage_file(name, now.as_deref());
+                    staged.push((name.clone(), now));
                 }
                 // (sent as a version of its own: what another thread sends
                 // while it runs is taken between the engine's steps)
@@ -1221,6 +1355,15 @@ impl Session {
                     ..opts
                 };
                 phitex_tex::timeline::lap("session: the options (records read)");
+                if std::env::var_os("PHITEX_GRAPH_CHECK").is_some_and(|x| x != "0") {
+                    self.graph_check = Some(GraphCheck {
+                        opts: opts.clone(),
+                        prelude: prelude.clone(),
+                        twin: None,
+                        checks: 0,
+                        differ: 0,
+                    });
+                }
                 let b = Build::with(opts, prelude.as_deref(), &text);
                 phitex_tex::timeline::lap("engine: the build returned");
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
@@ -1244,6 +1387,9 @@ impl Session {
                 self.built_text = None;
                 return fail(engine_stop(&e), Some(e));
             }
+        }
+        if self.graph_check.is_some() {
+            self.graph_check(&staged, &text, hint, cold);
         }
         // (the names the build asked for, in every evaluation since the
         // cold one: the files a later change of one is matched against)
