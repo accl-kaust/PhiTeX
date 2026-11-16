@@ -638,6 +638,8 @@ pub struct Session {
     /// done keys the build as it was made, whatever the files' places are
     /// by then.
     graph_key: std::sync::OnceLock<crate::graph::Key>,
+    /// The build runs with no page streamed ([`Session::build_unstreamed`]).
+    unstreamed: bool,
 }
 
 /// A clean build's options and format ([`Session::prepare_cold`]).
@@ -806,6 +808,7 @@ impl Session {
             cold_ms: 0,
             graph_same: false,
             graph_key: std::sync::OnceLock::new(),
+            unstreamed: false,
         }
     }
 
@@ -1748,6 +1751,16 @@ impl Session {
     /// Builds: the first time from nothing, then as an edit of the main
     /// text as it is now. A job the engine cannot run yet reports why, as
     /// its one error.
+    /// [`Session::build`] with no page streamed to a viewer: a step
+    /// whose pages no one is to see (Compare's definitions given alone,
+    /// the document's pages again).
+    pub fn build_unstreamed(&mut self) -> Report {
+        self.unstreamed = true;
+        let r = self.build();
+        self.unstreamed = false;
+        r
+    }
+
     pub fn build(&mut self) -> Report {
         let t0 = Instant::now();
         let why = if self.build.is_some() { "edit" } else { "cold" };
@@ -2047,7 +2060,7 @@ impl Session {
                 // (an edit's pages streamed as they are made, where a
                 // viewer shows them, as the clean build's: those it
                 // changed, `phitex_tex::Progress::stream_page`)
-                progress.set_streaming(self.status.meter().streams());
+                progress.set_streaming(self.status.meter().streams() && !self.unstreamed);
                 self.status.set_live(Some(live(progress)));
                 self.status.set("typesetting");
                 // (evaluated with the text, one evaluation: its stats

@@ -468,7 +468,8 @@ impl Compare {
         };
         if let Some(t) = phitex_diff::with_definitions(&text, &self.options()) {
             self.session.set_text(t);
-            let _ = self.session.build();
+            // (the document's pages again: none streamed to the viewer)
+            let _ = self.session.build_unstreamed();
         }
     }
 
