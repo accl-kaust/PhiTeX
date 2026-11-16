@@ -40,8 +40,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Two images, their PDFs' streams different.
 fn images() -> [Vec<u8>; 2] {
-    ["png-gray.png", "png-rgb16.png"]
-        .map(|n| std::fs::read(fixture(n)).expect("a PNG fixture"))
+    ["png-gray.png", "png-rgb16.png"].map(|n| std::fs::read(fixture(n)).expect("a PNG fixture"))
 }
 
 /// The two texts of the `\input` file.
@@ -112,7 +111,7 @@ fn content(file: &str, k: usize) -> Vec<u8> {
     }
 }
 
-fn env(c: &mut Command, dir: &Path) -> &mut Command {
+fn env<'a>(c: &'a mut Command, dir: &Path) -> &'a mut Command {
     let home = dir.join("home");
     let _ = std::fs::create_dir_all(&home);
     c.env("PHITEX_CACHE_DIR", dir.join("cache"))
@@ -130,7 +129,10 @@ fn env(c: &mut Command, dir: &Path) -> &mut Command {
 
 /// The clean build's PDF of the project with its files in `state`.
 fn clean(dir: &Path, state: &[usize]) -> Vec<u8> {
-    let root = dir.join(format!("clean-{}", state.iter().map(ToString::to_string).collect::<String>()));
+    let root = dir.join(format!(
+        "clean-{}",
+        state.iter().map(ToString::to_string).collect::<String>()
+    ));
     let pdf = root.join("doc.pdf");
     if let Ok(b) = std::fs::read(&pdf) {
         return b;
@@ -253,7 +255,11 @@ fn wait_for(w: &Watch, pdf: &Path, want: &[u8], what: &str) {
         assert!(
             Instant::now() < end,
             "{what}: the watch's PDF is not the clean build's after {CHANGE_LIMIT:?} ({}); {}",
-            if pdf.exists() { "a PDF there" } else { "no PDF" },
+            if pdf.exists() {
+                "a PDF there"
+            } else {
+                "no PDF"
+            },
             w.said()
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -268,7 +274,12 @@ fn change_each(dir: &Path, w: &Watch, at: &Path) {
     wait_for(w, &pdf, &clean(dir, &state), "the first build");
     for (i, f) in files().iter().enumerate() {
         for how in ["in place", "by a rename over it"] {
+            let before = clean(dir, &state);
             state[i] = 1 - state[i];
+            assert!(
+                clean(dir, &state) != before,
+                "{f}'s change changes no byte of the clean PDF"
+            );
             let p = at.join(f);
             let bytes = content(f, state[i]);
             if how == "in place" {
@@ -300,7 +311,13 @@ fn watch_rebuilds_on_every_file_saved_over() {
         &dir,
         &root,
         &[
-            "--write", "--exact-pdf", "--json", "--no-view", "--ini", "--etex", "doc.tex",
+            "--write",
+            "--exact-pdf",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "doc.tex",
         ],
         false,
     );
@@ -330,7 +347,14 @@ fn watch_lsp_rebuilds_on_every_file_saved_over() {
     let mut w = start(
         &dir,
         &root,
-        &["--write", "--exact-pdf", "--lsp", "--ini", "--etex", "doc.tex"],
+        &[
+            "--write",
+            "--exact-pdf",
+            "--lsp",
+            "--ini",
+            "--etex",
+            "doc.tex",
+        ],
         true,
     );
     lsp_send(

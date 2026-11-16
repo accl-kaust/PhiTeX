@@ -65,7 +65,7 @@ jobs:
       - run: cargo test --workspace --exclude phitex-live --lib --bins --no-fail-fast --quiet
       # (a watch sees each file its build read saved over, in place and by
       # a rename, on each system's file events: no TeX Live needed)
-      - run: cargo test -p phitex-cli --test watch_files --quiet
+      - run: cargo test -p phitex-cli --test tests --quiet -- watch_files::
   # (Windows, x86_64-pc-windows-msvc: the workspace's lint, and the unit
   # tests of the CLI, the engine and kpathsea, which need no TeX Live)
   # (and on Windows's arm64 runner, aarch64-pc-windows-msvc: rustup and
@@ -107,7 +107,7 @@ jobs:
           key: windows-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings
       - run: cargo test -p phitex-cli -p phitex-tex -p phitex-kpse --lib --bins --no-fail-fast --quiet
-      - run: cargo test -p phitex-cli --test watch_files --quiet
+      - run: cargo test -p phitex-cli --test tests --quiet -- watch_files::
   # (macOS, which has no /proc: the CLI's checks of a watch's process,
   # kill(pid, 0), as on Linux)
   macos:
@@ -126,7 +126,7 @@ jobs:
             target
           key: macos-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: cargo test -p phitex-cli --bins --quiet -- 'attach::'
-      - run: cargo test -p phitex-cli --test watch_files --quiet
+      - run: cargo test -p phitex-cli --test tests --quiet -- watch_files::
   # (by hand: phitex on TeX Live 2025's frozen tlnet-final, the same
   # files on both systems, scripts/ci/e2e.ps1: build, watch, an edit, q)
   texlive:
