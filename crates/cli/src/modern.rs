@@ -1357,10 +1357,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     // (the records the build changed, stored once it is done)
     s.flush_records();
     phitex_tex::timeline::lap("cli: the records stored");
-    // (the persisted graph, `PHITEX_GRAPH=1`: saved after the outputs
-    // are written, docs/spec-persisted-graph.md step 3)
-    let _ = s.save_graph();
-    phitex_tex::timeline::lap("cli: the graph saved");
+    // (the persisted graph's load, or why not)
     graph_notes(&s, o, ui);
     // (observe, docs/spec-persisted-graph.md §9: an edit with nothing
     // changed in this process, then the persisted graph's probe; the
@@ -1421,12 +1418,83 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     } else {
         i32::from(!r.out.errors.is_empty())
     };
+    // (the persisted graph, `PHITEX_GRAPH`, docs/spec-persisted-graph.md
+    // step 3: saved after everything is said; a worker of `build_detached`
+    // tells the process waiting for it first, holding the file so that
+    // the next load waits for the save)
+    if let Some(done) = std::env::var_os(GRAPH_DONE) {
+        let held = s.lock_graph();
+        done_with(Path::new(&done), code);
+        let _ = s.save_graph_locked();
+        drop(held);
+    } else {
+        let _ = s.save_graph();
+        phitex_tex::timeline::lap("cli: the graph saved");
+        graph_notes(&s, o, ui);
+    }
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
     std::mem::forget(s);
     std::mem::forget(r);
     phitex_tex::timeline::end("cold build");
     code
+}
+
+/// The variable a worker of [`build_detached`] is given: the file it
+/// writes its exit status to once its outputs are written and its
+/// report said.
+const GRAPH_DONE: &str = "PHITEX_GRAPH_DONE";
+
+/// `phitex build` keeping its graph (`PHITEX_GRAPH=1`,
+/// docs/spec-persisted-graph.md §6: the save off the build's wall): the
+/// build in a worker, this program again with the same arguments and
+/// [`GRAPH_DONE`] (its terminal this one's), which saves the graph after
+/// it has told its exit status; this process exits with that status at
+/// once. None: no worker could be started (the build runs here).
+fn build_detached() -> Option<i32> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let done = std::env::temp_dir().join(format!("phitex-graph-{}-{nanos:x}", std::process::id()));
+    let mut child = std::process::Command::new(std::env::current_exe().ok()?)
+        .args(std::env::args_os().skip(1))
+        .env(GRAPH_DONE, &done)
+        .spawn()
+        .ok()?;
+    let code = loop {
+        if let Ok(t) = std::fs::read_to_string(&done)
+            && let Ok(c) = t.trim().parse::<i32>()
+        {
+            break c;
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                // (its word written as it ended)
+                if let Some(c) = std::fs::read_to_string(&done)
+                    .ok()
+                    .and_then(|t| t.trim().parse::<i32>().ok())
+                {
+                    break c;
+                }
+                break st.code().unwrap_or(crate::EXIT_INTERNAL);
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            Err(_) => break crate::EXIT_INTERNAL,
+        }
+    };
+    let _ = std::fs::remove_file(&done);
+    Some(code)
+}
+
+/// A worker's word to [`build_detached`]: its exit status, written whole.
+fn done_with(done: &Path, code: i32) {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let tmp = done.with_extension("tmp");
+    if std::fs::write(&tmp, code.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, done);
+    }
 }
 
 /// The persisted graph's lines since last told (loaded, or why not;
@@ -1835,7 +1903,15 @@ pub fn main(args: &[String]) -> ! {
     }
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
-        Command::Build => std::process::exit(build(&t, &o, &ui)),
+        Command::Build => {
+            if phitex_live::graph::detached()
+                && std::env::var_os(GRAPH_DONE).is_none()
+                && let Some(code) = build_detached()
+            {
+                std::process::exit(code);
+            }
+            std::process::exit(build(&t, &o, &ui))
+        }
         Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)

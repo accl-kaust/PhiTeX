@@ -255,6 +255,12 @@ pub trait Store: Send + Sync {
     }
     /// Record `key` removed (a graph file refused: never read again).
     fn remove(&self, _key: Key<'_>) {}
+    /// Record `key` held against other processes until the guard is
+    /// dropped: alone (`write`, a save) or shared (a read). None: the
+    /// host has no locks (one process).
+    fn lock(&self, _key: Key<'_>, _write: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
 }
 
 /// The version of the encodings this crate gives the document's records
@@ -338,6 +344,14 @@ impl Records {
     /// The persisted graph's file removed (refused).
     pub fn remove_graph(&self) {
         self.store.remove(Key::Doc("graph"));
+    }
+
+    /// The persisted graph's file held against other processes: to
+    /// write it (alone), or to read it (shared): a load waits for a save
+    /// in flight ([`Store::lock`]).
+    #[must_use]
+    pub fn lock_graph(&self, write: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        self.store.lock(Key::Doc("graph"), write)
     }
 
     pub fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {

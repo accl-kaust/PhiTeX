@@ -388,6 +388,23 @@ impl Store for Kept {
         let _ = std::fs::remove_file(self.path(key));
     }
 
+    /// A lock file beside the record (`NAME.lock`), locked alone or
+    /// shared until the guard is dropped.
+    fn lock(&self, key: Key<'_>, write: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        let p = self.path(key);
+        std::fs::create_dir_all(p.parent()?).ok()?;
+        let mut name = p.file_name()?.to_os_string();
+        name.push(".lock");
+        let f = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p.with_file_name(name))
+            .ok()?;
+        if write { f.lock() } else { f.lock_shared() }.ok()?;
+        Some(Box::new(f))
+    }
+
     fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
         self.cache.format(name)
     }

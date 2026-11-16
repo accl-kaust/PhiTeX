@@ -625,6 +625,12 @@ struct ColdPrep {
     progress: Arc<phitex_tex::Progress>,
 }
 
+/// `n` bytes in MB, for a note.
+#[allow(clippy::cast_precision_loss, reason = "a size shown")]
+fn mb(n: usize) -> f64 {
+    n as f64 / 1e6
+}
+
 /// [`Session::graph_check`]: the options and format the cold build had,
 /// the twin loaded from the build's last save, and its sender of texts.
 struct GraphCheck {
@@ -1093,7 +1099,11 @@ impl Session {
     fn load_graph(&mut self, p: &ColdPrep) -> Result<String, String> {
         let t0 = Instant::now();
         let store = self.store.clone().ok_or("no cache")?;
-        let bytes = store.graph().ok_or("none saved")?;
+        // (a save in flight, a process before this one's: waited for)
+        let held = store.lock_graph(false);
+        let bytes = store.graph();
+        drop(held);
+        let bytes = bytes.ok_or("none saved")?;
         let read_ms = t0.elapsed().as_secs_f64() * 1e3;
         let parts = crate::graph::decode(&bytes).inspect_err(|_| store.remove_graph())?;
         if let Some(k) = crate::graph::key_differs(&parts.key, &self.graph_key()) {
@@ -1174,7 +1184,7 @@ impl Session {
         self.sink.keep_same();
         Ok(format!(
             "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0}; checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}",
-            bytes.len() as f64 / 1e6,
+            mb(bytes.len()),
             t0.elapsed().as_secs_f64() * 1e3,
             st.import_ms,
             st.client_ms,
@@ -1211,6 +1221,25 @@ impl Session {
     /// with no evaluation failure). A line for `-v`; none: graphs are not
     /// kept, or there is no build.
     pub fn save_graph(&self) -> Option<String> {
+        let _held = self.lock_graph();
+        self.save_graph_locked()
+    }
+
+    /// The persisted graph's file held for a save, against other
+    /// processes' loads ([`crate::host::Records::lock_graph`]): a save
+    /// begun after this process said it is done is waited for by the
+    /// next load.
+    #[must_use]
+    pub fn lock_graph(&self) -> Option<Box<dyn std::any::Any + Send>> {
+        if !self.graph_on {
+            return None;
+        }
+        self.store.as_ref()?.lock_graph(true)
+    }
+
+    /// [`Session::save_graph`], the file held already
+    /// ([`Session::lock_graph`]).
+    pub fn save_graph_locked(&self) -> Option<String> {
         if !self.graph_on {
             return None;
         }
@@ -1262,7 +1291,7 @@ impl Session {
         store.put_graph(&bytes);
         let l = format!(
             "graph: saved {:.1} MB in {:.0} ms (encoded {enc_ms:.0}: the client's {client_ms:.0}, the engine's {engine_ms:.0}; written {:.0})",
-            bytes.len() as f64 / 1e6,
+            mb(bytes.len()),
             t0.elapsed().as_secs_f64() * 1e3,
             t1.elapsed().as_secs_f64() * 1e3,
         );

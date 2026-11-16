@@ -34,6 +34,15 @@ pub fn on() -> bool {
     *ON.get_or_init(|| std::env::var_os("PHITEX_GRAPH").is_some_and(|x| !x.is_empty() && x != "0"))
 }
 
+/// Whether `phitex build` saves its graph after it has ended for its
+/// caller (`PHITEX_GRAPH=1`: the build in a worker process, which saves
+/// when the waiting one has gone, spec §6), or before it ends
+/// (`PHITEX_GRAPH=sync`).
+#[must_use]
+pub fn detached() -> bool {
+    on() && std::env::var_os("PHITEX_GRAPH").is_some_and(|x| x != "sync")
+}
+
 const MAGIC: &[u8; 8] = b"PXGFILE\x01";
 /// The file's layout's version: any change of it bumps it (the build's
 /// own bytes carry their own, under [`phitex_tex::engine_id`]).
@@ -640,7 +649,7 @@ mod tests {
         };
         // (a build of more than two chunks, its last one short)
         let build: Vec<u8> = (0..(2 * CHUNK + 777))
-            .map(|i| (i * 131 % 251) as u8)
+            .map(|i| u8::try_from(i * 131 % 251).unwrap_or(0))
             .collect();
         (key, [7; 32], m, build)
     }
