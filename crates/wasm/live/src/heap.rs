@@ -51,8 +51,12 @@ pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
     if increment < 0 || !increment.unsigned_abs().is_multiple_of(PAGE) {
         std::process::abort();
     }
+    // (a growth `room_for` asks on this thread: its refusal is an answer)
+    let asked = ROOM.with(std::cell::Cell::get);
     if SEALED.load(Ordering::Acquire) {
-        out_of_memory();
+        if !asked {
+            out_of_memory();
+        }
         return FAIL;
     }
     let old = wasm32::memory_grow::<0>(increment.unsigned_abs() / PAGE);
@@ -60,12 +64,32 @@ pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
         // (the single-threaded core is never sealed: it grows until the
         // browser or the 4 GiB ceiling refuses, and that refusal is its
         // document outgrowing the memory, told as the sealed one is)
-        if !PROBING.load(Ordering::Acquire) {
+        if !PROBING.load(Ordering::Acquire) && !asked {
             out_of_memory();
         }
         return FAIL;
     }
     (old * PAGE) as *mut u8
+}
+
+thread_local! {
+    /// [`room_for`] asks on this thread: a growth refused is its answer,
+    /// not the document outgrowing the memory.
+    static ROOM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether `bytes` more fit in the memory now: a block of that size
+/// taken and given back at once, its refusal no loss of the document
+/// (the persisted graph's save asks before it starts: work that may be
+/// left undone never takes the memory the document needs). Without a
+/// seal (one thread) the memory grows to fit, as the save would grow it.
+pub fn room_for(bytes: usize) -> bool {
+    let mut v: Vec<u8> = Vec::new();
+    ROOM.with(|r| r.set(true));
+    let ok = v.try_reserve_exact(bytes).is_ok();
+    ROOM.with(|r| r.set(false));
+    drop(v);
+    ok
 }
 
 /// The document outgrew the memory (sealed, or a growth refused outside

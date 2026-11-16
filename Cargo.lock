@@ -2323,6 +2323,7 @@ dependencies = [
 name = "phitex-wasm-live"
 version = "0.0.0"
 dependencies = [
+ "phitex-codecs",
  "phitex-defuse",
  "phitex-live",
  "phitex-shelf",

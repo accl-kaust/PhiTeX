@@ -39,6 +39,32 @@ pub struct Kept {
     put: Put,
     /// The core ended ([`Kept::end`]; set with `slots` held).
     ended: AtomicBool,
+    /// The persisted graph (`phitex_live::graph`, the store's `doc/graph`),
+    /// which the host keeps where it keeps a document's (VS Code's
+    /// workspace storage, the browser's `IndexedDB`), not as the session's
+    /// other keys: tens of MB, given and taken whole by the host's own
+    /// calls, never asked of it or posted ([`Graph`]).
+    graph: Mutex<Graph>,
+}
+
+/// The persisted graph's bytes between the core and its host.
+#[derive(Default)]
+struct Graph {
+    /// What the host gave before the open (`ph_graph_give`): the session's
+    /// first build takes it (none given: none saved, or graphs off).
+    given: Option<Vec<u8>>,
+    /// The graph given was refused (cut, a hash wrong): the host drops its
+    /// copy (told once, [`Kept::graph_dropped`]).
+    dropped: bool,
+}
+
+/// The persisted graph's key in the session's store.
+const GRAPH: &str = "doc/graph";
+
+thread_local! {
+    /// The graph the session saved on this thread (its session thread's;
+    /// without threads, the host's one), until [`Kept::take_graph`].
+    static SAVED: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Kept {
@@ -49,7 +75,33 @@ impl Kept {
             ask,
             put,
             ended: AtomicBool::new(false),
+            graph: Mutex::default(),
         }
+    }
+
+    fn graph(&self) -> MutexGuard<'_, Graph> {
+        self.graph.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The graph the host saved for the document about to open (none: it
+    /// has none, or keeps none): its first build takes it.
+    pub fn give_graph(&self, bytes: Option<Vec<u8>>) {
+        let mut g = self.graph();
+        g.given = bytes;
+        g.dropped = false;
+    }
+
+    /// The graph the session of this thread saved last, handed over
+    /// (none: none since). Each session's own: a document closed while
+    /// its save ended never hands its bytes to the next one's.
+    pub fn take_graph() -> Option<Vec<u8>> {
+        SAVED.with(std::cell::RefCell::take)
+    }
+
+    /// Whether the graph given was refused since last asked: the host
+    /// drops its copy.
+    pub fn graph_dropped(&self) -> bool {
+        std::mem::take(&mut self.graph().dropped)
     }
 
     /// The core ended (`ph_end`): the host hears nothing more, so nothing
@@ -139,11 +191,36 @@ fn name(key: Key<'_>) -> String {
 
 impl Store for Kept {
     fn get(&self, key: Key<'_>) -> Option<Vec<u8>> {
-        self.get_key(&name(key), true)
+        let key = name(key);
+        if key == GRAPH {
+            return self.graph().given.take();
+        }
+        self.get_key(&key, true)
     }
 
     fn put(&self, key: Key<'_>, bytes: &[u8]) {
-        self.put_key(&name(key), bytes, true);
+        let key = name(key);
+        if key == GRAPH {
+            return self.put_durable_owned(Key::Doc("graph"), bytes.to_vec());
+        }
+        self.put_key(&key, bytes, true);
+    }
+
+    fn put_durable_owned(&self, key: Key<'_>, bytes: Vec<u8>) {
+        if name(key) != GRAPH {
+            return self.put(key, &bytes);
+        }
+        if !self.ended.load(Ordering::SeqCst) {
+            SAVED.with(|s| *s.borrow_mut() = Some(bytes));
+        }
+    }
+
+    fn remove(&self, key: Key<'_>) {
+        if name(key) == GRAPH {
+            let mut g = self.graph();
+            g.given = None;
+            g.dropped = true;
+        }
     }
 
     fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
