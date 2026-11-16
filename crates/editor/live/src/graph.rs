@@ -1,8 +1,11 @@
 //! The persisted graph's file (docs/spec-persisted-graph.md §3, §7, step
 //! 3): a session's build saved whole in the document's cache directory
 //! ([`crate::host::Key::Doc`] `graph`) when a build or a watch ends, and
-//! loaded by the next session of the same document when its keys hold,
-//! behind `PHITEX_GRAPH=1`. Its first build is then an edit
+//! loaded by the next session of the same document when its keys hold.
+//! The command line keeps graphs by default (`graph` in `phitex.toml`,
+//! `PHITEX_GRAPH` over it); a session of this library, when its host
+//! says so ([`crate::session::Session::keep_graphs`]), else with
+//! `PHITEX_GRAPH=1`. Its first build is then an edit
 //! ([`crate::session::Session`]).
 //!
 //! The file, all or nothing:
@@ -26,21 +29,34 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::host::Host;
 
-/// Whether builds load and save their graph: `PHITEX_GRAPH=1` (off by
-/// default until its gate is green on the corpus: step 3).
+/// What `PHITEX_GRAPH` says, set: whether builds load and save their
+/// graph (`0` off; `1`, `sync` or anything else on). Over the command
+/// line's `graph` setting; a session's default where its host says
+/// nothing ([`on`]).
 #[must_use]
-pub fn on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("PHITEX_GRAPH").is_some_and(|x| !x.is_empty() && x != "0"))
+pub fn env() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("PHITEX_GRAPH")
+            .filter(|x| !x.is_empty())
+            .map(|x| x != "0")
+    })
 }
 
-/// Whether `phitex build` saves its graph after it has ended for its
-/// caller (`PHITEX_GRAPH=1`: the build in a worker process, which saves
-/// when the waiting one has gone, spec §6), or before it ends
-/// (`PHITEX_GRAPH=sync`).
+/// A session's default before its host says ([`crate::session::Session::keep_graphs`]):
+/// `PHITEX_GRAPH=1`.
 #[must_use]
-pub fn detached() -> bool {
-    on() && std::env::var_os("PHITEX_GRAPH").is_some_and(|x| x != "sync")
+pub fn on() -> bool {
+    env() == Some(true)
+}
+
+/// Whether `phitex build` saves its graph before it ends
+/// (`PHITEX_GRAPH=sync`), not after it has ended for its caller (the
+/// default: the build in a worker process, which saves when the waiting
+/// one has gone, spec §6).
+#[must_use]
+pub fn sync() -> bool {
+    std::env::var_os("PHITEX_GRAPH").is_some_and(|x| x == "sync")
 }
 
 const MAGIC: &[u8; 8] = b"PXGFILE\x01";

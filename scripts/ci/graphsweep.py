@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The persisted graph across processes (docs/spec-persisted-graph.md §5,
-step 3): each document of ci/research.json built by `phitex build` with
-PHITEX_GRAPH=1, one process after another in one directory and cache, the
-graph each saved loaded by the next:
+step 3): each document of ci/research.json built by `phitex build` as it
+is by default (keeping its graph; no PHITEX_GRAPH), one process after
+another in one directory and cache, the graph each saved loaded by the
+next:
 
 1. a clean build, which saves the graph;
 2. unchanged: loaded, no node run, the same bytes;
@@ -18,7 +19,7 @@ graph each saved loaded by the next:
    refused by its key, a clean build.
 
 Each process's PDF, log, aux and SyncTeX file must be byte-identical to a
-clean build (no graph) of the same files in the same directory (the
+clean build (no graph, PHITEX_GRAPH=0) of the same files in the same directory (the
 outputs moved aside, a fresh copy of the document with the same changes
 built there, then the history's put back): after 1, 2 and 5 the previous
 step's outputs are that. A process that should load and did not, one
@@ -99,8 +100,10 @@ class Doc:
 
     def env(self, graph, cache):
         e = manuals.side_env(self.c["engine"], {"PHITEX_CACHE_DIR": str(cache), "NO_COLOR": "1"}, phitex=True)
-        if graph:
-            e["PHITEX_GRAPH"] = "1"
+        # (the history as `phitex build` is by default, keeping its graph:
+        # no variable; the clean build references without one)
+        if not graph:
+            e["PHITEX_GRAPH"] = "0"
         if self.sde:
             e["SOURCE_DATE_EPOCH"] = self.sde
         return e

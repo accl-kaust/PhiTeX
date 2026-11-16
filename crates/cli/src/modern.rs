@@ -733,6 +733,10 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
+    /// Whether the build keeps the document's graph in the cache and
+    /// starts from the one saved (docs/spec-persisted-graph.md):
+    /// `PHITEX_GRAPH` if set, else `graph` (on by default).
+    pub graph: bool,
     /// The engine's threads (`threads` in the user's file; none or 0: the default, one
     /// thread), under `-j`.
     pub threads: Option<usize>,
@@ -1090,6 +1094,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
+        graph: phitex_live::graph::env().unwrap_or(cfg.graph.unwrap_or(true)),
         threads: cfg.threads.filter(|&n| n > 0),
         files,
         warnings: [cfg.warnings, rc_warnings].concat(),
@@ -1319,6 +1324,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
             return crate::EXIT_INTERNAL;
         }
     };
+    s.keep_graphs(t.graph);
     // (a package that could not be had, `--shelf`: said)
     {
         let ui = std::sync::Mutex::new(ui.clone());
@@ -1904,7 +1910,8 @@ pub fn main(args: &[String]) -> ! {
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
         Command::Build => {
-            if phitex_live::graph::detached()
+            if t.graph
+                && !phitex_live::graph::sync()
                 && std::env::var_os(GRAPH_DONE).is_none()
                 && let Some(code) = build_detached()
             {

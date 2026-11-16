@@ -46,6 +46,11 @@ pub struct Config {
     /// The cache's size limit in bytes (`cache-limit = "4GB"`; 0: no cache).
     #[serde(default, deserialize_with = "size")]
     pub cache_limit: Option<u64>,
+    /// Whether builds keep the document's graph in the cache, so the next
+    /// `phitex build` or `phitex watch` of it starts from where the last
+    /// one ended (on by default; `graph = false`, `phitex config graph
+    /// off`, turns it off; `PHITEX_GRAPH=0` or `1` over it).
+    pub graph: Option<bool>,
     /// Where TeX's files come from: `texlive` (kpathsea, the default) or
     /// `shelf` (Shelf's packs, fetched and kept: `crate::shelf`).
     pub files: Option<String>,
@@ -127,6 +132,7 @@ const KEYS: &[&str] = &[
     "copy-pdf",
     "synctex",
     "cache-limit",
+    "graph",
     "files",
     "phitex",
     "update-check",
@@ -462,7 +468,7 @@ fn names_of(key: &str) -> Option<&'static [&'static str]> {
 /// `value` checked for `key` (its own name): the error names the key
 /// and what it takes.
 fn check(key: &str, value: &str) -> Result<(), String> {
-    let switch = SWITCHES.contains(&key) || key == "shell-escape";
+    let switch = SWITCHES.contains(&key) || matches!(key, "shell-escape" | "graph");
     if switch && !matches!(value, "on" | "off" | "true" | "false") {
         return Err(format!("{key} is on or off, not '{value}'"));
     }
@@ -708,6 +714,11 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "the cache's size (\"500MB\", \"4GB\"; 0: no cache)",
     ),
     (
+        "graph",
+        "on",
+        "keep the document's graph in the cache: the next build or watch starts where the last one ended",
+    ),
+    (
         "files",
         "texlive",
         "where TeX's files come from: texlive (kpathsea) or shelf",
@@ -801,6 +812,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("copy-pdf", "false"),
     ("synctex", "false"),
     ("cache-limit", "\"4GB\""),
+    ("graph", "true"),
     ("files", "\"texlive\""),
     ("phitex", "\">=1.0\""),
     ("update-check", "true"),
@@ -1146,6 +1158,7 @@ const PROJECTS_TOO: &[&str] = &[
     "copy-pdf",
     "synctex",
     "cache-limit",
+    "graph",
     "files",
     "phitex",
     "watch-write",
@@ -1338,6 +1351,7 @@ impl Config {
             copy_pdf: self.copy_pdf.or(under.copy_pdf),
             synctex: self.synctex.or(under.synctex),
             cache_limit: self.cache_limit.or(under.cache_limit),
+            graph: self.graph.or(under.graph),
             files: self.files.or(under.files),
             phitex: self.phitex.or(under.phitex),
             update_check: self.update_check.or(under.update_check),
@@ -1693,6 +1707,7 @@ mod tests {
                 copy_pdf: None,
                 synctex: None,
                 cache_limit: None,
+                graph: None,
                 files: None,
                 phitex: None,
                 update_check: None,
@@ -1714,6 +1729,9 @@ mod tests {
             }
         );
         assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
+        assert_eq!(parse("graph = false").unwrap().graph, Some(false));
+        assert_eq!(with_key("", "graph", "off").unwrap(), "graph = false\n");
+        assert!(with_key("", "graph", "maybe").is_err());
         assert_eq!(
             parse("latexmk = \"exact\"").unwrap().latexmk.as_deref(),
             Some("exact")
