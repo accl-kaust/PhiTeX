@@ -27,7 +27,11 @@
 #   socket announces it changes the PDF (test/scenarios/ci-figure.json);
 #   the demo (demo.phitex.org's build, build/web, served here): a sample's
 #   first page from its PDF, typed words on it, no error (apps/web/test/check.mjs);
-#   VS Code's built-in wasm engine (apps/vscode/test/smoke.ts).
+#   VS Code's built-in wasm engine (apps/vscode/test/smoke.ts), and its
+#   following of the disk (apps/vscode/test/disk.ts: an image saved over,
+#   an \input file, the main file and a .bib edited outside the editor, a
+#   file made then removed, an editor's buffer over the disk's; each build's
+#   pages a clean build's of the folder as it is then).
 # Not covered (a manual step before a tag, docs/ci.md): overleaf.com itself
 # (its live DOM and login, the main file it names), the VS Code UI.
 #
@@ -186,6 +190,11 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: fe
         run: node build/vscode/dist/smoke.mjs test/scenarios/ci main.tex
+      # (built by tools/build/build-vscode.sh above, beside smoke.mjs)
+      - name: VS Code's built-in wasm engine and the disk
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node build/vscode/dist/disk.mjs
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
