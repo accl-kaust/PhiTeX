@@ -1071,13 +1071,15 @@ pub(crate) fn match_page_until(
             };
             if line || gap {
                 // (the next line's: just below, not a page's foot)
-                // (a glyph that is a hyphen alone: not a dash, read as
-                // hyphens too, [`folded`])
+                // (a glyph that ends in a hyphen after another character:
+                // pdfTeX's hyphen alone, a XeTeX native word's last; not
+                // a dash, read as hyphens too, [`folded`])
                 let (ha, hb) = glyph_atoms[k - 1];
                 let hyphen = line
                     && cur.len() > 1
-                    && hb == ha + 1
-                    && atoms[ha as usize].ch == '-'
+                    && hb > ha
+                    && atoms[hb as usize - 1].ch == '-'
+                    && atoms[cur[cur.len() - 2] as usize].ch != '-'
                     && gl.v > p.v
                     && (gl.v - p.v) * 5 <= 8 * p.size.max(gl.size);
                 if hyphen {
@@ -1164,7 +1166,24 @@ pub(crate) fn match_page_until(
     // common words, "from the same", paired one by one with the text
     // after its mark, where the run of its own node is)
     let mut alone = vec![false; words.len()];
-    let mut src_used: phitex_defuse::FxHashSet<(u32, u32)> = phitex_defuse::FxHashSet::default();
+    // (each source word matched, (node, word), and the page's word it is
+    // matched to)
+    let mut src_used: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+    // (each matched word's source words: its first and its last, (node,
+    // word); where the text around it is followed from, [`extend`])
+    let mut word_src: Vec<Option<WordSpan>> = vec![None; words.len()];
+    // (the words a later pass matched: the first pass's gaps are matched
+    // already, [`kept_pairs`])
+    let mut late: Vec<usize> = Vec::new();
+    // ([`kept_pairs`]'s answers, made again for each run of characters)
+    let (mut kept, mut groups): (Vec<Placed>, Vec<Group>) = (Vec::new(), Vec::new());
+    // (each atom's word, `u32::MAX` none: a hyphen at a line's end)
+    let mut atom_word = vec![u32::MAX; atoms.len()];
+    for (wi, w) in words.iter().enumerate() {
+        for &a in w {
+            atom_word[a as usize] = u32::try_from(wi).unwrap_or(u32::MAX);
+        }
+    }
     // (the heaviest cluster with every word of the page; then it and the
     // other clusters again with the runs of words left: floats,
     // footnotes, captions, a title; a later pass again while it matches
@@ -1204,7 +1223,7 @@ pub(crate) fn match_page_until(
                 let k = u32::try_from(k).unwrap_or(0);
                 // (a later pass: every word again, a run of three taking
                 // it over from a word matched alone)
-                if round > 0 || !src_used.contains(&(n, k)) {
+                if round > 0 || !src_used.contains_key(&(n, k)) {
                     src.words.push((n, k));
                 }
             }
@@ -1263,6 +1282,19 @@ pub(crate) fn match_page_until(
                 pairs.len()
             );
         }
+        // (a later pass's pairs but those of source words a word matched
+        // in a run or next to one has: never two glyphs on one byte; the
+        // page's words left for the next pass, the cluster of their own
+        // where a sentence repeats in another, and the runs counted
+        // without them)
+        let pairs: Vec<(usize, usize)> = if round > 0 {
+            pairs
+                .into_iter()
+                .filter(|&(_, j)| src_used.get(&src.words[j]).is_none_or(|&w| alone[w]))
+                .collect()
+        } else {
+            pairs
+        };
         let pairs = keep_run(&pairs);
         if round > 0 && !pairs.is_empty() {
             passes.insert(round + 1, ci);
@@ -1286,15 +1318,31 @@ pub(crate) fn match_page_until(
             if round > 0 && word_done[wi] && !alone[wi] {
                 continue;
             }
+            // (a word matched alone that had it: no longer)
+            if let Some(w) = src_used.insert(src.words[j], wi)
+                && w != wi
+                && word_done[w]
+            {
+                for &a in &words[w] {
+                    matched_atoms[a as usize] = None;
+                }
+                word_done[w] = false;
+                alone[w] = false;
+                word_src[w] = None;
+            }
             alone[wi] = round == 0 && r < 3;
             word_done[wi] = true;
-            src_used.insert(src.words[j]);
+            word_src[wi] = Some((src.words[j], src.words[j]));
+            if round > 0 {
+                late.push(wi);
+            }
             let (n, cs) = src.cands(j);
             for (&a, c) in words[wi].iter().zip(cs) {
                 matched_atoms[a as usize] = Some((n, c.1, c.1 + c.2));
             }
         }
-        // the gaps between matched words: characters by LCS
+        // the gaps between matched words: characters by LCS, kept where
+        // the words they join are alike ([`kept_pairs`])
         if round == 0 {
             let mut prev: Option<(usize, usize)> = None;
             let mut bounds: Vec<((usize, usize), (usize, usize))> = Vec::new();
@@ -1309,10 +1357,11 @@ pub(crate) fn match_page_until(
                 let mut ga: Vec<u32> = (ia..ib)
                     .flat_map(|i| words[free[i]].iter().copied())
                     .collect();
-                let mut sb: Vec<(u32, (char, u32, u32))> = (ja..jb)
+                let mut sb: Vec<(u32, u32, (char, u32, u32))> = (ja..jb)
                     .flat_map(|j| {
                         let (n, cs) = src.cands(j);
-                        cs.iter().map(move |&c| (n, c))
+                        let k = src.words[j].1;
+                        cs.iter().map(move |&c| (n, k, c))
                     })
                     .collect();
                 // (the page's first and last gaps: next to their anchor;
@@ -1332,30 +1381,196 @@ pub(crate) fn match_page_until(
                     .iter()
                     .map(|&a| u64::from(u32::from(atoms[a as usize].ch)))
                     .collect();
-                let xb: Vec<u64> = sb.iter().map(|x| u64::from(u32::from(x.1.0))).collect();
+                let xb: Vec<u64> = sb.iter().map(|x| u64::from(u32::from(x.2.0))).collect();
                 // (the page's first gap matched as near its anchor as it
                 // can be: from the end)
-                let pairs = if lead && !trail {
+                let pairs: Vec<(usize, usize)> = if lead && !trail {
                     let ra: Vec<u64> = xa.iter().rev().copied().collect();
                     let rb: Vec<u64> = xb.iter().rev().copied().collect();
-                    lcs(&ra, &rb)
+                    let mut ps: Vec<(usize, usize)> = lcs(&ra, &rb)
                         .into_iter()
                         .map(|(i, j)| (xa.len() - 1 - i, xb.len() - 1 - j))
-                        .collect()
+                        .collect();
+                    ps.reverse();
+                    ps
                 } else {
                     lcs(&xa, &xb)
                 };
-                for (i, j) in pairs {
-                    let (n, c) = sb[j];
-                    matched_atoms[ga[i] as usize] = Some((n, c.1, c.1 + c.2));
+                // (each group's words matched as a word the pass matched
+                // alone: a later pass's run takes it over, and it is left
+                // where it is out of order, as one)
+                kept_pairs(&ga, &atom_word, &atoms, &sb, &pairs, &mut kept, &mut groups);
+                let mut from = 0;
+                for &(to, first, last) in &groups {
+                    let m = &kept[from..to];
+                    from = to;
+                    for &(a, o) in m {
+                        matched_atoms[a as usize] = Some(o);
+                        let w = atom_word[a as usize] as usize;
+                        if w < words.len() {
+                            word_done[w] = true;
+                            alone[w] = true;
+                            word_src[w] = Some((first, last));
+                        }
+                    }
+                    let w = m
+                        .first()
+                        .map_or(0, |&(a, _)| atom_word[a as usize] as usize);
+                    let mut s = first;
+                    src_used.insert(s, w);
+                    while s != last {
+                        let Some(t) = step_src(ix, s, true) else {
+                            break;
+                        };
+                        src_used.insert(t, w);
+                        s = t;
+                    }
                 }
             }
         }
         round += 1;
     }
+    if stop(false) {
+        return None;
+    }
+    // the words next to those a later pass matched, on the page and in
+    // the sources, that are alike ([`extend`]: `pit` of a TikZ node's
+    // `{pit};`), before the words that the document has once are taken
+    // alone; a word next to none, or not alike, is left (a caption's
+    // `Figure 1:`), never given letters of other words around it
+    late.sort_unstable();
+    late.dedup();
+    extend(
+        &words,
+        &atoms,
+        ix,
+        &mut matched_atoms,
+        &mut word_done,
+        &mut src_used,
+        &mut word_src,
+        &late,
+    );
+    // the words left that the whole document has once (four letters or
+    // more, in one node, once there) and the page once: their own
+    // occurrence (a TikZ node's text, a short label out of the page's
+    // order, too short for a run of three)
+    let mut taken = Vec::new();
+    let cands: Vec<usize> = (0..words.len())
+        .filter(|&wi| {
+            // (not the rest of a word a hyphen split at the end of a
+            // column or a page: `side` of `in-side`, another word once
+            // alone)
+            let split = || {
+                wi > 0
+                    && words[wi - 1]
+                        .last()
+                        .is_some_and(|&a| atoms[a as usize].ch == '-')
+            };
+            !word_done[wi]
+                && !split()
+                && words[wi]
+                    .iter()
+                    .filter(|&&a| atoms[a as usize].ch.is_alphanumeric())
+                    .count()
+                    >= 4
+                && ix
+                    .post
+                    .singles
+                    .get(&whash[wi])
+                    .is_some_and(|v| v.len() == 1)
+        })
+        .collect();
+    // (how many times the page has each of them)
+    let mut on_page: FxHashMap<u64, u32> = cands.iter().map(|&wi| (whash[wi], 0)).collect();
+    if !on_page.is_empty() {
+        for h in &whash {
+            if let Some(c) = on_page.get_mut(h) {
+                *c += 1;
+            }
+        }
+    }
+    // (each node's words by hash: where, and how many)
+    let mut by_hash: FxHashMap<u32, FxHashMap<u64, (u32, u32)>> = FxHashMap::default();
+    for wi in cands {
+        let h = whash[wi];
+        if on_page[&h] != 1 {
+            continue;
+        }
+        let Some(&[raw]) = ix.post.singles.get(&h).map(Vec::as_slice) else {
+            continue;
+        };
+        let Some(&n) = ix.order.get(&raw) else {
+            continue;
+        };
+        let hs = by_hash.entry(n).or_insert_with(|| {
+            let mut m: FxHashMap<u64, (u32, u32)> = FxHashMap::default();
+            for (k, w) in ix.nodes[n as usize].scan.words.iter().enumerate() {
+                let e = m.entry(w.2).or_insert((0, u32::try_from(k).unwrap_or(0)));
+                e.0 += 1;
+            }
+            m
+        });
+        let Some(&(1, k)) = hs.get(&h) else {
+            continue;
+        };
+        if src_used.contains_key(&(n, k)) {
+            continue;
+        }
+        if let Some(m) = pair_words(&words, &atoms, ix, &[wi], &[(n, k)]) {
+            for (a, o) in m {
+                matched_atoms[a as usize] = Some(o);
+            }
+            word_done[wi] = true;
+            src_used.insert((n, k), wi);
+            word_src[wi] = Some(((n, k), (n, k)));
+            taken.push(wi);
+        }
+    }
+    // and the words next to those ([`extend`])
+    extend(
+        &words,
+        &atoms,
+        ix,
+        &mut matched_atoms,
+        &mut word_done,
+        &mut src_used,
+        &mut word_src,
+        &taken,
+    );
+    // (a word the first pass matched alone, out of the sources' order of
+    // the matched words around it on the page, the one before it and the
+    // one after it in order themselves: not its own, left; a subfigure's
+    // `(b)` matched to a TikZ node's name, the word unique in both,
+    // between the words of a figure's text)
+    let ran: Vec<usize> = (0..words.len()).filter(|&w| word_done[w]).collect();
+    for wi in 0..words.len() {
+        if !word_done[wi] || !alone[wi] {
+            continue;
+        }
+        let at = ran.partition_point(|&w| w < wi);
+        let (Some(&pw), Some(&nw)) = (at.checked_sub(1).and_then(|i| ran.get(i)), ran.get(at + 1))
+        else {
+            continue;
+        };
+        let (Some((_, before)), Some((after, _)), Some((first, last))) =
+            (word_src[pw], word_src[nw], word_src[wi])
+        else {
+            continue;
+        };
+        if before <= after && !(before <= first && last <= after) {
+            for &a in &words[wi] {
+                matched_atoms[a as usize] = None;
+            }
+            word_done[wi] = false;
+            src_used.remove(&first);
+            src_used.remove(&last);
+            word_src[wi] = None;
+        }
+    }
     // the characters left between two matched ones of one node: matched
-    // to that node's characters between them (`footnote*` against
-    // `footnote\footnote*`, a word a macro split)
+    // to that node's characters between them where the words are alike
+    // ([`kept_pairs`]; `footnote*` against `footnote\footnote*`, a word a
+    // macro split)
     if stop(false) {
         return None;
     }
@@ -1380,14 +1595,27 @@ pub(crate) fn match_page_until(
             let lo = sc.cands.partition_point(|c| c.1 < p.2);
             let hi = sc.cands.partition_point(|c| c.1 < q.1);
             if hi > lo && hi - lo <= 512 {
-                let xa: Vec<u64> = (s0..k).map(|x| u64::from(u32::from(atoms[x].ch))).collect();
-                let xb: Vec<u64> = sc.cands[lo..hi]
-                    .iter()
-                    .map(|c| u64::from(u32::from(c.0)))
+                let ga: Vec<u32> = (s0..k).map(|x| u32::try_from(x).unwrap_or(0)).collect();
+                // (each character's word: the words in order, as the
+                // characters are)
+                let mut w = sc.words.partition_point(|w| w.1 as usize <= lo);
+                let sb: Vec<(u32, u32, (char, u32, u32))> = (lo..hi)
+                    .map(|ci| {
+                        while w < sc.words.len() && sc.words[w].1 as usize <= ci {
+                            w += 1;
+                        }
+                        (p.0, u32::try_from(w).unwrap_or(0), sc.cands[ci])
+                    })
                     .collect();
-                for (i, j) in lcs(&xa, &xb) {
-                    let c = sc.cands[lo + j];
-                    matched_atoms[s0 + i] = Some((p.0, c.1, c.1 + c.2));
+                let xa: Vec<u64> = ga
+                    .iter()
+                    .map(|&a| u64::from(u32::from(atoms[a as usize].ch)))
+                    .collect();
+                let xb: Vec<u64> = sb.iter().map(|x| u64::from(u32::from(x.2.0))).collect();
+                let pairs = lcs(&xa, &xb);
+                kept_pairs(&ga, &atom_word, &atoms, &sb, &pairs, &mut kept, &mut groups);
+                for &(a, o) in &kept {
+                    matched_atoms[a as usize] = Some(o);
                 }
             }
         }
@@ -1399,10 +1627,17 @@ pub(crate) fn match_page_until(
                 .iter()
                 .filter(|&&a| matched_atoms[a as usize].is_some())
                 .count();
+            let at: Vec<String> = w
+                .iter()
+                .map(|&a| {
+                    matched_atoms[a as usize].map_or("-".to_owned(), |(n, f, _)| format!("{n}:{f}"))
+                })
+                .collect();
             eprintln!(
-                "origins: word {i} {t:?} done {} chars matched {m}/{}",
+                "origins: word {i} {t:?} done {} chars matched {m}/{} at {}",
                 word_done[i],
-                w.len()
+                w.len(),
+                at.join(" ")
             );
         }
     }
@@ -1472,6 +1707,414 @@ pub(crate) fn match_page_until(
             .collect(),
         orgs,
     })
+}
+
+/// A matched page word's source words, (node, word): its first and its
+/// last.
+type WordSpan = ((u32, u32), (u32, u32));
+
+/// An atom of the page and its source character: node, byte range.
+type Placed = (u32, (u32, u32, u32));
+
+/// A group of [`kept_pairs`]: where its atoms placed end, its first and
+/// last source words (node, word).
+type Group = (usize, (u32, u32), (u32, u32));
+
+/// Whether characters `a` (a page's) and `b` (the sources') are the same
+/// text: every letter and digit of the sources' matched by their longest
+/// common subsequence, and most of the page's (all of their characters,
+/// where the sources have no letter nor digit); its pairs. What else is
+/// typed around the letters may differ (a `TikZ` node's `pit` is `pit};`,
+/// a word's accent a glyph of its own, quotes and dashes TeX's
+/// ligatures), and the page may show a few letters or digits the sources
+/// do not type (a math font's prime, `0` at its code, between `a` and `b`
+/// of `a'b`), but a gap's letters are never matched to letters of another
+/// text one here and one there (a caption's `Figure` to the `i`, `g`,
+/// `u`, `r`, `e` of a label and an environment's name, or to `figure` of
+/// `\begin{figure}`; a `TikZ` node's text to the words of the paragraph
+/// before it). And a word a hyphen split at the end of a page or a
+/// column, its other part not next to it: its part the start, or the
+/// end, of the sources' word.
+fn alike(a: &[char], b: &[char]) -> Option<Vec<(usize, usize)>> {
+    if a.is_empty() || b.is_empty() || a.len() > 256 || b.len() > 512 {
+        return None;
+    }
+    if let Some(p) = split_part(a, b) {
+        return Some(p);
+    }
+    // (the same letters and digits in a row, the rest around them: each
+    // matched to the next alike, no table)
+    let (mut i, mut j, mut pairs) = (0, 0, Vec::with_capacity(a.len().min(b.len())));
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            pairs.push((i, j));
+            i += 1;
+            j += 1;
+        } else if !a[i].is_alphanumeric() {
+            i += 1;
+        } else if !b[j].is_alphanumeric() {
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    if (i == a.len() || a[i..].iter().all(|c| !c.is_alphanumeric()))
+        && b[j..].iter().all(|c| !c.is_alphanumeric())
+        && same_letters(a, b, &pairs)
+    {
+        return Some(pairs);
+    }
+    let pairs = lcs(a, b);
+    same_letters(a, b, &pairs).then_some(pairs)
+}
+
+/// [`alike`]'s test of a common subsequence `pairs` of `a` and `b`.
+fn same_letters(a: &[char], b: &[char], pairs: &[(usize, usize)]) -> bool {
+    let an = |c: &&char| c.is_alphanumeric();
+    letters_held(
+        (a.len(), a.iter().filter(an).count()),
+        (b.len(), b.iter().filter(an).count()),
+        pairs.len(),
+        pairs.iter().filter(|p| a[p.0].is_alphanumeric()).count(),
+    )
+}
+
+/// [`same_letters`] from the counts: `a`'s and `b`'s characters and
+/// letters and digits, `(len, alnum)`; the pairs', and their letters and
+/// digits.
+fn letters_held((la, na): (usize, usize), (lb, nb): (usize, usize), p: usize, l: usize) -> bool {
+    if nb == 0 {
+        p == la && p == lb
+    } else {
+        l == nb && 2 * l > na
+    }
+}
+
+/// [`alike`]'s part of a word a hyphen split: `a` (the page's) the start
+/// of `b` before its hyphen, or the end of `b`.
+fn split_part(a: &[char], b: &[char]) -> Option<Vec<(usize, usize)>> {
+    if let [head @ .., '-'] = a
+        && head.len() >= 2
+        && head.iter().all(|c| c.is_alphabetic())
+        && b.len() > head.len()
+        && b.starts_with(head)
+    {
+        return Some((0..head.len()).map(|i| (i, i)).collect());
+    }
+    if a.len() >= 3 && a.iter().all(|c| c.is_alphabetic()) && b.len() > a.len() && b.ends_with(a) {
+        let d = b.len() - a.len();
+        return Some((0..a.len()).map(|i| (i, d + i)).collect());
+    }
+    None
+}
+
+/// The pairs of a run of the page's characters `ga` (atoms; `of`, each
+/// one's word) matched to a run of the sources' `sb` ((node, word,
+/// character)) by their longest common subsequence `pairs`, kept where
+/// the words they join are [`alike`]: the page's words (their atoms in
+/// `ga`) that pairs join to the same source words, a group, against those
+/// source words (their characters in `sb`), in a row there. The kept
+/// atoms and their source characters (node, byte range) in `out`, a group
+/// after another, and each group in `groups` (both emptied first).
+fn kept_pairs(
+    ga: &[u32],
+    of: &[u32],
+    atoms: &[Atom],
+    sb: &[(u32, u32, (char, u32, u32))],
+    pairs: &[(usize, usize)],
+    out: &mut Vec<Placed>,
+    groups: &mut Vec<Group>,
+) {
+    // (a piece: its atoms' range in `ga`, the source words it touches,
+    // (node, word), first and last: in the order of `sb`)
+    type Piece = (usize, usize, Option<((u32, u32), (u32, u32))>);
+    out.clear();
+    groups.clear();
+    if pairs.is_empty() {
+        return;
+    }
+    // (the page's pieces: the atoms of one word, in a row in `ga`; each
+    // with the source words its pairs touch, first and last)
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut k = 0;
+    for i in 0..ga.len() {
+        if i == 0 || of[ga[i] as usize] != of[ga[i - 1] as usize] {
+            pieces.push((i, i, None));
+        }
+        let p = pieces.last_mut().expect("a piece");
+        p.1 = i + 1;
+        while k < pairs.len() && pairs[k].0 < i {
+            k += 1;
+        }
+        if k < pairs.len() && pairs[k].0 == i {
+            let x = &sb[pairs[k].1];
+            let w = (x.0, x.1);
+            p.2 = Some(p.2.map_or((w, w), |(a, b)| (a.min(w), b.max(w))));
+        }
+    }
+    // (groups: pieces in a row whose words meet, with the pieces between
+    // them that matched nothing: a math font's prime between `a` and `b`
+    // of `a'b`)
+    let mut g = 0;
+    while g < pieces.len() {
+        let Some(mut ws) = pieces[g].2 else {
+            g += 1;
+            continue;
+        };
+        let mut e = g + 1;
+        loop {
+            let mut f = e;
+            while f < pieces.len() && pieces[f].2.is_none() {
+                f += 1;
+            }
+            match pieces.get(f).and_then(|p| p.2) {
+                Some(w) if w.0 <= ws.1 => {
+                    ws.1 = ws.1.max(w.1);
+                    e = f + 1;
+                }
+                _ => break,
+            }
+        }
+        let (a0, a1) = (pieces[g].0, pieces[e - 1].1);
+        let b0 = sb.partition_point(|x| (x.0, x.1) < ws.0);
+        let b1 = sb.partition_point(|x| (x.0, x.1) <= ws.1);
+        // (the run's pairs in the group, else a word a hyphen split)
+        let (p0, p1) = (
+            pairs.partition_point(|p| p.0 < a0),
+            pairs.partition_point(|p| p.0 < a1),
+        );
+        let ch = |x: usize| atoms[ga[x] as usize].ch;
+        let held = letters_held(
+            (
+                a1 - a0,
+                (a0..a1).filter(|&x| ch(x).is_alphanumeric()).count(),
+            ),
+            (
+                b1 - b0,
+                sb[b0..b1]
+                    .iter()
+                    .filter(|x| x.2.0.is_alphanumeric())
+                    .count(),
+            ),
+            p1 - p0,
+            pairs[p0..p1]
+                .iter()
+                .filter(|p| ch(p.0).is_alphanumeric())
+                .count(),
+        );
+        let place = |(i, j): (usize, usize)| {
+            let (n, _, c) = sb[j];
+            (ga[i], (n, c.1, c.1 + c.2))
+        };
+        if held {
+            out.extend(pairs[p0..p1].iter().map(|&p| place(p)));
+            groups.push((
+                out.len(),
+                (sb[b0].0, sb[b0].1),
+                (sb[b1 - 1].0, sb[b1 - 1].1),
+            ));
+        } else if (ch(a1 - 1) == '-' && ch(a0) == sb[b0].2.0) || ch(a1 - 1) == sb[b1 - 1].2.0 {
+            // (where [`split_part`] may hold: its ends)
+            let xa: Vec<char> = (a0..a1).map(ch).collect();
+            let xb: Vec<char> = sb[b0..b1].iter().map(|x| x.2.0).collect();
+            if let Some(m) = split_part(&xa, &xb) {
+                out.extend(m.into_iter().map(|(i, j)| place((a0 + i, b0 + j))));
+                groups.push((
+                    out.len(),
+                    (sb[b0].0, sb[b0].1),
+                    (sb[b1 - 1].0, sb[b1 - 1].1),
+                ));
+            }
+        }
+        g = e;
+    }
+}
+
+/// Page words `ws` (in the page's order) against source words `ss`
+/// ((node, word), in the sources' order) where they are [`alike`], their
+/// characters run together: each matched atom and its source character
+/// (node, its byte range).
+fn pair_words(
+    words: &[Vec<u32>],
+    atoms: &[Atom],
+    ix: &Index,
+    ws: &[usize],
+    ss: &[(u32, u32)],
+) -> Option<Vec<Placed>> {
+    // (first what the counts of letters and digits and the ends allow,
+    // with nothing made: most words tried are not alike)
+    let (mut la, mut na, mut pf, mut pl, mut alpha) = (0, 0, None, None, true);
+    for &w in ws {
+        for &a in &words[w] {
+            let c = atoms[a as usize].ch;
+            la += 1;
+            na += usize::from(c.is_alphanumeric());
+            alpha &= c.is_alphabetic();
+            pf = pf.or(Some(c));
+            pl = Some(c);
+        }
+    }
+    let (mut lb, mut nb, mut sf, mut sl) = (0, 0, None, None);
+    for &(n, k) in ss {
+        let sc = &ix.nodes[n as usize].scan;
+        let (a, b, _) = sc.words[k as usize];
+        for c in &sc.cands[a as usize..b as usize] {
+            lb += 1;
+            nb += usize::from(c.0.is_alphanumeric());
+            sf = sf.or(Some(c.0));
+            sl = Some(c.0);
+        }
+    }
+    let counts = if nb == 0 {
+        la == lb
+    } else {
+        nb <= na && na < 2 * nb
+    };
+    let split =
+        (pl == Some('-') && pf == sf && lb >= la) || (alpha && la >= 3 && pl == sl && lb > la);
+    if !counts && !split {
+        return None;
+    }
+    let pa: Vec<u32> = ws.iter().flat_map(|&w| words[w].iter().copied()).collect();
+    let sb: Vec<(u32, (char, u32, u32))> = ss
+        .iter()
+        .flat_map(|&(n, k)| {
+            let s = &ix.nodes[n as usize].scan;
+            let (a, b, _) = s.words[k as usize];
+            s.cands[a as usize..b as usize].iter().map(move |&c| (n, c))
+        })
+        .collect();
+    let xa: Vec<char> = pa.iter().map(|&a| atoms[a as usize].ch).collect();
+    let xb: Vec<char> = sb.iter().map(|x| x.1.0).collect();
+    let pairs = alike(&xa, &xb)?;
+    Some(
+        pairs
+            .into_iter()
+            .map(|(i, j)| {
+                let (n, c) = sb[j];
+                (pa[i], (n, c.1, c.1 + c.2))
+            })
+            .collect(),
+    )
+}
+
+/// The source word after `(n, k)` (node, word) in the document's order,
+/// or before it (`fwd` false): the next node's first where `k` is its
+/// node's last.
+fn step_src(ix: &Index, (n, k): (u32, u32), fwd: bool) -> Option<(u32, u32)> {
+    let len = |n: u32| u32::try_from(ix.nodes[n as usize].scan.words.len()).unwrap_or(0);
+    if fwd {
+        let (mut n, mut k) = (n, k + 1);
+        while (n as usize) < ix.nodes.len() {
+            if k < len(n) {
+                return Some((n, k));
+            }
+            n += 1;
+            k = 0;
+        }
+        None
+    } else {
+        let (mut n, mut k) = (n, k);
+        loop {
+            if k > 0 {
+                return Some((n, k - 1));
+            }
+            if n == 0 {
+                return None;
+            }
+            n -= 1;
+            k = len(n);
+        }
+    }
+}
+
+/// The page's words next to matched ones matched to the source words
+/// next to theirs where they are [`alike`] ([`match_page_until`]): from
+/// each matched word of `seeds` (in the page's order) forward, then back,
+/// a word to a word, a word to two (a word a control sequence splits in
+/// the sources, `na\"{\i}ve`) or two to one (a word a hyphen splits at a
+/// line's end), as long as they are alike and neither is matched yet.
+#[allow(clippy::too_many_arguments)]
+fn extend(
+    words: &[Vec<u32>],
+    atoms: &[Atom],
+    ix: &Index,
+    matched_atoms: &mut [Option<(u32, u32, u32)>],
+    word_done: &mut [bool],
+    src_used: &mut FxHashMap<(u32, u32), usize>,
+    word_src: &mut [Option<WordSpan>],
+    seeds: &[usize],
+) {
+    // (a try: page words against source words)
+    type Try<'a> = Option<(&'a [usize], &'a [(u32, u32)])>;
+    let n = words.len();
+    for fwd in [true, false] {
+        let mut order = seeds.to_vec();
+        if !fwd {
+            order.reverse();
+        }
+        for wi in order {
+            let Some((first, last)) = word_src[wi] else {
+                continue;
+            };
+            let mut src = if fwd { last } else { first };
+            let mut i = wi;
+            loop {
+                let page_next = |i: usize| -> Option<usize> {
+                    let j = if fwd { i + 1 } else { i.checked_sub(1)? };
+                    (j < n && !word_done[j]).then_some(j)
+                };
+                let Some(p1) = page_next(i) else {
+                    break;
+                };
+                let free = |s: &(u32, u32)| !src_used.contains_key(s);
+                let Some(s1) = step_src(ix, src, fwd).filter(free) else {
+                    break;
+                };
+                let s2 = step_src(ix, s1, fwd).filter(free);
+                let p2 = page_next(p1);
+                // (in the page's order, and the sources')
+                let w1 = [p1];
+                let s1s = [s1];
+                let w2 = p2.map(|p2| if fwd { [p1, p2] } else { [p2, p1] });
+                let s2s = s2.map(|s2| if fwd { [s1, s2] } else { [s2, s1] });
+                let mut tries: [Try; 3] = [None; 3];
+                tries[0] = Some((&w1, &s1s));
+                if let Some(s2s) = &s2s {
+                    tries[1] = Some((&w1, s2s));
+                }
+                if let Some(w2) = &w2 {
+                    tries[2] = Some((w2, &s1s));
+                }
+                let mut got = None;
+                for (ws, ss) in tries.into_iter().flatten() {
+                    if let Some(m) = pair_words(words, atoms, ix, ws, ss) {
+                        got = Some((ws.to_vec(), ss.to_vec(), m));
+                        break;
+                    }
+                }
+                let Some((ws, ss, m)) = got else {
+                    break;
+                };
+                for (a, o) in m {
+                    matched_atoms[a as usize] = Some(o);
+                }
+                for &s in &ss {
+                    src_used.insert(s, ws[0]);
+                }
+                let span = (ss[0], ss[ss.len() - 1]);
+                for &w in &ws {
+                    word_done[w] = true;
+                    word_src[w] = Some(span);
+                }
+                (i, src) = if fwd {
+                    (ws[ws.len() - 1], span.1)
+                } else {
+                    (ws[0], span.0)
+                };
+            }
+        }
+    }
 }
 
 /// Unmatched glyphs between two matched ones of the same node on their
@@ -1815,9 +2458,17 @@ fn lis(xs: &[(usize, usize)]) -> Vec<(usize, usize)> {
 }
 
 /// A longest common subsequence of `a` and `b`: its pairs, in order.
-fn lcs(a: &[u64], b: &[u64]) -> Vec<(usize, usize)> {
+fn lcs<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(usize, usize)> {
     let (n, m) = (a.len(), b.len());
-    let mut t = vec![0u16; (n + 1) * (m + 1)];
+    // (a word's against a word's: the table on the stack)
+    let mut small = [0u16; 1024];
+    let mut big = Vec::new();
+    let t: &mut [u16] = if (n + 1) * (m + 1) <= small.len() {
+        &mut small[..(n + 1) * (m + 1)]
+    } else {
+        big.resize((n + 1) * (m + 1), 0u16);
+        &mut big
+    };
     for i in (0..n).rev() {
         for j in (0..m).rev() {
             t[i * (m + 1) + j] = if a[i] == b[j] {
@@ -3198,6 +3849,139 @@ mod tests {
         let first = m.orgs[0];
         let t = &texts[0];
         assert_eq!(&t[first.from as usize..first.to as usize], held("الصفحة"));
+    }
+
+    /// `text`'s words told the tap as native words on lines from `v`
+    /// down ([`natives`]): 3 pt between words, a new line 12 pt below
+    /// past 300 pt.
+    fn lines(r: &mut Recorder, text: &str, v: &mut Scaled) {
+        const PT: Scaled = 65536;
+        let mut h = 0;
+        for w in text.split_whitespace() {
+            let n = Scaled::try_from(w.chars().count()).unwrap_or(1);
+            if h > 0 && h + 5 * n * PT > 300 * PT {
+                h = 0;
+                *v += 12 * PT;
+            }
+            natives(r, &[(w, h)], *v);
+            h += (5 * n + 3) * PT;
+        }
+        *v += 12 * PT;
+    }
+
+    /// A page that starts with a `figure*` (its subcaption, its `TikZ`
+    /// picture's node texts, its caption) and goes on with the paragraph
+    /// after the float's source, whose words are the caption's too: each
+    /// word of the float's text matched to its own bytes (the caption's
+    /// to the `\caption` argument, a node's text to its braces), the
+    /// paragraph's to the paragraph's; LaTeX's `(a)` and `Figure 1:`, in
+    /// no source, never to letters of another text. The first pass's gap
+    /// before the paragraph matched the float's letters one by one to the
+    /// letters of whatever source was there: `Figure` to the `i`, `g` of
+    /// a label and the `ure` of `subfigure`, a node's text to the words
+    /// of the paragraph before (issue #47).
+    #[test]
+    fn a_floats_words_match_their_own_bytes() {
+        // (a word's place: node, bytes)
+        type At = Option<(usize, usize, usize)>;
+        const PT: Scaled = 65536;
+        let before = "The figure shows how the lanterns were painted over the winter, and the quarry where the granite and the marble were cut for the harbour. Each panel was drawn during the festival by a painter of the northern school.\n";
+        let float = "\\begin{figure*}\n\\centering\n\\begin{subfigure}{0.45\\textwidth}\n\\caption{Lanterns over the northern quay}\\label{fig:quay}\n\\end{subfigure}\n\\begin{subfigure}{0.45\\textwidth}\n\\begin{tikzpicture}\n\\node[draw] (a) at (0,0) {Granite pit};\n\\node[draw] (b) at (3,0) {Marble quarry};\n\\end{tikzpicture}\n\\end{subfigure}\n\\caption{Harbour scenes painted during the winter festival, with both panels drawn to the same scale.}\n\\end{figure*}\n";
+        let after = "After the festival the painters went back to the quarry, where the stone for the new harbour wall was cut and carried down to the quay on carts drawn by oxen, slowly, over many weeks of the spring.\n";
+        let texts = [held(before), held(float), held(after)];
+        let ix = Index::update(
+            texts
+                .iter()
+                .enumerate()
+                .map(|(k, t)| Node {
+                    raw: k as u64 + 1,
+                    scan: Arc::new(scan(t)),
+                })
+                .collect(),
+            Arc::default(),
+        );
+        let (mut r, out) = Recorder::new();
+        let mut v = 0;
+        // (the page: the float on top, then the paragraph after it)
+        for t in [
+            "(a) Lanterns over the northern quay",
+            "Granite pit",
+            "Marble quarry",
+            "Figure 1: Harbour scenes painted during the winter festival, with both panels drawn to the same scale.",
+            after,
+        ] {
+            lines(&mut r, t, &mut v);
+        }
+        v += 24 * PT;
+        natives(&mut r, &[("2", 150 * PT)], v);
+        drop(r);
+        let g = out.lock().unwrap().take().unwrap();
+        let m = match_page(&g, &ix);
+        // (each native word, a node of its glyphs: its text, and where it
+        // was placed: node, bytes)
+        let shown: Vec<(String, At)> = m
+            .orgs
+            .iter()
+            .zip(&g.codes)
+            .filter(|(_, c)| c.first)
+            .map(|(o, c)| {
+                let t: String = g.chars(c).into_iter().collect();
+                let at = (o.node != NO_NODE && !o.synth).then(|| {
+                    let raw = usize::try_from(m.nodes[o.node as usize].0).unwrap();
+                    (raw, o.from as usize, o.to as usize)
+                });
+                (t, at)
+            })
+            .collect();
+        let mut k = 0;
+        let mut word = |w: &str| {
+            let g = &shown[k];
+            k += 1;
+            assert_eq!(g.0, w);
+            g.1
+        };
+        // (placed in node `node`, within `from..to`, on its own text)
+        let within = |node: usize, (from, to): (usize, usize), g: At, w: &str| {
+            let Some((n, a, b)) = g else {
+                panic!("{w:?} not placed");
+            };
+            let t = &texts[n - 1];
+            assert!(
+                n == node && a >= from && b <= to && t[a..b] == *w,
+                "{w:?} placed at {:?} (node {n} {a}..{b}), not in {:?}",
+                &t[a..b],
+                &texts[node - 1][from..to]
+            );
+        };
+        let arg = |node: usize, s: &str| {
+            let at = texts[node - 1].find(s).unwrap();
+            (at, at + s.len())
+        };
+        let none = |g: At, w: &str| {
+            assert!(g.is_none(), "{w:?} placed: {g:?}");
+        };
+        none(word("(a)"), "(a)");
+        let sub = arg(2, "Lanterns over the northern quay");
+        for w in ["Lanterns", "over", "the", "northern", "quay"] {
+            within(2, sub, word(w), w);
+        }
+        for (w, t) in [
+            ("Granite", "Granite pit"),
+            ("pit", "Granite pit"),
+            ("Marble", "Marble quarry"),
+            ("quarry", "Marble quarry"),
+        ] {
+            within(2, arg(2, t), word(w), w);
+        }
+        none(word("Figure"), "Figure");
+        none(word("1:"), "1:");
+        let cap = "Harbour scenes painted during the winter festival, with both panels drawn to the same scale.";
+        for w in cap.split_whitespace() {
+            within(2, arg(2, cap), word(w), w);
+        }
+        for w in after.split_whitespace() {
+            within(3, (0, texts[2].len()), word(w), w);
+        }
     }
 
     #[test]
