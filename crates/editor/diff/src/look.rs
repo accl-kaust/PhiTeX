@@ -97,9 +97,9 @@ const FONTS: &str = r"\protected\long\def\phitexdifsf#1{\ifmmode\mathsf{#1}\else
 const FOOTMISC: &str = r"\RequirePackage[stable]{footmisc}";
 
 /// A colour as the colour stack takes it: `R G B`, each from 0 to 1.
-fn rgb(c: Option<&Color>, default: (f64, f64, f64)) -> String {
-    let (r, g, b) = c.and_then(Color::rgb).unwrap_or(default);
-    let f = |x: f64| {
+fn rgb(color: Option<&Color>, default: (f64, f64, f64)) -> String {
+    let (red, green, blue) = color.and_then(Color::rgb).unwrap_or(default);
+    let num = |x: f64| {
         let s = format!("{:.4}", x.clamp(0.0, 1.0));
         let s = s.trim_end_matches('0').trim_end_matches('.');
         if s.is_empty() {
@@ -108,7 +108,7 @@ fn rgb(c: Option<&Color>, default: (f64, f64, f64)) -> String {
             s.to_owned()
         }
     };
-    format!("{} {} {}", f(r), f(g), f(b))
+    format!("{} {} {}", num(red), num(green), num(blue))
 }
 
 const BLUE: (f64, f64, f64) = (0.0, 0.0, 1.0);
@@ -117,6 +117,10 @@ const RED: (f64, f64, f64) = (1.0, 0.0, 0.0);
 /// The definitions of `\DIFadd` (`add`: its name, `\DIFaddtex` under
 /// hyperref) and `\DIFdel` for `m`, colours `a` and `d` (`R G B`), and the
 /// packages and private definitions they need first.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm a type, as latexdiff lists them"
+)]
 fn markup(m: Markup, add: &str, del: &str, a: &str, d: &str, driver: &str) -> Vec<String> {
     let mut l: Vec<String> = Vec::new();
     let bar = format!("\\RequirePackage[{driver}]{{changebar}}");
@@ -240,6 +244,10 @@ fn markup(m: Markup, add: &str, del: &str, a: &str, d: &str, driver: &str) -> Ve
 
 /// The definitions of `\DIFaddbegin`, … for `s`, colours `a` and `d`.
 /// `colored`: the colour definitions are there already.
+#[allow(
+    clippy::many_single_char_names,
+    reason = "the colours a and d, as markup's"
+)]
 fn subtype(s: Subtype, a: &str, d: &str, colored: bool) -> Vec<String> {
     let cmd = |name: &str, body: &str| format!("\\providecommand{{\\{name}}}{{{body}}}");
     let six = |b: [&str; 6]| {

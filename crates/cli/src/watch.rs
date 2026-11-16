@@ -3793,7 +3793,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             };
             // (the files changed told the diff's session as the
             // document's was, whether or not a diff is on: it is kept)
-            for c in comparing.iter_mut() {
+            if let Some(c) = comparing.as_mut() {
                 c.files_changed(&edits.buffers, &diff_files);
                 if diff_reread {
                     c.reread();

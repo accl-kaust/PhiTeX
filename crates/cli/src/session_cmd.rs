@@ -1099,7 +1099,7 @@ fn compare_part(
             for e in walk_tex(root) {
                 let Ok(t) = std::fs::read(&e) else { continue };
                 if let Some((a, _)) = crate::shot::label_place(&t, l) {
-                    let n = t[..a].iter().filter(|&&b| b == b'\n').count() + 1;
+                    let n = t[..a].split(|&b| b == b'\n').count();
                     let rel = e.strip_prefix(root).unwrap_or(&e).display().to_string();
                     found = Some((rel, n));
                     break;

@@ -6680,7 +6680,7 @@ fn session_compare_runs_only_the_changes() {
     }
     // (no paragraph the diff left as it was run again, and the paragraph
     // pieces run only the changed ones and the definitions)
-    let changed = [5, 12, 33];
+    let edited_paras = [5, 12, 33];
     for r in v["reran"].as_array().expect("the nodes run again") {
         let text = r["text"].as_str().unwrap_or("");
         for (k, _) in text.match_indices("Paragraph ") {
@@ -6690,7 +6690,7 @@ fn session_compare_runs_only_the_changes() {
                 .collect();
             if let Ok(n) = n.parse::<usize>() {
                 assert!(
-                    changed.contains(&n),
+                    edited_paras.contains(&n),
                     "paragraph {n}, unchanged, ran again ({}): {text:?}",
                     r["why"]
                 );
@@ -6766,29 +6766,29 @@ fn session_png_compare() {
         "Sentence two of paragraph 12 says rather more",
     );
     std::fs::write(dir.join("main.tex"), &main2).expect("the edit");
-    let s = PngSession::start(&dir, "main.tex", &[]);
-    let c = s.json(&["png", "--compare", "HEAD", "--change", "1", "--dpi", "100"]);
-    assert_eq!(c["target"], "change 1", "{c}");
-    let (w, h) = png_size(c["png"].as_str().expect("its PNG"));
-    assert!(w > 10 && h > 5, "{w}x{h}");
+    let session = PngSession::start(&dir, "main.tex", &[]);
+    let change = session.json(&["png", "--compare", "HEAD", "--change", "1", "--dpi", "100"]);
+    assert_eq!(change["target"], "change 1", "{change}");
+    let (wide, high) = png_size(change["png"].as_str().expect("its PNG"));
+    assert!(wide > 10 && high > 5, "{wide}x{high}");
     let line = line_of(&main2, "says rather more");
-    let l = s.json(&[
+    let at = session.json(&[
         "png",
         "--compare",
         "HEAD",
         "--at",
         &format!("main.tex:{line}"),
     ]);
-    assert_eq!(l["page"], c["page"], "{l} {c}");
-    let b = bbox_of(&l);
-    let cb = bbox_of(&c);
+    assert_eq!(at["page"], change["page"], "{at} {change}");
+    let b = bbox_of(&at);
+    let cb = bbox_of(&change);
     assert!(
         b[1] <= cb[1] + 0.5 && cb[3] <= b[3] + 0.5,
         "the line's box holds the change's: {b:?} {cb:?}"
     );
-    let lab = s.json(&["png", "--compare", "HEAD", "--label", "p12"]);
-    assert_eq!(lab["page"], l["page"], "{lab}");
-    let out = s.phitex(&["session", "png", "--compare", "HEAD", "--change", "9"]);
+    let lab = session.json(&["png", "--compare", "HEAD", "--label", "p12"]);
+    assert_eq!(lab["page"], at["page"], "{lab}");
+    let out = session.phitex(&["session", "png", "--compare", "HEAD", "--change", "9"]);
     assert_eq!(out.status.code(), Some(4));
 }
 

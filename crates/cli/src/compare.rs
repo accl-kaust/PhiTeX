@@ -646,13 +646,9 @@ impl Compare {
                 let t = texts
                     .entry(c.new.file.clone())
                     .or_insert_with(|| now.read(&c.new.file));
-                let line = t.as_ref().map(|t| {
-                    t.as_bytes()[..c.new.start.min(t.len())]
-                        .iter()
-                        .filter(|&&b| b == b'\n')
-                        .count()
-                        + 1
-                });
+                let line = t
+                    .as_ref()
+                    .map(|t| t.get(..c.new.start).map_or(0, |s| s.matches('\n').count()) + 1);
                 let kind = match c.kind {
                     phitex_diff::ChangeKind::Add => "add",
                     phitex_diff::ChangeKind::Del => "del",
@@ -689,12 +685,11 @@ impl Compare {
         // through the diff's map), or another kept as it is)
         let mut index: Vec<Result<usize, u32>> = Vec::with_capacity(o.files.len());
         for f in &o.files {
-            match self.file_of(f) {
-                Some(k) => index.push(Ok(k)),
-                None => {
-                    index.push(Err(u32::try_from(files.len()).unwrap_or(u32::MAX)));
-                    files.push(f.clone());
-                }
+            if let Some(k) = self.file_of(f) {
+                index.push(Ok(k));
+            } else {
+                index.push(Err(u32::try_from(files.len()).unwrap_or(u32::MAX)));
+                files.push(f.clone());
             }
         }
         let place = |k: usize, at: u32| -> Option<(u32, u32)> {
