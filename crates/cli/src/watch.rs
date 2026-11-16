@@ -2366,8 +2366,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     checked, changed, ..
                 },
                 d,
-            )) = asked_reread
+            )) = &asked_reread
             {
+                let (checked, changed, d) = (*checked, *changed, *d);
                 rows.push((
                     "files".to_owned(),
                     format!(
@@ -2527,6 +2528,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 "looked_up": r.looked_up,
                 "keys_ms": r.keys.as_secs_f64() * 1e3,
                 "lookups_ms": r.lookups.as_secs_f64() * 1e3,
+                // (what the two took: the paths keyed and the names looked
+                // up, in order)
+                "found": r.found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "absent": r.absent,
             })),
             // (runs in all, a node run again counted again: past
             // nodes_run, the work an edit did again)

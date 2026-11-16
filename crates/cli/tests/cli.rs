@@ -942,22 +942,25 @@ fn watch_an_edit_that_makes_what_it_made_runs_its_node_alone() {
 /// 7 ms of 113 stagings of nothing). In a release build each build
 /// stays within 2 ms and 300 µs per 1000 nodes, and `r`'s check of the
 /// files within a small multiple of what the same calls cost this
-/// machine, timed beside it: a stat of each file found, kpathsea's lookup
-/// of each name not found (a bound in µs a file failed on loaded
-/// runners, 54 to 70 µs a file, #31; a file read again, or a second call
-/// a file, is over it on any machine).
+/// machine, timed beside it on the same files and names, those `r`
+/// reports it checked: a stat of each file found, kpathsea's lookup of
+/// each name not found (#31: a baseline of 7 files cycled and kpathsea's
+/// `.` the test's own folder compared other work, 1.6-3.7x on loaded
+/// runners; a file read again, or a second call a file, is over the bar).
 #[test]
 #[allow(clippy::too_many_lines, reason = "one watch session, step by step")]
 fn watch_no_change_rebuild() {
     /// The `r`s timed.
-    const CHECKS: u64 = 5;
-    /// `r`'s keys of the files found, at most this many times as many
-    /// stat calls (0.96-1.59 on accl, 8 runs; a second stat a file
-    /// 2.16-2.69, a read 8.6-10.2).
-    const KEYS_PER_STAT: f64 = 1.9;
+    const CHECKS: u64 = 15;
+    /// `r`'s keys of the files found, at most this many times the stat
+    /// calls on the same files, the median of the `r`s (mc, 8 copies on 16
+    /// CPUs, 208 runs: 0.97-1.44; a second stat a file 1.96-2.37, a read
+    /// 11.5-14.2).
+    const KEYS_PER_STAT: f64 = 1.7;
     /// `r`'s lookups of the names not found, at most this many times
-    /// kpathsea's (1.57-1.99 on accl; a second lookup a name 3.1-3.9).
-    const LOOKUPS_PER_LOOKUP: f64 = 2.5;
+    /// kpathsea's of the same names from the same folder (0.63-1.03; a
+    /// second lookup a name 1.39-1.78).
+    const LOOKUPS_PER_LOOKUP: f64 = 1.2;
     let _one = one();
     let big = big();
     let body = big
@@ -1008,41 +1011,33 @@ fn watch_no_change_rebuild() {
     };
     std::thread::sleep(Duration::from_millis(100));
     let (pdf_at, lst_at) = (stamp(&pdf), stamp(&dir.join("big.lst")));
-    // (the machine's own cost of the same calls, timed beside `r`'s:
-    // a stat of as many files found, the document's and TeX Live's fonts
-    // in turn, and kpathsea's lookup of the names not found, as the watch
-    // makes it, `tex::Tree::input`)
+    // (the machine's own cost of the same calls, timed beside `r`'s: a
+    // stat of each file `r` keyed and kpathsea's lookup of each name it
+    // looked up, the lists its event gives, in its order, each call timed
+    // alone as `r` times its own, `Session::reread_all_timed`; #31: a
+    // baseline of 7 files cycled, against `r`'s 59 on deeper paths,
+    // compared different work; and kpathsea's `.` is the document's
+    // folder, as the watch's is: a name not found reads the listing of
+    // each folder searched on the disk, kept only once the folder's time
+    // is two seconds old, and the watch's folder was just written, the
+    // test's own was not: 1.6-3.7x)
     let mut kpse = texlive_kpse();
-    let found: Vec<PathBuf> = ["cmr10.tfm", "cmmi10.tfm", "cmsy10.tfm", "cmbx10.tfm"]
-        .iter()
-        .map(|n| {
-            let p = kpse
-                .find_file(n.as_bytes(), phitex_kpse::Format::Tfm, false)
-                .expect("TeX Live's fonts");
-            PathBuf::from(String::from_utf8(p).expect("a path"))
-        })
-        .chain(
-            ["big.tex", "chap.tex", "big.lst"]
-                .iter()
-                .map(|n| dir.join(n)),
-        )
-        .collect();
-    let absent: Vec<String> = (0..40).map(|k| format!("absent-{k}.cfg")).collect();
-    let mut machine = |keys: usize, lookups: usize| {
-        let t = Instant::now();
-        for p in found.iter().cycle().take(keys) {
+    kpse.set_var("TEXMFDOTDIR", dir.to_str().expect("a UTF-8 path"));
+    let mut machine = |found: &[PathBuf], absent: &[String]| {
+        let mut stats = Duration::ZERO;
+        for p in found {
+            let t = Instant::now();
             std::hint::black_box(std::fs::metadata(p).ok());
+            stats += t.elapsed();
         }
-        let stats = t.elapsed().as_secs_f64() * 1e3;
-        let t = Instant::now();
-        for n in absent.iter().cycle().take(lookups) {
+        let mut lookups = Duration::ZERO;
+        for n in absent {
+            let t = Instant::now();
             std::hint::black_box(kpse.find_file(n.as_bytes(), phitex_kpse::Format::Tex, false));
+            lookups += t.elapsed();
         }
-        (stats, t.elapsed().as_secs_f64() * 1e3)
+        (stats.as_secs_f64() * 1e3, lookups.as_secs_f64() * 1e3)
     };
-    // (kpathsea's databases read, the files' entries cached, before any
-    // is timed)
-    machine(found.len(), absent.len());
     let check = |ev: &serde_json::Value, what: &str| {
         assert_eq!(ev["ok"], true, "{what}: {ev}");
         assert_eq!(ev["nodes_run"], 0, "{what} ran nodes: {ev}");
@@ -1062,9 +1057,10 @@ fn watch_no_change_rebuild() {
     };
     // (`r`'s check of the files, the keys of those found and the lookups
     // of those not, each against the same calls made here right after it:
-    // the least of each over the `r`s, so that a moment's load on a
-    // shared machine, on either side, is not taken for the check's cost)
-    let mut least = [f64::INFINITY; 4];
+    // the median of the `r`s' ratios, each `r` paired with the calls timed
+    // beside it, so that a moment's load on a shared machine, on either
+    // side, is not taken for the check's cost)
+    let (mut key_ratios, mut lookup_ratios) = (Vec::new(), Vec::new());
     let (mut keys, mut lookups) = (0, 0);
     for k in 1..=CHECKS {
         stdin.write_all(b"\n").expect("r");
@@ -1078,33 +1074,51 @@ fn watch_no_change_rebuild() {
         lookups = n(&r["looked_up"]);
         keys = checked - lookups;
         assert!(checked > 40 && lookups >= 40, "r {k} checked: {ev}");
+        let list = |f: &str| -> Vec<String> {
+            r[f].as_array()
+                .unwrap_or_else(|| panic!("r {k}: no {f} list: {ev}"))
+                .iter()
+                .map(|x| x.as_str().expect("a name").to_owned())
+                .collect()
+        };
+        let found: Vec<PathBuf> = list("found").into_iter().map(PathBuf::from).collect();
+        let absent = list("absent");
+        assert_eq!(absent.len(), lookups, "r {k}: the names looked up: {ev}");
+        assert!(
+            !found.is_empty() && found.len() <= keys,
+            "r {k}: the files keyed: {ev}"
+        );
+        if k == 1 {
+            eprintln!("watch: r keys {keys}: {found:?}\nwatch: r looks up: {absent:?}");
+            // (kpathsea's databases read, the files' entries cached, before
+            // any is timed)
+            machine(&found, &absent);
+        }
         let ms = |f: &str| r[f].as_f64().expect("the check's times");
         let (keys_ms, lookups_ms) = (ms("keys_ms"), ms("lookups_ms"));
-        let (stats_ms, kpse_ms) = machine(keys, lookups);
+        let (stats_ms, kpse_ms) = machine(&found, &absent);
         eprintln!(
             "watch: r {k}: {keys} keys {keys_ms:.3} ms ({keys} stat calls {stats_ms:.3} ms), {lookups} lookups {lookups_ms:.3} ms (kpathsea's {kpse_ms:.3} ms)"
         );
-        for (l, x) in least
-            .iter_mut()
-            .zip([keys_ms, stats_ms, lookups_ms, kpse_ms])
-        {
-            *l = l.min(x);
-        }
+        key_ratios.push(keys_ms / stats_ms);
+        lookup_ratios.push(lookups_ms / kpse_ms);
     }
-    let [keys_ms, stats_ms, lookups_ms, kpse_ms] = least;
+    let median = |mut xs: Vec<f64>| {
+        xs.sort_by(f64::total_cmp);
+        xs[xs.len() / 2]
+    };
+    let (keys_x, lookups_x) = (median(key_ratios), median(lookup_ratios));
     eprintln!(
-        "watch: r at best: the keys {:.2}x the stat calls, the lookups {:.2}x kpathsea's",
-        keys_ms / stats_ms,
-        lookups_ms / kpse_ms
+        "watch: r's median: the keys {keys_x:.2}x the stat calls, the lookups {lookups_x:.2}x kpathsea's"
     );
     if !cfg!(debug_assertions) {
         assert!(
-            keys_ms <= KEYS_PER_STAT * stats_ms,
-            "r's keys of {keys} files took {keys_ms:.3} ms at best, over {KEYS_PER_STAT}x the {stats_ms:.3} ms of as many stat calls"
+            keys_x <= KEYS_PER_STAT,
+            "r's keys of {keys} files took {keys_x:.2}x the same stat calls (the median of {CHECKS} `r`s), over {KEYS_PER_STAT}x"
         );
         assert!(
-            lookups_ms <= LOOKUPS_PER_LOOKUP * kpse_ms,
-            "r's lookups of {lookups} names took {lookups_ms:.3} ms at best, over {LOOKUPS_PER_LOOKUP}x the {kpse_ms:.3} ms of kpathsea's"
+            lookups_x <= LOOKUPS_PER_LOOKUP,
+            "r's lookups of {lookups} names took {lookups_x:.2}x kpathsea's of the same names (the median of {CHECKS} `r`s), over {LOOKUPS_PER_LOOKUP}x"
         );
     }
     std::thread::sleep(Duration::from_millis(50));

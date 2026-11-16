@@ -850,6 +850,9 @@ impl Session {
         let trace = phitex_tex::OBSERVE && std::env::var_os("PHITEX_REREAD_TRACE").is_some();
         let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
         let (mut keys, mut lookups, mut looked_up) = (Duration::ZERO, Duration::ZERO, 0);
+        // (what was checked, in order: the paths keyed, the names looked
+        // up; a test times the same calls on them, cli::watch_no_change_rebuild)
+        let (mut found_paths, mut absent) = (Vec::new(), Vec::new());
         let stale: Vec<String> = self
             .inputs
             .iter()
@@ -875,11 +878,16 @@ impl Session {
                         },
                     },
                 };
+                let d = t.elapsed();
                 if *found {
-                    keys += t.elapsed();
+                    keys += d;
+                    if let Some(p) = p {
+                        found_paths.push(p.clone());
+                    }
                 } else {
-                    lookups += t.elapsed();
+                    lookups += d;
                     looked_up += 1;
+                    absent.push(n.clone());
                 }
                 if trace {
                     eprintln!(
@@ -898,6 +906,8 @@ impl Session {
             looked_up,
             keys,
             lookups,
+            found: found_paths,
+            absent,
         };
         self.changed.extend(stale);
         r
@@ -3002,7 +3012,7 @@ mod out_name_tests {
 }
 
 /// What `r`'s check of the files did ([`Session::reread_all_timed`]).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Reread {
     /// The files and names checked.
     pub checked: usize,
@@ -3014,4 +3024,9 @@ pub struct Reread {
     pub keys: Duration,
     /// The time the lookups of the names not found took.
     pub lookups: Duration,
+    /// The paths of the files found whose keys were taken, in the order
+    /// taken.
+    pub found: Vec<PathBuf>,
+    /// The names not found, looked up again, in the order looked up.
+    pub absent: Vec<String>,
 }
