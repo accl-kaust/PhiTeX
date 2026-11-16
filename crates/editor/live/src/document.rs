@@ -1232,6 +1232,87 @@ mod tests {
         assert_eq!((ran, &out), (0, &cold));
     }
 
+    /// A save made in slices (`Session::graph_save_start`, `graph_save_more`:
+    /// the wasm core without threads, a slice a step, its host's requests
+    /// answered between two) stores the bytes the whole save stores, however
+    /// small its slices; one given up after any slice stores nothing, and the
+    /// build stands as it was.
+    #[test]
+    fn a_save_in_slices_is_the_whole_save() {
+        let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{\\vrule width 5pt height 5pt}\\penalty-10000 \\input chap \\hbox{\\vrule width 7pt height 7pt}\\penalty-10000 \\end\n";
+        let disk = Arc::new(Disk::default());
+        disk.put(
+            "chap.tex",
+            "/p/",
+            "\\hbox{\\vrule width 10pt height 5pt}\\penalty-10000 ",
+        );
+        let store = Arc::new(Graphs::default());
+        let key = format!("{:?}", crate::host::Key::Doc("graph"));
+        let mut s = Session::new(
+            job(),
+            Arc::from(text),
+            disk.clone(),
+            Some(store.clone() as Arc<dyn crate::host::Store>),
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        s.keep_graphs(true);
+        let r = s.build();
+        assert!(r.internal.is_none(), "{:?}", r.internal);
+        s.wait_streamed();
+        let cold = r.main_output().map(|(_, b)| b.to_vec()).unwrap_or_default();
+        assert!(
+            s.save_graph()
+                .is_some_and(|l| l.starts_with("graph: saved")),
+            "the whole save"
+        );
+        let whole = lock(&store.0).remove(&key).expect("saved whole");
+        // (a slice paused at its first ask: the most slices there can be)
+        let mut g = s.graph_save_start().expect("a save to make");
+        let mut slices = 1usize;
+        let line = loop {
+            if let Some(l) = s.graph_save_more(&mut g, &|| true) {
+                break l;
+            }
+            assert!(lock(&store.0).get(&key).is_none(), "stored before its end");
+            slices += 1;
+        };
+        assert!(line.starts_with("graph: saved"), "{line}");
+        assert!(line.contains(&format!("in {slices} slices")), "{line}");
+        assert!(slices > 20, "{slices} slices");
+        assert_eq!(
+            lock(&store.0).remove(&key).as_ref(),
+            Some(&whole),
+            "the slices' bytes are the whole save's"
+        );
+        // (given up after 1, 2, ... slices: nothing stored)
+        for after in (1..slices).step_by(slices / 7 + 1) {
+            let mut g = s.graph_save_start().expect("a save to make");
+            for _ in 0..after {
+                assert!(s.graph_save_more(&mut g, &|| true).is_none());
+            }
+            let l = s.graph_save_given_up(g);
+            assert!(l.contains("not saved: given up"), "{l}");
+            assert!(
+                lock(&store.0).get(&key).is_none(),
+                "stored, given up after {after}"
+            );
+        }
+        // (and saved whole again after them, the same bytes)
+        assert!(
+            s.save_graph()
+                .is_some_and(|l| l.starts_with("graph: saved"))
+        );
+        assert_eq!(lock(&store.0).get(&key), Some(&whole));
+        drop(s);
+        let (out, _, ran, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.starts_with("graph: loaded")),
+            "{notes:?}"
+        );
+        assert_eq!((ran, &out), (0, &cold));
+    }
+
     /// The cold build at the first step, an editor's buffer built at the
     /// next, the viewer's state and events as `phitex watch` gives them.
     #[test]

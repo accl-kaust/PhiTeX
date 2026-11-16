@@ -444,6 +444,51 @@ fn get_chunks(d: &mut Dec<'_>) -> R<crate::chunks::Chunks> {
     Ok(crate::chunks::Chunks { cs, next: d.u()? })
 }
 
+/// The bytes [`Build::save_more`] copies or hashes between two asks of
+/// its `pause` (whole words).
+pub const SAVE_PIECE: usize = 256 << 10;
+
+/// Where a save under way stands ([`Save`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SavePart {
+    /// The client's part k written ([`Build::put_client_part`]).
+    Client(usize),
+    /// The engine's graph exported ([`phitex_defuse::Engine::export_more`]).
+    Engine,
+    CopyEngine,
+    HashClient,
+    CopyClient,
+    Done,
+}
+
+/// A save of a build under way ([`Build::save_start`]), made a slice at a
+/// time by [`Build::save_more`]. Dropped before its end, nothing of it is
+/// left.
+pub struct Save {
+    part: SavePart,
+    /// The document file next, in the client's part of them.
+    j: usize,
+    /// The client's bytes, and the values they name (the engine's roots).
+    client: Vec<u8>,
+    roots: Vec<ValueId>,
+    eng: Option<phitex_defuse::Export>,
+    eng_bytes: Vec<u8>,
+    out: Vec<u8>,
+    /// The next byte copied or hashed.
+    i: usize,
+    hashing: phitex_defuse::HashBytes,
+    client_ms: f64,
+    engine_ms: f64,
+}
+
+impl Save {
+    /// Whether the save is whole ([`Build::save_more`] gave its bytes).
+    #[must_use]
+    pub fn done(&self) -> bool {
+        self.part == SavePart::Done
+    }
+}
+
 impl Build {
     /// The build as its quiet point leaves it, as bytes
     /// ([`Build::load`] makes a build of them that stands as this one
@@ -465,342 +510,497 @@ impl Build {
         self.save_until(&|| false).expect("a save nothing stops")
     }
 
-    /// [`Build::save_timed`], given up once `stop` says so (asked before
-    /// the client's tables, after them and between the engine's nodes,
-    /// [`phitex_defuse::Engine::export_until`]): none then, nothing of the
-    /// build changed.
+    /// [`Build::save_timed`], given up once `stop` says so (asked between
+    /// the client's parts, between the engine's nodes and entries,
+    /// [`phitex_defuse::Engine::export_until`], and between pieces of the
+    /// bytes): none then, nothing of the build changed.
     #[must_use]
     pub fn save_until(&self, stop: &dyn Fn() -> bool) -> Option<(Vec<u8>, f64, f64)> {
         if stop() {
             return None;
         }
-        let t0 = std::time::Instant::now();
-        let v = self.g.eng.values();
-        let mut e = Enc {
-            v,
-            out: Vec::new(),
-            roots: Vec::new(),
-        };
-        self.put_client(&mut e);
-        let client = std::mem::take(&mut e.out);
-        let mut roots = std::mem::take(&mut e.roots);
-        roots.sort_unstable();
-        roots.dedup();
-        let client_ms = t0.elapsed().as_secs_f64() * 1e3;
-        let t1 = std::time::Instant::now();
-        let eng = self.g.eng.export_until(&roots, stop)?;
-        let engine_ms = t1.elapsed().as_secs_f64() * 1e3;
-        let mut out = Vec::with_capacity(8 + 4 + 8 + eng.len() + 16 + client.len());
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&(eng.len() as u64).to_le_bytes());
-        out.extend_from_slice(&eng);
-        out.extend_from_slice(&(client.len() as u64).to_le_bytes());
-        out.extend_from_slice(&phitex_defuse::hash_bytes(HASH_SEED, &client).to_le_bytes());
-        out.extend_from_slice(&client);
-        Some((out, client_ms, engine_ms))
+        // (one slice, to its end unless `stop` says so: then given up)
+        self.save_more(&mut self.save_start(), stop)
     }
 
+    /// A save of the build ([`Build::save`]) to be made in slices
+    /// ([`Build::save_more`]), between which the caller may do other work
+    /// as long as nothing changes the build: no evaluation, no edit. (The
+    /// wasm core without threads saves a slice a step, its host's requests
+    /// answered between them; an edit drops the save.) The same bytes as
+    /// [`Build::save`] at the end.
+    #[must_use]
+    pub fn save_start(&self) -> Save {
+        Save {
+            part: SavePart::Client(0),
+            j: 0,
+            client: Vec::new(),
+            roots: Vec::new(),
+            eng: None,
+            eng_bytes: Vec::new(),
+            out: Vec::new(),
+            i: 0,
+            hashing: phitex_defuse::HashBytes::new(HASH_SEED),
+            client_ms: 0.0,
+            engine_ms: 0.0,
+        }
+    }
+
+    /// More of save `s` ([`Build::save_start`]): its bytes, with how long
+    /// the client's tables and the engine's export took (ms, the slices'
+    /// times summed), once it is whole; else none (`pause` said so: call
+    /// again to go on). `pause` is asked between the client's parts and
+    /// its document files, every few of the engine's nodes and entries
+    /// ([`phitex_defuse::Engine::export_more`]) and between pieces of
+    /// [`SAVE_PIECE`] bytes; each call writes something, whatever it says.
+    #[must_use]
+    pub fn save_more(&self, s: &mut Save, pause: &dyn Fn() -> bool) -> Option<(Vec<u8>, f64, f64)> {
+        loop {
+            match s.part {
+                SavePart::Client(k) => {
+                    let t0 = std::time::Instant::now();
+                    let mut e = Enc {
+                        v: self.g.eng.values(),
+                        out: std::mem::take(&mut s.client),
+                        roots: std::mem::take(&mut s.roots),
+                    };
+                    let whole = self.put_client_part(&mut e, k, &mut s.j, pause);
+                    s.client = e.out;
+                    s.roots = e.roots;
+                    s.client_ms += t0.elapsed().as_secs_f64() * 1e3;
+                    if whole {
+                        s.j = 0;
+                        s.part = if k + 1 < Self::CLIENT_PARTS {
+                            SavePart::Client(k + 1)
+                        } else {
+                            s.roots.sort_unstable();
+                            s.roots.dedup();
+                            s.eng = Some(self.g.eng.export_start(&s.roots));
+                            s.roots = Vec::new();
+                            SavePart::Engine
+                        };
+                    }
+                    if pause() {
+                        return None;
+                    }
+                }
+                SavePart::Engine => {
+                    let t0 = std::time::Instant::now();
+                    let x = s.eng.as_mut().expect("the engine's export begun");
+                    let eng = self.g.eng.export_more(x, pause);
+                    s.engine_ms += t0.elapsed().as_secs_f64() * 1e3;
+                    let eng = eng?;
+                    s.eng = None;
+                    let mut out = Vec::with_capacity(8 + 4 + 8 + eng.len() + 16 + s.client.len());
+                    out.extend_from_slice(MAGIC);
+                    out.extend_from_slice(&VERSION.to_le_bytes());
+                    out.extend_from_slice(&(eng.len() as u64).to_le_bytes());
+                    s.out = out;
+                    s.eng_bytes = eng;
+                    s.i = 0;
+                    s.part = SavePart::CopyEngine;
+                }
+                SavePart::CopyEngine => {
+                    while s.eng_bytes.len() - s.i > SAVE_PIECE {
+                        s.out.extend_from_slice(&s.eng_bytes[s.i..s.i + SAVE_PIECE]);
+                        s.i += SAVE_PIECE;
+                        if pause() {
+                            return None;
+                        }
+                    }
+                    s.out.extend_from_slice(&s.eng_bytes[s.i..]);
+                    // (copied: its memory given back)
+                    s.eng_bytes = Vec::new();
+                    s.out
+                        .extend_from_slice(&(s.client.len() as u64).to_le_bytes());
+                    s.i = 0;
+                    s.part = SavePart::HashClient;
+                }
+                SavePart::HashClient => {
+                    while s.client.len() - s.i > SAVE_PIECE {
+                        s.hashing.more(&s.client[s.i..s.i + SAVE_PIECE]);
+                        s.i += SAVE_PIECE;
+                        if pause() {
+                            return None;
+                        }
+                    }
+                    let h = s.hashing.end(&s.client[s.i..]);
+                    s.out.extend_from_slice(&h.to_le_bytes());
+                    s.i = 0;
+                    s.part = SavePart::CopyClient;
+                }
+                SavePart::CopyClient => {
+                    while s.client.len() - s.i > SAVE_PIECE {
+                        s.out.extend_from_slice(&s.client[s.i..s.i + SAVE_PIECE]);
+                        s.i += SAVE_PIECE;
+                        if pause() {
+                            return None;
+                        }
+                    }
+                    s.out.extend_from_slice(&s.client[s.i..]);
+                    s.client = Vec::new();
+                    s.part = SavePart::Done;
+                    return Some((std::mem::take(&mut s.out), s.client_ms, s.engine_ms));
+                }
+                SavePart::Done => return None,
+            }
+        }
+    }
+
+    /// The parts of the client's tables ([`Build::put_client_part`]).
+    const CLIENT_PARTS: usize = 15;
+
+    /// Part `k` of the client's tables written, each part its mark after it
+    /// but the last: whole (true), or, the document files' part, up to a
+    /// file after which `pause` said so (false: called again, it goes on
+    /// at file `*j`).
     #[allow(clippy::too_many_lines)]
-    fn put_client(&self, e: &mut Enc<'_>) {
+    fn put_client_part(
+        &self,
+        e: &mut Enc<'_>,
+        k: usize,
+        j: &mut usize,
+        pause: &dyn Fn() -> bool,
+    ) -> bool {
         let g = &self.g;
         let o = &g.ops;
-        // (the build)
-        e.u(u64::from(self.unit.raw()));
-        e.n(self.nodes.len());
-        for (k, n, src) in &self.nodes {
-            let Src::Doc(s, t) = *src;
-            e.u(*k);
-            e.u(n.raw());
-            e.n(s);
-            e.n(t);
-        }
-        put_chunks(e, &self.ini);
-        put_lines(e, &self.dlines);
-        e.u(self.dvi.raw());
-        e.u(self.end.raw());
-        e.u64s(&self.settled);
-        e.b(self.doc);
-        e.s(&self.text);
-        e.b(self.canon);
-        e.os(self.raw.as_deref());
-        e.u(self.settles);
-        e.b(self.loads_ran);
-        e.b(self.evaluated);
-        e.u(self.stages);
-        e.u(self.stats.version);
-        e.n(self.stats.live);
-        // (the output file the end node made, by its bytes: a build that
-        // runs nothing after its load gives it again)
-        let linked = self
-            .end_file()
-            .and_then(|x| crate::assemble::linked_of(g.eng.values(), x));
-        e.b(linked.is_some());
-        if let Some((h, b)) = &linked {
-            e.u(*h);
-            e.by(b);
-        }
-        e.tag(1);
-        // (the graph's tables)
-        let mut start: Vec<(Field, ValueId)> = g.start_env.iter().map(|(&f, &x)| (f, x)).collect();
-        start.sort_unstable_by_key(|x| x.0);
-        e.fxs(&start);
-        e.strs(&g.eval_errors);
-        e.strs(&g.eval_warnings);
-        e.strs(&g.no_fixpoint);
-        e.n(g.shell_store.len());
-        for (k, x) in &g.shell_store {
-            e.s(k);
-            e.os(x.as_deref());
-        }
-        e.fxs(&g.env_pushed);
-        e.n(g.absent_pushed.len());
-        for &f in &g.absent_pushed {
-            e.f(f);
-        }
-        let mut mp: Vec<(&u64, &Arc<str>)> = g.marks_pushed.iter().collect();
-        mp.sort_unstable_by_key(|x| x.0);
-        e.n(mp.len());
-        for (k, s) in mp {
-            e.u(*k);
-            e.s(s);
-        }
-        e.ox(g.xpages_pruned);
-        e.u(g.env_calls);
-        e.fxs(&g.job);
-        e.fxs(&g.files);
-        e.n(g.reads.len());
-        for (n, h) in &g.reads {
-            e.s(n);
-            e.u(*h);
-        }
-        for xs in [&g.queries, &g.tool_reads] {
-            e.n(xs.len());
-            for (n, b) in xs {
-                e.s(n);
-                e.b(*b);
-            }
-        }
-        e.n(g.absent.len());
-        for &f in &g.absent {
-            e.f(f);
-        }
-        e.strs(&g.written);
-        e.n(g.seeds.len());
-        for (a, b) in &g.seeds {
-            e.s(a);
-            e.s(b);
-        }
-        e.by(&g.made_seeds);
-        e.strs(&g.opened_last);
-        {
-            let m = g.marks.0.locked();
-            e.n(m.0.len());
-            for (l, h, c) in &m.0 {
-                e.u(u64::from(*l));
-                e.u(*h);
-                e.s(c);
-            }
-            e.b(m.1);
-        }
-        e.n(g.wkeys_guess.len());
-        for (n, ks) in &g.wkeys_guess {
-            e.s(n);
-            e.strs(ks);
-        }
-        e.tag(2);
-        // (the ops' tables: the texts' analyses registered)
-        let reg = crate::hints::registered(&o.hints);
-        e.n(reg.len());
-        for (k, cs) in &reg {
-            e.x(ValueId::from_raw(*k));
-            e.n(cs.len());
-            for (s, th) in cs.iter() {
-                e.n(*s);
-                e.by(&th.encode());
-            }
-        }
-        e.tag(3);
-        // (the loads' records and what the build learnt of them)
-        e.b(g.loads.is_some());
-        if let Some(l) = &g.loads {
-            let s = l.persisted();
-            e.by(&s.recs);
-            e.strs(&s.asked);
-            e.strs(&s.changed);
-            e.n(s.now.len());
-            for (k, h) in &s.now {
-                e.s(k);
-                e.u(*h);
-            }
-            e.n(s.predicted.len());
-            for (k, rv) in &s.predicted {
-                e.s(k);
-                e.n(rv.len());
-                for (n, gl, b) in rv {
-                    e.s(n);
-                    e.b(*gl);
+        match k {
+            0 => {
+                // (the build)
+                e.u(u64::from(self.unit.raw()));
+                e.n(self.nodes.len());
+                for (k, n, src) in &self.nodes {
+                    let Src::Doc(s, t) = *src;
+                    e.u(*k);
+                    e.u(n.raw());
+                    e.n(s);
+                    e.n(t);
+                }
+                put_chunks(e, &self.ini);
+                put_lines(e, &self.dlines);
+                e.u(self.dvi.raw());
+                e.u(self.end.raw());
+                e.u64s(&self.settled);
+                e.b(self.doc);
+                e.s(&self.text);
+                e.b(self.canon);
+                e.os(self.raw.as_deref());
+                e.u(self.settles);
+                e.b(self.loads_ran);
+                e.b(self.evaluated);
+                e.u(self.stages);
+                e.u(self.stats.version);
+                e.n(self.stats.live);
+                // (the output file the end node made, by its bytes: a build that
+                // runs nothing after its load gives it again)
+                let linked = self
+                    .end_file()
+                    .and_then(|x| crate::assemble::linked_of(g.eng.values(), x));
+                e.b(linked.is_some());
+                if let Some((h, b)) = &linked {
+                    e.u(*h);
                     e.by(b);
                 }
+                e.tag(1);
             }
-            for x in s.given {
-                e.u(x);
+            1 => {
+                // (the graph's tables)
+                let mut start: Vec<(Field, ValueId)> =
+                    g.start_env.iter().map(|(&f, &x)| (f, x)).collect();
+                start.sort_unstable_by_key(|x| x.0);
+                e.fxs(&start);
+                e.strs(&g.eval_errors);
+                e.strs(&g.eval_warnings);
+                e.strs(&g.no_fixpoint);
+                e.n(g.shell_store.len());
+                for (k, x) in &g.shell_store {
+                    e.s(k);
+                    e.os(x.as_deref());
+                }
+                e.fxs(&g.env_pushed);
+                e.n(g.absent_pushed.len());
+                for &f in &g.absent_pushed {
+                    e.f(f);
+                }
+                let mut mp: Vec<(&u64, &Arc<str>)> = g.marks_pushed.iter().collect();
+                mp.sort_unstable_by_key(|x| x.0);
+                e.n(mp.len());
+                for (k, s) in mp {
+                    e.u(*k);
+                    e.s(s);
+                }
+                e.ox(g.xpages_pruned);
+                e.u(g.env_calls);
+                e.fxs(&g.job);
+                e.fxs(&g.files);
+                e.n(g.reads.len());
+                for (n, h) in &g.reads {
+                    e.s(n);
+                    e.u(*h);
+                }
+                for xs in [&g.queries, &g.tool_reads] {
+                    e.n(xs.len());
+                    for (n, b) in xs {
+                        e.s(n);
+                        e.b(*b);
+                    }
+                }
+                e.n(g.absent.len());
+                for &f in &g.absent {
+                    e.f(f);
+                }
+                e.strs(&g.written);
+                e.n(g.seeds.len());
+                for (a, b) in &g.seeds {
+                    e.s(a);
+                    e.s(b);
+                }
+                e.by(&g.made_seeds);
+                e.strs(&g.opened_last);
+                {
+                    let m = g.marks.0.locked();
+                    e.n(m.0.len());
+                    for (l, h, c) in &m.0 {
+                        e.u(u64::from(*l));
+                        e.u(*h);
+                        e.s(c);
+                    }
+                    e.b(m.1);
+                }
+                e.n(g.wkeys_guess.len());
+                for (n, ks) in &g.wkeys_guess {
+                    e.s(n);
+                    e.strs(ks);
+                }
+                e.tag(2);
             }
-        }
-        e.tag(4);
-        // (the cut document files)
-        {
-            let docs = o.docs.locked();
-            let mut names: Vec<&String> = docs.keys().collect();
-            names.sort();
-            e.n(names.len());
-            for name in names {
-                let df = docs[name].locked();
-                e.s(name);
-                e.s(&df.path);
-                e.s(&df.text);
-                put_doc_nodes(e, &df.slices);
-                e.n(df.readers.len());
-                for r in &df.readers {
-                    e.u(r.raw());
+            2 => {
+                // (the ops' tables: the texts' analyses registered)
+                let reg = crate::hints::registered(&o.hints);
+                e.n(reg.len());
+                for (k, cs) in &reg {
+                    e.x(ValueId::from_raw(*k));
+                    e.n(cs.len());
+                    for (s, th) in cs.iter() {
+                        e.n(*s);
+                        e.by(&th.encode());
+                    }
                 }
-                let mut sh: Vec<(&u64, &(ValueId, i64))> = df.shifts.iter().collect();
-                sh.sort_unstable_by_key(|x| x.0);
-                e.n(sh.len());
-                for (k, &(x, d)) in sh {
-                    e.u(*k);
-                    e.x(x);
-                    e.i(d);
+                e.tag(3);
+            }
+            3 => {
+                // (the loads' records and what the build learnt of them)
+                e.b(g.loads.is_some());
+                if let Some(l) = &g.loads {
+                    let s = l.persisted();
+                    e.by(&s.recs);
+                    e.strs(&s.asked);
+                    e.strs(&s.changed);
+                    e.n(s.now.len());
+                    for (k, h) in &s.now {
+                        e.s(k);
+                        e.u(*h);
+                    }
+                    e.n(s.predicted.len());
+                    for (k, rv) in &s.predicted {
+                        e.s(k);
+                        e.n(rv.len());
+                        for (n, gl, b) in rv {
+                            e.s(n);
+                            e.b(*gl);
+                            e.by(b);
+                        }
+                    }
+                    for x in s.given {
+                        e.u(x);
+                    }
                 }
-                let mut pl: Vec<(&u64, &Vec<NodeId>)> = df.placed.iter().collect();
-                pl.sort_unstable_by_key(|x| x.0);
-                e.n(pl.len());
-                for (k, ns) in pl {
-                    e.u(*k);
-                    e.u64s(&ns.iter().map(|n| n.raw()).collect::<Vec<_>>());
-                }
-                e.n(df.args.len());
-                for a in &df.args {
-                    e.b(a.is_some());
-                    if let Some(a) = a {
-                        e.n(a.len());
-                        for &x in a {
+                e.tag(4);
+            }
+            4 => {
+                // (the cut document files, a part of their own each)
+                {
+                    let docs = o.docs.locked();
+                    let mut names: Vec<&String> = docs.keys().collect();
+                    names.sort();
+                    if *j == 0 {
+                        e.n(names.len());
+                    }
+                    while let Some(name) = names.get(*j) {
+                        let df = docs[*name].locked();
+                        e.s(name);
+                        e.s(&df.path);
+                        e.s(&df.text);
+                        put_doc_nodes(e, &df.slices);
+                        e.n(df.readers.len());
+                        for r in &df.readers {
+                            e.u(r.raw());
+                        }
+                        let mut sh: Vec<(&u64, &(ValueId, i64))> = df.shifts.iter().collect();
+                        sh.sort_unstable_by_key(|x| x.0);
+                        e.n(sh.len());
+                        for (k, &(x, d)) in sh {
+                            e.u(*k);
                             e.x(x);
+                            e.i(d);
+                        }
+                        let mut pl: Vec<(&u64, &Vec<NodeId>)> = df.placed.iter().collect();
+                        pl.sort_unstable_by_key(|x| x.0);
+                        e.n(pl.len());
+                        for (k, ns) in pl {
+                            e.u(*k);
+                            e.u64s(&ns.iter().map(|n| n.raw()).collect::<Vec<_>>());
+                        }
+                        e.n(df.args.len());
+                        for a in &df.args {
+                            e.b(a.is_some());
+                            if let Some(a) = a {
+                                e.n(a.len());
+                                for &x in a {
+                                    e.x(x);
+                                }
+                            }
+                        }
+                        put_lines(e, &df.dlines);
+                        *j += 1;
+                        if *j < names.len() && pause() {
+                            return false;
                         }
                     }
                 }
-                put_lines(e, &df.dlines);
+                e.tag(5);
             }
-        }
-        e.tag(5);
-        {
-            let rl = o.rest_lines.locked();
-            let mut xs: Vec<(u64, ValueId, i64)> = rl
-                .iter()
-                .map(|(&x, &k)| (e.v.stable_raw(x), x, k))
-                .collect();
-            xs.sort_unstable();
-            e.n(xs.len());
-            for (_, x, k) in xs {
-                e.x(x);
-                e.i(k);
+            5 => {
+                {
+                    let rl = o.rest_lines.locked();
+                    let mut xs: Vec<(u64, ValueId, i64)> = rl
+                        .iter()
+                        .map(|(&x, &k)| (e.v.stable_raw(x), x, k))
+                        .collect();
+                    xs.sort_unstable();
+                    e.n(xs.len());
+                    for (_, x, k) in xs {
+                        e.x(x);
+                        e.i(k);
+                    }
+                }
+                e.tag(6);
             }
-        }
-        e.tag(6);
-        {
-            let syms = o.syms.snapshot();
-            e.n(syms.len());
-            for (a, b, c, n) in syms {
-                e.i(i64::from(a));
-                e.u(b);
-                e.i(i64::from(c));
-                e.b(n.is_some());
-                if let Some((x, y)) = n {
-                    e.s(&x);
-                    e.s(&y);
+            6 => {
+                {
+                    let syms = o.syms.snapshot();
+                    e.n(syms.len());
+                    for (a, b, c, n) in syms {
+                        e.i(i64::from(a));
+                        e.u(b);
+                        e.i(i64::from(c));
+                        e.b(n.is_some());
+                        if let Some((x, y)) = n {
+                            e.s(&x);
+                            e.s(&y);
+                        }
+                    }
+                }
+                e.tag(7);
+            }
+            7 => {
+                put_fin_table(e, &o.fin_defs.locked());
+                put_fin_table(e, &o.fin_defs_start.locked());
+                e.tag(8);
+            }
+            8 => {
+                {
+                    let fc = o.fin_class.locked();
+                    let mut xs: Vec<(&crate::pages::FinPageKey, &crate::run::FinClass)> =
+                        fc.iter().collect();
+                    xs.sort_unstable_by_key(|x| *x.0);
+                    e.n(xs.len());
+                    for (&(a, b, c), &(h, pen, j)) in xs {
+                        e.i(a);
+                        e.i(b);
+                        e.i(c);
+                        e.x(h);
+                        e.i(i64::from(pen));
+                        e.i(j);
+                    }
+                }
+                e.tag(9);
+            }
+            9 => {
+                {
+                    let cs = o
+                        .counters
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut xs: Vec<(&&str, &Field)> = cs.iter().collect();
+                    xs.sort_unstable_by_key(|x| *x.0);
+                    e.n(xs.len());
+                    for (n, &f) in xs {
+                        e.s(n);
+                        e.f(f);
+                    }
+                }
+                e.tag(10);
+            }
+            10 => {
+                {
+                    let sl = o
+                        .scope_learned
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut xs: Vec<(&String, &bool)> = sl.iter().collect();
+                    xs.sort_unstable();
+                    e.n(xs.len());
+                    for (n, &b) in xs {
+                        e.s(n);
+                        e.b(b);
+                    }
+                }
+                e.tag(11);
+            }
+            11 => {
+                {
+                    let rk = o.rel_keys.locked();
+                    let mut xs: Vec<(&i64, &(u64, u64))> = rk.iter().collect();
+                    xs.sort_unstable();
+                    e.n(xs.len());
+                    for (&k, &(a, b)) in xs {
+                        e.i(k);
+                        e.u(a);
+                        e.u(b);
+                    }
+                }
+                e.tag(12);
+            }
+            12 => {
+                e.u(o.units_folded.load(Relaxed));
+                e.u(o.siblings_pulled.load(Relaxed));
+                e.u(o.give_back_guesses[0].load(Relaxed));
+                e.u(o.give_back_guesses[1].load(Relaxed));
+                e.u(o.edit_stall_ms.load(Relaxed));
+                // (the process's pictures refused and met with more, `crate::pic`)
+                let (refused, many) = crate::pic::learned();
+                e.u64s(&refused);
+                e.u64s(&many);
+                e.tag(13);
+            }
+            13 => {
+                // (the link's pages and read-time commands, docs/spec-persisted-graph.md
+                // §2.2.4)
+                crate::pdfout::save_link(e, &o.pdf_cmds);
+                e.tag(14);
+            }
+            14 => {
+                // (the pages' glyph origins, where they are kept: what their
+                // writers showed, the SyncTeX file's and the viewer's source)
+                e.b(o.origins.load(Relaxed));
+                if o.origins.load(Relaxed) {
+                    crate::origins::save_kept(e, e.v.instance(), &self.shown_ids());
                 }
             }
+            _ => {}
         }
-        e.tag(7);
-        put_fin_table(e, &o.fin_defs.locked());
-        put_fin_table(e, &o.fin_defs_start.locked());
-        e.tag(8);
-        {
-            let fc = o.fin_class.locked();
-            let mut xs: Vec<(&crate::pages::FinPageKey, &crate::run::FinClass)> =
-                fc.iter().collect();
-            xs.sort_unstable_by_key(|x| *x.0);
-            e.n(xs.len());
-            for (&(a, b, c), &(h, pen, j)) in xs {
-                e.i(a);
-                e.i(b);
-                e.i(c);
-                e.x(h);
-                e.i(i64::from(pen));
-                e.i(j);
-            }
-        }
-        e.tag(9);
-        {
-            let cs = o
-                .counters
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut xs: Vec<(&&str, &Field)> = cs.iter().collect();
-            xs.sort_unstable_by_key(|x| *x.0);
-            e.n(xs.len());
-            for (n, &f) in xs {
-                e.s(n);
-                e.f(f);
-            }
-        }
-        e.tag(10);
-        {
-            let sl = o
-                .scope_learned
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut xs: Vec<(&String, &bool)> = sl.iter().collect();
-            xs.sort_unstable();
-            e.n(xs.len());
-            for (n, &b) in xs {
-                e.s(n);
-                e.b(b);
-            }
-        }
-        e.tag(11);
-        {
-            let rk = o.rel_keys.locked();
-            let mut xs: Vec<(&i64, &(u64, u64))> = rk.iter().collect();
-            xs.sort_unstable();
-            e.n(xs.len());
-            for (&k, &(a, b)) in xs {
-                e.i(k);
-                e.u(a);
-                e.u(b);
-            }
-        }
-        e.tag(12);
-        e.u(o.units_folded.load(Relaxed));
-        e.u(o.siblings_pulled.load(Relaxed));
-        e.u(o.give_back_guesses[0].load(Relaxed));
-        e.u(o.give_back_guesses[1].load(Relaxed));
-        e.u(o.edit_stall_ms.load(Relaxed));
-        // (the process's pictures refused and met with more, `crate::pic`)
-        let (refused, many) = crate::pic::learned();
-        e.u64s(&refused);
-        e.u64s(&many);
-        e.tag(13);
-        // (the link's pages and read-time commands, docs/spec-persisted-graph.md
-        // §2.2.4)
-        crate::pdfout::save_link(e, &o.pdf_cmds);
-        e.tag(14);
-        // (the pages' glyph origins, where they are kept: what their
-        // writers showed, the SyncTeX file's and the viewer's source)
-        e.b(o.origins.load(Relaxed));
-        if o.origins.load(Relaxed) {
-            crate::origins::save_kept(e, e.v.instance(), &self.shown_ids());
-        }
+        true
     }
 
     /// The pages' identities in the link, in order (`pdfout::SHOWN`).

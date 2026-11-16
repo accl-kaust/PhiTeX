@@ -36,6 +36,8 @@ const THREADED: bool = !cfg!(all(target_arch = "wasm32", not(target_feature = "a
 /// the thread that had waited longest, so each edit's runs began cold).
 struct Crew {
     idle: Mutex<Vec<Arc<Slot>>>,
+    /// The threads made so far ([`Crew::start`] makes up to a count).
+    made: std::sync::atomic::AtomicUsize,
     /// [`end`] called: no thread comes to rest again (set with `idle`
     /// held, read with it or with the thread's own slot held).
     ended: AtomicBool,
@@ -62,10 +64,16 @@ pub fn end() {
     crew().end();
 }
 
+/// The process's crew made up to `n` threads ([`Crew::start`]).
+pub fn start(n: usize) {
+    crew().start(n);
+}
+
 impl Crew {
     fn new() -> Crew {
         Crew {
             idle: Mutex::new(Vec::new()),
+            made: std::sync::atomic::AtomicUsize::new(0),
             ended: AtomicBool::new(false),
         }
     }
@@ -88,6 +96,29 @@ impl Crew {
         }
     }
 
+    /// Threads made, each straight to rest, until `n` have been made in
+    /// all (none where there are no threads, nor once ended).
+    fn start(&'static self, n: usize) {
+        if !THREADED {
+            return;
+        }
+        while !self.ended.load(Ordering::SeqCst)
+            && self
+                .made
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |m| (m < n).then_some(m + 1))
+                .is_ok()
+        {
+            let made = std::thread::Builder::new()
+                .name("defuse-worker".to_owned())
+                .stack_size(crate::WORKER_STACK)
+                .spawn(move || self.serve());
+            if made.is_err() {
+                self.made.fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
+
     /// `job` on a thread at once: the idle one that worked last, else a new
     /// one it starts on.
     fn submit(&'static self, job: Job) {
@@ -105,6 +136,7 @@ impl Crew {
             slot.cv.notify_one();
             return;
         }
+        self.made.fetch_add(1, Ordering::SeqCst);
         std::thread::Builder::new()
             .name("defuse-worker".to_owned())
             .stack_size(crate::WORKER_STACK)

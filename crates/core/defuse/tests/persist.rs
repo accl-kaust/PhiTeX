@@ -747,6 +747,47 @@ fn roots_come_back_by_content() {
     }
 }
 
+/// An export made in slices (`Engine::export_start`, `Engine::export_more`,
+/// what the wasm core without threads saves a slice a step, its host's
+/// requests answered between them) gives the bytes the whole export
+/// gives, however small its slices; the slices' bytes import as the
+/// whole's do. A slice paused at once still writes something: the
+/// export ends.
+#[test]
+fn an_export_in_slices_is_the_whole_export() {
+    let (a, oa) = setup();
+    build(&a, &oa, 300);
+    a.evaluate(2).unwrap();
+    let v = a.values();
+    let roots = vec![v.str("page"), v.list(vec![v.int(1), v.str("x")])];
+    let whole = a.export(&roots);
+    for every in [1u64, 2, 7, 1000] {
+        let mut x = a.export_start(&roots);
+        let asks = AtomicU64::new(0);
+        let pause = || asks.fetch_add(1, Ordering::Relaxed) % every == every - 1;
+        let mut slices = 0u64;
+        let bytes = loop {
+            slices += 1;
+            assert!(slices < 1_000_000, "the export ends");
+            // (between two slices the engine is read, as a host's requests read it)
+            let _ = a.live_nodes();
+            if let Some(b) = a.export_more(&mut x, &pause) {
+                break b;
+            }
+            assert!(!x.done());
+        };
+        assert!(x.done());
+        assert_eq!(bytes, whole, "sliced at every {every}th ask: the whole export's bytes");
+        if every == 1 {
+            assert!(slices > 10, "{slices} slices");
+        }
+    }
+    let (b, _) = setup();
+    let got = b.import(&whole).unwrap();
+    assert_eq!(got.stats.not_holding, 0);
+    assert_eq!(b.evaluate(2).unwrap().runs, 0);
+}
+
 /// The importing store holds every value where the exporting one held
 /// it (`Values::stable_raw`): a string, a list, a big integer, and a
 /// sequence of plain values, each the same stable id in both stores (a

@@ -640,6 +640,21 @@ pub struct Session {
     graph_key: std::sync::OnceLock<crate::graph::Key>,
 }
 
+/// A save of the persisted graph under way ([`Session::graph_save_start`]),
+/// made a slice at a time ([`Session::graph_save_more`]): the build's
+/// bytes, then the file's. Dropped before its end, nothing is stored.
+pub struct GraphSave {
+    build: phitex_tex::Save,
+    /// The file begun, and the build's bytes it is made of.
+    file: Option<(crate::graph::Encoding, Vec<u8>)>,
+    /// The slices' time, summed; the build's encoding's (ms).
+    work: std::time::Duration,
+    enc_ms: f64,
+    client_ms: f64,
+    engine_ms: f64,
+    slices: usize,
+}
+
 /// A clean build's options and format ([`Session::prepare_cold`]).
 struct ColdPrep {
     opts: Options,
@@ -1329,71 +1344,151 @@ impl Session {
     /// says so. A host that saves at idle, while the session takes edits
     /// (the wasm core), stops it for the next one.
     pub fn save_graph_until(&self, stop: &dyn Fn() -> bool) -> Option<String> {
-        if !self.graph_on {
-            return None;
+        let mut s = match self.graph_save_start() {
+            Ok(s) => s,
+            Err(l) => return l,
+        };
+        if stop() {
+            return Some(self.graph_save_given_up(s));
         }
-        let (b, store) = (self.build.as_ref()?, self.store.as_ref()?);
+        match self.graph_save_more(&mut s, stop) {
+            Some(l) => Some(l),
+            None => Some(self.graph_save_given_up(s)),
+        }
+    }
+
+    /// A save of the persisted graph ([`Session::save_graph_until`]) to be
+    /// made in slices ([`Session::graph_save_more`]), between which the
+    /// host answers its requests (the wasm core without threads: a slice a
+    /// step, the edit that comes meanwhile taken at the next). Nothing may
+    /// build meanwhile: a host that builds drops the save
+    /// ([`Session::graph_save_given_up`]). None to make: graphs not kept,
+    /// no build (no line), or why not (a line, noted).
+    pub fn graph_save_start(&self) -> Result<GraphSave, Option<String>> {
+        if !self.graph_on {
+            return Err(None);
+        }
+        let (Some(b), Some(_)) = (self.build.as_ref(), self.store.as_ref()) else {
+            return Err(None);
+        };
         if !self.graph_quiet {
             let l = "graph: not saved: the last build did not end".to_owned();
             self.note_graph(l.clone());
-            return Some(l);
+            return Err(Some(l));
         }
         if self.graph_same {
             let l = "graph: unchanged since loaded, its file kept".to_owned();
             self.note_graph(l.clone());
-            return Some(l);
+            return Err(Some(l));
         }
-        let t0 = Instant::now();
-        let Some((body, client_ms, engine_ms)) = b.save_until(stop) else {
-            let l = format!(
-                "graph: not saved: given up after {:.0} ms for what came",
-                t0.elapsed().as_secs_f64() * 1e3
-            );
-            self.note_graph(l.clone());
-            return Some(l);
-        };
-        let enc_ms = t0.elapsed().as_secs_f64() * 1e3;
-        let m = crate::graph::Manifest {
-            text: self.built_text.as_deref().unwrap_or_default().to_owned(),
-            inputs: self
-                .inputs
-                .iter()
-                .map(|(n, f, p, o)| {
-                    (
-                        n.clone(),
-                        *f,
-                        p.as_ref().map(|p| p.to_string_lossy().into_owned()),
-                        *o,
-                    )
-                })
-                .collect(),
-            stamps: self
-                .stamps
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .iter()
-                .map(|(p, k)| (p.to_string_lossy().into_owned(), k.clone()))
-                .collect(),
-            outside: self
-                .outside
-                .as_ref()
-                .map(|l| l.lock().unwrap_or_else(PoisonError::into_inner).clone())
-                .unwrap_or_default(),
-            cold_ms: self.cold_ms,
-        };
-        let bytes = crate::graph::encode(self.graph_key(), &b.prelude_key(), &m, &body);
-        drop(body);
-        let t1 = Instant::now();
-        let size = bytes.len();
-        store.put_graph(bytes);
+        Ok(GraphSave {
+            build: b.save_start(),
+            file: None,
+            work: std::time::Duration::ZERO,
+            enc_ms: 0.0,
+            client_ms: 0.0,
+            engine_ms: 0.0,
+            slices: 0,
+        })
+    }
+
+    /// More of save `s` ([`Session::graph_save_start`]): once it is whole,
+    /// the file stored and its line (noted); else none (`pause` said so:
+    /// call again to go on, or give it up). `pause` is asked every few
+    /// of the build's nodes and entries and between pieces of its bytes
+    /// ([`Build::save_more`], [`crate::graph::encode_more`]); each call
+    /// does something, whatever it says.
+    pub fn graph_save_more(&self, s: &mut GraphSave, pause: &dyn Fn() -> bool) -> Option<String> {
+        let t = Instant::now();
+        let r = self.graph_save_slice(s, pause);
+        s.work += t.elapsed();
+        s.slices += 1;
+        let (size, t_write) = r?;
         let l = format!(
-            "graph: saved {:.1} MB in {:.0} ms (encoded {enc_ms:.0}: the client's {client_ms:.0}, the engine's {engine_ms:.0}; written {:.0})",
+            "graph: saved {:.1} MB in {:.0} ms (encoded {:.0}: the client's {:.0}, the engine's {:.0}; written {:.0}){}",
             mb(size),
-            t0.elapsed().as_secs_f64() * 1e3,
-            t1.elapsed().as_secs_f64() * 1e3,
+            s.work.as_secs_f64() * 1e3,
+            s.enc_ms,
+            s.client_ms,
+            s.engine_ms,
+            t_write.as_secs_f64() * 1e3,
+            if s.slices > 1 {
+                format!(", in {} slices", s.slices)
+            } else {
+                String::new()
+            },
         );
         self.note_graph(l.clone());
         Some(l)
+    }
+
+    /// [`Session::graph_save_more`]'s slice: the file's size and the
+    /// time its write took, once stored.
+    fn graph_save_slice(
+        &self,
+        s: &mut GraphSave,
+        pause: &dyn Fn() -> bool,
+    ) -> Option<(usize, std::time::Duration)> {
+        let (b, store) = (self.build.as_ref()?, self.store.as_ref()?);
+        if s.file.is_none() {
+            let t = Instant::now();
+            let r = b.save_more(&mut s.build, pause);
+            s.enc_ms += t.elapsed().as_secs_f64() * 1e3;
+            let (body, client_ms, engine_ms) = r?;
+            (s.client_ms, s.engine_ms) = (client_ms, engine_ms);
+            let m = crate::graph::Manifest {
+                text: self.built_text.as_deref().unwrap_or_default().to_owned(),
+                inputs: self
+                    .inputs
+                    .iter()
+                    .map(|(n, f, p, o)| {
+                        (
+                            n.clone(),
+                            *f,
+                            p.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                            *o,
+                        )
+                    })
+                    .collect(),
+                stamps: self
+                    .stamps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .iter()
+                    .map(|(p, k)| (p.to_string_lossy().into_owned(), k.clone()))
+                    .collect(),
+                outside: self
+                    .outside
+                    .as_ref()
+                    .map(|l| l.lock().unwrap_or_else(PoisonError::into_inner).clone())
+                    .unwrap_or_default(),
+                cold_ms: self.cold_ms,
+            };
+            let e = crate::graph::encode_start(self.graph_key(), &b.prelude_key(), &m, body.len());
+            s.file = Some((e, body));
+            if pause() {
+                return None;
+            }
+        }
+        let (e, body) = s.file.as_mut().expect("the file begun");
+        let bytes = crate::graph::encode_more(e, body, pause)?;
+        s.file = None;
+        let t = Instant::now();
+        let size = bytes.len();
+        store.put_graph(bytes);
+        Some((size, t.elapsed()))
+    }
+
+    /// Save `s` given up ([`Session::graph_save_start`]): nothing stored;
+    /// its line (noted).
+    pub fn graph_save_given_up(&self, s: GraphSave) -> String {
+        let l = format!(
+            "graph: not saved: given up after {:.0} ms for what came",
+            s.work.as_secs_f64() * 1e3
+        );
+        drop(s);
+        self.note_graph(l.clone());
+        l
     }
 
     /// (observe) docs/spec-persisted-graph.md §9: the build's persisted

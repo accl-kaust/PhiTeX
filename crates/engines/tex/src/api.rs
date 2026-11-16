@@ -24,7 +24,7 @@ use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
-pub use persist::{EnvReask, LoadStats};
+pub use persist::{EnvReask, LoadStats, Save};
 
 /// Finds a file by the name TeX asks for: the name to print and the
 /// bytes. The key is TeX's own lookup (`\\input`, `\\openin`,
