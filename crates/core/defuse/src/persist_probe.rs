@@ -915,6 +915,14 @@ impl Engine {
                                 reach.map(|d| self.node(d).state()),
                                 n.prior.lock().is_some()
                             );
+                            eprintln!(
+                                "persist-probe: moved: path steps {:?}; witnesses {}",
+                                self.paths
+                                    .steps
+                                    .get(rd.path().0 as usize)
+                                    .map(|ss| ss.iter().map(|st| format!("{st:?}")).collect::<Vec<_>>()),
+                                n.foreign.lock().witness.len()
+                            );
                             let defs = self.defined_by_live(f);
                             eprintln!(
                                 "persist-probe: moved: live definers {:?}",
