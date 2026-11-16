@@ -213,6 +213,10 @@ class Doc:
             shutil.copytree(self.d, before, symlinks=True)
         lines, nodes, code, wall = self.run(self.d, True, self.cache, threads)
         sums = self.sums(self.d)
+        # (the history's terminal, before the reference's build, in the
+        # same directory, writes over it)
+        term = self.d.parent / f"{self.d.name}.term"
+        hterm = term.read_bytes() if term.exists() else b""
         loaded = any(x.startswith("graph: loaded") for x in lines)
         if ref is None and load is False:
             ref, rcode = self.clean_of(before)
@@ -231,9 +235,7 @@ class Doc:
             keep = Path(self.args.out) / "files" / self.tag / f"{len(self.steps):02d}"
             shutil.rmtree(keep, ignore_errors=True)
             shutil.copytree(WORK / "graph" / self.tag / "last", keep)
-            term = self.d.parent / f"{self.d.name}.term"
-            if term.exists():
-                shutil.copy(term, keep / "history.term")
+            (keep / "history.term").write_bytes(hterm)
             diff = [x for x in OUTS if sums.get(x) != ref.get(x)]
             self.red.append(f"{what}: {', '.join(diff)} not the clean build's ({sums} / {ref}, clean exit {rcode})")
         if load is True and not loaded:
