@@ -196,6 +196,41 @@ test("a double-click finds its source after comment lines were added above it (i
   await w.stop();
 });
 
+test("a double-click on a float's text on page 2 of a two-column paper goes to its own line: the figure*'s caption and subcaptions, a TikZ node's text (#47)", async () => {
+  const text = readFileSync(new URL("../../oracle/fixtures/latex/origins/floats2col.tex", import.meta.url), "utf8");
+  const lineOf = (s) => text.slice(0, text.indexOf(s)).split("\n").length;
+  const { w, t } = await open({ "main.tex": text });
+  await t.until(`+$("#pgn")?.textContent >= 2`, "page 2", 240000);
+  await sleep(1500);
+  /** Each place find marks `word` at, double-clicked: the source line the watch said, in the pages' order. */
+  const lines = async (word) => {
+    await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = ${JSON.stringify(word)}; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+    const n = await t.until(`$$(".mark.fnd").length`, `${word} found`);
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const at = await t.until(`(() => { const m = $$(".mark.fnd")[${k}]; if (!m) return null; m.scrollIntoView({ block: "center" }); const r = m.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`, `${word} ${k + 1} shown`);
+      await sleep(300);
+      const from = w.out.length;
+      await t.mouse(at.x, at.y, 1);
+      await t.mouse(at.x, at.y, 2);
+      const end = Date.now() + 10000;
+      while (!/source: main\.tex:\d+/.test(w.out.slice(from)) && Date.now() < end) await sleep(50);
+      out.push(+(/source: main\.tex:(\d+)/.exec(w.out.slice(from))?.[1] ?? 0));
+    }
+    // (find closed, its marks gone: the next word's are its own)
+    await t.q(`(() => { const i = $("#findq"); i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); $("#find").hidden = true; return 1; })()`);
+    await t.until(`$$(".mark.fnd").length === 0`, "find's marks gone");
+    return out;
+  };
+  // (the figure*'s caption and subcaptions; the TikZ nodes' texts, then the figure's caption that names them again)
+  assert.deepEqual(await lines("Harbour"), [lineOf("\\caption{Harbour")]);
+  assert.deepEqual(await lines("Lanterns"), [lineOf("\\caption{Lanterns")]);
+  assert.deepEqual(await lines("kettles"), [lineOf("\\caption{Copper kettles")]);
+  assert.deepEqual(await lines("Granite"), [lineOf("{Granite pit}"), lineOf("\\caption{Stone travels")]);
+  assert.deepEqual(await lines("Marble"), [lineOf("{Marble quarry}"), lineOf("\\caption{Stone travels")]);
+  await w.stop();
+});
+
 test("Esc clears the highlights on the pages (item 21)", async () => {
   const { w, t } = await open({ "main.tex": doc("Find Quokka here.") });
   await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = "Quokka"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);

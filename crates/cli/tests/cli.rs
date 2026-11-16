@@ -706,6 +706,256 @@ fn watch_word_edit_ms() -> f64 {
     ms
 }
 
+/// RFC 4648 base64 `t` as little-endian `u32`s (the viewer's `origins`
+/// arrays).
+fn words_of_base64(t: &str) -> Vec<u32> {
+    let mut bytes = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in t.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue,
+        };
+        acc = acc << 6 | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push(u8::try_from(acc >> bits & 0xFF).unwrap_or(0));
+        }
+    }
+    let (words, _) = bytes.as_chunks::<4>();
+    words.iter().map(|&c| u32::from_le_bytes(c)).collect()
+}
+
+/// Glyph origins of the texts of floats on later pages, as the viewer
+/// asks for them (`phitex watch`, its socket's `origins`): a two-column
+/// paper's `figure*` (subcaptions, a `TikZ` picture's node texts, its
+/// caption) and figure, a one-column paper's floats moved to later pages
+/// (a float page, a table at a page's foot), and XeLaTeX's two-column
+/// `figure*` (issue #47). Each glyph of such a text is the bytes of that
+/// text (a caption's of its `\caption` argument, a node's text of its
+/// braces), each of its letters shown by one glyph, all of them on a page
+/// after the first where the float is moved there; no glyph (but a
+/// macro's, synthesized: `Figure 1:`, `(a)`) is placed in source text no
+/// page shows (a label, an environment's name, an option, a coordinate),
+/// and no byte is two glyphs'. The matcher filled the gaps between the
+/// words it matched with letters one by one: a caption's on the second
+/// page took the `i`, `g` of a label and the `ure` of `subfigure`, a node's
+/// text letters of the paragraph before it, and the viewer's double-click
+/// on them went there.
+#[test]
+#[allow(clippy::too_many_lines, reason = "three documents, one check")]
+fn glyph_origins_of_float_texts() {
+    // (an engine, a document, and its floats' texts with the first page,
+    // from 0, each is on)
+    type Doc<'a> = (&'a str, &'a str, &'a [(&'a str, usize)]);
+    let _one = one();
+    let later = 1;
+    let docs: [Doc; 3] = [
+        (
+            "pdflatex",
+            "floats2col",
+            &[
+                ("Lanterns over the northern quay", later),
+                ("Copper kettles cooling slowly", later),
+                (
+                    "Harbour scenes painted during the winter festival, with both panels drawn to the same scale.",
+                    later,
+                ),
+                ("Granite pit", later),
+                ("Marble quarry", later),
+                (
+                    "Stone travels from the granite pit to the marble quarry by cart.",
+                    later,
+                ),
+            ],
+        ),
+        (
+            "pdflatex",
+            "floats1col",
+            &[
+                (
+                    "Orchards bloom along the valley road in early spring.",
+                    later,
+                ),
+                ("Tools kept by each trade in the village.", 0),
+                ("Fishing boats return to the harbour at dusk.", later),
+                ("Weaver & Loom", 0),
+                ("Baker & Oven", 0),
+            ],
+        ),
+        (
+            "xelatex",
+            "floatsxe",
+            &[
+                ("Lanterns over the northern quay", later),
+                ("Granite pit", later),
+                ("Marble quarry", later),
+                ("Copper kettles cooling slowly", later),
+                (
+                    "Harbour scenes painted during the winter festival, with both panels drawn to the same scale.",
+                    later,
+                ),
+            ],
+        ),
+    ];
+    let mut fails = Vec::new();
+    for (engine, name, texts) in docs {
+        let file = format!("{name}.tex");
+        let src =
+            std::fs::read(fixtures().join("latex/origins").join(&file)).expect("the document");
+        let dir = scratch(&format!("float-origins-{name}"));
+        std::fs::write(dir.join(&file), &src).expect("the document");
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args([
+                "watch",
+                "--json",
+                "--synctex",
+                "--engine",
+                engine,
+                "-j",
+                "1",
+                &file,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let mut stdin = child.stdin.take().expect("its input");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+            .as_str()
+            .expect("the viewer's url")
+            .to_owned();
+        let built = until(&mut lines, "build", &1.into(), &mut seen);
+        assert_eq!(built["ok"], true, "{name}: {built}");
+        let pages = usize::try_from(built["pages"].as_u64().expect("its pages")).unwrap_or(0);
+        let mut viewer = Viewer::connect(&url);
+        // (each page's glyphs: page, start, end, synthesized; in its order)
+        let mut glyphs: Vec<Vec<(u32, u32, bool)>> = Vec::new();
+        let mut id = 0;
+        for k in 0..pages {
+            let end = Instant::now() + Duration::from_secs(120);
+            let o = loop {
+                id += 1;
+                let r = viewer.ask(&serde_json::json!({"id": id, "op": "origins", "page": k}));
+                let j = &r["json"];
+                if j.get("pending").is_none() && j.get("n").is_some() {
+                    break j.clone();
+                }
+                assert!(Instant::now() < end, "{name}: page {k}'s origins: {r}");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let files: Vec<String> = o["files"]
+                .as_array()
+                .expect("the files")
+                .iter()
+                .map(|f| f.as_str().unwrap_or_default().to_owned())
+                .collect();
+            let at = files.iter().position(|f| f.ends_with(&file));
+            let (file_of, start, end, synth) = (
+                words_of_base64(o["file"].as_str().unwrap_or_default()),
+                words_of_base64(o["start"].as_str().unwrap_or_default()),
+                words_of_base64(o["end"].as_str().unwrap_or_default()),
+                words_of_base64(o["synth"].as_str().unwrap_or_default()),
+            );
+            // (a XeTeX native word's glyphs, one after another, all the
+            // word's bytes: once)
+            let mut gs: Vec<(u32, u32, bool)> = (0..file_of.len())
+                .filter(|&i| at.is_some_and(|f| file_of[i] as usize == f))
+                .map(|i| (start[i], end[i], synth[i / 32] >> (i % 32) & 1 == 1))
+                .collect();
+            gs.dedup();
+            glyphs.push(gs);
+        }
+        let _ = stdin.write_all(b"q\n");
+        drop(stdin);
+        lines.for_each(drop);
+        let _ = child.wait();
+        // (the source text a page shows: the paragraphs' lines, those
+        // that begin with a letter, and the texts of the floats)
+        let mut shown = vec![false; src.len()];
+        let mut at = 0;
+        for line in src.split_inclusive(|&b| b == b'\n') {
+            if line.first().is_some_and(u8::is_ascii_alphabetic) {
+                shown[at..at + line.len()].fill(true);
+            }
+            at += line.len();
+        }
+        let place = |t: &str| {
+            let a = src
+                .windows(t.len())
+                .position(|w| w == t.as_bytes())
+                .unwrap_or_else(|| panic!("{name}: {t:?} in the document"));
+            (a, a + t.len())
+        };
+        for (t, _) in texts {
+            let (a, b) = place(t);
+            shown[a..b].fill(true);
+        }
+        if let Some(a) = src.windows(9).position(|w| w == b"\\section{") {
+            let b = a + src[a..].iter().position(|&c| c == b'}').unwrap_or(0);
+            shown[a + 9..b].fill(true);
+        }
+        // (each byte: the glyphs placed on it, page and index)
+        let mut on: Vec<Vec<(usize, usize)>> = vec![Vec::new(); src.len()];
+        for (k, gs) in glyphs.iter().enumerate() {
+            for (i, &(s, e, synth)) in gs.iter().enumerate() {
+                if synth || e <= s {
+                    continue;
+                }
+                let (s, e) = (s as usize, (e as usize).min(src.len()));
+                if !shown[s..e].iter().all(|&x| x) {
+                    fails.push(format!(
+                        "{name}: page {} glyph {i} placed on {:?}, text no page shows",
+                        k + 1,
+                        String::from_utf8_lossy(&src[s..e])
+                    ));
+                }
+                for x in &mut on[s..e] {
+                    x.push((k, i));
+                }
+            }
+        }
+        for (b, gs) in on.iter().enumerate() {
+            if gs.len() > 1 {
+                fails.push(format!(
+                    "{name}: byte {b} {:?} is the glyphs {gs:?}'",
+                    char::from(src[b])
+                ));
+            }
+        }
+        for &(t, page) in texts {
+            let (a, b) = place(t);
+            for x in a..b {
+                if !src[x].is_ascii_alphanumeric() {
+                    continue;
+                }
+                match on[x].as_slice() {
+                    [(k, _)] if *k >= page => {}
+                    gs => fails.push(format!(
+                        "{name}: {t:?}: its {:?} at byte {x} is the glyphs {gs:?} (pages from 0), not one on page {} or after",
+                        char::from(src[x]),
+                        page + 1
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "float texts' origins:\n{}",
+        fails.join("\n")
+    );
+}
+
 /// `phitex watch --synctex` with a browser's socket: a save made while
 /// the viewer's asks are in flight (every page's origins, asked at once,
 /// as a browser asks for the pages it shows after a build), one made the
