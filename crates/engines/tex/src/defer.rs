@@ -33,27 +33,49 @@ enum SymKey {
 /// builds filled the internal names' range and the frozen tokens
 /// numbered after it were taken for ordinary ones (#32). Numbered per
 /// engine, the names are the same few in every build.
+///
+/// Each kind is numbered on its own, from 0: the register symbols and
+/// the derived names. Numbered together, a number was a register's in
+/// one build and a derived name's in another, as the runs happened to
+/// meet them, and each kind's name of it was minted: the builds of a
+/// session made the union of two orders' names, near twice the most
+/// symbols one build numbers, and a loaded machine's orders more of
+/// them (amsldoc's nine builds 280 and 739 new names under the gate's
+/// load, half of them `sym|dn|<n>` beside a `sym|<n>` of the same `n`).
 #[derive(Default)]
 pub(crate) struct SymTable {
+    regs: KindTable,
+    names: KindTable,
+}
+
+/// The symbols of one kind of a [`SymTable`], by number.
+#[derive(Default)]
+struct KindTable {
     by: std::sync::RwLock<(phitex_defuse::FxHashMap<SymKey, u32>, Vec<SymKey>)>,
 }
 
 impl SymTable {
-    /// The number of `k`, given it on its first sight.
+    fn kind(&self, k: &SymKey) -> &KindTable {
+        match k {
+            SymKey::Reg(..) => &self.regs,
+            SymKey::Name(..) => &self.names,
+        }
+    }
+
+    /// The number of `k` among its kind, given it on its first sight.
     fn number(&self, k: SymKey) -> u32 {
-        if let Some(&i) = self
-            .by
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .0
-            .get(&k)
+        let t = self.kind(&k);
+        if let Some(&i) =
+            t.by.read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0
+                .get(&k)
         {
             return i;
         }
-        let mut t = self
-            .by
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut t =
+            t.by.write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(&i) = t.0.get(&k) {
             return i;
         }
@@ -63,10 +85,32 @@ impl SymTable {
         i
     }
 
-    /// What number `i` stands for.
-    fn key(&self, i: u32) -> Option<SymKey> {
-        self.by
-            .read()
+    /// How many register symbols and derived names are numbered.
+    pub(crate) fn counts(&self) -> (u32, u32) {
+        let n = |t: &KindTable| {
+            u32::try_from(
+                t.by.read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .1
+                    .len(),
+            )
+            .unwrap_or(u32::MAX)
+        };
+        (n(&self.regs), n(&self.names))
+    }
+
+    /// What register symbol number `i` stands for.
+    fn reg(&self, i: u32) -> Option<SymKey> {
+        Self::key(&self.regs, i)
+    }
+
+    /// What derived name number `i` stands for.
+    fn name(&self, i: u32) -> Option<SymKey> {
+        Self::key(&self.names, i)
+    }
+
+    fn key(t: &KindTable, i: u32) -> Option<SymKey> {
+        t.by.read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .1
             .get(i as usize)
@@ -120,7 +164,7 @@ pub(crate) fn sym_of(ops: &crate::run::Ops, t: Tok) -> Option<Sym> {
         return None;
     }
     let i = t.as_cs()?.name().strip_prefix(SYM_PREFIX)?.parse().ok()?;
-    match ops.syms.key(i)? {
+    match ops.syms.reg(i)? {
         SymKey::Reg(reg, node, j) => Some(Sym {
             reg,
             node: NodeId::from_raw(node),
@@ -727,7 +771,7 @@ pub(crate) fn dname_of(ops: &crate::run::Ops, t: Tok) -> Option<DName> {
         .strip_prefix(DNAME_TAG)?
         .parse()
         .ok()?;
-    match ops.syms.key(i)? {
+    match ops.syms.name(i)? {
         SymKey::Name(reg, node, j, prefix, suffix) => Some(DName {
             s: Sym {
                 reg,
