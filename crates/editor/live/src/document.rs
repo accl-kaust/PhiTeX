@@ -1107,7 +1107,9 @@ mod tests {
         );
         let (out, log, _, notes) = graph_build(text, &disk, Some(&store));
         assert!(
-            notes.iter().any(|l| l.contains("1 files moved (extra")),
+            notes
+                .iter()
+                .any(|l| l.contains("2 files moved (extra.tex, extra)")),
             "{notes:?}"
         );
         let (c, cl, ..) = clean(&disk);
