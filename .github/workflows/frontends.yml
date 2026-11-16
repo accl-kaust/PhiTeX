@@ -31,7 +31,11 @@
 #   following of the disk (apps/vscode/test/disk.ts: an image saved over,
 #   an \input file, the main file and a .bib edited outside the editor, a
 #   file made then removed, an editor's buffer over the disk's; each build's
-#   pages a clean build's of the folder as it is then).
+#   pages a clean build's of the folder as it is then); the persisted graph
+#   in each (apps/vscode/test/graph.ts, apps/web/test/graph.mjs,
+#   test/scenarios/ci-graph.json: an open of a document whose graph is
+#   kept builds nothing, a change made while closed is built; in VS Code's
+#   Node host each open's PDF a clean build's, byte for byte).
 # Not covered (a manual step before a tag, docs/ci.md): overleaf.com itself
 # (its live DOM and login, the main file it names), the VS Code UI.
 #
@@ -180,12 +184,21 @@ jobs:
           node tools/dev/mock-run.mjs test/scenarios/ci-tabs.json
           # (Overleaf's own main document, its Menu's, followed: the socket's join and change)
           node tools/dev/mock-run.mjs test/scenarios/ci-rootdoc.json
+          # (the persisted graph: saved, a reload loads it and builds nothing, a
+          # change made on the server while the tab was away built after it)
+          node tools/dev/mock-run.mjs test/scenarios/ci-graph.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe
         env:
           PHITEX_CHROME: /usr/bin/google-chrome
         run: node apps/web/test/check.mjs
+      - name: the demo's persisted graph (a reload builds nothing; a change made away is built)
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        env:
+          PHITEX_CHROME: /usr/bin/google-chrome
+        run: node apps/web/test/graph.mjs
       - name: VS Code's built-in wasm engine
         if: ${{ !cancelled() }}
         working-directory: fe
@@ -200,6 +213,11 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: fe
         run: node build/vscode/dist/end.mjs
+      # (the persisted graph: each open on a core of its own, its PDF a clean build's byte for byte)
+      - name: VS Code's built-in wasm engine and its persisted graph
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node build/vscode/dist/graph.mjs
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

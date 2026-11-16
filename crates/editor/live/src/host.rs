@@ -261,6 +261,12 @@ pub trait Store: Send + Sync {
     fn put_durable(&self, key: Key<'_>, bytes: &[u8]) {
         self.put(key, bytes);
     }
+    /// [`Store::put_durable`], the bytes given away: a host that keeps
+    /// them in memory (the wasm core, until its host takes them) keeps
+    /// these, no copy.
+    fn put_durable_owned(&self, key: Key<'_>, bytes: Vec<u8>) {
+        self.put_durable(key, &bytes);
+    }
     /// Record `key` removed (a graph file refused: never read again).
     fn remove(&self, _key: Key<'_>) {}
     /// Record `key` held against other processes until the guard is
@@ -345,8 +351,8 @@ impl Records {
     }
 
     /// The persisted graph's file stored, durably.
-    pub fn put_graph(&self, bytes: &[u8]) {
-        self.store.put_durable(Key::Doc("graph"), bytes);
+    pub fn put_graph(&self, bytes: Vec<u8>) {
+        self.store.put_durable_owned(Key::Doc("graph"), bytes);
     }
 
     /// The persisted graph's file removed (refused).

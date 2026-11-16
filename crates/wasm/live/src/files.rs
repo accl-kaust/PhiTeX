@@ -51,14 +51,15 @@ pub trait Host: Send + Sync {
 /// What a pack's fetch is told (the session's progress: `Meter::fetch`).
 pub type FetchHook = Arc<dyn Fn(&Fetch<'_>) + Send + Sync>;
 
+/// A given file's content key, made at its first ask ([`Files::stamp`]).
+type ContentKey = Arc<OnceLock<Vec<u8>>>;
+
 #[derive(Default)]
 struct State {
     by_name: HashMap<String, Entry>,
     /// The host's files by the path it gave (the project's, as `./name`),
-    /// each with the number of its giving ([`Files::stamp`]).
-    by_given_path: HashMap<String, (u64, Arc<Vec<u8>>)>,
-    /// The files the host has given so far: each giving's number.
-    givings: u64,
+    /// each with its content's key, made at its first ask ([`Files::stamp`]).
+    by_given_path: HashMap<String, (ContentKey, Arc<Vec<u8>>)>,
     index: Option<Arc<Index>>,
     /// The extension's bundled texmf/: these names the host's, not Shelf's.
     bundled: HashSet<String>,
@@ -235,21 +236,91 @@ impl Files {
         }
     }
 
-    /// A key of the file at `path` that changes when its bytes may have,
-    /// none read ([`phitex_live::host::Host::stamp`]: a Rebuild, `r` in
-    /// the watch, reads again only the files whose key moved): Shelf's,
-    /// the release's, the same for the session (as the CLI's `--shelf`);
-    /// the host's, the number of its last giving, a file given again (a
-    /// figure replaced in Overleaf) a new one; none: not here.
+    /// A key of the file at `path` that changes when its bytes do
+    /// ([`phitex_live::host::Host::stamp`]: a Rebuild, `r` in the watch,
+    /// reads again only the files whose key moved; a persisted graph's
+    /// load stages only those, `phitex_live::graph`): Shelf's, from the
+    /// release's index, nothing fetched (the file's own content sum, else
+    /// its pack's id, which names the pack's content), as the CLI's
+    /// `--shelf` keys it; the host's, its content's (SHA-256 and length,
+    /// made once a giving, at its first ask: off the host's thread), so a
+    /// later session's host giving the same bytes gives the same key, a
+    /// figure replaced in Overleaf another; none: not here.
     pub fn stamp(&self, path: &str) -> Option<Vec<u8>> {
-        if path.starts_with(shelf::TL) {
-            return self.read(path).is_some().then(|| b"shelf".to_vec());
+        if let Some(rel) = path.strip_prefix(shelf::TL) {
+            let ix = self.lock().index.clone()?;
+            return ix
+                .sum_of(rel)
+                .or_else(|| ix.pack_of(rel))
+                .map(|k| [b"shelf:".as_slice(), k.as_bytes()].concat());
         }
         let s = self.lock();
         let plain = path.strip_prefix("./").unwrap_or(path);
-        s.by_given_path
-            .get(plain)
-            .map(|(n, _)| n.to_le_bytes().to_vec())
+        let (key, b) = s.by_given_path.get(plain)?.clone();
+        drop(s);
+        Some(
+            key.get_or_init(|| {
+                let mut k = phitex_codecs::sha256::sha256(&b).to_vec();
+                k.extend_from_slice(&(b.len() as u64).to_le_bytes());
+                k
+            })
+            .clone(),
+        )
+    }
+
+    /// Where `name` (as a finder's key names it: [`phitex_tex::font_name`]'s
+    /// font side stripped) is found now, nothing fetched: the host's file
+    /// given under it (asked of the host when it has said nothing of it),
+    /// else Shelf's path from the release's index, along TEXINPUTS as
+    /// [`Files::locate`] looks
+    /// ([`phitex_live::host::Host::relocate`]: a loaded graph's inputs
+    /// checked; the CLI's `--shelf` answers the same from its index).
+    pub fn relocate(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<String> {
+        let search = self.lock().search.clone();
+        let searched =
+            !(name.starts_with('/') || name.starts_with("./") || name.starts_with("../"));
+        let Some(search) = search.filter(|_| searched) else {
+            return self.relocate_default(name, engine);
+        };
+        for e in &search.elements {
+            match e {
+                phitex_live::latexmkrc::Element::Default => {
+                    if let Some(p) = self.relocate_default(name, engine) {
+                        return Some(p);
+                    }
+                }
+                phitex_live::latexmkrc::Element::Dir { path, sub } => {
+                    for c in search.candidates(path, *sub, name) {
+                        let s = self.lock();
+                        if let Some((p, _)) = self.by_name(s, &c) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn relocate_default(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<String> {
+        let s = self.lock();
+        if let Some(Entry::Given(f)) = s.by_name.get(name) {
+            return f.as_ref().map(|(p, _)| p.clone());
+        }
+        let Some(ix) = s.index.clone() else {
+            return self.by_name(s, name).map(|(p, _)| p);
+        };
+        if Self::hosts(&s, &ix, name, engine) {
+            return self.by_name(s, name).map(|(p, _)| p);
+        }
+        drop(s);
+        let rel = ix.resolve(name, shelf::format_of(name), engine)?;
+        Some(format!("{}{rel}", shelf::TL))
+    }
+
+    /// Shelf's release, as the index names it (none: no index yet).
+    pub fn release(&self) -> Option<String> {
+        self.lock().index.as_ref().map(|ix| ix.release().to_owned())
     }
 
     /// Whether `name` is the host's (given, or bundled outside an engine's
@@ -432,10 +503,10 @@ impl Files {
             s.by_given_path.remove(&p);
         }
         if let Some((p, b)) = &file {
-            s.givings += 1;
-            let n = s.givings;
-            s.by_given_path
-                .insert(p.strip_prefix("./").unwrap_or(p).to_owned(), (n, b.clone()));
+            s.by_given_path.insert(
+                p.strip_prefix("./").unwrap_or(p).to_owned(),
+                (ContentKey::default(), b.clone()),
+            );
         }
         s.by_name.insert(name.to_owned(), Entry::Given(file));
         drop(s);
@@ -539,11 +610,14 @@ impl PackSource for HostPacks {
 mod tests {
     use super::*;
 
-    /// A file the host gives keeps its stamp until it is given again (a
-    /// new one: a Rebuild reads it again) or given as absent (none: looked
-    /// up again, gone); one never given has none.
+    /// A file the host gives keeps its stamp until it is given again with
+    /// other bytes (a new one: a Rebuild reads it again) or given as
+    /// absent (none: looked up again, gone); one never given has none.
+    /// The stamp is the content's: given again with the same bytes, or
+    /// by another core (a later session, a persisted graph's load), the
+    /// same.
     #[test]
-    fn a_given_files_stamp_moves_only_when_it_is_given_again() {
+    fn a_given_files_stamp_moves_only_when_its_bytes_do() {
         let f = Files::default();
         assert_eq!(f.stamp("./a.png"), None);
         f.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
@@ -551,6 +625,15 @@ mod tests {
         let a = f.stamp("./a.png").expect("given");
         assert_eq!(f.stamp("a.png").as_ref(), Some(&a));
         let b = f.stamp("./b.tex");
+        f.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
+        assert_eq!(
+            f.stamp("./a.png").as_ref(),
+            Some(&a),
+            "the same bytes again"
+        );
+        let other = Files::default();
+        other.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
+        assert_eq!(other.stamp("./a.png").as_ref(), Some(&a), "another core's");
         f.provide("a.png", Some(("./a.png".to_owned(), b"two".to_vec())));
         assert_ne!(f.stamp("./a.png").as_ref(), Some(&a));
         assert_eq!(f.stamp("./b.tex"), b);

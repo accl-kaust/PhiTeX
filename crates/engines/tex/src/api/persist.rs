@@ -40,6 +40,9 @@ pub struct LoadStats {
     pub import_ms: f64,
     pub client_ms: f64,
     pub analysis_ms: f64,
+    /// Of the client's: the link's pages and commands, their fonts made
+    /// again of their records.
+    pub link_ms: f64,
     pub total_ms: f64,
     pub values: u64,
     pub nodes: u64,
@@ -453,8 +456,24 @@ impl Build {
 
     /// [`Build::save`], with how long the client's tables and the
     /// engine's export took (ms).
+    ///
+    /// # Panics
+    ///
+    /// Never: nothing stops it ([`Build::save_until`]).
     #[must_use]
     pub fn save_timed(&self) -> (Vec<u8>, f64, f64) {
+        self.save_until(&|| false).expect("a save nothing stops")
+    }
+
+    /// [`Build::save_timed`], given up once `stop` says so (asked before
+    /// the client's tables, after them and between the engine's nodes,
+    /// [`phitex_defuse::Engine::export_until`]): none then, nothing of the
+    /// build changed.
+    #[must_use]
+    pub fn save_until(&self, stop: &dyn Fn() -> bool) -> Option<(Vec<u8>, f64, f64)> {
+        if stop() {
+            return None;
+        }
         let t0 = std::time::Instant::now();
         let v = self.g.eng.values();
         let mut e = Enc {
@@ -469,7 +488,7 @@ impl Build {
         roots.dedup();
         let client_ms = t0.elapsed().as_secs_f64() * 1e3;
         let t1 = std::time::Instant::now();
-        let eng = self.g.eng.export(&roots);
+        let eng = self.g.eng.export_until(&roots, stop)?;
         let engine_ms = t1.elapsed().as_secs_f64() * 1e3;
         let mut out = Vec::with_capacity(8 + 4 + 8 + eng.len() + 16 + client.len());
         out.extend_from_slice(MAGIC);
@@ -479,7 +498,7 @@ impl Build {
         out.extend_from_slice(&(client.len() as u64).to_le_bytes());
         out.extend_from_slice(&phitex_defuse::hash_bytes(HASH_SEED, &client).to_le_bytes());
         out.extend_from_slice(&client);
-        (out, client_ms, engine_ms)
+        Some((out, client_ms, engine_ms))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1216,7 +1235,9 @@ impl Build {
         let many = d.u64s()?;
         crate::pic::learn(&refused, &many);
         d.tag(13)?;
+        let tl = std::time::Instant::now();
         let link = crate::pdfout::load_link(&mut d)?;
+        st.link_ms = tl.elapsed().as_secs_f64() * 1e3;
         d.tag(14)?;
         if d.b()? {
             crate::origins::load_kept(&mut d, v.instance())?;
@@ -1256,7 +1277,8 @@ impl Build {
         // (the registry as saved: the analyses registered by the runs too)
         crate::hints::set_registered(&g.ops.hints, reg);
         link.install(v, &g.ops.pdf_cmds);
-        st.analysis_ms = ta.elapsed().as_secs_f64() * 1e3;
+        // (the analyses' alone: the link's, between them, apart)
+        st.analysis_ms = ta.elapsed().as_secs_f64() * 1e3 - st.link_ms;
         let edits = opts.edits.clone().unwrap_or_default();
         let stats = Stats {
             version,

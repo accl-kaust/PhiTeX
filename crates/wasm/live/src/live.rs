@@ -130,9 +130,33 @@ impl Host for Shelf {
     }
 
     /// [`Files::stamp`]: a Rebuild reads again only what the host gave
-    /// since, as `r` in the watch reads only what changed on disk.
+    /// since with other bytes, as `r` in the watch reads only what changed
+    /// on disk; a loaded graph stages only those.
     fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
         self.files.stamp(&path.to_string_lossy())
+    }
+
+    /// [`Files::relocate`]: where a loaded graph's input is now, from
+    /// what the host gave and Shelf's index, nothing fetched.
+    fn relocate(&self, key: &str) -> Option<PathBuf> {
+        let name = phitex_tex::font_name(key).unwrap_or(key);
+        let found = self.files.relocate(name, self.engine).map(PathBuf::from);
+        crate::session::let_host_in();
+        found
+    }
+
+    /// Shelf's files are the distribution's; the host's are the project's.
+    fn distribution(&self, path: &Path) -> bool {
+        path.to_string_lossy().starts_with(phitex_shelf::TL)
+    }
+
+    /// Shelf's release, which keys a persisted graph (`phitex_live::graph`)
+    /// as the CLI's `--shelf` keys it.
+    fn release(&self) -> String {
+        self.files
+            .release()
+            .map(|r| format!("Shelf {r}"))
+            .unwrap_or_default()
     }
 
     /// Shelf's files keyed by their own content (the index's sums) and

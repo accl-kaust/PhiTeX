@@ -444,20 +444,27 @@ pub fn encode(key: &Key, prelude: &[u8; 32], manifest: &Manifest, build: &[u8]) 
         }
     }
     e.u(manifest.cold_ms);
-    let mut payload = e.0;
-    payload.reserve(build.len());
-    payload.extend_from_slice(build);
-    let chunks = payload.len().div_ceil(CHUNK);
-    let mut out = Vec::with_capacity(HEAD + 8 * chunks + payload.len());
+    // (one buffer, its head's hashes filled in last: the build's bytes
+    // copied once, a graph of tens of MB never held three times over, in
+    // the wasm core's fixed memory too)
+    let len = e.0.len() + build.len();
+    let chunks = len.div_ceil(CHUNK);
+    let start = HEAD + 8 * chunks;
+    let mut out = Vec::with_capacity(start + len);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(len as u64).to_le_bytes());
     out.extend_from_slice(&u32::try_from(CHUNK).unwrap_or(u32::MAX).to_le_bytes());
     out.extend_from_slice(&u32::try_from(chunks).unwrap_or(u32::MAX).to_le_bytes());
-    for c in payload.chunks(CHUNK) {
-        out.extend_from_slice(&crate::tex::words_hash(c).to_le_bytes());
+    out.resize(start, 0);
+    out.extend_from_slice(&e.0);
+    drop(e);
+    out.extend_from_slice(build);
+    let (head, payload) = out.split_at_mut(start);
+    for (k, c) in payload.chunks(CHUNK).enumerate() {
+        head[HEAD + 8 * k..HEAD + 8 * k + 8]
+            .copy_from_slice(&crate::tex::words_hash(c).to_le_bytes());
     }
-    out.extend_from_slice(&payload);
     out
 }
 

@@ -4,7 +4,9 @@ Status: step 1 (the engine's export and import) and step 2 (the
 client's tables, `Build::save` / `Build::load` in process, §2.2, §12)
 built, with pdfTeX's link state (step 2b, §2.2.4); step 3 (the cache
 file, its keys, the environment re-ask, across processes, §13) built;
-step 5: on by default in `phitex build` and `phitex watch` (§15). Branch
+step 5: on by default in `phitex build` and `phitex watch` (§15); the
+builtin (wasm) engine of VS Code, the web demo and the Overleaf
+extension keeps graphs too, saved at a pause (§16). Branch
 `persist-design`: the design's observe-only probe (`PHITEX_PERSIST_PROBE`). It builds on
 docs/note-persisted-graph.md (the 11-01 design note),
 docs/spec-seeded-reads.md (branch `seeded-r2`: why seeding definitions alone
@@ -943,3 +945,95 @@ graph loaded; D: a one-word edit, loaded.
 The default's clean build is within +5% of no graph at every point;
 its second build 3.4-9.9x faster where the document is not one long
 plain run (para4000 1.1-2.7x).
+
+## 16. Step 4: the builtin (wasm) engine (2026-11-16)
+
+VS Code's builtin engine, the web demo and the Overleaf extension run
+`phitex_live::Session` in the wasm core (crates/wasm/live), so the load,
+the keys and the checks are §13's, unchanged. What the core adds is how
+the bytes reach the host and when the save runs.
+
+**The core** (crates/wasm/live):
+- `ph_graph_give(bytes)` before `ph_open`: the graph the host kept for
+  the document (empty: none). The open's JSON says `graph: true` to
+  keep graphs (off unless the host says). The session's first build
+  takes it from the store's `doc/graph` key (`store::Kept`), which the
+  core answers itself: tens of MB are never asked of the host or posted.
+  A refused file (cut, a hash wrong) is reported `dropped` and the host
+  deletes its copy; a key that differs is a clean build, as natively.
+- `{"event": "graph", ...}` before the build's own event: the load's
+  line (`loaded`, or why not) and `dropped`; then, when a save is made,
+  `saved: N` and its time. The host takes the bytes with `ph_graph()`.
+- **The save runs at a pause.** After a build, once nothing has been
+  asked for 2 s (`GRAPH_IDLE`), on the session thread; without threads,
+  the step answers 3 and the host steps again after the pause.
+  `Session::save_graph_until` gives it up at any ask
+  (`Engine::export_until`, a check every 32 nodes; `Build::save_until`),
+  so an edit typed during a save waits for nothing: the save is made at
+  the next pause. With JSPI (Chrome's single-threaded core) the save
+  yields to the host as a build does; Firefox's core has no JSPI, so its
+  save runs to its end once started (0.1-1.3 s, after 2 s of quiet).
+- **Memory.** The core's memory is fixed (`heap.rs`): a save first asks
+  for three times the last graph's size, or 64 bytes a value the store
+  holds (`Session::graph_bytes_guess`; 44-54 measured), as a block taken
+  and given back (`heap::room_for`, its refusal no loss). A save never
+  takes what the document needs. The file is encoded in one buffer
+  (`graph::encode`) and handed over without a copy
+  (`Store::put_durable_owned`): its peak is about twice its size.
+- **Keys of the host's files.** A file the host gives is keyed by its
+  content (SHA-256 and length, made once at its first ask, off the host's
+  thread), so a later session's host giving the same bytes gives the same
+  key, and only a file whose bytes differ becomes an edit. Shelf's files
+  are keyed by the release's index (the file's own sum, else its pack's
+  id), nothing fetched, as the CLI's `--shelf` keys them. A loaded graph's
+  inputs are resolved again from what the host gave and Shelf's index,
+  nothing fetched (`Files::relocate`); the release key is `Shelf <release>`.
+  A save made after another open is never handed over as the new
+  document's: each session keeps its own (a thread-local slot), and the
+  open's number is checked.
+
+**The hosts** (PhiTeX-frontends, common/src/wasm/graphs.ts, core.ts):
+`GraphStore` keeps a graph a document under the host's project name,
+raw (no compression: a load decompresses nothing), and drops the least
+recently used past a cap. `CoreSession` gives the kept graph before each
+open and keeps each saved one.
+- VS Code: the workspace's storage (`context.storageUri`, the global one
+  without a workspace), a file a document (written aside, renamed in);
+  at most 16 documents and 2 GB. Setting `phitex.graph` (on).
+- The web demo and the Overleaf extension: IndexedDB (`phitex-graph`,
+  the page's or the extension's origin), keyed by project and main file;
+  at most 16 projects and 512 MB, the least recently opened dropped
+  first. Setting: the demo's Clear cache dialog, the extension's popup
+  (Package cache); off drops every graph kept. A Compare's core keeps
+  none. Clear cache clears them with the build's state.
+
+**Tests.** Native: `a_save_given_up_stores_nothing` (a save stopped at
+each of its asks stores nothing; the one after is whole; the next session
+loads it, no node run, the clean build's bytes). In the frontends:
+apps/vscode/test/graph.ts (VS Code's Node host, each open on a core of
+its own): the first open saves, the second loads and runs 0 nodes with
+the same PDF, then an `\input` file, the main file, a figure and a
+`.bib` changed while closed, a damaged graph (refused, dropped, saved
+again), graphs off; every PDF byte for byte a clean build's.
+apps/web/test/graph.mjs (the demo in Chromium) and
+test/scenarios/ci-graph.json (the extension on the mock Overleaf): a
+reload loads and runs 0 nodes, a change made while closed is built.
+
+**Timings** (VS Code's Node host on the workstation, 4 engine threads, a
+fresh core each open, the store's formats and packs warm; seconds from
+the open's request to its first build; the core's start, 0.55-0.74 s,
+apart):
+
+| doc | graphs off | first open (saves) | second open | second open, a word typed while closed |
+|---|---:|---:|---:|---:|
+| amsldoc | 10.8-12.3 | 10.5-12.0 | 1.87-2.13 | 2.19-2.86 |
+| Grail (XeLaTeX) | 75.6-79.0 | 75.3-80.2 | 3.25-3.34 | 4.03-4.12 |
+
+- The save, in the core at the pause: amsldoc 0.41-0.56 s (28.8-29.0
+  MB), Grail 1.14-1.25 s (61.1-61.2 MB). Nothing waits for it.
+- The load: amsldoc 1.49-1.78 s (import 0.55-0.69, the client's
+  0.82-0.94 of which the analyses 0.88), Grail 2.5-2.6 s (import
+  1.15-1.22, the client's 0.38-0.43, XeTeX's font lookups checked again
+  most of the rest). At one engine thread amsldoc's client part is 0.42 s
+  (the analyses 0.37): the 4-thread pool's first use costs about 0.5 s
+  on a fresh core, a follow-up (start the pool with the core).
