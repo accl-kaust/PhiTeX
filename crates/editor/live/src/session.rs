@@ -836,6 +836,33 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// (measure, with `PHITEX_RUN_LOG` set) the document's nodes the last
+    /// build or edit ran, once each: each one's operation and its text
+    /// (the slice of the main text or of a file it is). A check of which
+    /// paragraphs an edit ran again.
+    pub fn ran_texts(&self) -> Vec<(&'static str, String)> {
+        let Some(b) = &self.build else {
+            return Vec::new();
+        };
+        let spans: HashMap<u64, (Option<Arc<str>>, usize, usize)> = b
+            .node_spans()
+            .into_iter()
+            .map(|(n, f, s, e)| (n, (f, s, e)))
+            .collect();
+        let text = self.built_text.clone().unwrap_or_else(|| Arc::from(""));
+        let mut seen = std::collections::HashSet::new();
+        b.stats
+            .run_log
+            .iter()
+            .filter(|r| seen.insert(r.0))
+            .filter_map(|r| {
+                let (f, s, e) = spans.get(&r.0)?;
+                let t = f.as_deref().unwrap_or(&text);
+                Some((r.1, t.get(*s..*e)?.to_owned()))
+            })
+            .collect()
+    }
+
     /// `PHITEX_GRAPH_CHECK` (docs/spec-persisted-graph.md, step 2): the
     /// twin loaded from the last save given the change the build was given
     /// (`staged`, `text` with its `hint`), its runs and outputs compared
@@ -1282,6 +1309,98 @@ impl Session {
                 ""
             },
         ))
+    }
+
+    /// A session for `job` (another job of the same document: its options
+    /// the same but where its outputs go, Compare's marked-up document)
+    /// that stands where this one stands: this session's build copied in
+    /// this process ([`Build::save`], then [`Build::load`] with the new
+    /// session's options, docs/spec-persisted-graph.md §12), with the
+    /// tables of what it read (the files, their keys, the editor's
+    /// buffers) and the text it built. Its first build is then an edit of
+    /// that text and of those files: what it runs is what the watch would
+    /// run for the same change, not a clean build. It keeps no graph of
+    /// its own (the document's is this session's), and writes its outputs
+    /// through `sink`, its records in `store`. A line for `-v`.
+    ///
+    /// # Errors
+    ///
+    /// No build yet, the last one ended in an evaluation failure (its
+    /// graph not quiet), its format not found, or the copy refused: the
+    /// new session's first build is then a clean build.
+    pub fn fork(
+        &self,
+        job: Job,
+        store: Option<Arc<dyn Store>>,
+        sink: Arc<dyn Sink>,
+        status: Arc<Status>,
+    ) -> Result<(Session, String), String> {
+        let t0 = Instant::now();
+        let b = self.build.as_ref().ok_or("no build yet")?;
+        if !self.graph_quiet {
+            return Err("the document's last build did not end".into());
+        }
+        let text = self
+            .built_text
+            .clone()
+            .ok_or("the document's build has no text")?;
+        let mut s = Session::new(job, text.clone(), self.host.clone(), store, sink, status);
+        s.graph_on = false;
+        s.graph_first = false;
+        s.outside = None;
+        let bytes = b.save();
+        let save_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let t1 = Instant::now();
+        let p = s.prepare_cold(&text)?;
+        let (nb, st) =
+            match crate::panics::catch(|| Build::load(p.opts, p.prelude.as_deref(), &bytes)) {
+                Ok(Ok(x)) => x,
+                Ok(Err(e)) => return Err(format!("the copy refused: {e}")),
+                Err(e) => return Err(format!("the copy stopped: {e}")),
+            };
+        if nb.prelude_key() != b.prelude_key() {
+            return Err("the format differs".into());
+        }
+        let load_ms = t1.elapsed().as_secs_f64() * 1e3;
+        s.inputs.clone_from(&self.inputs);
+        for (i, (n, _, p, _)) in s.inputs.iter().enumerate() {
+            s.inputs_by.add(n, p.as_deref(), i);
+        }
+        s.stamps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone_from(&self.stamps.lock().unwrap_or_else(PoisonError::into_inner));
+        s.tool_reads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone_from(
+                &self
+                    .tool_reads
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        s.buffers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone_from(&self.buffers.lock().unwrap_or_else(PoisonError::into_inner));
+        s.built_text = Some(text);
+        s.page_hashes = nb.pages();
+        s.cold_ms = self.cold_ms;
+        s.graph_quiet = true;
+        if std::env::var_os("PHITEX_STUCK_SECS").is_none() {
+            nb.set_stuck_after(Some(
+                (Duration::from_millis(self.cold_ms) * 5).max(Duration::from_secs(60)),
+            ));
+        }
+        s.build = Some(nb);
+        let note = format!(
+            "fork: {:.1} MB in {:.0} ms (saved {save_ms:.0}, loaded {load_ms:.0}: import {:.0}, the client's {:.0})",
+            mb(bytes.len()),
+            t0.elapsed().as_secs_f64() * 1e3,
+            st.import_ms,
+            st.client_ms,
+        );
+        Ok((s, note))
     }
 
     /// The build saved as the document's persisted graph

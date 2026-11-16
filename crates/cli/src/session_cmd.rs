@@ -187,13 +187,22 @@ pub enum Verb {
         #[arg(
             long,
             value_name = "LABEL",
-            required_unless_present = "at",
-            conflicts_with = "at"
+            required_unless_present_any = ["at", "change"],
+            conflicts_with_all = ["at", "change"]
         )]
         label: Option<String>,
         /// What line LINE (from 1) of FILE made, instead
-        #[arg(long, value_name = "FILE:LINE")]
+        #[arg(long, value_name = "FILE:LINE", conflicts_with = "change")]
         at: Option<String>,
+        /// Draw from the diff against REV instead (as `session compare
+        /// REV` makes it): the label's or the line's part of its pages,
+        /// or change N's
+        #[arg(long, value_name = "REV")]
+        compare: Option<String>,
+        /// With --compare: change N (from 1, as `session compare` numbers
+        /// them)
+        #[arg(long, value_name = "N", requires = "compare")]
+        change: Option<usize>,
         /// Pixels per inch
         #[arg(long, value_name = "N", default_value_t = 150)]
         dpi: u32,
@@ -211,6 +220,31 @@ pub enum Verb {
         /// Give up waiting for the build after TIME (default 60s)
         #[arg(long, value_name = "TIME")]
         timeout: Option<String>,
+    },
+    /// Diff the files as they are against an older version (latexdiff's
+    /// markup, as the viewer's Compare), and say where each change is
+    ///
+    /// REV is a git commit, branch or HEAD~N, or the path of an older copy
+    /// of the main file. Waits for the diff's build (started from the
+    /// watch's own: about an edit's time). Prints the diff PDF's path and
+    /// the changes, one a line: its number, page, box (points from the
+    /// page's top left) and file:line. The diff is the agent's own: the
+    /// viewer's Compare is left as it is. Again with no REV: the last one,
+    /// diffed again against the files as they are now.
+    Compare {
+        /// The version to compare with
+        #[arg(value_name = "REV", required_unless_present = "stop")]
+        rev: Option<String>,
+        /// End the agent's diff
+        #[arg(long, conflicts_with = "rev")]
+        stop: bool,
+        /// The look, as the viewer's diff settings: markup=underline|
+        /// ctraditional|traditional|cfont|fontstrike|bold|invisible (or a
+        /// latexdiff type with change bars: culinechbar, cfontchbar,
+        /// cchangebar, changebar), subtype=safe|color|marker, add=#RRGGBB,
+        /// del=#RRGGBB; comma-separated
+        #[arg(long, value_name = "KEY=VALUE,...")]
+        style: Option<String>,
     },
     /// Where what a label labels (or what a source line made) is: its
     /// page and box in points from the page's top left, nothing drawn
@@ -694,6 +728,43 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                 Verb::Png {
                     label,
                     at,
+                    compare: Some(rev),
+                    change,
+                    dpi,
+                    out: to,
+                    context,
+                    diff: _,
+                    timeout: _,
+                } => {
+                    let root = PathBuf::from(s["root"].as_str().unwrap_or("."));
+                    let (f, what) = compare_part(
+                        &mut c,
+                        &root,
+                        rev,
+                        label.as_deref(),
+                        at.as_deref(),
+                        *change,
+                        context.as_deref(),
+                    )?;
+                    let v = draw(&f, &what, *dpi, to.as_deref(), false)?;
+                    if as_json {
+                        out(&v);
+                    } else {
+                        println!("{}", where_line(&f, &what));
+                        println!(
+                            "{} ({}x{} px, {dpi} dpi)",
+                            v["png"].as_str().unwrap_or(""),
+                            v["width"],
+                            v["height"]
+                        );
+                    }
+                    Ok(0)
+                }
+                Verb::Png {
+                    label,
+                    at,
+                    compare: None,
+                    change: _,
                     dpi,
                     out: to,
                     context,
@@ -732,6 +803,26 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         }
                     }
                     Ok(0)
+                }
+                Verb::Compare { rev, stop, style } => {
+                    let v = compare_call(&mut c, rev.as_deref(), *stop, style.as_deref(), None)?;
+                    if as_json {
+                        out(&v);
+                    } else if *stop {
+                        println!(
+                            "{}",
+                            if v["stopped"] == true {
+                                "the agent's diff ended"
+                            } else {
+                                "no agent's diff was running"
+                            }
+                        );
+                    } else {
+                        print_compare(&v, st);
+                    }
+                    Ok(i32::from(
+                        v["errors"].as_array().is_some_and(|e| !e.is_empty()),
+                    ))
                 }
                 Verb::Where {
                     label,
@@ -882,6 +973,243 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
             }
         }
     }
+}
+
+/// `session compare`'s request: the diff against `rev` (none: the last
+/// one), in the look `style` (`KEY=VALUE,...`), `at` (a file from the
+/// project's folder and a line) placed on its pages too.
+fn compare_call(
+    c: &mut Conn,
+    rev: Option<&str>,
+    stop: bool,
+    style: Option<&str>,
+    at: Option<(&str, usize)>,
+) -> Result<Value, Failed> {
+    let mut p = json!({"rev": rev, "stop": stop});
+    for kv in style.into_iter().flat_map(|s| s.split(',')) {
+        let kv = kv.trim();
+        if kv.is_empty() {
+            continue;
+        }
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| Failed(EXIT_REFUSED, format!("--style {kv}: KEY=VALUE")))?;
+        let key = match k.trim() {
+            "markup" | "type" => "markup",
+            "subtype" | "mode" => "subtype",
+            "add" | "add_color" | "added" => "add",
+            "del" | "del_color" | "deleted" => "del",
+            other => {
+                return Err(Failed(
+                    EXIT_REFUSED,
+                    format!("--style: no key {other} (markup, subtype, add, del)"),
+                ));
+            }
+        };
+        let v = v.trim();
+        let ok = match key {
+            "markup" => phitex_diff::Markup::parse(v).is_some(),
+            "subtype" => phitex_diff::Subtype::parse(v).is_some(),
+            _ => phitex_diff::Color::parse(v).is_ok(),
+        };
+        if !ok {
+            return Err(Failed(
+                EXIT_REFUSED,
+                format!("--style: {key}={v} is not one"),
+            ));
+        }
+        p[key] = json!(v);
+    }
+    if let Some((f, l)) = at {
+        p["at"] = json!([f, l]);
+    }
+    c.call(
+        "phitex/session/compare",
+        &p,
+        Some(Duration::from_secs(3600)),
+    )
+}
+
+/// `session compare`'s answer, a line each: the PDF, the changes.
+fn print_compare(v: &Value, st: Style) {
+    let changes = v["changes"].as_array().cloned().unwrap_or_default();
+    println!(
+        "{} ({} page{}): {} change{} against {}",
+        v["pdf"].as_str().unwrap_or("(no PDF)"),
+        v["pages"],
+        if v["pages"] == 1 { "" } else { "s" },
+        changes.len(),
+        if changes.len() == 1 { "" } else { "s" },
+        v["rev"].as_str().unwrap_or("")
+    );
+    for c in &changes {
+        let place = match (c["page"].as_u64(), c["bbox"].as_array()) {
+            (Some(p), Some(b)) => format!(
+                "page {p}, {}",
+                b.iter()
+                    .map(|x| format!("{:.2}", x.as_f64().unwrap_or(0.0)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            _ => "not shown".to_owned(),
+        };
+        let text = |k: &str| one_line(c[k].as_str().unwrap_or(""), 40);
+        let what = match c["kind"].as_str().unwrap_or("") {
+            "add" => format!("added \"{}\"", text("new_text")),
+            "del" => format!("deleted \"{}\"", text("old_text")),
+            _ => format!("\"{}\" -> \"{}\"", text("old_text"), text("new_text")),
+        };
+        println!(
+            "{:>3}  {}:{}  {place}  {what}",
+            c["n"],
+            c["file"].as_str().unwrap_or(""),
+            c["line"]
+        );
+    }
+    for e in v["errors"].as_array().into_iter().flatten().take(3) {
+        println!("{}", st.red(e.as_str().unwrap_or("")));
+    }
+}
+
+/// `png --compare`'s part of the diff's pages: change `change`'s box, or
+/// where the label's line (its `\label`'s line in the project's files) or
+/// line `at` is shown.
+fn compare_part(
+    c: &mut Conn,
+    root: &Path,
+    rev: &str,
+    label: Option<&str>,
+    at: Option<&str>,
+    change: Option<usize>,
+    context: Option<&str>,
+) -> Result<(Found, What), Failed> {
+    let pad = match context {
+        Some(p) => p
+            .trim()
+            .trim_end_matches("pt")
+            .parse::<f64>()
+            .map_err(|_| Failed(EXIT_REFUSED, format!("--context {p}: points")))?,
+        None => 3.0,
+    };
+    let (what, line) = match (change, label, at) {
+        (Some(n), _, _) => (What::Change(n), None),
+        (None, Some(l), _) => {
+            // (the label's line, in the project's .tex files)
+            let mut found = None;
+            for e in walk_tex(root) {
+                let Ok(t) = std::fs::read(&e) else { continue };
+                if let Some((a, _)) = crate::shot::label_place(&t, l) {
+                    let n = t[..a].iter().filter(|&&b| b == b'\n').count() + 1;
+                    let rel = e.strip_prefix(root).unwrap_or(&e).display().to_string();
+                    found = Some((rel, n));
+                    break;
+                }
+            }
+            let (f, n) = found.ok_or_else(|| {
+                Failed(
+                    EXIT_REFUSED,
+                    format!("no \\label{{{l}}} in the project's files"),
+                )
+            })?;
+            (What::Label(l.to_owned()), Some((f, n)))
+        }
+        (None, None, at) => match What::of(None, at)? {
+            What::Line(f, n) => {
+                // (from here, as the project's folder names it)
+                let here = std::env::current_dir().unwrap_or_default();
+                let abs = here.join(&f);
+                let rel = abs
+                    .canonicalize()
+                    .ok()
+                    .and_then(|a| {
+                        let r = root.canonicalize().ok()?;
+                        a.strip_prefix(r).ok().map(|p| p.display().to_string())
+                    })
+                    .unwrap_or(f.clone());
+                (What::Line(f, n), Some((rel, n)))
+            }
+            w => (w, None),
+        },
+    };
+    let v = compare_call(
+        c,
+        Some(rev),
+        false,
+        None,
+        line.as_ref().map(|(f, n)| (f.as_str(), *n)),
+    )?;
+    let pdf = PathBuf::from(
+        v["pdf"]
+            .as_str()
+            .ok_or_else(|| Failed(EXIT_REFUSED, "the diff made no PDF".to_owned()))?,
+    );
+    let place = match &what {
+        What::Change(n) => v["changes"]
+            .as_array()
+            .and_then(|cs| cs.get(n.checked_sub(1)?))
+            .ok_or_else(|| {
+                Failed(
+                    EXIT_REFUSED,
+                    format!(
+                        "no change {n}: the diff has {}",
+                        v["changes"].as_array().map_or(0, Vec::len)
+                    ),
+                )
+            })?
+            .clone(),
+        _ => v["at"].clone(),
+    };
+    let (Some(page), Some(b)) = (place["page"].as_u64(), place["bbox"].as_array()) else {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!("{}: not shown on the diff's pages", what.said()),
+        ));
+    };
+    let b: Vec<f64> = b.iter().filter_map(Value::as_f64).collect();
+    let rect = [b[0], b[1], b[2], b[3]];
+    let k = usize::try_from(page).unwrap_or(1).saturating_sub(1);
+    // (padded on every side: the page's edge is not needed)
+    let size = (rect[2] + pad, rect[3] + pad);
+    Ok((
+        Found {
+            build: 0,
+            page: k,
+            rect: crate::shot::padded(rect, pad, size),
+            pdf,
+            before: None,
+            number: None,
+            printed: None,
+            approximate: false,
+        },
+        what,
+    ))
+}
+
+/// The `.tex` files under `root` (not in hidden folders), for a label.
+fn walk_tex(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let hidden = p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'));
+            if hidden {
+                continue;
+            }
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "tex") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The project's folder for `here`: the nearest above it with `.phitex/`
@@ -1545,6 +1873,8 @@ enum What {
     Label(String),
     /// A file (as given, from here) and its line, from 1.
     Line(String, usize),
+    /// A change of a diff, from 1 (`png --compare --change`).
+    Change(usize),
 }
 
 impl What {
@@ -1572,6 +1902,7 @@ impl What {
         let s = match self {
             What::Label(l) => l.clone(),
             What::Line(f, l) => format!("{f}-{l}"),
+            What::Change(n) => format!("change-{n}"),
         };
         s.chars()
             .map(|c| {
@@ -1588,6 +1919,7 @@ impl What {
         match self {
             What::Label(l) => l.clone(),
             What::Line(f, l) => format!("{f}:{l}"),
+            What::Change(n) => format!("change {n}"),
         }
     }
 }
@@ -1747,6 +2079,12 @@ fn ranges_of(
 ) -> Result<Vec<(String, usize, usize)>, Failed> {
     let mut ranges = Vec::new();
     match what {
+        What::Change(_) => {
+            return Err(Failed(
+                EXIT_REFUSED,
+                "a change is a diff's: --compare".into(),
+            ));
+        }
         What::Line(f, l) => {
             let here = std::env::current_dir().unwrap_or_default();
             let p = here.join(f);
@@ -1882,7 +2220,7 @@ fn locate(
     }
     let label = match what {
         What::Label(l) => Some(l.clone()),
-        What::Line(..) => None,
+        What::Line(..) | What::Change(_) => None,
     };
     let shot = |c: &mut Conn, at: &[(String, usize, usize)], pages: &[usize]| {
         c.call(
@@ -2138,7 +2476,7 @@ fn locate(
     };
     let extend: Option<&dyn crate::shot::Claims> = match what {
         What::Label(_) => Some(&src),
-        What::Line(..) => None,
+        What::Line(..) | What::Change(_) => None,
     };
     let rect = crate::shot::region(&shown.marks, &class, shown.size, extend).ok_or_else(|| {
         Failed(

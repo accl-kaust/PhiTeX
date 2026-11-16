@@ -13,7 +13,7 @@ use std::sync::Arc;
 use phitex_diff::{Baseline, Color, Dir, Files, Flat, Live, Markup, Subtype};
 use serde_json::{Value, json};
 
-use crate::session::{self, Job, Report, Session, Status};
+use crate::session::{self, Report, Session, Status};
 
 /// Where past versions come from.
 pub trait Versions {
@@ -22,7 +22,7 @@ pub trait Versions {
     /// # Errors
     ///
     /// If there is no such version.
-    fn files(&self, rev: &str) -> Result<Box<dyn Files>, String>;
+    fn files(&self, rev: &str) -> Result<Box<dyn Files + '_>, String>;
     /// The versions, newest first, `skip` then at most `limit`, as the
     /// viewer's commit graph takes them (`commits.ts`'s `Commit`).
     ///
@@ -49,7 +49,7 @@ impl Git {
 }
 
 impl Versions for Git {
-    fn files(&self, rev: &str) -> Result<Box<dyn Files>, String> {
+    fn files(&self, rev: &str) -> Result<Box<dyn Files + '_>, String> {
         let s = self.0.snapshot(rev).map_err(|e| format!("{rev}: {e}"))?;
         Ok(Box::new(s))
     }
@@ -135,13 +135,17 @@ impl Look {
 /// A diff under way: against which version, how it looks, the live diff,
 /// and the marked-up document's own session.
 ///
-/// The session is the watch's for its life once made: a later Compare
-/// (another pair of versions, the same after a stop) is an edit of the
-/// marked-up text it last built, not a clean build. The first is a clean
-/// build: the engine starts no session from another's state (its build is
-/// one graph of values that cannot be copied, and the diff's job is named
-/// otherwise, `JOB-diff`, a value of the job's start that the document's
-/// whole build read).
+/// The session starts where the document's stands: a copy of the
+/// document's build ([`session::Session::beside`]), the same job (its
+/// outputs written as `JOB-diff`), so that its first build is an edit of
+/// the document: the marked-up text of each file the diff changed
+/// ([`phitex_diff::Split`]: the main file's as its text, the others' as
+/// buffers), the markup's definitions, which change nothing an unchanged
+/// paragraph reads. It runs again only what the markup touched (the
+/// changed paragraphs, the pages from the first one changed until the
+/// page breaks are the document's again, what reads them). The session is
+/// the watch's for its life once made: a later Compare is an edit of the
+/// marked-up text it last built.
 pub struct Compare {
     pub rev: String,
     /// The other side (none: the files as they are, diffed at each edit).
@@ -167,12 +171,23 @@ pub struct Compare {
     /// Where each change is on the diff's pages (its first glyph's page
     /// and height): the viewer's next and previous go there.
     places: Vec<Option<phitex_diff::Place>>,
+    /// Each change's box on the page it is first shown on (points from
+    /// the page's top left: x0, y0, x1, y1) and that page (from 0).
+    boxes: Vec<Option<(usize, [f32; 4])>>,
     /// The diff's own outputs written (`JOB-diff.*`), for the watcher.
     pub wrote: Vec<(PathBuf, u64)>,
     /// Whether its outputs are written into the folder (the watch's
     /// `--write`): else none (`JOB-diff.pdf`, `.cb`, `.cb2`), its PDF
     /// served from memory.
     write: bool,
+    /// The marked-up texts given to its session as the files other than
+    /// the main one ([`phitex_diff::Split`]), by name: the next build
+    /// gives those that changed.
+    bufs: HashMap<String, String>,
+    /// Whether the text last given was split into the files ([`Compare::give`]).
+    split: bool,
+    /// How its session began (a copy of the document's build, or why not).
+    pub began: String,
 }
 
 /// The main file's flattened text in `files`.
@@ -247,16 +262,14 @@ impl Compare {
         to: Option<&str>,
         now: &dyn Files,
         main: &str,
-        job: &Job,
-        files: crate::tex::Files,
+        doc: &Session,
         status: Arc<Status>,
         write: bool,
     ) -> Result<Compare, String> {
         let pair = Pair::of(src, rev, to, now, main)?;
-        let mut j = job.clone();
-        j.jobname = format!("{}-diff", job.jobname);
-        // (the diff's .aux and .toc its own; the PDF as the document's)
-        let session = Session::new(j, files, status, &mut |_| {})?;
+        // (the diff's outputs as `JOB-diff`, its .aux and .toc its own;
+        // its job the document's, so that it starts from its build)
+        let (session, began) = doc.beside(&format!("{}-diff", doc.job.jobname), status);
         let mut c = Compare {
             rev: String::new(),
             to: None,
@@ -276,8 +289,12 @@ impl Compare {
             report: None,
             origins: None,
             places: Vec::new(),
+            boxes: Vec::new(),
             wrote: Vec::new(),
             write,
+            bufs: HashMap::new(),
+            split: false,
+            began,
         };
         c.take(pair);
         Ok(c)
@@ -314,7 +331,7 @@ impl Compare {
         );
         self.rev = p.rev;
         self.to = p.to;
-        self.live = Live::new(Baseline::from_flat(p.old.clone(), &self.look.options()));
+        self.live = Live::new(Baseline::from_flat(p.old.clone(), &self.options()));
         self.old = p.old;
         self.diff(&p.new);
         // (the last build's PDF, pages and places are of another text: none
@@ -325,6 +342,16 @@ impl Compare {
             self.places.clear();
             self.origins = None;
         }
+    }
+
+    /// The diff's options: the look's, changebar's driver the engine's
+    /// (XeTeX's for xelatex: pdfTeX's refuses it).
+    fn options(&self) -> phitex_diff::Options {
+        let mut o = self.look.options();
+        if self.session.job.engine.xetex() {
+            o.driver = phitex_diff::Driver::Xetex;
+        }
+        o
     }
 
     /// The session's status: its phases, its progress and pages.
@@ -358,6 +385,11 @@ impl Compare {
     /// read again by the next build, as the document's session is told.
     pub fn files_changed(&mut self, buffers: &HashMap<String, String>, names: &[String]) {
         for n in names {
+            // (a file the diff marked up: its marked-up text is the
+            // session's, made again from the change by the live diff)
+            if self.bufs.contains_key(n) {
+                continue;
+            }
             let text = buffers.get(n).map(|b| crate::tex::chars(b.as_bytes()));
             self.session.set_buffer(n, text.as_deref());
         }
@@ -371,7 +403,7 @@ impl Compare {
     /// A new look: the baseline read again with it, the whole diffed.
     pub fn restyle(&mut self, look: Look, now: &dyn Files, src: &dyn Versions, main: &str) {
         self.look = look;
-        self.live = Live::new(Baseline::from_flat(self.old.clone(), &self.look.options()));
+        self.live = Live::new(Baseline::from_flat(self.old.clone(), &self.options()));
         let new = match &self.to {
             Some(t) => src.files(t).and_then(|f| flat(f.as_ref(), main, "new")),
             None => flat(now, main, "new"),
@@ -395,7 +427,7 @@ impl Compare {
         if let Some(tex) = self.next.take()
             && (tex != self.tex || self.report.is_none())
         {
-            self.session.set_text(crate::tex::chars(tex.as_bytes()));
+            self.give(&tex);
             self.tex = tex;
         }
         if self.report.is_some() && self.session.up_to_date() {
@@ -416,29 +448,215 @@ impl Compare {
         self.report = Some(r);
         let raw = self.session.origins();
         self.places = raw.as_ref().map_or_else(Vec::new, |o| self.places_of(o));
+        self.boxes = raw.as_ref().map_or_else(Vec::new, |o| self.boxes_of(o));
         self.origins = raw.map(|o| self.mapped(&o));
         self.report.as_ref()
     }
 
-    /// Where each change is shown on the diff's pages: the glyphs of the
-    /// marked-up text (the main file's), by page, each at its bytes there.
-    fn places_of(&self, o: &phitex_live::view::Origins) -> Vec<Option<phitex_diff::Place>> {
+    /// The marked-up text `tex` given to the session: split into the new
+    /// version's files where it can be (the main file's as its text, each
+    /// other file's that changed since given as its buffer, one given
+    /// before and not marked up now as on disk again); else whole, as the
+    /// main file's text.
+    fn give(&mut self, tex: &str) {
+        let out = self.live.out();
+        let split = out
+            .split
+            .as_ref()
+            .filter(|s| !s.texts.is_empty() && out.tex == tex);
+        self.split = split.is_some();
+        let (main, files): (String, HashMap<String, String>) = match split {
+            Some(s) => (
+                s.texts[0].clone(),
+                out.files
+                    .iter()
+                    .zip(&s.texts)
+                    .skip(1)
+                    .map(|(n, t)| (n.clone(), t.clone()))
+                    .collect(),
+            ),
+            _ => (tex.to_owned(), HashMap::new()),
+        };
+        self.session.set_text(crate::tex::chars(main.as_bytes()));
+        for (n, t) in &files {
+            if self.bufs.get(n) != Some(t) {
+                let t = crate::tex::chars(t.as_bytes());
+                self.session.set_buffer(n, Some(&t));
+            }
+        }
+        for n in self.bufs.keys() {
+            if !files.contains_key(n) {
+                self.session.set_buffer(n, None);
+            }
+        }
+        self.bufs = files;
+    }
+
+    /// Which of the diff's files ([`phitex_diff::DiffOut::files`]) file
+    /// `f` of the build is: the main file by its name, the others by
+    /// their paths from the project's folder.
+    fn file_of(&self, f: &str) -> Option<usize> {
+        let d = self.live.out();
         let main = self.session.job.path.file_name();
-        let mains: Vec<bool> = o
-            .files
+        if Path::new(f).file_name() == main {
+            return Some(0);
+        }
+        d.split.as_ref()?;
+        let plain = f.strip_prefix("./").unwrap_or(f);
+        d.files
             .iter()
-            .map(|f| Path::new(f).file_name() == main)
-            .collect();
+            .skip(1)
+            .position(|x| plain == x || Path::new(plain).ends_with(x))
+            .map(|k| k + 1)
+    }
+
+    /// Byte `at` of the build's file `k` of the diff's files, in the
+    /// flat marked-up text ([`phitex_diff::DiffOut::tex`]).
+    fn flat_at(&self, k: usize, at: usize) -> Option<usize> {
+        match &self.live.out().split {
+            Some(s) if self.split => s.flat_of(k, at),
+            _ => (k == 0).then_some(at),
+        }
+    }
+
+    /// Where each change is shown on the diff's pages: the glyphs of the
+    /// marked-up text (its files'), by page, each at its bytes there.
+    fn places_of(&self, o: &phitex_live::view::Origins) -> Vec<Option<phitex_diff::Place>> {
+        let ours: Vec<Option<usize>> = o.files.iter().map(|f| self.file_of(f)).collect();
         let glyphs = o.pages.iter().enumerate().flat_map(|(k, p)| {
             let p = p.clone();
-            let mains = &mains;
+            let ours = &ours;
             (0..p.as_ref().map_or(0, |p| p.len())).filter_map(move |i| {
                 let p = p.as_ref()?;
-                mains.get(p.file[i] as usize).copied().filter(|&m| m)?;
-                Some((k, p.y[i], p.start[i] as usize, p.end[i] as usize))
+                let f = (*ours.get(p.file[i] as usize)?)?;
+                let a = self.flat_at(f, p.start[i] as usize)?;
+                let b = self
+                    .flat_at(f, (p.end[i] as usize).saturating_sub(1))
+                    .map_or(a + 1, |b| b + 1);
+                Some((k, p.y[i], a, b.max(a + 1)))
             })
         });
         phitex_diff::places(&self.live.out().changes, glyphs)
+    }
+
+    /// Each change's box on the page its first glyph is on: the glyphs of
+    /// its markup there.
+    fn boxes_of(&self, o: &phitex_live::view::Origins) -> Vec<Option<(usize, [f32; 4])>> {
+        let changes = &self.live.out().changes;
+        let mut out: Vec<Option<(usize, [f32; 4])>> = vec![None; changes.len()];
+        let ours: Vec<Option<usize>> = o.files.iter().map(|f| self.file_of(f)).collect();
+        for (k, p) in o.pages.iter().enumerate() {
+            let Some(p) = p else { continue };
+            for i in 0..p.len() {
+                let Some(f) = ours.get(p.file[i] as usize).copied().flatten() else {
+                    continue;
+                };
+                let Some(a) = self.flat_at(f, p.start[i] as usize) else {
+                    continue;
+                };
+                let mut c = changes.partition_point(|c| c.out.end <= a);
+                while c < changes.len() && changes[c].out.start <= a {
+                    let g = glyph_box(p, i);
+                    match &mut out[c] {
+                        None => out[c] = Some((k, g)),
+                        Some((page, b)) if *page == k => *b = union(*b, g),
+                        Some(_) => {}
+                    }
+                    c += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Where what line `line` (from 1) of the user's file `file` made is on
+    /// the diff's pages: the page it is first on, and its glyphs' box
+    /// there.
+    pub fn line_box(&self, file: &str, text: &str, line: usize) -> Option<(usize, [f32; 4])> {
+        let o = self.origins.as_ref()?;
+        let a = text
+            .split_inclusive('\n')
+            .take(line - 1)
+            .map(str::len)
+            .sum::<usize>();
+        let b = a + text[a..].find('\n').map_or(text.len() - a, |n| n + 1);
+        let plain = file.strip_prefix("./").unwrap_or(file);
+        let fs: Vec<bool> = o
+            .files
+            .iter()
+            .map(|f| {
+                let f = f.strip_prefix("./").unwrap_or(f);
+                f == plain || Path::new(f).ends_with(plain)
+            })
+            .collect();
+        let mut found: Option<(usize, [f32; 4])> = None;
+        for (k, p) in o.pages.iter().enumerate() {
+            let Some(p) = p else { continue };
+            for i in 0..p.len() {
+                let at = p.start[i] as usize;
+                if fs.get(p.file[i] as usize) == Some(&true) && (a..b).contains(&at) {
+                    match &mut found {
+                        None => found = Some((k, glyph_box(p, i))),
+                        Some((page, bx)) if *page == k => *bx = union(*bx, glyph_box(p, i)),
+                        Some(_) => {}
+                    }
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        found
+    }
+
+    /// The diff's PDF as last built.
+    pub fn pdf(&self) -> Option<&Arc<[u8]>> {
+        self.pdf.as_ref()
+    }
+
+    /// The changes as `session compare` gives them: each its kind, its
+    /// page (from 1) and box (points from the page's top left), its place
+    /// in the user's files (a file and a line, from 1), and its texts.
+    pub fn changes_for(&self, now: &dyn Files) -> Vec<Value> {
+        let d = self.live.out();
+        let mut texts: HashMap<String, Option<String>> = HashMap::new();
+        d.changes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let t = texts
+                    .entry(c.new.file.clone())
+                    .or_insert_with(|| now.read(&c.new.file));
+                let line = t.as_ref().map(|t| {
+                    t.as_bytes()[..c.new.start.min(t.len())]
+                        .iter()
+                        .filter(|&&b| b == b'\n')
+                        .count()
+                        + 1
+                });
+                let kind = match c.kind {
+                    phitex_diff::ChangeKind::Add => "add",
+                    phitex_diff::ChangeKind::Del => "del",
+                    phitex_diff::ChangeKind::Change => "change",
+                };
+                let r = |x: f32| (f64::from(x) * 100.0).round() / 100.0;
+                let (page, bbox) = match self.boxes.get(i).copied().flatten() {
+                    Some((k, b)) => (json!(k + 1), json!(b.map(r))),
+                    None => (Value::Null, Value::Null),
+                };
+                json!({
+                    "n": i + 1,
+                    "kind": kind,
+                    "page": page,
+                    "bbox": bbox,
+                    "file": c.new.file,
+                    "line": line,
+                    "old_text": c.old_text,
+                    "new_text": c.new_text,
+                    "section": c.section,
+                })
+            })
+            .collect()
     }
 
     /// The diff build's origins `o` with each glyph of the marked-up text
@@ -447,20 +665,22 @@ impl Compare {
     /// of other files (a class, a package) kept; the head's, from no file.
     fn mapped(&self, o: &phitex_live::view::Origins) -> phitex_live::view::Origins {
         let d = self.live.out();
-        let main = self.session.job.path.file_name();
-        let is_main = |f: &str| Path::new(f).file_name() == main;
         let mut files: Vec<String> = d.files.clone();
-        let mut index: Vec<u32> = Vec::with_capacity(o.files.len());
+        // (each of the build's files: one of the diff's (its glyphs mapped
+        // through the diff's map), or another kept as it is)
+        let mut index: Vec<Result<usize, u32>> = Vec::with_capacity(o.files.len());
         for f in &o.files {
-            if is_main(f) {
-                index.push(u32::MAX);
-            } else {
-                index.push(u32::try_from(files.len()).unwrap_or(u32::MAX));
-                files.push(f.clone());
+            match self.file_of(f) {
+                Some(k) => index.push(Ok(k)),
+                None => {
+                    index.push(Err(u32::try_from(files.len()).unwrap_or(u32::MAX)));
+                    files.push(f.clone());
+                }
             }
         }
-        let place = |out: u32| -> Option<(u32, u32)> {
-            let (f, at) = d.source(out as usize)?;
+        let place = |k: usize, at: u32| -> Option<(u32, u32)> {
+            let out = self.flat_at(k, at as usize)?;
+            let (f, at) = d.source(out)?;
             let k = d.files.iter().position(|x| x == f)?;
             Some((u32::try_from(k).ok()?, u32::try_from(at).ok()?))
         };
@@ -472,16 +692,16 @@ impl Compare {
                     let mut q = (**p).clone();
                     for i in 0..q.file.len() {
                         match index.get(q.file[i] as usize) {
-                            Some(&u32::MAX) => match place(q.start[i]) {
+                            Some(&Ok(f)) => match place(f, q.start[i]) {
                                 Some((k, a)) => {
-                                    let b = place(q.end[i].saturating_sub(1))
+                                    let b = place(f, q.end[i].saturating_sub(1))
                                         .filter(|&(k2, b)| k2 == k && b >= a)
                                         .map_or(a + 1, |(_, b)| b + 1);
                                     (q.file[i], q.start[i], q.end[i]) = (k, a, b);
                                 }
                                 None => q.file[i] = u32::MAX,
                             },
-                            Some(&k) => q.file[i] = k,
+                            Some(&Err(k)) => q.file[i] = k,
                             None => {}
                         }
                     }
@@ -546,6 +766,204 @@ impl Compare {
             del_color: del.unwrap_or(&l.del_color).to_owned(),
         }
     }
+}
+
+/// Glyph `i`'s box on its page: its advance, from its size's ascent
+/// above the baseline to its descent below.
+fn glyph_box(p: &phitex_tex::PageOrigins, i: usize) -> [f32; 4] {
+    let (x, y, w, s) = (p.x[i], p.y[i], p.w[i], p.size[i]);
+    [x, y - 0.75 * s, x + w, y + 0.25 * s]
+}
+
+fn union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
+}
+
+/// An older copy of the main file as a version: the files as they are,
+/// the main one's text the copy's (`session compare PATH`).
+struct OldCopy<'a> {
+    main: String,
+    text: String,
+    now: &'a dyn Files,
+}
+
+impl Files for OldCopy<'_> {
+    fn read(&self, path: &str) -> Option<String> {
+        if path == self.main {
+            Some(self.text.clone())
+        } else {
+            self.now.read(path)
+        }
+    }
+}
+
+/// [`OldCopy`] as the source of the one version, whatever it is named.
+struct CopySource<'a> {
+    main: String,
+    text: String,
+    now: &'a dyn Files,
+}
+
+impl Versions for CopySource<'_> {
+    fn files(&self, _rev: &str) -> Result<Box<dyn Files + '_>, String> {
+        Ok(Box::new(OldCopy {
+            main: self.main.clone(),
+            text: self.text.clone(),
+            now: self.now,
+        }))
+    }
+
+    fn log(&self, _skip: usize, _limit: usize) -> Result<Vec<Value>, String> {
+        Ok(Vec::new())
+    }
+}
+
+/// `phitex session compare` in the watch (and `png --compare`): the agent's
+/// own diff (`slot`, beside the viewer's, which it leaves as it is) of the
+/// files as they are (`root`, `buffers`) against `rev` (a git revision, or
+/// the path of an older copy of the main file `main`; none: the last one),
+/// started from the document's session `doc`, in look `look`, built; its
+/// PDF written to `.phitex/compare/JOB-diff.pdf`; `at`'s place on its
+/// pages. `stop`: the agent's diff ended.
+///
+/// # Errors
+///
+/// No version to compare with, a version not there, not a LaTeX document.
+#[allow(clippy::too_many_arguments, reason = "the watch's parts, each its own")]
+pub fn agent(
+    slot: &mut Option<Compare>,
+    doc: &Session,
+    root: &Path,
+    main: &str,
+    buffers: &HashMap<String, String>,
+    rev: Option<&str>,
+    stop: bool,
+    look: &[Option<String>; 4],
+    at: Option<&(String, usize)>,
+) -> Result<Value, String> {
+    if stop {
+        let was = slot.take().is_some();
+        return Ok(json!({"stopped": was}));
+    }
+    let t0 = std::time::Instant::now();
+    let now = Now { root, buffers };
+    let rev = match (rev, slot.as_ref()) {
+        (Some(r), _) => r.to_owned(),
+        (None, Some(c)) => c.rev.clone(),
+        (None, None) => return Err("no version to compare with: give a revision".into()),
+    };
+    // (a file here: an older copy of the main file; else a git revision)
+    let copy = [root.join(&rev), PathBuf::from(&rev)]
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| {
+            std::fs::read(&p)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .map_err(|e| format!("{}: {e}", p.display()))
+        })
+        .transpose()?;
+    let src: Box<dyn Versions + '_> = match copy {
+        Some(text) => Box::new(CopySource {
+            main: main.to_owned(),
+            text,
+            now: &now,
+        }),
+        None => Box::new(Git::open(root)?),
+    };
+    match slot.as_mut() {
+        Some(c) => c.against(src.as_ref(), &rev, None, &now, main)?,
+        None => {
+            *slot = Some(Compare::start(
+                src.as_ref(),
+                &rev,
+                None,
+                &now,
+                main,
+                doc,
+                Arc::new(Status::default()),
+                false,
+            )?);
+        }
+    }
+    let c = slot.as_mut().ok_or("no diff")?;
+    if look.iter().any(Option::is_some) {
+        let l = c.look_from(
+            look[0].as_deref(),
+            look[1].as_deref(),
+            look[2].as_deref(),
+            look[3].as_deref(),
+        );
+        c.restyle(l, &now, src.as_ref(), main);
+    }
+    c.build();
+    let pdf = match c.pdf() {
+        Some(b) => {
+            let dir = root.join(".phitex/compare");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            let p = dir.join(format!("{}-diff.pdf", doc.job.jobname));
+            std::fs::write(&p, &b[..]).map_err(|e| format!("{}: {e}", p.display()))?;
+            Some(p.display().to_string())
+        }
+        None => None,
+    };
+    // (the marked-up files as the build was given them, beside it: what
+    // the diff's pages are made of)
+    let tex_dir = root.join(".phitex/compare/tex");
+    let _ = std::fs::remove_dir_all(&tex_dir);
+    {
+        let d = c.live.out();
+        let files: Vec<(&str, &str)> = match (&d.split, c.split) {
+            (Some(sp), true) => d
+                .files
+                .iter()
+                .map(String::as_str)
+                .zip(sp.texts.iter().map(String::as_str))
+                .collect(),
+            _ => vec![(main, c.tex.as_str())],
+        };
+        for (n, t) in files {
+            let p = tex_dir.join(n);
+            if let Some(dir) = p.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            std::fs::write(&p, t).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+    }
+    let changes = c.changes_for(&now);
+    let region = at.and_then(|(f, l)| {
+        let text = now.read(f)?;
+        let (k, b) = c.line_box(f, &text, *l)?;
+        let r = |x: f32| (f64::from(x) * 100.0).round() / 100.0;
+        Some(json!({"page": k + 1, "bbox": b.map(r)}))
+    });
+    let r = c.report.as_ref();
+    Ok(json!({
+        "rev": c.rev,
+        "label": c.label,
+        "pdf": pdf,
+        "tex": tex_dir.display().to_string(),
+        "pages": c.hashes.len(),
+        "changes": changes,
+        "errors": c.errors(false),
+        "look": c.look.json(),
+        "ms": t0.elapsed().as_secs_f64() * 1e3,
+        "build_ms": r.map(|r| r.wall.as_secs_f64() * 1e3),
+        "began": c.began,
+        "at": region,
+        "runs": r.map(|r| r.runs.iter().map(|x| x.commands_run).sum::<u64>()),
+        "ran": std::env::var_os("PHITEX_RUN_LOG").map(|_| {
+            c.session
+                .ran_texts()
+                .into_iter()
+                .map(|(op, t)| json!({"op": op, "text": t}))
+                .collect::<Vec<_>>()
+        }),
+    }))
 }
 
 #[cfg(test)]

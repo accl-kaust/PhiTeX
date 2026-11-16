@@ -649,6 +649,7 @@ fn is_read(a: &Ask) -> bool {
             | Ask::Transcript
             | Ask::WritePdf { .. }
             | Ask::Shot { .. }
+            | Ask::Compare { .. }
     )
 }
 
@@ -2937,6 +2938,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     rebuild(&mut s, "cold", None, &mut cold_meanwhile);
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
+    // (`phitex session compare`'s diff: the agent's own, beside the
+    // viewer's, which it never switches)
+    let mut agent_cmp: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
     // (the diagnostics the last build left for later, made now: given to
     // the viewers and the editor, counted, said as an event)
@@ -3559,6 +3563,33 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 });
                             continue;
                         }
+                        // (`phitex session compare`: the agent's diff, built
+                        // here, on the loop: it starts from the document's
+                        // build)
+                        if let Ask::Compare {
+                            id,
+                            rev,
+                            stop,
+                            look,
+                            at,
+                        } = &a
+                        {
+                            let t = Instant::now();
+                            let r = crate::compare::agent(
+                                &mut agent_cmp,
+                                &s,
+                                &root,
+                                &main_rel,
+                                &edits.buffers,
+                                rev.as_deref(),
+                                *stop,
+                                look,
+                                at.as_ref(),
+                            );
+                            busy.borrow_mut().did("session compare", t);
+                            hub.shot_made(*id, r);
+                            continue;
+                        }
                         if a == Ask::Transcript {
                             hub.transcript(last.borrow().builds, s.transcript());
                         }
@@ -3746,6 +3777,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         {
             held.push_back((Instant::now(), Event::Reads));
         }
+        // (the agent's diff told the files changed, as the document's
+        // session was: its next `session compare` builds them)
+        if let Some(c) = agent_cmp.as_mut() {
+            c.files_changed(&edits.buffers, &diff_files);
+            if diff_reread {
+                c.reread();
+            }
+        }
         // (the diff: asked for, or diffed again after the edit)
         if let Some(v) = &view {
             let now = crate::compare::Now {
@@ -3754,7 +3793,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             };
             // (the files changed told the diff's session as the
             // document's was, whether or not a diff is on: it is kept)
-            if let Some(c) = comparing.as_mut() {
+            for c in comparing.iter_mut() {
                 c.files_changed(&edits.buffers, &diff_files);
                 if diff_reread {
                     c.reread();
@@ -3792,12 +3831,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                     to.as_deref(),
                                     &now,
                                     &main_rel,
-                                    &s.job,
-                                    s.files(),
+                                    &s,
                                     diff_status.clone(),
                                     writing,
                                 )
-                                .map(|c| comparing = Some(c)),
+                                .map(|c| {
+                                    if ui.verbose > 0 {
+                                        ui.line(&st.dim(&format!("diff: {}", c.began)));
+                                    }
+                                    comparing = Some(c);
+                                }),
                             }
                         });
                         match (started, comparing.as_mut()) {

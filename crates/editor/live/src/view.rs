@@ -202,6 +202,21 @@ pub enum Ask {
         pages: Vec<usize>,
         label: Option<String>,
     },
+    /// `phitex session compare` (and `png --compare`): the files as they
+    /// are diffed against version `rev` (a git revision, or the path of an
+    /// older copy of the main file) by a diff session of the agent's own,
+    /// beside the viewer's (none: the last one again; `stop`: ended), in
+    /// the look `look` (markup, subtype, added and deleted colours, each
+    /// none: as it was), its build waited for; `at` (a file and a line
+    /// from 1): where what that line made is on the diff's pages too.
+    /// Done by the session's owner, which says when, by `id`.
+    Compare {
+        id: u64,
+        rev: Option<String>,
+        stop: bool,
+        look: [Option<String>; 4],
+        at: Option<(String, usize)>,
+    },
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.

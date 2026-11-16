@@ -497,7 +497,7 @@ impl phitex_diff::Files for BaselineFiles {
 }
 
 impl crate::compare::Versions for BaselineFiles {
-    fn files(&self, _rev: &str) -> Result<Box<dyn phitex_diff::Files>, String> {
+    fn files(&self, _rev: &str) -> Result<Box<dyn phitex_diff::Files + '_>, String> {
         Ok(Box::new(BaselineFiles(self.0.clone())))
     }
 
@@ -1023,6 +1023,7 @@ impl Hub {
             "phitex/session/log" => self.log(p),
             "phitex/session/pdf" => self.pdf(p),
             "phitex/session/shot" => self.shot(p),
+            "phitex/session/compare" => self.compare(p),
             "phitex/review/mode" | "phitex/review/workspace" | "phitex/propose"
                 if !lock(&self.st).changes =>
             {
@@ -1443,6 +1444,44 @@ impl Hub {
                     v["main"] = json!(main);
                     v
                 });
+            }
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// `session compare` and `png --compare`: the files as they are
+    /// diffed against `rev` by the agent's own diff session (beside the
+    /// viewer's, which it leaves as it is), its build waited for
+    /// ([`Ask::Compare`]); `stop` ends it.
+    fn compare(&self, p: &Value) -> Result<Value, Fail> {
+        let s = |k: &str| p[k].as_str().map(str::to_owned);
+        let at = p["at"].as_array().and_then(|a| {
+            Some((
+                a.first()?.as_str()?.to_owned(),
+                usize::try_from(a.get(1)?.as_u64()?).ok()?,
+            ))
+        });
+        let mut st = lock(&self.st);
+        st.shots.0 += 1;
+        let id = st.shots.0;
+        drop(st);
+        self.ask_watch(Ask::Compare {
+            id,
+            rev: s("rev"),
+            stop: p["stop"] == true,
+            look: [s("markup"), s("subtype"), s("add"), s("del")],
+            at,
+        });
+        let mut st = lock(&self.st);
+        loop {
+            if st.ended {
+                return Err(Fail {
+                    status: EXIT_NO_SESSION,
+                    message: "the watch ended".into(),
+                });
+            }
+            if let Some(r) = st.shots.1.remove(&id) {
+                return r.map_err(refused);
             }
             st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
         }
@@ -3575,7 +3614,7 @@ impl phitex_diff::Files for Over {
 }
 
 impl crate::compare::Versions for ProposalVersions {
-    fn files(&self, rev: &str) -> Result<Box<dyn phitex_diff::Files>, String> {
+    fn files(&self, rev: &str) -> Result<Box<dyn phitex_diff::Files + '_>, String> {
         let over = if rev == "now" {
             HashMap::new()
         } else {

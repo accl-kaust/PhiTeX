@@ -7810,10 +7810,12 @@ fn compare_para(k: usize, first: &str) -> String {
 /// The marked-up document `tex` (latexdiff's, the viewer's `diff.tex`)
 /// built clean as `JOB-diff.tex` by `phitex build`: its PDF.
 fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
+    // (the job the document's: the diff's session is the document's job,
+    // started from its build, its outputs named `JOB-diff`)
     let d = scratch(name);
-    std::fs::write(d.join(format!("{job}-diff.tex")), tex).expect("the marked-up document");
+    std::fs::write(d.join(format!("{job}.tex")), tex).expect("the marked-up document");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &d)
-        .args(["build", "-j", "4", &format!("{job}-diff.tex")])
+        .args(["build", "-j", "4", &format!("{job}.tex")])
         .output()
         .expect("phitex build runs");
     assert!(
@@ -7821,7 +7823,7 @@ fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
         "the clean build of the marked-up document failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read(d.join(format!("{job}-diff.pdf"))).expect("the clean PDF")
+    std::fs::read(d.join(format!("{job}.pdf"))).expect("the clean PDF")
 }
 
 /// Compare (the viewer's diff against a git revision) streams the
@@ -7831,8 +7833,9 @@ fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
 /// diff is shown and drawn from its own file (a word the edit deleted,
 /// on no page of the document's, on it), and the diff's build in after
 /// them; its PDF the one a clean build of the marked-up text writes,
-/// byte for byte. A second Compare (after a stop and an edit) is an edit
-/// of the diff's session, not a clean build, and exact too.
+/// byte for byte, though its build started from the document's (an edit,
+/// not a clean build). A second Compare (after a stop and an edit) is an
+/// edit of the diff's session, and exact too.
 #[test]
 #[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
 fn watch_compare_streams_its_pages() {
@@ -7955,7 +7958,8 @@ fn watch_compare_streams_its_pages() {
     let diff = until(&mut lines, "event", &"diff".into(), &mut seen);
     assert_eq!(diff["changes"], changes, "{diff}");
     assert_eq!(diff["errors"], 0, "{diff}");
-    assert_eq!(diff["cold"], true, "the first Compare: {diff}");
+    // (the first Compare an edit too: started from the document's build)
+    assert_eq!(diff["cold"], false, "the first Compare: {diff}");
     // (its PDF: a clean build's of the marked-up text)
     let tex = http_get(&url, "diff.tex");
     let want = clean_diff_pdf("watch-compare-clean", "paper", &tex);
