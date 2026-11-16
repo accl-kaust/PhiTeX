@@ -427,6 +427,9 @@ impl Compare {
         if let Some(tex) = self.next.take()
             && (tex != self.tex || self.report.is_none())
         {
+            if self.report.is_none() {
+                self.prime();
+            }
             self.give(&tex);
             self.tex = tex;
         }
@@ -451,6 +454,22 @@ impl Compare {
         self.boxes = raw.as_ref().map_or_else(Vec::new, |o| self.boxes_of(o));
         self.origins = raw.map(|o| self.mapped(&o));
         self.report.as_ref()
+    }
+
+    /// A session started from the document's build: given first the
+    /// document with the markup's definitions alone, and built
+    /// ([`phitex_diff::with_definitions`]): its paragraphs read none of
+    /// them, so that build runs the definitions only, and the next, the
+    /// marked-up text, only what the markup changed. (Given at once, the
+    /// two make one edit from the body's start to the last change.)
+    fn prime(&mut self) {
+        let Some(text) = self.session.built_text() else {
+            return;
+        };
+        if let Some(t) = phitex_diff::with_definitions(&text, &self.options()) {
+            self.session.set_text(t);
+            let _ = self.session.build();
+        }
     }
 
     /// The marked-up text `tex` given to the session: split into the new
@@ -956,11 +975,19 @@ pub fn agent(
         "began": c.began,
         "at": region,
         "runs": r.map(|r| r.runs.iter().map(|x| x.commands_run).sum::<u64>()),
-        "ran": std::env::var_os("PHITEX_RUN_LOG").map(|_| {
+        "runs_by_op": c
+            .session
+            .runs_by_op()
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), json!(v)))
+            .collect::<serde_json::Map<String, Value>>(),
+        // (the nodes its build ran again, with their texts: which
+        // paragraphs, `PHITEX_DIFF_RERAN=1`)
+        "reran": std::env::var_os("PHITEX_DIFF_RERAN").map(|_| {
             c.session
-                .ran_texts()
+                .reran_texts()
                 .into_iter()
-                .map(|(op, t)| json!({"op": op, "text": t}))
+                .map(|(op, t, why)| json!({"op": op, "text": t, "why": why}))
                 .collect::<Vec<_>>()
         }),
     }))

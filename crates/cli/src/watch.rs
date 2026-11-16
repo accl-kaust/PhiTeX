@@ -3963,6 +3963,14 @@ fn build_stats(
         "resident_kb": x.map_or(0, |x| x.rss_kb),
         "values_bytes": x.map_or(0, |x| x.values_bytes),
         "ok": r.out.errors.is_empty(),
+        // (the nodes it ran again, with their texts and why,
+        // `PHITEX_DIFF_RERAN=1`: Compare's check of what an edit runs)
+        "reran": std::env::var_os("PHITEX_DIFF_RERAN").map(|_| {
+            s.reran_texts()
+                .into_iter()
+                .map(|(op, t, why)| json!({"op": op, "text": t, "why": why}))
+                .collect::<Vec<_>>()
+        }),
     })
 }
 #[cfg(test)]

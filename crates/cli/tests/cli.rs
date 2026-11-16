@@ -6151,16 +6151,26 @@ fn checker_png(w: u32, h: u32, a: [u8; 3], b: [u8; 3]) -> Vec<u8> {
 struct PngSession {
     dir: PathBuf,
     run: PathBuf,
+    /// Variables the watch and each command are run with.
+    env: Vec<(String, String)>,
 }
 
 impl PngSession {
     fn start(dir: &Path, main: &str, extra: &[&str]) -> PngSession {
+        PngSession::start_with(dir, main, extra, &[])
+    }
+
+    fn start_with(dir: &Path, main: &str, extra: &[&str], env: &[(&str, &str)]) -> PngSession {
         let run = dir.with_extension("run");
         let _ = std::fs::remove_dir_all(&run);
         std::fs::create_dir_all(&run).expect("a runtime folder");
         let s = PngSession {
             dir: dir.to_path_buf(),
             run,
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
         };
         let mut args = vec![
             "session",
@@ -6187,6 +6197,7 @@ impl PngSession {
         command(Path::new(env!("CARGO_BIN_EXE_phitex")), &self.dir)
             .args(args)
             .env("XDG_RUNTIME_DIR", &self.run)
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .output()
             .expect("phitex runs")
     }
@@ -6580,6 +6591,204 @@ fn session_png_at_line() {
     assert_eq!(seen, 2, "{all}");
     assert!(b[3] - b[1] < 40.0, "more than its lines: {b:?}");
     let out = s.phitex(&["session", "png", "--at", "doc.tex:100000"]);
+    assert_eq!(out.status.code(), Some(4));
+}
+
+/// The document `session compare`'s tests diff: 40 paragraphs, each a
+/// line of its own and labelled, half in the main file and half in
+/// `sec.tex` (`\input`), a reference at the end.
+fn cmp_session_doc(dir: &Path) -> (String, String) {
+    let para = |k: usize| {
+        format!(
+            "Paragraph {k} begins here. Sentence one of paragraph {k} says what a sentence says at length. Sentence two of paragraph {k} says more of the same at some length, so that the paragraph runs over several lines.\\label{{p{k}}}\n\n"
+        )
+    };
+    let mut main = String::from("\\documentclass{article}\n\\begin{document}\n\\section{One}\n");
+    for k in 0..20 {
+        main.push_str(&para(k));
+    }
+    main.push_str("\\input{sec}\nSee paragraph \\ref{p30}.\n\n\\end{document}\n");
+    let mut sec = String::from("\\section{Two}\n");
+    for k in 20..40 {
+        sec.push_str(&para(k));
+    }
+    std::fs::write(dir.join("main.tex"), &main).expect("the main file");
+    std::fs::write(dir.join("sec.tex"), &sec).expect("its input");
+    git(dir, &["init", "-q"]);
+    git(dir, &["add", "main.tex", "sec.tex"]);
+    git(dir, &["commit", "-q", "-m", "the first version"]);
+    (main, sec)
+}
+
+/// Line (from 1) of `text` that has `needle`.
+fn line_of(text: &str, needle: &str) -> u64 {
+    let at = text.find(needle).expect("the needle");
+    u64::try_from(text[..at].matches('\n').count() + 1).expect("a line")
+}
+
+/// `phitex session compare REV`: the files as they are diffed against a
+/// git revision by a diff session of the agent's own, started from the
+/// watch's build: its build is an edit of the document's, and runs again
+/// no paragraph the diff left unchanged (only the three changed ones, in
+/// two files: the markup's definitions follow `\begin{document}`, the
+/// markup changes nothing another paragraph reads, and the slices between
+/// two changes keep their nodes); its PDF a clean build's of the
+/// marked-up files, byte for byte; each change placed (page, box) and
+/// named by file and line. Again after an edit: the change added. `--stop`
+/// ends it.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one session, in order")]
+fn session_compare_runs_only_the_changes() {
+    let _one = one();
+    let dir = scratch("session-compare");
+    let (main, sec) = cmp_session_doc(&dir);
+    let main2 = main
+        .replace(
+            "Sentence one of paragraph 5 ",
+            "Sentence ONE of paragraph 5 ",
+        )
+        .replace(
+            "Sentence two of paragraph 12 says more",
+            "Sentence two of paragraph 12 says rather more",
+        );
+    let sec2 = sec.replace(
+        "Sentence one of paragraph 33 says",
+        "Sentence one of paragraph 33 now says",
+    );
+    std::fs::write(dir.join("main.tex"), &main2).expect("the edit");
+    std::fs::write(dir.join("sec.tex"), &sec2).expect("the edit");
+    let s = PngSession::start_with(&dir, "main.tex", &[], &[("PHITEX_DIFF_RERAN", "1")]);
+    let v = s.json(&["compare", "HEAD"]);
+    assert!(
+        v["began"].as_str().is_some_and(|b| b.starts_with("fork:")),
+        "not started from the document's build: {}",
+        v["began"]
+    );
+    let changes = v["changes"].as_array().expect("the changes");
+    assert_eq!(changes.len(), 3, "{v}");
+    let want = [
+        ("main.tex", line_of(&main2, "Sentence ONE of paragraph 5 ")),
+        ("main.tex", line_of(&main2, "says rather more")),
+        ("sec.tex", line_of(&sec2, "33 now says")),
+    ];
+    for (c, (file, line)) in changes.iter().zip(want) {
+        assert_eq!(c["file"], file, "{c}");
+        assert_eq!(c["line"], line, "{c}");
+        assert!(c["page"].as_u64().is_some_and(|p| p >= 1), "{c}");
+        let b = bbox_of(c);
+        assert!(b[0] < b[2] && b[1] < b[3], "{c}");
+    }
+    // (no paragraph the diff left as it was run again, and the paragraph
+    // pieces run only the changed ones and the definitions)
+    let changed = [5, 12, 33];
+    for r in v["reran"].as_array().expect("the nodes run again") {
+        let text = r["text"].as_str().unwrap_or("");
+        for (k, _) in text.match_indices("Paragraph ") {
+            let n: String = text[k + 10..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if let Ok(n) = n.parse::<usize>() {
+                assert!(
+                    changed.contains(&n),
+                    "paragraph {n}, unchanged, ran again ({}): {text:?}",
+                    r["why"]
+                );
+            }
+        }
+    }
+    let exec = v["runs_by_op"]["exec"].as_u64().unwrap_or(0);
+    assert!(
+        exec <= 3 + 2,
+        "{exec} pieces run for 3 changed paragraphs: {}",
+        v["runs_by_op"]
+    );
+    // (its PDF: a clean build's of the marked-up files, the same job)
+    let check = |round: &str| {
+        let r = scratch(&format!("session-compare-clean-{round}"));
+        std::fs::copy(dir.join("main.tex"), r.join("main.tex")).expect("a copy");
+        let tex = dir.join(".phitex/compare/tex");
+        for f in ["main.tex", "sec.tex"] {
+            std::fs::copy(tex.join(f), r.join(f)).expect("the marked-up file");
+        }
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &r)
+            .args(["build", "main.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let want = std::fs::read(r.join("main.pdf")).expect("the clean PDF");
+        let got = std::fs::read(dir.join(".phitex/compare/main-diff.pdf")).expect("the diff's PDF");
+        assert!(
+            got == want,
+            "{round}: the diff's PDF is not a clean build's of its files: {}",
+            first_difference(&got, &want)
+        );
+    };
+    check("first");
+    // (an edit, the diff again: the change added, its build an edit)
+    let sec3 = sec2.replace(
+        "Sentence two of paragraph 35 says",
+        "Sentence two of paragraph 35 also says",
+    );
+    std::fs::write(dir.join("sec.tex"), &sec3).expect("another edit");
+    let w = s.json(&["wait"]);
+    assert_eq!(w["errors"].as_array().map_or(0, Vec::len), 0, "{w}");
+    let again = s.json(&["compare", "HEAD"]);
+    assert_eq!(
+        again["changes"].as_array().map_or(0, Vec::len),
+        4,
+        "{again}"
+    );
+    check("second");
+    // (the text, a line each)
+    let out = s.phitex(&["session", "compare", "HEAD"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("4 changes against HEAD"), "{text}");
+    assert!(text.contains("sec.tex:"), "{text}");
+    let stop = s.json(&["compare", "--stop"]);
+    assert_eq!(stop["stopped"], true, "{stop}");
+}
+
+/// `phitex session png --compare REV`: a part of the diff's pages, drawn
+/// as `png` draws one of the document's: change N's, a source line's, a
+/// label's.
+#[test]
+fn session_png_compare() {
+    let _one = one();
+    let dir = scratch("session-png-compare");
+    let (main, _) = cmp_session_doc(&dir);
+    let main2 = main.replace(
+        "Sentence two of paragraph 12 says more",
+        "Sentence two of paragraph 12 says rather more",
+    );
+    std::fs::write(dir.join("main.tex"), &main2).expect("the edit");
+    let s = PngSession::start(&dir, "main.tex", &[]);
+    let c = s.json(&["png", "--compare", "HEAD", "--change", "1", "--dpi", "100"]);
+    assert_eq!(c["target"], "change 1", "{c}");
+    let (w, h) = png_size(c["png"].as_str().expect("its PNG"));
+    assert!(w > 10 && h > 5, "{w}x{h}");
+    let line = line_of(&main2, "says rather more");
+    let l = s.json(&[
+        "png",
+        "--compare",
+        "HEAD",
+        "--at",
+        &format!("main.tex:{line}"),
+    ]);
+    assert_eq!(l["page"], c["page"], "{l} {c}");
+    let b = bbox_of(&l);
+    let cb = bbox_of(&c);
+    assert!(
+        b[1] <= cb[1] + 0.5 && cb[3] <= b[3] + 0.5,
+        "the line's box holds the change's: {b:?} {cb:?}"
+    );
+    let lab = s.json(&["png", "--compare", "HEAD", "--label", "p12"]);
+    assert_eq!(lab["page"], l["page"], "{lab}");
+    let out = s.phitex(&["session", "png", "--compare", "HEAD", "--change", "9"]);
     assert_eq!(out.status.code(), Some(4));
 }
 

@@ -1946,3 +1946,47 @@ fn a_format_texts_edit_runs_the_runs_that_read_it() {
         "a word's edit in the first part ran {first} nodes (4 when this was written, mc 86655)"
     );
 }
+
+/// An edit in two places far apart (a diff's marked-up text, a search and
+/// replace) runs its two pieces, not every piece between them: the
+/// slices the same on both sides between the two keep their nodes, as
+/// the ends do. The PDF equals a cold build's.
+#[test]
+fn an_edit_in_two_places_runs_two_pieces() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\pdfcompresslevel=0 \\hsize=6in \\vsize=8.5in \\parindent=20pt\n",
+    );
+    for k in 0..200 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, enough to fill a few lines of text set \
+             with plain's macros, so that the paragraph builder has work to do and the \
+             pages fill up one after another.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./two.tex", "two", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src
+        .replacen(
+            "Paragraph 40 has some words",
+            "Paragraph 40 has some wordz",
+            1,
+        )
+        .replacen(
+            "Paragraph 160 has some words",
+            "Paragraph 160 has some wordz",
+            1,
+        );
+    b.edit(&text);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert_eq!(common::runs_of(&b, "exec"), 2, "only the two edited pieces");
+}

@@ -70,7 +70,7 @@ const ULEM: &str = r"\mathchardef\phitexdifbox=31001\relax
 \def\phitexdifreskip{\phitexdifstop\phitexdifleaders\phitexdifstart}
 \protected\def\phitexdifmarkover#1{\leavevmode\setbox\phitexdifmarkbox\hbox{{#1}}\phitexdifpixel.5\wd\phitexdifmarkbox\ifmmode\setbox\phitexdifmarkbox\hbox{\raise1.4ex\box\phitexdifmarkbox}\dp\phitexdifmarkbox-1.4ex\ht\phitexdifmarkbox0pt\relax\def\phitexdifleadtype{\cleaders\copy\phitexdifmarkbox}\else\def\phitexdifleadtype{\leaders\copy\phitexdifmarkbox}\fi}
 \def\phitexdifwaverule{\vrule width4bp height.2pt depth.2pt\relax}
-\def\phitexdifwave{\ifx\XeTeXrevision\phitexdifundefined\ifx\pdfliteral\phitexdifundefined\phitexdifwaverule\else\ifnum\pdfoutput>0 \hbox to4bp{\pdfliteral{q 0.4 w 0 0 m 1.333 2 2.667 -2 4 0 c S Q}\hss}\else\phitexdifwaverule\fi\fi\else\hbox to4bp{\special{pdf:content q 0.4 w 0 0 m 1.333 2 2.667 -2 4 0 c S Q}\hss}\fi}
+\def\phitexdifwave{\ifcsname XeTeXrevision\endcsname\hbox to4bp{\special{pdf:content q 0.4 w 0 0 m 1.333 2 2.667 -2 4 0 c S Q}\hss}\else\ifx\pdfliteral\phitexdifundefined\phitexdifwaverule\else\ifnum\pdfoutput>0 \hbox to4bp{\pdfliteral{q 0.4 w 0 0 m 1.333 2 2.667 -2 4 0 c S Q}\hss}\else\phitexdifwaverule\fi\fi\fi}
 \protected\def\phitexdifuwave{\leavevmode\bgroup\ifdim\phitexdifdepth=\maxdimen\phitexdifdepth3.5pt\relax\else\advance\phitexdifdepth2pt\relax\fi\phitexdifmarkover{\lower\phitexdifdepth\hbox{\phitexdifwave}}\phitexdifon}
 \protected\def\phitexdifsoutt{\leavevmode\bgroup\phitexdifdepth=-.55ex\relax\phitexdifULset}
 \protected\long\def\phitexdifsout#1{\ifmmode\ifx\text\phitexdifundefined\mbox{\phitexdifsoutt{$#1$}}\else\text{\phitexdifsoutt{$#1$}}\fi\else\phitexdifsoutt{#1}\fi}";
@@ -82,7 +82,7 @@ const ULEM: &str = r"\mathchardef\phitexdifbox=31001\relax
 /// the text in the colour, in a group (out of math, a paragraph begun:
 /// no colour whatsit left in the vertical list).
 const COLOR: &str = r"\def\phitexdifstack{\ifcsname @pdfcolorstack\endcsname\csname @pdfcolorstack\endcsname\else0\fi}
-\def\phitexdifpdf{\ifx\XeTeXrevision\phitexdifundefined\ifx\pdfcolorstack\phitexdifundefined\else\ifnum\pdfoutput>0 1\fi\fi\fi}
+\def\phitexdifpdf{\ifcsname XeTeXrevision\endcsname\else\ifx\pdfcolorstack\phitexdifundefined\else\ifnum\pdfoutput>0 1\fi\fi\fi}
 \protected\def\phitexdifpush#1{\ifnum0\phitexdifpdf=1 \pdfcolorstack\phitexdifstack push{#1 rg #1 RG}\else\special{color push rgb #1}\fi}
 \protected\def\phitexdifpop{\ifnum0\phitexdifpdf=1 \pdfcolorstack\phitexdifstack pop\else\special{color pop}\fi}
 \protected\long\def\phitexdifmark#1#2{\ifmmode\else\leavevmode\fi{\phitexdifpush{#1}#2\phitexdifpop}}";
@@ -299,10 +299,13 @@ fn subtype(s: Subtype, a: &str, d: &str, colored: bool) -> Vec<String> {
     }
 }
 
-/// The definitions put at the end of the new preamble (`preamble`), for
-/// `opts`, each line tagged `%DIF PREAMBLE` as latexdiff tags them.
-#[must_use]
-pub fn dif_preamble(opts: &Options, preamble: &str) -> String {
+/// The markup's lines for `opts` and a new preamble `preamble` (as
+/// latexdiff's, each set under its `%DIF … PREAMBLE` line), in two: the
+/// packages to load (at the preamble's end), and the rest, its
+/// definitions (after `\begin{document}`: a preamble changed is a
+/// document whose every paragraph its build runs again, the body's first
+/// lines are not).
+fn parts(opts: &Options, preamble: &str) -> (Vec<String>, Vec<String>) {
     let hyperref = crate::loads(preamble, &["hyperref"]);
     let a = rgb(opts.add_color.as_ref(), BLUE);
     let d = rgb(opts.del_color.as_ref(), RED);
@@ -357,13 +360,56 @@ pub fn dif_preamble(opts: &Options, preamble: &str) -> String {
         lines.push("%DIF HYPERREF PREAMBLE".into());
         lines.extend(HYPERREF.lines().map(str::to_owned));
     }
+    // (the packages; a subtype that redefines LaTeX's own commands as
+    // it loads them, whole)
+    let (mut pre, mut body) = (Vec::new(), Vec::new());
+    let mut whole = false;
+    for l in lines {
+        if l.starts_with("%DIF ") {
+            whole = l == "%DIF ONLYCHANGEDPAGE PREAMBLE";
+            body.push(l);
+        } else if whole || l.starts_with("\\RequirePackage") || l.starts_with("\\usepackage") {
+            pre.push(l);
+        } else {
+            body.push(l);
+        }
+    }
+    (pre, body)
+}
+
+/// `lines` tagged `%DIF PREAMBLE` each, between latexdiff's marks.
+fn block(lines: &[String]) -> String {
     let mut s = String::from("%DIF PREAMBLE EXTENSION ADDED BY LATEXDIFF\n");
     for l in lines {
-        s.push_str(&l);
+        s.push_str(l);
         s.push_str(" %DIF PREAMBLE\n");
     }
     s.push_str("%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF\n");
     s
+}
+
+/// What the markup puts at the end of the new preamble (`preamble`), for
+/// `opts`: the packages its look needs (changebar, footmisc, zref), each
+/// line tagged `%DIF PREAMBLE` as latexdiff tags them; none for the other
+/// looks (the default's among them).
+#[must_use]
+pub fn dif_preamble(opts: &Options, preamble: &str) -> String {
+    let (pre, _) = parts(opts, preamble);
+    if pre.is_empty() {
+        String::new()
+    } else {
+        block(&pre)
+    }
+}
+
+/// What the markup puts right after `\begin{document}`: its definitions
+/// (latexdiff puts them in the preamble; here a document's build started
+/// from its own sees no preamble changed), a comment first, so that the
+/// line `\begin{document}` ends as it did.
+#[must_use]
+pub fn dif_body(opts: &Options, preamble: &str) -> String {
+    let (_, body) = parts(opts, preamble);
+    format!("%\n{}", block(&body))
 }
 
 const LABEL_HEAD: &str = r#"% To show only pages with changes (pdf) (external program pdftk needs to be installed)
@@ -482,7 +528,8 @@ mod tests {
             del_color: Color::parse("#ff0000").ok(),
             ..Options::default()
         };
-        let p = dif_preamble(&o, "\\usepackage{amsmath}\n");
+        assert_eq!(dif_preamble(&o, "\\usepackage{amsmath}\n"), "");
+        let p = dif_body(&o, "\\usepackage{amsmath}\n");
         for bad in [
             "\\RequirePackage",
             "\\usepackage",
@@ -499,6 +546,9 @@ mod tests {
         assert!(p.contains(
             "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0 1}{\\phitexdifuwave{#1}}} %DIF PREAMBLE\n"
         ));
+        // (no XeTeX primitive named: `phitex build` of the marked-up text
+        // would take it for a XeTeX document)
+        assert!(!p.contains("\\XeTeX"), "{p}");
         assert!(p.contains(
             "\\providecommand{\\DIFdel}[1]{\\phitexdifmark{1 0 0}{\\phitexdifsout{#1}}} %DIF PREAMBLE\n"
         ));
@@ -536,7 +586,7 @@ mod tests {
                     ..Options::default()
                 };
                 for pre in ["", "\\usepackage{hyperref}\n"] {
-                    let p = dif_preamble(&o, pre);
+                    let p = dif_preamble(&o, pre) + &dif_body(&o, pre);
                     for l in p.lines().filter(|l| !l.starts_with('%')) {
                         let depth = l.chars().fold(0i32, |d, c| match c {
                             '{' => d + 1,

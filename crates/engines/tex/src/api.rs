@@ -922,7 +922,8 @@ impl Applied {
 }
 
 /// Edits the nodes `nodes_now` (each with its key) to the slices `new`:
-/// the slices both share at the start and the end stay, those between
+/// the slices both share at the start and the end stay, and those
+/// between that are the same on both sides ([`middle_matches`]); the rest
 /// are replaced, removed or inserted (their arguments `args_of`'s).
 /// The document's text and a document file's are edited so alike, the
 /// file's pieces under each node that placed them ([`Build::stage_file`]).
@@ -958,27 +959,66 @@ fn apply_slices(
     }
     let (a, b) = common_ends(old, new, &same);
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
-    let common = old_mid.min(new_mid);
     crate::timeline::lap("engine: the slice-key diff");
-    for k in common..old_mid {
+    // (between the ends: the slices the same on both sides kept too, as
+    // the ends are, each edit between them its own: an edit in two places
+    // (a diff's marked-up text, a search and replace) runs its two places,
+    // not every slice between them)
+    let kept = middle_matches(
+        old_mid,
+        new_mid,
+        &|i| old[a + i].0,
+        &|j| new[a + j].0,
+        &|i, j| same(a + i, a + j),
+    );
+    // (each new slice of the middle: an old node kept, an old node given
+    // its text, or a new node; the old nodes neither, removed)
+    let mut plan: Vec<Option<(usize, bool)>> = vec![None; new_mid];
+    let mut gone: Vec<usize> = Vec::new();
+    let (mut oi, mut nj) = (0usize, 0usize);
+    for &(ki, kj) in kept.iter().chain(std::iter::once(&(old_mid, new_mid))) {
+        let (dels, ins) = (ki - oi, kj - nj);
+        for k in 0..dels.min(ins) {
+            plan[nj + k] = Some((oi + k, true));
+        }
+        gone.extend(oi + dels.min(ins)..ki);
+        oi = ki + 1;
+        nj = kj + 1;
+        if kj < new_mid {
+            plan[kj] = Some((ki, false));
+        }
+    }
+    for &k in &gone {
         match at {
             Placing::Top(_) => eng.remove(old[a + k].1),
             Placing::Placed => eng.remove_placed(old[a + k].1),
         }
     }
+    let (mut replaced, mut inserted) = (0usize, 0usize);
     let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
     for i in 0..new.len() {
         let n = if i < a || i >= a + new_mid {
             let oi = if i < a { i } else { i - new_mid + old_mid };
             old[oi].1
-        } else if i - a < common {
-            let n = old[i].1;
-            let args = args_of(eng, i);
-            eng.replace(n, exec, args);
+        } else if let Some((k, give)) = plan[i - a] {
+            let n = old[a + k].1;
+            if give {
+                let args = args_of(eng, i);
+                eng.replace(n, exec, args);
+                replaced += 1;
+            }
             n
         } else {
             let args = args_of(eng, i);
-            let next = old.get(a + old_mid).map(|x| x.1);
+            inserted += 1;
+            // (the node after it: the next one of the middle kept or given
+            // its text, else the end's first)
+            let next = plan[i - a + 1..]
+                .iter()
+                .flatten()
+                .map(|&(k, _)| old[a + k].1)
+                .next()
+                .or_else(|| old.get(a + old_mid).map(|x| x.1));
             match (at, nodes.last()) {
                 (Placing::Top(_), Some(&(_, p, _))) => eng.insert_after(p, exec, args),
                 (Placing::Top(end), None) => eng.insert_before(next.unwrap_or(end), exec, args),
@@ -991,12 +1031,90 @@ fn apply_slices(
     *nodes_now = nodes;
     crate::timeline::lap("engine: replace/insert/remove, the node list made");
     Some(Applied {
-        prefix: a,
+        prefix: a + kept.len(),
         suffix: b,
-        replaced: common,
-        removed: old_mid - common,
-        inserted: new_mid - common,
+        replaced,
+        removed: gone.len(),
+        inserted,
     })
+}
+
+/// The slices of an edit's middle (`om` old, `nm` new, keys `ko` and `kn`)
+/// that are the same on both sides (`same`), in order, as pairs (old,
+/// new): those whose key is in each side once, the longest run of them in
+/// order (patience), then their equal neighbours. Linear but for a sort:
+/// no quadratic diff of a large middle.
+fn middle_matches(
+    om: usize,
+    nm: usize,
+    ko: &dyn Fn(usize) -> u64,
+    kn: &dyn Fn(usize) -> u64,
+    same: &dyn Fn(usize, usize) -> bool,
+) -> Vec<(usize, usize)> {
+    if om == 0 || nm == 0 {
+        return Vec::new();
+    }
+    // (each key's count and place on each side)
+    let mut seen: phitex_defuse::FxHashMap<u64, (u32, usize, u32, usize)> =
+        phitex_defuse::FxHashMap::default();
+    for i in 0..om {
+        let e = seen.entry(ko(i)).or_insert((0, i, 0, 0));
+        e.0 += 1;
+        e.1 = i;
+    }
+    for j in 0..nm {
+        if let Some(e) = seen.get_mut(&kn(j)) {
+            e.2 += 1;
+            e.3 = j;
+        }
+    }
+    let mut pairs: Vec<(usize, usize)> = seen
+        .values()
+        .filter(|e| e.0 == 1 && e.2 == 1 && same(e.1, e.3))
+        .map(|e| (e.1, e.3))
+        .collect();
+    pairs.sort_unstable_by_key(|p| p.1);
+    // (the longest run increasing in the old place: patience sorting)
+    let mut tails: Vec<usize> = Vec::new();
+    let mut back: Vec<Option<usize>> = vec![None; pairs.len()];
+    for (k, &(i, _)) in pairs.iter().enumerate() {
+        let at = tails.partition_point(|&t| pairs[t].0 < i);
+        back[k] = at.checked_sub(1).map(|p| tails[p]);
+        if at == tails.len() {
+            tails.push(k);
+        } else {
+            tails[at] = k;
+        }
+    }
+    let mut chain = Vec::with_capacity(tails.len());
+    let mut k = tails.last().copied();
+    while let Some(x) = k {
+        chain.push(pairs[x]);
+        k = back[x];
+    }
+    chain.reverse();
+    // (their equal neighbours, between one and the next)
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(chain.len());
+    let (mut lo_i, mut lo_j) = (0usize, 0usize);
+    for (c, &(i, j)) in chain.iter().enumerate() {
+        let (mut bi, mut bj) = (i, j);
+        while bi > lo_i && bj > lo_j && same(bi - 1, bj - 1) {
+            bi -= 1;
+            bj -= 1;
+        }
+        out.extend((0..i - bi).map(|d| (bi + d, bj + d)));
+        out.push((i, j));
+        let (hi_i, hi_j) = chain.get(c + 1).map_or((om, nm), |&(x, y)| (x, y));
+        let (mut fi, mut fj) = (i + 1, j + 1);
+        while fi < hi_i && fj < hi_j && same(fi, fj) {
+            out.push((fi, fj));
+            fi += 1;
+            fj += 1;
+        }
+        lo_i = fi;
+        lo_j = fj;
+    }
+    out
 }
 
 /// Edits the document's nodes `nodes`, cut from `old_text`, to the text

@@ -153,10 +153,15 @@ impl Session {
     pub fn beside(&self, outputs: &str, status: Arc<Status>) -> (Session, String) {
         let job = self.live.job.clone();
         let (store, out) = Self::store_and_out(&job, Some(outputs), &mut |_| {});
-        match self
-            .live
-            .fork(job.clone(), store.clone(), out.clone(), status.clone())
-        {
+        // (`PHITEX_COMPARE_FORK=0`: a clean build, as before the fork, to
+        // measure against)
+        let fork = if std::env::var_os("PHITEX_COMPARE_FORK").is_some_and(|v| v == "0") {
+            Err("PHITEX_COMPARE_FORK=0".to_owned())
+        } else {
+            self.live
+                .fork(job.clone(), store.clone(), out.clone(), status.clone())
+        };
+        match fork {
             Ok((live, note)) => (
                 Session {
                     live,

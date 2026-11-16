@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 pub use flatten::{Flat, flatten};
 pub use live::{Live, Place, Stats, changes_json, places};
-pub use look::dif_preamble;
+pub use look::{dif_body, dif_preamble};
 pub use sig::{Class, EnvKind, EnvSig, Sig, Signatures};
 
 /// A set of files: a project, at one version. Paths are relative to the
@@ -469,11 +469,13 @@ impl Split {
 }
 
 /// The runs of the marked-up text before the body that are the new
-/// text's: the preamble, latexdiff's definitions (`head_len` bytes in all
-/// with them), `\begin{document}`.
-fn head_spans(nb: Body, head_len: usize) -> [(usize, usize, usize); 2] {
-    let tail = nb.start - nb.begin;
-    [(0, nb.begin, 0), (head_len - tail, tail, nb.begin)]
+/// text's: the preamble, then (after the `pre` bytes of packages it
+/// loads) `\begin{document}`.
+fn head_spans(nb: Body, pre: usize) -> [(usize, usize, usize); 2] {
+    [
+        (0, nb.begin, 0),
+        (nb.begin + pre, nb.start - nb.begin, nb.begin),
+    ]
 }
 
 /// `tex`, the marked-up flat text of `flat`, split back into `flat`'s
@@ -694,6 +696,29 @@ pub fn diff(
     base.diff(new, main)
 }
 
+/// `text`, a main file's, with the markup's definitions for `opts` put
+/// where the diff's text has them ([`Baseline::diff`]: packages at the
+/// preamble's end, the rest after `\begin{document}`) and nothing else
+/// changed: the document as it is, ready for the markup. A build of the
+/// document given this first, then the diff's text, runs the definitions
+/// alone first, then only the paragraphs the markup changed. None without
+/// `\begin{document}` in it.
+#[must_use]
+pub fn with_definitions(text: &str, opts: &Options) -> Option<String> {
+    let b = find_body(text);
+    if b.start == 0 {
+        return None;
+    }
+    let pre = &text[..b.begin];
+    Some(format!(
+        "{pre}{}{}{}{}",
+        dif_preamble(opts, pre),
+        &text[b.begin..b.start],
+        dif_body(opts, pre),
+        &text[b.start..]
+    ))
+}
+
 /// Where a document's body is: where `\begin{document}` begins, where the
 /// body begins after it, and where `\end{document}` begins.
 #[derive(Clone, Copy, Debug)]
@@ -821,8 +846,8 @@ impl Baseline {
         let new_toks = read(&new.text, nb);
         let amsmath = loads(preamble, &["amsmath", "mathtools"]);
         let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
-        em.out.push_str(&self.head(new, nb));
-        let head = head_spans(nb, em.out.len());
+        let (h, head) = self.head(new, nb);
+        em.out.push_str(&h);
         em.body(&old_toks, &new_toks, ob.end, nb.end);
         em.push(&new.text[nb.end..]);
         let spans = std::mem::take(&mut em.spans);
@@ -878,13 +903,22 @@ impl Baseline {
         sigs
     }
 
-    /// The output before the body: the new preamble, latexdiff's
-    /// definitions at its end, `\begin{document}`.
-    fn head(&self, new: &Flat, nb: Body) -> String {
-        let mut s = String::from(&new.text[..nb.begin]);
-        s.push_str(&dif_preamble(&self.opts, &new.text[..nb.begin]));
+    /// The output before the body: the new preamble, the packages the
+    /// markup needs at its end (none for most looks), `\begin{document}`,
+    /// the markup's definitions after it ([`look`]: in the body, not the
+    /// preamble, so that the document's build sees no preamble changed);
+    /// and its runs that are the new text's.
+    fn head(&self, new: &Flat, nb: Body) -> (String, [(usize, usize, usize); 2]) {
+        let preamble = &new.text[..nb.begin];
+        let mut s = String::from(preamble);
+        let pre = dif_preamble(&self.opts, preamble);
+        s.push_str(&pre);
         s.push_str(&new.text[nb.begin..nb.start]);
-        s
+        // (whatever the body's first line: the live diff keeps the head
+        // while the body is edited; a blank line made after it is a `\par`
+        // in vertical mode, nothing)
+        s.push_str(&look::dif_body(&self.opts, preamble));
+        (s, head_spans(nb, pre.len()))
     }
 
     /// The old side's tokens, read with `sigs`.
@@ -981,7 +1015,10 @@ mod tests {
     }
 
     fn body(d: &DiffOut) -> &str {
-        let s = d.tex.find("\\begin{document}\n").unwrap() + 17;
+        // (the body after the markup's definitions, and the line end
+        // after `\begin{document}`)
+        let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF\n\n";
+        let s = d.tex.find(end).unwrap() + end.len();
         let e = d.tex.rfind("\\end{document}").unwrap();
         &d.tex[s..e]
     }
@@ -1091,8 +1128,11 @@ mod tests {
     fn preamble_block() {
         let d = run("a\n", "b\n");
         assert!(
+            d.tex.starts_with(
+                "\\documentclass{article}\n\\begin{document}%\n%DIF PREAMBLE EXTENSION"
+            ),
+            "{}",
             d.tex
-                .starts_with("\\documentclass{article}\n%DIF PREAMBLE EXTENSION")
         );
         assert!(d.tex.contains(
             "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0 1}{\\phitexdifuwave{#1}}} %DIF PREAMBLE\n"
@@ -1124,7 +1164,7 @@ mod tests {
             ]
         );
         assert!(o.latexdiff_args().contains(&"--driver=xetex".to_owned()));
-        let p = dif_preamble(&o, "");
+        let p = dif_preamble(&o, "") + &dif_body(&o, "");
         assert!(
             p.contains("\\RequirePackage[xetex]{changebar} %DIF PREAMBLE\n"),
             "{p}"
@@ -1156,7 +1196,7 @@ mod tests {
             add_color: Some(Color::parse("#008000").unwrap()),
             ..Options::default()
         };
-        let p = dif_preamble(&o, "");
+        let p = dif_preamble(&o, "") + &dif_body(&o, "");
         assert!(
             p.contains(
                 "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0.502 0}{\\phitexdifuwave{#1}}}"
@@ -1174,7 +1214,7 @@ mod tests {
             del_color: Some(Color::parse("orange").unwrap()),
             ..Options::default()
         };
-        let p = dif_preamble(&o, "");
+        let p = dif_preamble(&o, "") + &dif_body(&o, "");
         assert!(
             p.contains("\\providecommand{\\DIFdelbegin}{\\phitexdifpush{1 0.5 0}}"),
             "{p}"
@@ -1189,7 +1229,7 @@ mod tests {
             add_color: Some(Color::parse("#008000").unwrap()),
             ..Options::default()
         };
-        let p = dif_preamble(&o, "");
+        let p = dif_preamble(&o, "") + &dif_body(&o, "");
         assert!(
             p.contains("\\definecolor{DIFaddcolor}{HTML}{008000}\\cbcolor{DIFaddcolor}"),
             "{p}"

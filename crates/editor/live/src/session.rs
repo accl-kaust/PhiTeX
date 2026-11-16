@@ -836,11 +836,12 @@ impl Session {
             .unwrap_or_default()
     }
 
-    /// (measure, with `PHITEX_RUN_LOG` set) the document's nodes the last
-    /// build or edit ran, once each: each one's operation and its text
-    /// (the slice of the main text or of a file it is). A check of which
-    /// paragraphs an edit ran again.
-    pub fn ran_texts(&self) -> Vec<(&'static str, String)> {
+    /// The document's nodes the last build or edit made to run again
+    /// (`phitex_tex::Stats::reruns`, but those whose run stood on its last
+    /// reads), once each: each one's operation and its text (the slice of
+    /// the main text or of a file it is). A check of which paragraphs an
+    /// edit ran again; the nodes it made new are not among them.
+    pub fn reran_texts(&self) -> Vec<(&'static str, String, String)> {
         let Some(b) = &self.build else {
             return Vec::new();
         };
@@ -849,16 +850,18 @@ impl Session {
             .into_iter()
             .map(|(n, f, s, e)| (n, (f, s, e)))
             .collect();
+        let stood: std::collections::HashSet<u64> = b.stats.stood.iter().copied().collect();
         let text = self.built_text.clone().unwrap_or_else(|| Arc::from(""));
         let mut seen = std::collections::HashSet::new();
         b.stats
-            .run_log
+            .reruns
             .iter()
-            .filter(|r| seen.insert(r.0))
-            .filter_map(|r| {
-                let (f, s, e) = spans.get(&r.0)?;
-                let t = f.as_deref().unwrap_or(&text);
-                Some((r.1, t.get(*s..*e)?.to_owned()))
+            .filter(|r| !stood.contains(&r.0) && seen.insert(r.0))
+            .map(|r| {
+                let t = spans.get(&r.0).and_then(|(f, s, e)| {
+                    f.as_deref().unwrap_or(&text).get(*s..*e).map(str::to_owned)
+                });
+                (r.1, t.unwrap_or_default(), r.2.clone())
             })
             .collect()
     }
@@ -1563,6 +1566,12 @@ impl Session {
     /// The main file's text from now on (TeX's characters).
     pub fn set_text(&mut self, text: String) {
         self.text = Arc::from(text);
+    }
+
+    /// The main text the last build built (TeX's characters).
+    #[must_use]
+    pub fn built_text(&self) -> Option<Arc<str>> {
+        self.built_text.clone()
     }
 
     /// File `name` changed: its text from now on is `text` (an editor's

@@ -29,8 +29,8 @@ use crate::emit::{self, Em};
 use crate::myers::patience as lcs;
 use crate::tok::{self, Kind, SECTIONS, Tok};
 use crate::{
-    Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, head_spans,
-    loads, map_runs, split,
+    Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, loads, map_runs,
+    split,
 };
 use phitex_source::{SyntaxKind, Tree};
 use std::fmt::Write as _;
@@ -65,8 +65,9 @@ struct Side {
     body: Body,
     sigs: Signatures,
     amsmath: bool,
-    /// The output before the body.
+    /// The output before the body, and its runs that are the new text's.
     head: String,
+    head_spans: [(usize, usize, usize); 2],
     old: Old,
     /// The new body's CST, and each paragraph's length and hash.
     tree: Tree,
@@ -209,7 +210,7 @@ impl Side {
         let preamble = &new.text[..body.begin];
         let sigs = base.signatures(preamble);
         let amsmath = loads(preamble, &["amsmath", "mathtools"]);
-        let head = base.head(new, body);
+        let (head, head_spans) = base.head(new, body);
         let toks = base.old_tokens(&sigs);
         let chunks = emit::chunks(&toks);
         let keys = chunks
@@ -224,6 +225,7 @@ impl Side {
             sigs,
             amsmath,
             head,
+            head_spans,
             old: Old { toks, chunks, keys },
             tree,
             phash,
@@ -702,11 +704,7 @@ impl Side {
         if nl {
             tex.push('\n');
         }
-        let flat_spans: Vec<_> = head_spans(self.body, self.head.len())
-            .iter()
-            .chain(&spans)
-            .copied()
-            .collect();
+        let flat_spans: Vec<_> = self.head_spans.iter().chain(&spans).copied().collect();
         let split = split(&tex, &self.flat, &flat_spans, &adds);
         DiffOut {
             tex,

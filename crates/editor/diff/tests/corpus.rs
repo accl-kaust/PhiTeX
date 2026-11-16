@@ -82,7 +82,10 @@ fn identity() {
         let new = Dir(case.join("new"));
         let d = diff(&new, &new, "main.tex", &Options::default()).unwrap();
         assert!(d.changes.is_empty(), "{}", case.display());
-        let body = &d.tex[d.tex.find("\\begin{document}").unwrap()..];
+        // (the body after the markup's definitions, which follow
+        // `\begin{document}`)
+        let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF";
+        let body = &d.tex[d.tex.find(end).unwrap() + end.len()..];
         assert!(!body.contains("\\DIF"), "{}", case.display());
     }
 }
