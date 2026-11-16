@@ -37,7 +37,7 @@ import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
 import type { Entry } from "./outline.ts";
 
 /** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
-const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
+const WATCH = new Set(["page", "withdrawn", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
 
 /** An editor. Edits are sequential (each against the text just before it), in UTF-16. */
 export interface EditorHost {
@@ -162,6 +162,7 @@ export type StreamEvent =
  */
 export type WatchEvent =
   | { event: "page"; k: number; hash: string; pages?: number; exact?: boolean }
+  | { event: "withdrawn"; k: number; pages: number }
   | { event: "progress"; pass?: number; pages?: number; phase?: string; ms?: number; name?: string; pack?: string; done?: number; total?: number }
   | { event: "diagnostics"; items: Problem[] }
   | { event: "settled"; settling?: boolean; pass?: number; ms?: number; since_ms?: number | null; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number }
@@ -1738,6 +1739,15 @@ export class PreviewSession {
         void this.peerPages();
         return;
       }
+      case "withdrawn":
+        // (a page streamed and taken back, its run refuted: an edit took it
+        // out or moved it, spec §2.1c. The last build's page there again, or
+        // none past its pages: the pages as the watch has them now, its
+        // `pages` answer (the build's with the streamed pages that stand over
+        // them), as after `settled`. Else the page taken back stayed on until
+        // the build was in, a page past the end among them)
+        this.chain = this.chain.then(() => this.layout());
+        return;
       case "progress":
         // (a pack the build fetches, the engine's own Shelf, native or wasm: as a host's fetch.
         // The loading card lists the file asked for ("amsmath.sty", as $/progress's

@@ -10051,7 +10051,7 @@ var preambleOf = (t) => {
   return end < 0 ? t ?? "" : t.slice(0, end);
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
+var WATCH2 = /* @__PURE__ */ new Set(["page", "withdrawn", "progress", "diagnostics", "settled", "superseded", "sync", "building"]);
 var PENDING_CAP_MS = 1e4;
 var NEAR_CULPRIT = 64;
 function place3(t, pos) {
@@ -11300,6 +11300,9 @@ var PreviewSession = class {
         void this.peerPages();
         return;
       }
+      case "withdrawn":
+        this.chain = this.chain.then(() => this.layout());
+        return;
       case "progress":
         if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
         if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
