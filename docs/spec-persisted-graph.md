@@ -675,10 +675,9 @@ Steps 1 and 2 change no output and load nothing across processes. Step
   `scripts/accl/gate-fast persist [COMMIT] [N] [J]` (gate-shard.sh
   `persist`: ci/research.json under `editsweep.py --threads J
   --graph-check`; red for a refused or changed load, an edit whose
-  twin gave the build's PDF but ran otherwise at -j1, or one whose
-  twin's output differs without unsaved link state; one with it is
-  reported apart, its runs that read what the link gives back free to
-  differ). At more threads
+  twin ran otherwise at -j1, or one whose twin's output differs; where
+  the build held link state the save leaves out, the line names it (red
+  until step 2b, §2.2.4). At more threads
   the runs are reported, not compared (two evaluations of one change
   run ahead of their inputs as their schedules have it).
 
