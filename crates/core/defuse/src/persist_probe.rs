@@ -75,6 +75,8 @@ pub struct PersistProbe {
     /// `reads_by_kind`), and the nodes with one.
     pub verify_moved: [u64; 11],
     pub verify_moved_nodes: u64,
+    /// Reads whose plain answer differs (held by the engine's own check).
+    pub verify_plain_differ: u64,
     /// Decoded records equal to the engine's (definitions, contributions,
     /// reads, output) once mapped back: 0 differing is the round trip.
     pub roundtrip_differ: u64,
@@ -94,7 +96,7 @@ impl PersistProbe {
              defs {} contribs {} placed {} sources {} text-values {}; engine-read-bytes {:.2} MB; \
              values {} (strs {} {:.2} MB, lists {}, ropes {}); env {} paths {} memo {}; client roots {} new values {}; \
              bytes {:.2} MB [values {:.2} (env-only {:.2}) nodes {:.2} records {:.2} reads {:.2} env+paths+memo {:.2} client+env values {:.2}]; \
-             encode {:.1} ms, decode values {:.1} ms, decode records {:.1} ms, verify {:.1} ms over {} reads, moved {} in {} nodes {:?}; roundtrip differ {}; beyond the environment: values {} bytes {:.2} MB strings {:.2} MB",
+             encode {:.1} ms, decode values {:.1} ms, decode records {:.1} ms, verify {:.1} ms over {} reads, moved {} in {} nodes {:?} (plain answers differing {}); roundtrip differ {}; beyond the environment: values {} bytes {:.2} MB strings {:.2} MB",
             self.nodes[0],
             self.nodes[1],
             self.nodes[2],
@@ -148,6 +150,7 @@ impl PersistProbe {
             self.verify_moved.iter().sum::<u64>(),
             self.verify_moved_nodes,
             self.verify_moved,
+            self.verify_plain_differ,
             self.roundtrip_differ,
             self.beyond_env[0],
             mb(self.beyond_env[1]),
@@ -880,7 +883,19 @@ impl Engine {
                 let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::read::answer_in(self, n, rd.kind(), rd.path(), &mut memo)
                 }));
-                if a.as_ref().map_or(true, |a| *a != rd.seen()) {
+                // (a plain answer that differs is asked again as the engine
+                // asks a record's read, `RunRecord::read_holds` with no
+                // shortcut: a member path's answer is not the field's)
+                let differs = a.as_ref().map_or(true, |a| *a != rd.seen());
+                if differs {
+                    p.verify_plain_differ += 1;
+                }
+                if differs
+                    && !std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        r.read_holds(self, n, &rd, true, &mut crate::node::HoldMemo::default())
+                    }))
+                    .unwrap_or(false)
+                {
                     p.verify_moved[kind_code(rd.kind()).1] += 1;
                     if p.verify_moved.iter().sum::<u64>() <= 12 {
                         let op = self
