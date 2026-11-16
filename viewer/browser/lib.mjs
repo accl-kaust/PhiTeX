@@ -97,14 +97,22 @@ export class Browser {
     const b = new Browser();
     b.data = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-chrome-"));
     b.proc = spawn(chromiumName(), ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--window-size=1200,900", "--remote-debugging-port=0", `--user-data-dir=${b.data}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+    // (ready when it says where DevTools listens, however long a cold runner takes; a browser that
+    // exits first fails the start. A start that fails leaves no browser behind: one left running
+    // kept the test runner alive until the job's time ran out)
     let err = "";
-    b.proc.stderr.on("data", (d) => (err += d));
-    for (let i = 0; i < 300 && !b.port; i++) {
-      const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(err);
-      if (m) b.port = m[1];
-      else await sleep(50);
-    }
-    if (!b.port) throw new Error(`no browser: ${err}`);
+    b.port = await new Promise((ok, no) => {
+      b.proc.stderr.on("data", (d) => {
+        err += d;
+        const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(err);
+        if (m) ok(m[1]);
+      });
+      b.proc.on("error", (e) => no(new Error(`no browser: ${e.message}`)));
+      b.proc.on("exit", (c, sig) => no(new Error(`no browser: it exited (${c ?? sig}): ${err}`)));
+    }).catch(async (e) => {
+      await b.stop();
+      throw e;
+    });
     return b;
   }
   async tabs() {
