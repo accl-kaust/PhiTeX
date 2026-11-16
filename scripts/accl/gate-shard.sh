@@ -620,7 +620,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     # persist-process K N J: the persisted graph across processes
     # (docs/spec-persisted-graph.md §5, step 3): shard K of N of
     # ci/research.json, each document's history of `phitex build`
-    # processes with PHITEX_GRAPH=1 at -j J (scripts/ci/graphsweep.py):
+    # processes as built by default (the graph kept) at -j J (scripts/ci/graphsweep.py):
     # a clean build saving its graph; unchanged; three words typed; a
     # .bib's entry, an image and the document class (shadowed by the
     # document's copy) changed; the other -j; the graph file cut and a

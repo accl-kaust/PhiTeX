@@ -1527,6 +1527,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             std::process::exit(crate::EXIT_INTERNAL);
         });
     spin.done();
+    s.keep_graphs(t.graph);
     // (no log laid out after a build; the PDF file appended an update
     // section after each edit, the exact file written when idle, but
     // with `--exact`)
@@ -2006,7 +2007,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (the records the builds changed, stored before the watch ends;
         // the exact PDF file and, with `--log`, the log)
         s.flush_records();
-        // (the persisted graph, `PHITEX_GRAPH=1`, docs/spec-persisted-graph.md
+        // (the persisted graph, `graph`, docs/spec-persisted-graph.md
         // step 3: saved as the watch ends, its build quiet)
         let _ = s.save_graph();
         modern::graph_notes(s, o, ui);
@@ -2145,6 +2146,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (the records the build changed, stored as it settles: a no-op
         // unless a load changed them)
         s.flush_records();
+        // (the persisted graph's load at the first build, or why not)
+        modern::graph_notes(s, o, ui);
         // (an edit the build took while it ran: timed from it)
         let since = match (since, s.absorbed_at()) {
             (Some(a), Some(b)) => Some(a.max(b)),

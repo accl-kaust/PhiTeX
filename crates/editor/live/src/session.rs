@@ -974,9 +974,13 @@ impl Session {
     /// `PHITEX_GRAPH=1`, docs/spec-persisted-graph.md step 3): its first
     /// build loads the graph a session of the document saved, and
     /// [`Session::save_graph`] saves its own. Set before the first build.
+    /// With no store (no cache), none is kept.
     pub fn keep_graphs(&mut self, on: bool) {
+        let on = on && self.store.is_some();
         self.graph_on = on;
-        if on && self.outside.is_none() {
+        if !on {
+            self.outside = None;
+        } else if self.outside.is_none() {
             self.outside = Some(Arc::default());
         }
     }

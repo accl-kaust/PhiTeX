@@ -733,6 +733,10 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
+    /// Whether the build keeps the document's graph in the cache and
+    /// starts from the one saved (docs/spec-persisted-graph.md):
+    /// `PHITEX_GRAPH` if set, else `graph` (on by default).
+    pub graph: bool,
     /// The engine's threads (`threads` in the user's file; none or 0: the default, one
     /// thread), under `-j`.
     pub threads: Option<usize>,
@@ -1090,6 +1094,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
+        graph: phitex_live::graph::env().unwrap_or(cfg.graph.unwrap_or(true)),
         threads: cfg.threads.filter(|&n| n > 0),
         files,
         warnings: [cfg.warnings, rc_warnings].concat(),
@@ -1319,6 +1324,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
             return crate::EXIT_INTERNAL;
         }
     };
+    s.keep_graphs(t.graph);
     // (a package that could not be had, `--shelf`: said)
     {
         let ui = std::sync::Mutex::new(ui.clone());
@@ -1456,7 +1462,13 @@ fn build_detached() -> Option<i32> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let done = std::env::temp_dir().join(format!("phitex-graph-{}-{nanos:x}", std::process::id()));
-    let mut child = std::process::Command::new(std::env::current_exe().ok()?)
+    let mut cmd = std::process::Command::new(std::env::current_exe().ok()?);
+    // (from where this one started: its target resolved, this process
+    // is in the build's folder, and the arguments name files from there)
+    if let Some(d) = STARTED_IN.get() {
+        cmd.current_dir(d);
+    }
+    let mut child = cmd
         .args(std::env::args_os().skip(1))
         .env(GRAPH_DONE, &done)
         .spawn()
@@ -1898,20 +1910,22 @@ pub fn main(args: &[String]) -> ! {
         ui.error(&e);
         std::process::exit(crate::EXIT_USAGE);
     });
+    // (a build keeping its graph runs in a worker, which says all a
+    // build says, the target's warnings first: this process nothing)
+    if command == Command::Build
+        && t.graph
+        && !phitex_live::graph::sync()
+        && std::env::var_os(GRAPH_DONE).is_none()
+        && let Some(code) = build_detached()
+    {
+        std::process::exit(code);
+    }
     for w in &t.warnings {
         ui.warning(w);
     }
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
-        Command::Build => {
-            if phitex_live::graph::detached()
-                && std::env::var_os(GRAPH_DONE).is_none()
-                && let Some(code) = build_detached()
-            {
-                std::process::exit(code);
-            }
-            std::process::exit(build(&t, &o, &ui))
-        }
+        Command::Build => std::process::exit(build(&t, &o, &ui)),
         Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)

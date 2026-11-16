@@ -3,8 +3,8 @@
 Status: step 1 (the engine's export and import) and step 2 (the
 client's tables, `Build::save` / `Build::load` in process, §2.2, §12)
 built, with pdfTeX's link state (step 2b, §2.2.4); step 3 (the cache
-file, its keys, the environment re-ask, across processes behind
-`PHITEX_GRAPH=1`, §13) built. Branch
+file, its keys, the environment re-ask, across processes, §13) built;
+step 5: on by default in `phitex build` and `phitex watch` (§15). Branch
 `persist-design`: the design's observe-only probe (`PHITEX_PERSIST_PROBE`). It builds on
 docs/note-persisted-graph.md (the 11-01 design note),
 docs/spec-seeded-reads.md (branch `seeded-r2`: why seeding definitions alone
@@ -815,8 +815,8 @@ changes, so a loaded build's SyncTeX file held only the edited pages
 **The save** (`Session::save_graph`): after the outputs are written and
 the report said. A synchronous save cost para4000 +30 % of its clean
 build at -j8 (encoding 220 ms, writing 58 MB 125 ms), so `phitex build`
-with `PHITEX_GRAPH=1` runs the build in a worker (this program again,
-`PHITEX_GRAPH_DONE`), which writes its exit status for the process
+keeping its graph runs the build in a worker (this program again, from
+the folder it was started in, `PHITEX_GRAPH_DONE`), which writes its exit status for the process
 waiting on it once everything is said, then saves holding the file's
 lock (`Store::lock`, the CLI's `graph.lock`), which the next load waits
 for. `PHITEX_GRAPH=sync` saves in process. A watch saves when it ends.
@@ -832,23 +832,39 @@ changed (refused by its key). PDF, log, aux and SyncTeX byte-identical to
 a clean build of the same files in the same folder.
 
 
-## 14. Step 3 status (2026-11-16, stopped by the user before merge)
+## 14. Step 3 status (2026-11-16)
 
-Branch `persist3b`, not merged to dev. The feature sits behind `PHITEX_GRAPH`, which is off by default (`=1` saves through a detached worker, `=sync` saves in process).
+Merged to dev behind `PHITEX_GRAPH` (cf366ab07), then on by default
+(§15). The sweep at 886f454f3: gate-fast mc 88086; second process -j1
+69/69 (mc 88087-91), -j8 68/69 (mc 88092-95): revtex-aps-xe red, #45.
 
-**Green** at 886f454f3 (rebased on dev 553b1df76):
-- gate-fast: mc 88086.
-- Second-process sweep at -j1: all 69 documents (mc 88087-91).
-- Second-process sweep at -j8: 68 of 69 documents (mc 88092-95).
-- Unit tests: `graph` (file cut or flipped), `document::a_session_loads_the_graph_the_last_one_saved`, and `inputs::a_touched_files_date_is_read_again` (red on dev, green here).
-
-**Red, open:** revtex-aps-xe at -j8, the step that edits the `.bib` after a load.
-- It failed 1 of 4 at the branch head and was green at 444a54a97.
-- The loaded build runs 159 nodes in 2 rounds and writes two `\bibcite` lines of the `.aux` later than a clean build does. The PDF differs, and the result is the same wrong one every time it fails.
-- It did not reproduce on n11, where the history was run the same way (`--shelf`).
-- The likely cause is the -j8 edit path when the `.bbl` changes, with a write order that depends on the schedule. This is not settled: the next step is a watch at -j8 that edits the same `.bib` with no graph.
-- The shadow step after it compares against the previous step, so it is red as a consequence.
-- This blocks the merge rule ("green on all 69").
+**#45, fixed.** revtex-aps-xe at -j8, the step editing the `.bib` after a
+load: about 1 in 15 gate runs (1 in 90 histories of the sweep's own),
+the PDF the same wrong one each time (page 6 with the bibliography over
+it), two `\bibcite` lines after page 6's writes in the `.aux`, the
+loaded build 140-160 nodes in 2 rounds where a good one ran 14.
+- Not the load alone, not the -j8 `.bib` edit alone: a -j8 watch with no
+  graph making the same edits was right 320 of 320; graph histories kept
+  the bad state in about 1 in 90, and a kept state re-ran red 24 of 24.
+- The cause, in the engine: a placement matched to its placer's last
+  node by (op, args) and kept where it stands (after the new node's
+  children, nothing of a later slot between) kept the anchor, slot and
+  continuation flag it was placed with first. Page 6's finisher, placed
+  after the bibliography's piece 279 and kept after its first piece 229,
+  stayed anchored at 279; the `.bib` edit re-ran 229, `stranded` found
+  the finisher foreign between 229 and its continuation, the
+  continuation was made anew, and the pages after it ran again from a
+  wrong start. Kept anchors that differ from the placement's are common
+  (finishers at every few builds, in a watch too); a later move of the
+  anchor or a re-run of its neighbour exposes them.
+- Fix (commit.rs, the keep): a kept node takes its placement's anchor,
+  slot, rank and continuation flag. Tests `ranked::a_node_kept_after_another_node_moves_with_it`
+  and `ranked::a_node_kept_after_an_earlier_node_stays_with_it`, red
+  before; `Engine::check_invariants` checks that a placed node stands
+  after its anchor.
+- Proved: gate-fast green (mc 88223); second-process sweep 69/69 at -j1
+  (mc 88225-28) and at -j8 twice (mc 88229-32, 88233-36); 212 histories
+  of revtex-aps-xe's sweep at -j8, every `.bib` step 14 nodes and right.
 
 **Found and filed, not graph bugs:**
 - #43: a second `phitex build` in a used folder logs differently. The seeded `.aux` is read per field, and the nested part `.aux` reads are dropped. Seen on dev. The sweep's refused steps now compare against a clean build of the same folder, as its doc always said.
@@ -882,3 +898,48 @@ Branch `persist3b`, not merged to dev. The feature sits behind `PHITEX_GRAPH`, w
 | para4000 | 8 | 1.32 | 0.69 | 1.36 | 1.84 | 0.61 | 0.58 | 506 ms | 98.3 MB |
 
 The asynchronous save costs a clean build at most +3% wall (para4000 at -j8), within the +5% bar. The synchronous save costs up to +39%, which is why the save is asynchronous.
+
+## 15. Step 5: on by default (2026-11-16)
+
+`phitex build` and `phitex watch` (`--lsp` too: VS Code's "phitex watch"
+engine) keep the document's graph in the cache and start from the last
+one saved. `graph` in `phitex.toml` (on; `phitex config graph off`, a
+project's too) and `PHITEX_GRAPH` over it (`0` off, `1` on, `sync` saved
+before the build ends). With no cache (`cache-limit = 0`) none is kept.
+`-v` says at the first build (a watch's too) whether the saved graph was
+loaded, or why not (`graph: not loaded: none saved`, `... its key
+`$SOURCE_DATE_EPOCH` differs`, `... chunk 10's hash is wrong`).
+
+The worker of an asynchronous save starts from the folder `phitex`
+started in (the target resolved, the process stands in the build's
+folder) and before anything is said (the target's warnings were said by
+both).
+
+The CI's runs take the default: the second-process sweep's histories
+run with no variable (its clean references `PHITEX_GRAPH=0`), every
+`phitex build` of the gate's and the corpus's saves its graph, and a CLI
+test's second build loads it (`build_rounds_are_latexmks_runs`: no round
+loaded, one with `PHITEX_GRAPH=0`). Green at df332b4f4: gate-fast mc
+88278; the default path's sweep (8cbca4c83) 69/69 at -j1 (mc 88256-59)
+and -j8 (mc 88252-55).
+
+**Timings**, n11 local disk, release binary of 8cbca4c83, medians of 5
+(the first of 6 dropped), seconds. A: a clean build, `PHITEX_GRAPH=0`;
+A2: its second build, no graph; B: a clean build by default (the save
+asynchronous); S: `PHITEX_GRAPH=sync`; C: an unchanged second build, the
+graph loaded; D: a one-word edit, loaded.
+
+| doc | -j | A | A2 | B | B/A | S | C | D |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| amsldoc | 1 | 1.74 | 1.42 | 1.79 | +2.9% | 1.93 | 0.42 | 0.46 |
+| amsldoc | 8 | 2.19 | 1.76 | 2.14 | -2.3% | 2.30 | 0.36 | 0.40 |
+| acm | 1 | 2.50 | 1.71 | 2.51 | +0.4% | 2.70 | 0.39 | 0.49 |
+| acm | 8 | 2.20 | 1.73 | 2.30 | +4.5% | 2.51 | 0.38 | 0.48 |
+| Grail | 1 | 11.53 | 7.98 | 11.58 | +0.4% | 12.05 | 0.81 | 0.81 |
+| Grail | 8 | 9.59 | 7.09 | 9.64 | +0.5% | 10.06 | 0.82 | 0.82 |
+| para4000 | 1 | 1.69 | 1.68 | 1.73 | +2.4% | 2.17 | 0.62 | 0.65 |
+| para4000 | 8 | 0.67 | 0.67 | 0.70 | +4.5% | 1.17 | 0.59 | 0.62 |
+
+The default's clean build is within +5% of no graph at every point;
+its second build 3.4-9.9x faster where the document is not one long
+plain run (para4000 1.1-2.7x).
