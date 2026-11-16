@@ -371,6 +371,7 @@ header:active { cursor: grabbing; }
 .peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
 .peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
 .peek .pc .lk button:hover { text-decoration: underline; }
+.peek .pc .lk button.u { overflow-wrap: anywhere; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
 .peek .pc .lk button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; border-radius: 2px; }
 /* where a jump landed, lit for a moment (viewer.ts flash): only its opacity animates */
 .slot .phx-flash { position: absolute; z-index: 2; pointer-events: none; border-radius: 3px; background: color-mix(in srgb, var(--ph-accent) 22%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ph-accent) 55%, transparent); animation: phx-flash 1.5s ease-out forwards; }

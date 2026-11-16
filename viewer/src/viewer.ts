@@ -884,7 +884,7 @@ export class Viewer {
         // (the year next to the names: a long line cut at its end keeps it)
         `<div class="mt">${[[c.authors.length && esc(names(c.authors)), c.year && esc(c.year)].filter(Boolean).join(", "), c.venue && `<i>${esc(c.venue)}</i>`].filter(Boolean).join(" · ")}</div>` +
         `<div class="lk">` +
-        [doi ? `<button type="button" data-act="open" data-u="${esc(doi)}">DOI</button>` : c.url ? `<button type="button" data-act="open" data-u="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, "").split("/")[0])}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>·</i>") +
+        [doi ? `<button type="button" class="u" data-act="open" data-u="${esc(doi)}" title="${esc(doi)}">doi:${esc(c.doi!)}</button>` : c.url ? `<button type="button" class="u" data-act="open" data-u="${esc(c.url)}" title="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, ""))}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>·</i>") +
         `</div></section>`
       );
     };
@@ -971,9 +971,36 @@ export class Viewer {
    * and address where it prints them. Sentences end at ". " but not at an
    * initial's ("D. E. Knuth").
    */
+  /**
+   * The DOI or address starting at `m` in `text`, its line breaks taken out: the page's text
+   * has a space where the line broke, and TeX breaks a DOI or URL after a dot, a slash or a
+   * hyphen ("doi:10. 1145/3503222.3507772"); its end trimmed of the sentence's punctuation.
+   * With the span it covers, to take it out of the venue.
+   */
+  private static joined(text: string, m: number): { v: string; end: number } {
+    let i = m;
+    while (i < text.length) {
+      if (text[i] === " " && /[./\-_=?&#]/.test(text[i - 1]) && /[0-9A-Za-z]/.test(text[i + 1] ?? "")) i++;
+      else if (/[\s,;]/.test(text[i]) || /[)\]]/.test(text[i]) && !text.slice(m, i).includes("(")) break;
+      else i++;
+    }
+    let v = text.slice(m, i).replace(/ /g, "");
+    while (/[.)\]]$/.test(v) && !(v.endsWith(")") && v.includes("("))) v = v.slice(0, -1);
+    return { v, end: m + v.length + (text.slice(m, i).match(/ /g)?.length ?? 0) };
+  }
+
   private static asCited(label: string, text: string, at: [number, number]): Cited {
-    const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
-    const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
+    const dm = /\b10\.\s?\d{4,9}\s?\//.exec(text);
+    const doi = dm ? Viewer.joined(text, dm.index).v : undefined;
+    const um = /https?:\/\//.exec(text);
+    const url = um ? Viewer.joined(text, um.index).v : undefined;
+    // (the DOI or address shown as its own link: not again in the venue, "doi:" and all)
+    const shown = dm ?? um;
+    if (shown) {
+      const { end } = Viewer.joined(text, shown.index);
+      const from = /(?:doi:\s?|https?:\/\/(?:dx\.\s?)?doi\.\s?org\/\s?)?$/i.exec(text.slice(0, shown.index))!.index;
+      text = (text.slice(0, from) + text.slice(end)).replace(/\s+([.,;])/g, "$1").replace(/\s{2,}/g, " ").trim();
+    }
     // (the year: the label's where it names one (natbib's "Kuon and Rose (2007)"), else the
     // entry's last, never one end of a page range ("1749–1760": the card's year "1760"))
     const year =

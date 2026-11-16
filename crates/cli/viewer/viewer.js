@@ -1106,7 +1106,7 @@ var Viewer = class _Viewer {
     const here = (c) => list.length > 1 && !!c.at && c.at[0] === link[4] && c.at[1] === (link[5] ?? null);
     const card = (c, i) => {
       const doi = c.doi ? `https://doi.org/${c.doi}` : "";
-      return `<section class="ce${here(c) ? " here" : ""}" data-i="${i}"><div class="hd">${c.label ? `<span class="lab">[${esc(c.label)}]</span>` : ""}<span class="ti">${esc(c.title)}</span>${c.key ? `<code>${esc(c.key)}</code>` : ""}</div><div class="mt">${[[c.authors.length && esc(names(c.authors)), c.year && esc(c.year)].filter(Boolean).join(", "), c.venue && `<i>${esc(c.venue)}</i>`].filter(Boolean).join(" \xB7 ")}</div><div class="lk">` + [doi ? `<button type="button" data-act="open" data-u="${esc(doi)}">DOI</button>` : c.url ? `<button type="button" data-act="open" data-u="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, "").split("/")[0])}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>\xB7</i>") + `</div></section>`;
+      return `<section class="ce${here(c) ? " here" : ""}" data-i="${i}"><div class="hd">${c.label ? `<span class="lab">[${esc(c.label)}]</span>` : ""}<span class="ti">${esc(c.title)}</span>${c.key ? `<code>${esc(c.key)}</code>` : ""}</div><div class="mt">${[[c.authors.length && esc(names(c.authors)), c.year && esc(c.year)].filter(Boolean).join(", "), c.venue && `<i>${esc(c.venue)}</i>`].filter(Boolean).join(" \xB7 ")}</div><div class="lk">` + [doi ? `<button type="button" class="u" data-act="open" data-u="${esc(doi)}" title="${esc(doi)}">doi:${esc(c.doi)}</button>` : c.url ? `<button type="button" class="u" data-act="open" data-u="${esc(c.url)}" title="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, ""))}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>\xB7</i>") + `</div></section>`;
     };
     const bibs = list.filter((c) => c.bibtex).length;
     pc.innerHTML = (list.length > 1 ? `<div class="mh"><span>${list.length} works cited here</span>${bibs > 1 ? `<button type="button" data-act="bib" data-i="all">Copy all BibTeX (${bibs})</button>` : ""}</div>` : "") + `<div class="cs">${list.map(card).join("")}</div>`;
@@ -1174,9 +1174,34 @@ var Viewer = class _Viewer {
    * and address where it prints them. Sentences end at ". " but not at an
    * initial's ("D. E. Knuth").
    */
+  /**
+   * The DOI or address starting at `m` in `text`, its line breaks taken out: the page's text
+   * has a space where the line broke, and TeX breaks a DOI or URL after a dot, a slash or a
+   * hyphen ("doi:10. 1145/3503222.3507772"); its end trimmed of the sentence's punctuation.
+   * With the span it covers, to take it out of the venue.
+   */
+  static joined(text, m) {
+    let i = m;
+    while (i < text.length) {
+      if (text[i] === " " && /[./\-_=?&#]/.test(text[i - 1]) && /[0-9A-Za-z]/.test(text[i + 1] ?? "")) i++;
+      else if (/[\s,;]/.test(text[i]) || /[)\]]/.test(text[i]) && !text.slice(m, i).includes("(")) break;
+      else i++;
+    }
+    let v = text.slice(m, i).replace(/ /g, "");
+    while (/[.)\]]$/.test(v) && !(v.endsWith(")") && v.includes("("))) v = v.slice(0, -1);
+    return { v, end: m + v.length + (text.slice(m, i).match(/ /g)?.length ?? 0) };
+  }
   static asCited(label, text, at) {
-    const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
-    const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
+    const dm = /\b10\.\s?\d{4,9}\s?\//.exec(text);
+    const doi = dm ? _Viewer.joined(text, dm.index).v : void 0;
+    const um = /https?:\/\//.exec(text);
+    const url = um ? _Viewer.joined(text, um.index).v : void 0;
+    const shown = dm ?? um;
+    if (shown) {
+      const { end } = _Viewer.joined(text, shown.index);
+      const from2 = /(?:doi:\s?|https?:\/\/(?:dx\.\s?)?doi\.\s?org\/\s?)?$/i.exec(text.slice(0, shown.index)).index;
+      text = (text.slice(0, from2) + text.slice(end)).replace(/\s+([.,;])/g, "$1").replace(/\s{2,}/g, " ").trim();
+    }
     const year = /\b(1[5-9]\d\d|20\d\d)[a-z]?\b/.exec(label)?.[0] ?? [...text.matchAll(/(?<![\d–-])\b(1[5-9]\d\d|20\d\d)[a-z]?\b(?![–-]\d)/g)].at(-1)?.[0];
     const parts = [];
     let cur = "";
@@ -2790,6 +2815,7 @@ header:active { cursor: grabbing; }
 .peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
 .peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
 .peek .pc .lk button:hover { text-decoration: underline; }
+.peek .pc .lk button.u { overflow-wrap: anywhere; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
 .peek .pc .lk button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; border-radius: 2px; }
 /* where a jump landed, lit for a moment (viewer.ts flash): only its opacity animates */
 .slot .phx-flash { position: absolute; z-index: 2; pointer-events: none; border-radius: 3px; background: color-mix(in srgb, var(--ph-accent) 22%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ph-accent) 55%, transparent); animation: phx-flash 1.5s ease-out forwards; }
