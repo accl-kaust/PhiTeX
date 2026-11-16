@@ -41,7 +41,7 @@
 # PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed by op
 # class beside the control GATE_CONTROL's recorded timings, default
 # 566fb842: gate-time.py); amsedit 8, amsedit 16 (the edit histories,
-# GATE_AMS_EDITS edits, 10); editkinds (amsldoc in one watch session
+# GATE_AMS_EDITS edits, 10; amsldoc's, then acmart's sample-sigconf's); editkinds (amsldoc in one watch session
 # per -j, 8 and 1, every edit kind in turn, gate-editkinds.py: each
 # edit's PDF against a cold build, red if not the same; its save-to-build
 # ms against its kind's target, rounds, runs and cutoffs, recorded in

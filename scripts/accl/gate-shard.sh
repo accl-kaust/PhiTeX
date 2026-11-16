@@ -847,6 +847,14 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/amsh" amsldoc.tex $j $n $j "$r/edits-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
     grep -E '^acct-edit:' "$r/edits-j$j.err" 2>/dev/null | cut -c1-400 >> "$r/ams.txt"
     grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "amsldoc edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
+    # (and acmart's sample-sigconf, a document with a figure of its own
+    # in a .pdf (sampleteaser.pdf) and BibTeX: the history's cold build
+    # once ran in the watch's directory with its .pdf files deleted, the
+    # figure with them, and differed by the harness's doing)
+    rm -rf "$w/acmh" "$w/acmh-given" "$w/acmh-cold" && cp -a ci/research/acmart "$w/acmh"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/acache \
+      timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/acmh" sample-sigconf.tex $j $n $j "$r/edits-acm-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
+    grep -q '"verdict": "same"' "$r/edits-acm-j$j.json" 2>/dev/null || red "sample-sigconf edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-acm-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
     ;;
   editkinds)
     # editkinds: every edit kind on amsldoc, one watch session per -j,

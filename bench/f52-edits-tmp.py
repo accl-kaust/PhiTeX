@@ -32,6 +32,12 @@ def main():
     binary, d, main_, j, edits_json, out = sys.argv[1:7]
     flags = sys.argv[7:]
     edits = json.load(open(edits_json))
+    # (the document as given, before the watch writes anything: the cold
+    # build's directory is this with the edited files, so it keeps the
+    # document's own .pdf figures, which deleting outputs by extension took)
+    given = d.rstrip("/") + "-given"
+    shutil.rmtree(given, ignore_errors=True)
+    shutil.copytree(d, given, symlinks=True)
     p = subprocess.Popen([binary, "watch", "--no-view", "--json", *flags, "-j", j, main_], cwd=d,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.environ.get("F52_ERR", os.devnull), "a"))
 
@@ -91,10 +97,9 @@ def main():
         p.kill()
     cold = d.rstrip("/") + "-cold"
     shutil.rmtree(cold, ignore_errors=True)
-    shutil.copytree(d, cold, symlinks=True)
-    for x in os.listdir(cold):
-        if x.endswith((".pdf", ".aux", ".log", ".toc", ".out")):
-            os.remove(os.path.join(cold, x))
+    shutil.copytree(given, cold, symlinks=True)
+    for f in sorted({f for f, _, _ in steps}):
+        shutil.copy2(os.path.join(d, f), os.path.join(cold, f))
     subprocess.run([binary, "build", *flags, "-j", j, main_], cwd=cold,
                    stdout=subprocess.DEVNULL, stderr=open(os.environ.get("F52_ERR", os.devnull) + ".cold" if os.environ.get("F52_ERR") else os.devnull, "w"))
     try:
