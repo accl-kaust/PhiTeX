@@ -1,6 +1,6 @@
 //! `phitex watch` sees every file its build read change on disk, on every
-//! system (Linux's inotify, macOS's FSEvents, Windows's
-//! ReadDirectoryChangesW): an image, a figure in a subfolder, a file read
+//! system (Linux's inotify, macOS's `FSEvents`, Windows's
+//! `ReadDirectoryChangesW`): an image, a figure in a subfolder, a file read
 //! through a symbolic link to a folder elsewhere and an `\input` file,
 //! each saved over in place and by renaming a new file over it (an
 //! editor's atomic save), the document's text untouched. Each change is
@@ -8,8 +8,10 @@
 //! then. Headless and as an editor's language server (`--lsp`, the
 //! document open in the editor, its folder named through a symbolic
 //! link as an editor that opened it so has it). No TeX Live: `-ini`
-//! documents, the images pdfTeX's own fixtures.
+//! documents, the images pdfTeX's own fixtures, a `texmf.cnf` of one
+//! line ([`env`]).
 
+use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -64,10 +66,11 @@ fn document() -> String {
          \\input part\n\
          \\shipout\\hbox{",
     );
-    for f in files().iter().filter(|f| f.ends_with(".png")) {
-        s.push_str(&format!(
-            "\\pdfximage width 20bp {{{f}}}\\pdfrefximage\\pdflastximage\n"
-        ));
+    for f in files().iter().filter(|f| !is_tex(f)) {
+        let _ = writeln!(
+            s,
+            "\\pdfximage width 20bp {{{f}}}\\pdfrefximage\\pdflastximage"
+        );
     }
     s.push_str("}\n\\end\n");
     s
@@ -103,18 +106,38 @@ fn link(to: &Path, at: &Path) {
     unreachable!("no links made off Unix: {} {}", to.display(), at.display());
 }
 
+fn is_tex(file: &str) -> bool {
+    Path::new(file).extension().is_some_and(|e| e == "tex")
+}
+
 fn content(file: &str, k: usize) -> Vec<u8> {
-    if file.ends_with(".tex") {
+    if is_tex(file) {
         PARTS[k].as_bytes().to_vec()
     } else {
         images()[k].clone()
     }
 }
 
+/// `c` run as the tests run it: its own home and cache, the dates fixed,
+/// the raw file events logged, and a TeX Live of one `texmf.cnf` that
+/// names a tree with nothing in it (a `-ini` document reads only its
+/// own files).
 fn env<'a>(c: &'a mut Command, dir: &Path) -> &'a mut Command {
     let home = dir.join("home");
+    let cnf = dir.join("texmf-cnf");
+    let tree = dir.join("texmf");
     let _ = std::fs::create_dir_all(&home);
+    let _ = std::fs::create_dir_all(&cnf);
+    let _ = std::fs::create_dir_all(&tree);
+    let _ = std::fs::write(
+        cnf.join("texmf.cnf"),
+        format!(
+            "TEXMF = {}\nTEXINPUTS = .\n",
+            tree.to_string_lossy().replace('\\', "/")
+        ),
+    );
     c.env("PHITEX_CACHE_DIR", dir.join("cache"))
+        .env("TEXMFCNF", &cnf)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("APPDATA", &home)
@@ -192,38 +215,38 @@ fn start(dir: &Path, cwd: &Path, args: &[&str], lsp: bool) -> Watch {
     let stdout = child.stdout.take().expect("its output");
     let kept = out.clone();
     std::thread::spawn(move || {
-        if lsp {
-            // (the server's messages, framed)
-            let mut r = BufReader::new(stdout);
-            loop {
-                let mut len = 0usize;
-                loop {
-                    let mut h = String::new();
-                    if r.read_line(&mut h).unwrap_or(0) == 0 {
-                        return;
-                    }
-                    let h = h.trim_end();
-                    if h.is_empty() {
-                        break;
-                    }
-                    if let Some((k, v)) = h.split_once(':')
-                        && k.eq_ignore_ascii_case("content-length")
-                    {
-                        len = v.trim().parse().unwrap_or(0);
-                    }
-                }
-                let mut b = vec![0; len];
-                if r.read_exact(&mut b).is_err() {
-                    return;
-                }
-                kept.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&b).into_owned());
-            }
-        } else {
+        if !lsp {
             for l in BufReader::new(stdout).lines().map_while(Result::ok) {
                 kept.lock().unwrap().push(l);
             }
+            return;
+        }
+        // (the server's messages, framed)
+        let mut r = BufReader::new(stdout);
+        loop {
+            let mut len = 0usize;
+            loop {
+                let mut h = String::new();
+                if r.read_line(&mut h).unwrap_or(0) == 0 {
+                    return;
+                }
+                let h = h.trim_end();
+                if h.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = h.split_once(':')
+                    && k.eq_ignore_ascii_case("content-length")
+                {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut b = vec![0; len];
+            if r.read_exact(&mut b).is_err() {
+                return;
+            }
+            kept.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&b).into_owned());
         }
     });
     Watch { child, err, out }
