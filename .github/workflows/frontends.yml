@@ -184,8 +184,10 @@ jobs:
           node tools/dev/mock-run.mjs test/scenarios/ci-tabs.json
           # (Overleaf's own main document, its Menu's, followed: the socket's join and change)
           node tools/dev/mock-run.mjs test/scenarios/ci-rootdoc.json
-          # (the persisted graph: saved, a reload loads it and builds nothing, a
-          # change made on the server while the tab was away built after it)
+          # (the persisted graph: none kept first (the scenarios above kept theirs
+          # under the same mock project), the first build's saved at once, a reload
+          # loads it and builds nothing, a change made on the server while the tab
+          # was away built after it and saved)
           node tools/dev/mock-run.mjs test/scenarios/ci-graph.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
