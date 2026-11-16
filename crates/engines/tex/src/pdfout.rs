@@ -3169,7 +3169,7 @@ impl phitex_defuse::Operation for PdfPage {
                     let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
                     let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
                     cx.told_outside();
-                    p.stream_page(k, hash, |start, last| {
+                    p.stream_page(k, hash, (cx.node().raw(), id), |start, last| {
                         let t0 = std::time::Instant::now();
                         let none = crate::exec::ColorStart::new();
                         let (pdf, exact, file) = match page_alone(

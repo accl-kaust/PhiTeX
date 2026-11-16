@@ -177,7 +177,11 @@ impl Document {
                 .meter()
                 .on_streamed(Box::new(move |p, pages| {
                     if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
-                        v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
+                        if p.gone {
+                            v.withdraw_page(k);
+                        } else {
+                            v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
+                        }
                     }
                 }));
             let l = lsp.clone();
@@ -2544,19 +2548,30 @@ mod tests {
             .unwrap()
     }
 
-    /// The pages (from 0) told in `ev` before the build was in, and
-    /// whether none was told after.
+    /// The pages (from 0) told in `ev` before the build was in and not
+    /// withdrawn since (`withdrawn`: a page a refuted run streamed), and
+    /// whether none was told or withdrawn after.
     fn told_before_settled(ev: &[Value]) -> (std::collections::BTreeSet<u64>, bool) {
         let settled = ev
             .iter()
             .position(|e| e["event"] == "settled")
             .expect("settled");
-        let ks = ev[..settled]
-            .iter()
-            .filter(|e| e["event"] == "page")
-            .filter_map(|e| e["k"].as_u64())
-            .collect();
-        (ks, ev[settled..].iter().all(|e| e["event"] != "page"))
+        let mut ks = std::collections::BTreeSet::new();
+        for e in &ev[..settled] {
+            if let Some(k) = e["k"].as_u64() {
+                if e["event"] == "page" {
+                    ks.insert(k);
+                } else if e["event"] == "withdrawn" {
+                    ks.remove(&k);
+                }
+            }
+        }
+        (
+            ks,
+            ev[settled..]
+                .iter()
+                .all(|e| e["event"] != "page" && e["event"] != "withdrawn"),
+        )
     }
 
     /// A document of rules, page `i` a rule `widths[i]` wide, with a

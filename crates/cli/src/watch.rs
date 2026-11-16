@@ -1533,10 +1533,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     if let Some(v) = view.as_ref().map(View::viewer) {
         let ui = ui.clone();
         status.meter().on_streamed(Box::new(move |p, pages| {
-            ui.streamed(p.page, p.hash);
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                if p.gone {
+                    v.withdraw_page(k);
+                    return;
+                }
                 v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
+            ui.streamed(p.page, p.hash);
         }));
     }
     // (the diff's session's own status (Compare, made when first asked):
@@ -1551,10 +1555,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             .listen(Box::new(move |p| shown.progress(p)));
         let ui = ui.clone();
         diff_status.meter().on_streamed(Box::new(move |p, pages| {
-            ui.streamed(p.page, p.hash);
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                if p.gone {
+                    v.diff_withdraw_page(k);
+                    return;
+                }
                 v.diff_stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
+            ui.streamed(p.page, p.hash);
         }));
     }
     {

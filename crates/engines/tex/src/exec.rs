@@ -355,6 +355,28 @@ pub struct StreamedPage {
     /// what it has, those it lacks left out (a graphics state, a shading
     /// or pattern, a color space, an external object made later).
     pub exact: bool,
+    /// Page `page` streamed in this evaluation is withdrawn: no page
+    /// that stands is there as it was told (the run that made it was
+    /// refuted: its finisher gone, the pages before it moved, its
+    /// writer gone or made another page), and none streamed since took
+    /// it over. The viewer shows the page its last build has there
+    /// again, or none past those. `hash` 0, `pdf` empty.
+    pub gone: bool,
+}
+
+impl StreamedPage {
+    /// Page `page` (from 1), streamed in evaluation `evaluation`,
+    /// withdrawn ([`StreamedPage::gone`]).
+    fn withdrawn(evaluation: u64, page: u64) -> StreamedPage {
+        StreamedPage {
+            evaluation,
+            page,
+            hash: 0,
+            pdf: Vec::new(),
+            exact: false,
+            gone: true,
+        }
+    }
 }
 
 /// A colour stack command a page's walk meets, in its order: the stack's
@@ -430,6 +452,53 @@ struct Colors {
     /// What was told of each page (from 1) last, its file streamed
     /// ([`Told`]): a page made again as it was told is not told again.
     told: std::collections::BTreeMap<u64, Told>,
+    /// This evaluation's streams, each by the writer that made it (its
+    /// node): the page (from 1) it made last, which page that is
+    /// ([`PageId`]) and its identity ([`Claim`]).
+    claims: FxHashMap<u64, Claim>,
+    /// The writers that streamed in this evaluation, or asked a page's
+    /// file beside it ([`Progress::stream_page_beside`]): those whose
+    /// claims [`Progress::withdraw_gone`] checks.
+    writers: phitex_defuse::FxHashSet<u64>,
+    /// The pages (from 1) told in this evaluation: the ones a refuted
+    /// run may have told ([`Progress::withdraw_gone`]).
+    told_now: std::collections::BTreeSet<u64>,
+}
+
+/// A page a writer streamed in this evaluation ([`Colors::claims`]).
+#[derive(Debug, Clone, Copy)]
+struct Claim {
+    page: u64,
+    id: PageId,
+    hash: u64,
+}
+
+impl Colors {
+    /// Whether page `k` (from 1), told in this evaluation, stands as it
+    /// was told: a writer `live` says is live last made it, with the
+    /// identity told, and its page ([`PageId`]) is still page `k`
+    /// (`page_of`).
+    fn stands(
+        &self,
+        k: u64,
+        live: &dyn Fn(u64) -> bool,
+        page_of: &dyn Fn(PageId) -> Option<u64>,
+    ) -> bool {
+        let Some(t) = self.told.get(&k) else {
+            return false;
+        };
+        self.claims
+            .iter()
+            .any(|(&w, c)| c.page == k && c.hash == t.hash && live(w) && page_of(c.id) == Some(k))
+    }
+
+    /// Page `k` (from 1) withdrawn: nothing of it told, nor waiting to be
+    /// made again from its colours.
+    fn withdraw(&mut self, k: u64) {
+        self.told.remove(&k);
+        self.waiting.remove(&k);
+        self.told_now.remove(&k);
+    }
 }
 
 /// A page told ([`Colors::told`]): its identity, whether exact, the
@@ -592,15 +661,39 @@ impl Progress {
     /// for its page's file, which streams as it is made). `make` owns what
     /// it reads (the values may be collected once the evaluation ends).
     /// Where threads are not (wasm), made here.
-    pub(crate) fn stream_page_beside(self: &Arc<Self>, k: u64, hash: u64, make: MakeFile) {
+    pub(crate) fn stream_page_beside(
+        self: &Arc<Self>,
+        k: u64,
+        hash: u64,
+        writer: (u64, PageId),
+        make: MakeFile,
+    ) {
         if cfg!(target_family = "wasm") {
-            self.stream_page(k, hash, make);
+            self.stream_page(k, hash, writer, make);
             return;
         }
+        // (its writer known to have streamed now, before its file is
+        // made: the evaluation's end checks it, [`Progress::withdraw_gone`])
+        self.colors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .writers
+            .insert(writer.0);
         let me = self.clone();
+        self.beside_job(Box::new(move || me.stream_page(k, hash, writer, make)));
+    }
+
+    /// `run` on the pages' files' thread, after every job asked before
+    /// it ([`PageFiles`]); dropped once a newer evaluation begins. Where
+    /// threads are not (wasm), or none could be made, run here.
+    fn beside_job(self: &Arc<Self>, run: Box<dyn FnOnce() + Send>) {
+        if cfg!(target_family = "wasm") {
+            run();
+            return;
+        }
         let job = BesideJob {
             evaluation: self.evaluation(),
-            run: Box::new(move || me.stream_page(k, hash, make)),
+            run,
         };
         let mut g = self
             .beside
@@ -709,10 +802,17 @@ impl Progress {
     /// exact once it is known to carry none. A page made as it was told
     /// last (the same identity, from the same colours, exact) is not made
     /// or told again: an edit tells the pages it changed.
+    ///
+    /// `writer`: the node that made it and which page it is
+    /// ([`PageId`]). A page the writer told before in this evaluation,
+    /// at another place, that no other stream holds as told, is
+    /// withdrawn ([`StreamedPage::gone`]): the run that made it was
+    /// refuted.
     pub(crate) fn stream_page(
         &self,
         k: u64,
         hash: u64,
+        writer: (u64, PageId),
         make: impl FnOnce(Option<&ColorStart>, Option<u64>) -> Option<Made>,
     ) {
         let Some(h) = self.on_stream.get() else {
@@ -724,6 +824,30 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // (the writer's page now this one: the one it told before,
+            // elsewhere, withdrawn where nothing else holds it)
+            c.writers.insert(writer.0);
+            let before = c.claims.insert(
+                writer.0,
+                Claim {
+                    page: k,
+                    id: writer.1,
+                    hash,
+                },
+            );
+            if let Some(b) = before
+                && b.page != k
+                && c.told_now.contains(&b.page)
+                && !c.stands(b.page, &|_| true, &|id| self.page_of(id.0, id.1))
+            {
+                c.withdraw(b.page);
+                drop(c);
+                (h.page)(StreamedPage::withdrawn(self.evaluation(), b.page));
+                c = self
+                    .colors
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
             c.settle(&order);
             let start = c.start(k).cloned();
             if let Some(st) = &start
@@ -787,6 +911,7 @@ impl Progress {
                     file,
                 },
             );
+            c.told_now.insert(k);
         }
         (h.page)(StreamedPage {
             evaluation: e,
@@ -794,7 +919,75 @@ impl Progress {
             hash,
             pdf,
             exact,
+            gone: false,
         });
+    }
+
+    /// The evaluation's end: each page told in it that does not stand as
+    /// told withdrawn ([`StreamedPage::gone`]). A page stands where a
+    /// writer `live` keeps made it last, with the identity told, at the
+    /// place its page has now ([`Progress::page_of`], the finishers gone
+    /// dropped first: [`Progress::keep_ships`]). A streamed page is the
+    /// page as a run made it, the evaluation's work ahead of what it
+    /// rests on; one whose run was refuted (a finisher of a page an
+    /// edit took out, run before the edit reached it) was told all the
+    /// same, and nothing streamed since was told at its place: the
+    /// viewer had it until the build was in. Checked after the pages'
+    /// files asked so far ([`Progress::stream_page_beside`]).
+    pub(crate) fn withdraw_gone(self: &Arc<Self>, live: impl Fn(u64) -> bool) {
+        self.keep_ships(&live);
+        let live: phitex_defuse::FxHashSet<u64> = {
+            let c = self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if c.told_now.is_empty() {
+                return;
+            }
+            c.writers.iter().copied().filter(|&w| live(w)).collect()
+        };
+        // (after the files asked beside, where any were: in their order;
+        // else here, before the build is in)
+        let beside = self
+            .beside
+            .q
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .started;
+        if beside {
+            let me = self.clone();
+            self.beside_job(Box::new(move || me.withdraw_unstanding(&live)));
+        } else {
+            self.withdraw_unstanding(&live);
+        }
+    }
+
+    /// [`Progress::withdraw_gone`]'s check, the writers `live` those of
+    /// the evaluation that are.
+    fn withdraw_unstanding(&self, live: &phitex_defuse::FxHashSet<u64>) {
+        let Some(h) = self.on_stream.get() else {
+            return;
+        };
+        let gone: Vec<u64> = {
+            let mut c = self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let gone: Vec<u64> = c
+                .told_now
+                .iter()
+                .copied()
+                .filter(|&k| !c.stands(k, &|w| live.contains(&w), &|id| self.page_of(id.0, id.1)))
+                .collect();
+            for &k in &gone {
+                c.withdraw(k);
+            }
+            gone
+        };
+        let e = self.evaluation();
+        for k in gone {
+            (h.page)(StreamedPage::withdrawn(e, k));
+        }
     }
 
     /// Page `k` (from 1) of this build, `id` its identity ([`PageId`]),
@@ -862,6 +1055,7 @@ impl Progress {
                         hash: w.hash,
                         pdf: Vec::new(),
                         exact: true,
+                        gone: false,
                     });
                 }
             } else if let Some((pdf, exact)) = (w.remake)(v, &start) {
@@ -876,6 +1070,7 @@ impl Progress {
                     hash: crate::exec::recolored(w.hash),
                     pdf,
                     exact,
+                    gone: false,
                 });
             }
         }
@@ -1013,11 +1208,16 @@ impl Progress {
     /// An evaluation begins: no jobs known or done, no page streamed in
     /// it waiting for its colours (the last's: its build is in).
     pub(crate) fn begin(&self) {
-        self.colors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .waiting
-            .clear();
+        {
+            let mut c = self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            c.waiting.clear();
+            c.claims.clear();
+            c.writers.clear();
+            c.told_now.clear();
+        }
         self.done.store(0, Ordering::Relaxed);
         self.total.store(0, Ordering::Relaxed);
         self.page.store(0, Ordering::Relaxed);
@@ -1580,4 +1780,92 @@ pub(crate) fn lock_waits() -> Vec<(String, u64, std::time::Duration)> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A progress whose pages streamed are kept as told: each page (from
+    /// 1) and whether it was withdrawn.
+    fn streaming() -> (Arc<Progress>, Arc<std::sync::Mutex<Vec<(u64, bool)>>>) {
+        let p = Arc::new(Progress::new(2));
+        let told: Arc<std::sync::Mutex<Vec<(u64, bool)>>> = Arc::default();
+        let t = told.clone();
+        p.on_stream(StreamHook {
+            page: Box::new(move |s| t.lock().unwrap().push((s.page, s.gone))),
+        });
+        p.set_streaming(true);
+        (p, told)
+    }
+
+    /// Writer `w` of finisher `f`'s only page streams it, `hash` its
+    /// identity, where that page is now.
+    fn stream(p: &Progress, w: u64, f: u64, hash: u64) {
+        let k = p.page_of(f, 0).expect("the finisher's page");
+        p.stream_page(k, hash, (w, (f, 0)), |_, _| {
+            Some(Made::File(vec![1], true, None, hash))
+        });
+    }
+
+    fn take(t: &std::sync::Mutex<Vec<(u64, bool)>>) -> Vec<(u64, bool)> {
+        std::mem::take(&mut *t.lock().unwrap())
+    }
+
+    /// An edit takes page 2 of 4 out. A writer that streamed its page at
+    /// the place its finisher had before the edit reached it (page 4,
+    /// which the edit removes), then made it at its place (page 3), has
+    /// page 4 withdrawn then; the writer of the page taken out, which
+    /// streamed before its finisher was found gone and never ran again,
+    /// has its page withdrawn at the evaluation's end, as no page that
+    /// stands is there as told. The pages that stand are not, nor those
+    /// of an evaluation before.
+    #[test]
+    fn a_page_streamed_by_a_refuted_run_is_withdrawn() {
+        let (p, told) = streaming();
+        p.begin();
+        for (i, f) in [10, 20, 30, 40].into_iter().enumerate() {
+            p.note_ships(f, (i64::try_from(i).unwrap() + 1, false), 1);
+            stream(&p, f + 1, f, f * 100);
+        }
+        p.withdraw_gone(|_| true);
+        assert_eq!(
+            take(&told),
+            [(1, false), (2, false), (3, false), (4, false)]
+        );
+
+        // (the edit: finisher 20 gone; 30 and 40 each a page earlier)
+        p.begin();
+        // (the writer of the page taken out, run again before its
+        // finisher was found gone: told, then gone with it)
+        stream(&p, 21, 20, 2001);
+        // (40's writer, before its finisher's place moved: page 4)
+        stream(&p, 41, 40, 4001);
+        p.note_ships(30, (2, false), 1);
+        stream(&p, 31, 30, 3001);
+        p.note_ships(40, (3, false), 1);
+        stream(&p, 41, 40, 4002);
+        assert_eq!(
+            take(&told),
+            [(2, false), (4, false), (2, false), (4, true), (3, false)]
+        );
+        // (the evaluation's end: 20 and its writer gone; page 2 stands
+        // as 31 told it, page 3 as 41 did)
+        p.withdraw_gone(|n| n != 20 && n != 21);
+        assert_eq!(take(&told), []);
+
+        // (a page told by a writer that is gone at the end, its finisher
+        // with it: withdrawn then)
+        p.begin();
+        p.note_ships(50, (4, false), 1);
+        stream(&p, 51, 50, 5001);
+        assert_eq!(take(&told), [(4, false)]);
+        p.withdraw_gone(|n| n != 50 && n != 51);
+        assert_eq!(take(&told), [(4, true)]);
+        // (told again later, as any page)
+        p.begin();
+        p.note_ships(60, (4, false), 1);
+        stream(&p, 61, 60, 5001);
+        assert_eq!(take(&told), [(4, false)]);
+    }
 }

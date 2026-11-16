@@ -7467,6 +7467,14 @@ impl Build {
         self.dump_claims();
         self.dump_readers();
         crate::timeline::lap("engine: the edit's phases noted");
+        // (the pages streamed that do not stand as told withdrawn, before
+        // the build is in: `Progress::withdraw_gone`)
+        if streaming {
+            self.g
+                .watch
+                .progress
+                .withdraw_gone(|n| self.g.eng.is_live(NodeId::from_raw(n)));
+        }
         self.tell_settled_pages();
         crate::timeline::lap("engine: the pages settled told");
         // (a debug or observe build stops on a defect of the settled
