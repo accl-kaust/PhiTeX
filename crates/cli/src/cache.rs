@@ -225,6 +225,17 @@ impl Cache {
     /// `bytes` stored at `path` (in the cache's directory), whole; then
     /// the least recently used entries evicted to the limit, `keep` kept.
     pub fn put(&self, path: &Path, bytes: &[u8], keep: &[PathBuf]) -> io::Result<()> {
+        self.put_as(path, bytes, keep, false)
+    }
+
+    /// [`Cache::put`], the bytes synced to the disk before the rename: a
+    /// crash leaves the old file or the new one whole (the persisted
+    /// graph's, `phitex_live::graph`).
+    pub fn put_synced(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.put_as(path, bytes, &[path.to_path_buf()], true)
+    }
+
+    fn put_as(&self, path: &Path, bytes: &[u8], keep: &[PathBuf], sync: bool) -> io::Result<()> {
         if self.limit == 0 {
             return Ok(());
         }
@@ -236,7 +247,19 @@ impl Cache {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, bytes)?;
+        if sync {
+            use std::io::Write as _;
+            let wrote = std::fs::File::create(&tmp).and_then(|mut f| {
+                f.write_all(bytes)?;
+                f.sync_all()
+            });
+            if let Err(e) = wrote {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        } else {
+            std::fs::write(&tmp, bytes)?;
+        }
         std::fs::rename(&tmp, path)?;
         let known = {
             let mut k = KNOWN_USAGE

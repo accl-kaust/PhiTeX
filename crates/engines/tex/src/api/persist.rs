@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 const MAGIC: &[u8; 8] = b"PXBUILD\x01";
 /// The client's encoding's version: any change of its layout bumps it.
-const VERSION: u32 = 2;
+const VERSION: u32 = 4;
 const HASH_SEED: u64 = 0x7078_6275_696c_6431;
 
 type R<T> = Result<T, String>;
@@ -448,6 +448,14 @@ impl Build {
     /// tables. Call between evaluations. Nothing of the build changes.
     #[must_use]
     pub fn save(&self) -> Vec<u8> {
+        self.save_timed().0
+    }
+
+    /// [`Build::save`], with how long the client's tables and the
+    /// engine's export took (ms).
+    #[must_use]
+    pub fn save_timed(&self) -> (Vec<u8>, f64, f64) {
+        let t0 = std::time::Instant::now();
         let v = self.g.eng.values();
         let mut e = Enc {
             v,
@@ -459,7 +467,10 @@ impl Build {
         let mut roots = std::mem::take(&mut e.roots);
         roots.sort_unstable();
         roots.dedup();
+        let client_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let t1 = std::time::Instant::now();
         let eng = self.g.eng.export(&roots);
+        let engine_ms = t1.elapsed().as_secs_f64() * 1e3;
         let mut out = Vec::with_capacity(8 + 4 + 8 + eng.len() + 16 + client.len());
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
@@ -468,7 +479,7 @@ impl Build {
         out.extend_from_slice(&(client.len() as u64).to_le_bytes());
         out.extend_from_slice(&phitex_defuse::hash_bytes(HASH_SEED, &client).to_le_bytes());
         out.extend_from_slice(&client);
-        out
+        (out, client_ms, engine_ms)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -764,6 +775,26 @@ impl Build {
         // (the link's pages and read-time commands, docs/spec-persisted-graph.md
         // §2.2.4)
         crate::pdfout::save_link(e, &o.pdf_cmds);
+        e.tag(14);
+        // (the pages' glyph origins, where they are kept: what their
+        // writers showed, the SyncTeX file's and the viewer's source)
+        e.b(o.origins.load(Relaxed));
+        if o.origins.load(Relaxed) {
+            crate::origins::save_kept(e, e.v.instance(), &self.shown_ids());
+        }
+    }
+
+    /// The pages' identities in the link, in order (`pdfout::SHOWN`).
+    fn shown_ids(&self) -> Vec<u64> {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
+            .and_then(|x| v.seq_to_vec(x).first().map(|&l| crate::val::list_of(v, l)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| u64::from_ne_bytes(crate::val::int_of(v, x).to_ne_bytes()))
+            .collect()
     }
 
     /// A build of the bytes [`Build::save`] wrote, in this process, with
@@ -1186,6 +1217,10 @@ impl Build {
         crate::pic::learn(&refused, &many);
         d.tag(13)?;
         let link = crate::pdfout::load_link(&mut d)?;
+        d.tag(14)?;
+        if d.b()? {
+            crate::origins::load_kept(&mut d, v.instance())?;
+        }
         if d.i != client.len() {
             return Err("bytes left after the client's tables".into());
         }
@@ -1269,4 +1304,164 @@ impl Build {
         self.settle();
         self.stats.nodes_run
     }
+
+    /// The output file's node run again with its text (its product
+    /// compared as any run's): what its writer read outside the
+    /// environment moved (XeTeX's PDF writer's files, a picture or a font
+    /// it embeds, as a loaded graph finds them, `phitex_live::graph`),
+    /// for the next evaluation.
+    pub fn relink(&mut self) {
+        let args = self
+            .g
+            .eng
+            .node_info(self.dvi)
+            .map(|i| i.args)
+            .unwrap_or_default();
+        self.g.eng.replace(self.dvi, self.g.dvi, args);
+        self.staged = true;
+    }
+
+    /// [`Build::reask_environment`]'s tools' files: each the build holds
+    /// (pushed as its own, so no stat key of the session's keys it and the
+    /// provider's re-ask of its answers does not reach it) asked of the
+    /// provider again, by its search; one that moved, came or went pushed,
+    /// its readers re-asked.
+    fn reask_tools(&mut self, out: &mut EnvReask) {
+        let tools: Vec<(Field, Option<ValueId>)> = {
+            let v = self.g.eng.values();
+            let is_tool = |f: Field| v.with_str(f.0, |n| n.starts_with("tfile:")) == Some(true);
+            self.g
+                .files
+                .iter()
+                .map(|&(f, x)| (f, Some(x)))
+                .chain(self.g.absent.iter().map(|&f| (f, None)))
+                .filter(|&(f, _)| is_tool(f))
+                .collect()
+        };
+        let mut moved = false;
+        for (f, held) in tools {
+            out.asked += 1;
+            let now = self.g.eng.ask_provider(f);
+            if now == held {
+                continue;
+            }
+            out.moved
+                .push(crate::val::field_name(self.g.eng.values(), f));
+            self.g.files.retain(|&(h, _)| h != f);
+            self.g.absent.retain(|&h| h != f);
+            match now {
+                Some(x) => self.g.files.push((f, x)),
+                None => self.g.absent.push(f),
+            }
+            moved = true;
+        }
+        if moved {
+            let env = self.g.environment(self.opts.fixpoint);
+            self.g.push_env_as(env, true);
+            self.staged = true;
+        }
+    }
+
+    /// A loaded build's environment as this process gives it
+    /// (docs/spec-persisted-graph.md §3.3), what moved staged as an edit's
+    /// change is, for the next evaluation:
+    /// - the job's bindings made again from the options (the date where
+    ///   `SOURCE_DATE_EPOCH` gives none, the job's name, the TCX);
+    /// - every answer the provider made of something outside the format
+    ///   and the code ([`Graph::outside_answer`]) asked of it again
+    ///   ([`phitex_defuse::Engine::reask_provided`]), a tool's file and a
+    ///   cut file's lines among them, but the files the build holds by
+    ///   their names (the session's manifest: their stat keys, their
+    ///   names resolved again, [`Build::stage_file`] where one moved).
+    ///   The rest, the format's (its bindings, the fields it does not
+    ///   bind) and the code's, are keyed by the format's key and the
+    ///   engine's identity.
+    ///
+    /// Call between [`Build::load`] and the first evaluation.
+    pub fn reask_environment(&mut self) -> EnvReask {
+        let mut out = EnvReask::default();
+        // (the job's bindings)
+        if let Some(base) = self.g.env_base.clone() {
+            let v = self.g.eng.values();
+            let fresh = super::by_field(super::job_sets(v, &base, &self.opts));
+            if fresh != self.g.job {
+                out.moved.extend(
+                    fresh
+                        .iter()
+                        .filter(|e| !self.g.job.contains(e))
+                        .map(|&(f, _)| crate::val::field_name(v, f)),
+                );
+                self.g.job = fresh;
+                let env = self.g.environment(self.opts.fixpoint);
+                self.g.push_env_as(env, true);
+                self.staged = true;
+            }
+        }
+        // (the provider as an evaluation installs it)
+        let finder = self.opts.finder.clone();
+        self.g.provide(&finder);
+        self.reask_tools(&mut out);
+        let v = self.g.eng.values();
+        let held: phitex_defuse::FxHashSet<Field> = self
+            .g
+            .files
+            .iter()
+            .map(|&(f, _)| f)
+            .chain(self.g.absent.iter().copied())
+            .filter(|&f| v.with_str(f.0, |n| !n.starts_with("tfile:")) == Some(true))
+            .collect();
+        let (asked, moved) = self.g.eng.reask_provided(&|f| {
+            held.contains(&f) || v.with_str(f.0, Graph::outside_answer) != Some(true)
+        });
+        out.asked += asked;
+        out.moved
+            .extend(moved.iter().map(|&(f, _)| crate::val::field_name(v, f)));
+        // (a moved field the client holds, a tool's file: its table and
+        // what it last pushed take the new answer, so the next push finds
+        // nothing changed in it)
+        for &(f, x) in &moved {
+            let g = &mut self.g;
+            g.files.retain(|&(h, _)| h != f);
+            g.absent.retain(|&h| h != f);
+            match x {
+                Some(x) => g.files.push((f, x)),
+                None => g.absent.push(f),
+            }
+            match (
+                g.env_pushed
+                    .binary_search_by_key(&f.0.raw(), |e| e.0.0.raw()),
+                x,
+            ) {
+                (Ok(i), Some(x)) => g.env_pushed[i].1 = x,
+                (Ok(i), None) => {
+                    g.env_pushed.remove(i);
+                }
+                (Err(i), Some(x)) => g.env_pushed.insert(i, (f, x)),
+                (Err(_), None) => {}
+            }
+            if x.is_none() {
+                if let Err(i) = g
+                    .absent_pushed
+                    .binary_search_by_key(&f.0.raw(), |h| h.0.raw())
+                {
+                    g.absent_pushed.insert(i, f);
+                }
+            } else {
+                g.absent_pushed.retain(|&h| h != f);
+            }
+        }
+        if !moved.is_empty() {
+            self.staged = true;
+        }
+        out
+    }
+}
+
+/// What [`Build::reask_environment`] found: the provider's answers asked
+/// again, and the fields that moved (the job's bindings' and the
+/// provider's), by name.
+#[derive(Debug, Default, Clone)]
+pub struct EnvReask {
+    pub asked: usize,
+    pub moved: Vec<String>,
 }

@@ -466,11 +466,13 @@ fn file_mtime(r: &mut Run<'_, '_>, key: &str) -> R<Option<i64>> {
     let Some(&p) = list_of(v, x).first() else {
         return Ok(None);
     };
-    Ok(std::fs::metadata(str_of(v, p))
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|d| i64::try_from(d.as_secs()).ok()))
+    // (the environment's answer for the file's path, `fdate:<path>`
+    // (`crate::api`'s provider): a read the run records, so a file whose
+    // time moved runs its readers again, as its text's change does. Read
+    // from the disk here, it was no read of the run's: a touched file
+    // kept a watch's, or a loaded graph's, old date)
+    let f = v.field(&format!("{}{}", crate::api::FILE_DATE, str_of(v, p)));
+    Ok(r.cx.env(f)?.map(|t| int_of(v, t)))
 }
 
 /// A file's size in bytes, as [`file_bytes`] finds it. A document file

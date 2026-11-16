@@ -47,6 +47,14 @@ pub trait Host: Send + Sync {
         }
     }
 
+    /// Where the file a finder's key names is now, for a check of where it
+    /// was found before ([`crate::graph`]: a loaded graph's inputs): the
+    /// answer [`Host::locate_key`] gives, which a host may make without
+    /// fetching the file (Shelf's: from the release's index).
+    fn relocate(&self, key: &str) -> Option<PathBuf> {
+        self.locate_key(key)
+    }
+
     /// The bytes of the file at `path` (as [`Host::locate`] found it, or
     /// as a diagnostic names it); none: not readable.
     fn read(&self, path: &Path) -> Option<Vec<u8>>;
@@ -217,6 +225,14 @@ pub trait Host: Send + Sync {
         0
     }
 
+    /// What names the files' release the host serves, beyond the
+    /// files' own keys ([`Host::stamp`]): Shelf's release, whose packs'
+    /// files all have one stamp; TeX Live's trees. A persisted graph
+    /// ([`crate::graph`]) is kept by it. Empty: none.
+    fn release(&self) -> String {
+        String::new()
+    }
+
     /// A cold build's engine began, its progress `progress` (a host may
     /// watch it from outside, the CLI's `PHITEX_SNAPSHOT_SECS`).
     fn progress(&self, _progress: &Arc<phitex_tex::Progress>) {}
@@ -238,6 +254,21 @@ pub trait Store: Send + Sync {
     /// Format `name`'s evaluated state and the key it was stored with.
     fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)>;
     fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]);
+    /// [`Store::put`], durable: written whole where a crash leaves the
+    /// old bytes or the new ones, never a mix (the CLI's: a temporary
+    /// file, synced, renamed). The persisted graph's
+    /// ([`crate::graph`]).
+    fn put_durable(&self, key: Key<'_>, bytes: &[u8]) {
+        self.put(key, bytes);
+    }
+    /// Record `key` removed (a graph file refused: never read again).
+    fn remove(&self, _key: Key<'_>) {}
+    /// Record `key` held against other processes until the guard is
+    /// dropped: alone (`write`, a save) or shared (a read). None: the
+    /// host has no locks (one process).
+    fn lock(&self, _key: Key<'_>, _write: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
 }
 
 /// The version of the encodings this crate gives the document's records
@@ -306,6 +337,31 @@ impl Records {
         self.store.format(name)
     }
 
+    /// The persisted graph's file ([`crate::graph`]): unstamped, its own
+    /// head keys it (the engine among its keys).
+    #[must_use]
+    pub fn graph(&self) -> Option<Vec<u8>> {
+        self.store.get(Key::Doc("graph"))
+    }
+
+    /// The persisted graph's file stored, durably.
+    pub fn put_graph(&self, bytes: &[u8]) {
+        self.store.put_durable(Key::Doc("graph"), bytes);
+    }
+
+    /// The persisted graph's file removed (refused).
+    pub fn remove_graph(&self) {
+        self.store.remove(Key::Doc("graph"));
+    }
+
+    /// The persisted graph's file held against other processes: to
+    /// write it (alone), or to read it (shared): a load waits for a save
+    /// in flight ([`Store::lock`]).
+    #[must_use]
+    pub fn lock_graph(&self, write: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        self.store.lock(Key::Doc("graph"), write)
+    }
+
     pub fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {
         self.store.put_format(name, key, bytes);
     }
@@ -348,6 +404,12 @@ pub trait Sink: Send + Sync {
     /// # Errors
     /// Why it could not be written.
     fn put(&self, name: &str, bytes: &[u8], hash: u64) -> Result<PathBuf, String>;
+
+    /// From now on a file the outputs' place holds with the same bytes,
+    /// written by an earlier process, is left as it is (not written
+    /// again, its time and key kept): the session's build is the graph an
+    /// earlier session saved ([`crate::graph`]). Nothing by default.
+    fn keep_same(&self) {}
 
     /// The main output (the PDF or DVI), shared, its fingerprint `hash`:
     /// a host may write only what changed since the last it wrote.

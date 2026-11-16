@@ -555,14 +555,31 @@ impl Host for ShelfHost {
         crate::review::fed(path, bytes);
     }
 
-    /// A pack's file: its release's, the same for the session; the
-    /// project's: as on disk ([`crate::session::disk_stamp`]).
+    /// A pack's file: its key in the release's index (its content sum,
+    /// else its pack's id), nothing fetched; the project's: as on disk
+    /// ([`crate::session::disk_stamp`]).
     fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
         let s = path.to_string_lossy();
-        if s.starts_with(phitex_shelf::TL) {
-            return self.files.read(&s).is_some().then(|| b"shelf".to_vec());
+        if let Some(rel) = s.strip_prefix(phitex_shelf::TL) {
+            let ix = self.files.index();
+            return ix
+                .sum_of(rel)
+                .or_else(|| ix.pack_of(rel))
+                .map(|k| [b"shelf:".as_slice(), k.as_bytes()].concat());
         }
         crate::session::disk_stamp(path)
+    }
+
+    /// [`Host::locate_key`]'s answer from the release's index, nothing
+    /// fetched: the project's file, else the index's path.
+    fn relocate(&self, key: &str) -> Option<PathBuf> {
+        let tl = |rel: &str| PathBuf::from(format!("{}{rel}", phitex_shelf::TL));
+        match phitex_tex::font_name(key) {
+            Some(name) => project(name).or_else(|| self.files.path_of(name).map(tl)),
+            None => along(self.inputs.tex.as_ref(), key, Some, || {
+                project(key).or_else(|| self.files.path_in(key, "tex").map(tl))
+            }),
+        }
     }
 
     fn same_file(&self, a: &str, b: &str) -> bool {
@@ -574,6 +591,11 @@ impl Host for ShelfHost {
 
     fn canonical(&self, path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Shelf's release: a pack's files all have one stamp.
+    fn release(&self) -> String {
+        format!("Shelf {}", self.files.index().release())
     }
 
     /// A pack's file (the cache's fonts too).

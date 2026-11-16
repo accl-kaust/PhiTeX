@@ -106,7 +106,13 @@ fn env_value_shared(eng: &Engine, f: Field) -> (u64, Option<ValueId>) {
             .as_ref()
             .and_then(|p| p(eng.values(), f))
             .flatten();
-        eng.env.values.write().entry(f).or_insert(x);
+        // (the provider's answer: asked again on a load,
+        // `Engine::reask_provided`)
+        let mut vals = eng.env.values.write();
+        if let std::collections::hash_map::Entry::Vacant(e) = vals.entry(f) {
+            e.insert(x);
+            eng.env.provided.write().insert(f);
+        }
         x
     });
     eng.env.asking.lock().remove(&f);

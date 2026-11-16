@@ -2,7 +2,9 @@
 
 Status: step 1 (the engine's export and import) and step 2 (the
 client's tables, `Build::save` / `Build::load` in process, §2.2, §12)
-built, with pdfTeX's link state (step 2b, §2.2.4). Branch
+built, with pdfTeX's link state (step 2b, §2.2.4); step 3 (the cache
+file, its keys, the environment re-ask, across processes behind
+`PHITEX_GRAPH=1`, §13) built. Branch
 `persist-design`: the design's observe-only probe (`PHITEX_PERSIST_PROBE`). It builds on
 docs/note-persisted-graph.md (the 11-01 design note),
 docs/spec-seeded-reads.md (branch `seeded-r2`: why seeding definitions alone
@@ -740,3 +742,143 @@ written files, at -j1 and -j8, after the cold build and after every
 scripted edit (amsldoc's every edit kind, three word edits of the
 others). The client's analysis (the document's and the cut files'
 `Incr`, made again) is most of the client's load time (23-86 ms).
+
+## 13. Step 3: what was built and measured
+
+**The file** (crates/editor/live/src/graph.rs): `docs/ID/graph` (beside
+`noderec`, a job named otherwise with its own), written to a temporary
+file, synced and renamed (`Store::put_durable`, the CLI's
+`Cache::put_synced`). Head: magic, version, the payload's length, 1 MiB
+chunks each hashed (`tex::words_hash`: a one-word difference, a flipped
+bit, always changes it); payload: the keys by name, the format's key, the
+manifest, the build (`Build::save`). A short or long file, a hash wrong,
+a part out of range: refused before anything is decoded, the file
+removed, a clean build. Unit test `a_cut_or_flipped_graph_file_is_refused`
+cuts it at every chunk bound and flips every bit of its head and hashes
+and a spread of its payload's.
+
+**Keys** (`Session::graph_key`, taken at the session's first build and
+kept for its save): the engine (`engine_id`), the file's version, the
+files' release (`Host::release`: Shelf's release; TeX Live's trees), the
+engine's name and output, `-ini`, the main file and the output directory
+(canonical), the job name, `--spec`, wait-long, node records, SyncTeX,
+origins, shell escape, the fixpoint, the job's search paths, the live
+layout, every variable of `graph::KEY_VARS` (`SOURCE_DATE_EPOCH`,
+`FORCE_SOURCE_DATE`, `TEXINPUTS`, `TEXMFHOME`, `BIBINPUTS`, `BSTINPUTS`,
+`TEXMF_OUTPUT_DIRECTORY`, and the engine's switches that change a
+product or the graph's shape), XeTeX's font index; then the format's key
+against the store's format before decoding and the build's after. Not
+`-j`. A refusal names the key (`-v`: "graph: not loaded: its key
+`$SOURCE_DATE_EPOCH` differs").
+
+**The manifest**: the main text the build is for, every name the builds
+asked the finder for (found or not, where, whether the document's), the
+stat keys taken when each was read, and what XeTeX's fonts and PDF writer
+looked up and read through the host outside the environment
+(`graph::KeyedFonts`, `keyed_dpx`: each lookup's answer, each file's key
+when read).
+
+**A load** (`Session::load_graph`, the session's first build, before
+anything else is read):
+1. keys; the format's key;
+2. the files read outside the environment: a font file of the engine's
+   (its runs shaped with it, unrecorded) moved or found elsewhere refuses
+   the load; one of the PDF writer's (a picture XeTeX embeds) makes the
+   output file again (`Build::relink`);
+3. `Build::load`; the session's tables from the manifest;
+4. every name resolved again (`Host::relocate`: Shelf's from its index,
+   nothing fetched) and every file found keyed again: a name found
+   elsewhere now (a document's `.sty` shadowing the distribution's), one
+   found now and not then (but where the job wrote it), a stat key moved:
+   staged, as a watch stages a changed file (its content compared in
+   place: the same bytes, no change);
+5. `Build::reask_environment`: the job's bindings made again from the
+   options (the date where `SOURCE_DATE_EPOCH` gives none; XeTeX's PDF
+   date is now the job's `epoch` binding, read by the output node, so a
+   moved date links again); every answer the provider made of something
+   besides the format and the code (`Graph::outside_answer`: files, a
+   tool's files, a cut file's lines) and not keyed by the manifest asked
+   of it again (`Engine::reask_provided`, the provider's fields marked as
+   such in the environment, exported: the engine's bytes version 4), what
+   moved re-asking its readers (`Cause::Environment`);
+6. the first build is then an edit of the main text against the saved
+   one. Nothing moved and no node run: the file is kept (no save), and
+   outputs already on disk with the same bytes are left as they are
+   (`Sink::keep_same`).
+
+**Saved since step 2**: the pages' glyph origins (`origins::save_kept`:
+what each page's writer showed, its pieces, its objects' codes; the
+client's bytes version 3). A page's writer runs again only when the page
+changes, so a loaded build's SyncTeX file held only the edited pages
+(amsldoc: 1 481 lines of 22 566) until they were saved.
+
+**The save** (`Session::save_graph`): after the outputs are written and
+the report said. A synchronous save cost para4000 +30 % of its clean
+build at -j8 (encoding 220 ms, writing 58 MB 125 ms), so `phitex build`
+with `PHITEX_GRAPH=1` runs the build in a worker (this program again,
+`PHITEX_GRAPH_DONE`), which writes its exit status for the process
+waiting on it once everything is said, then saves holding the file's
+lock (`Store::lock`, the CLI's `graph.lock`), which the next load waits
+for. `PHITEX_GRAPH=sync` saves in process. A watch saves when it ends.
+
+**Gate**: `scripts/accl/gate-fast persist COMMIT N J process`
+(`gate-shard.sh persist-process`, `scripts/ci/graphsweep.py`): per
+research document at -j J, `phitex build` processes in one folder and
+cache: clean (saved); unchanged (loaded, 0 nodes); three words typed; a
+`.bib` title edited; a picture replaced; the document class shadowed by
+a copy in the folder (it says so in the log); the other -j unchanged;
+again; the file cut, then a bit flipped (refused); `SOURCE_DATE_EPOCH`
+changed (refused by its key). PDF, log, aux and SyncTeX byte-identical to
+a clean build of the same files in the same folder.
+
+
+## 14. Step 3 status (2026-11-16, stopped by the user before merge)
+
+Branch `persist3b`, not merged to dev. The feature sits behind `PHITEX_GRAPH`, which is off by default (`=1` saves through a detached worker, `=sync` saves in process).
+
+**Green** at 886f454f3 (rebased on dev 553b1df76):
+- gate-fast: mc 88086.
+- Second-process sweep at -j1: all 69 documents (mc 88087-91).
+- Second-process sweep at -j8: 68 of 69 documents (mc 88092-95).
+- Unit tests: `graph` (file cut or flipped), `document::a_session_loads_the_graph_the_last_one_saved`, and `inputs::a_touched_files_date_is_read_again` (red on dev, green here).
+
+**Red, open:** revtex-aps-xe at -j8, the step that edits the `.bib` after a load.
+- It failed 1 of 4 at the branch head and was green at 444a54a97.
+- The loaded build runs 159 nodes in 2 rounds and writes two `\bibcite` lines of the `.aux` later than a clean build does. The PDF differs, and the result is the same wrong one every time it fails.
+- It did not reproduce on n11, where the history was run the same way (`--shelf`).
+- The likely cause is the -j8 edit path when the `.bbl` changes, with a write order that depends on the schedule. This is not settled: the next step is a watch at -j8 that edits the same `.bib` with no graph.
+- The shadow step after it compares against the previous step, so it is red as a consequence.
+- This blocks the merge rule ("green on all 69").
+
+**Found and filed, not graph bugs:**
+- #43: a second `phitex build` in a used folder logs differently. The seeded `.aux` is read per field, and the nested part `.aux` reads are dropped. Seen on dev. The sweep's refused steps now compare against a clean build of the same folder, as its doc always said.
+- #44: `defer::a_name_built_from_a_stepped_counter_reads_through_the_name` fails under load. It does so on dev too.
+- #33 (pictures test) is already known.
+
+**Fixed this round:**
+- Glyph codes are saved as deltas (client v4): para4000 went from 114 MB to 98 MB. Every `phitex build` makes origins, because the view is on by default.
+- A moved input's place is now taken into the session's table at load. Before, every later load found the shadowing class "moved" again.
+- The harness keeps the history's own terminal output.
+
+**Timings**, n11 local disk, fastdev binary of 886f454f3, medians of 5, seconds.
+- Columns:
+  - A: clean build.
+  - A2: today's second build, no graph.
+  - B: clean build that saves the graph asynchronously.
+  - S: clean build that saves the graph synchronously.
+  - C: unchanged build with the graph loaded.
+  - D: one-word edit with the graph loaded.
+- The Grail D column is a word in `evaluation.tex`, which changes the PDF. The word in the main file did not change it.
+
+| doc | -j | A | A2 | B | S | C | D | sync save | graph |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| amsldoc | 1 | 7.86 | 1.49 | 7.87 | 8.05 | 0.42 | 0.47 | 195 ms | 29.4 MB |
+| amsldoc | 8 | 8.17 | 1.78 | 8.15 | 8.50 | 0.36 | 0.40 | 210-243 ms | 30.1 MB |
+| acm | 1 | 8.67 | 1.77 | 8.63 | 8.86 | 0.40 | 0.50 | 203 ms | 35.9 MB |
+| acm | 8 | 8.49 | 1.78 | 8.45 | 8.54 | 0.39 | 0.49 | 211 ms | 36.2 MB |
+| Grail | 1 | 21.16 | 8.47 | 21.05 | 21.63 | 0.83 | 1.01 | 476 ms | 61.2 MB |
+| Grail | 8 | 19.04 | 7.61 | 18.84 | 19.07 | 0.83 | 1.02 | 489 ms | 63.2 MB |
+| para4000 | 1 | 2.40 | 1.77 | 2.43 | 2.90 | 0.65 | 0.62 | 502 ms | 98.2 MB |
+| para4000 | 8 | 1.32 | 0.69 | 1.36 | 1.84 | 0.61 | 0.58 | 506 ms | 98.3 MB |
+
+The asynchronous save costs a clean build at most +3% wall (para4000 at -j8), within the +5% bar. The synchronous save costs up to +39%, which is why the save is asynchronous.

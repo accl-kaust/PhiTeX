@@ -39,7 +39,7 @@ use crate::values::{Field, FxHashMap, Value, ValueId, Values, hash_bytes};
 
 const MAGIC: &[u8; 8] = b"PXGRAPH\x01";
 /// The encoding's version: any change of the bytes' layout bumps it.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HASH_SEED: u64 = 0x7078_6772_6170_6831;
 
 const C_VALUES: u32 = 1;
@@ -665,6 +665,7 @@ struct Decoded {
     settled: Vec<crate::api::Settled>,
     finals: Vec<(Field, Option<Reaching>, bool, bool)>,
     env: Vec<(Field, Option<ValueId>)>,
+    env_provided: Vec<Field>,
     env_changes: u64,
     scalars: [u64; 6],
     has_finals: bool,
@@ -772,10 +773,13 @@ impl Engine {
         }
         {
             let env = self.env.values.read();
+            let provided = self.env.provided.read();
             put(&mut meta, env.len() as u64);
             for (f, x) in env.iter() {
                 put(&mut meta, t.put(f.0));
                 put(&mut meta, t.opt(*x));
+                // (the provider's answer, or the client's setting)
+                meta.push(u8::from(provided.contains(f)));
             }
             put(&mut meta, self.env.changes.load(Ordering::Acquire));
         }
@@ -1097,9 +1101,13 @@ impl Engine {
         }
         let k = c.count(2)?;
         let mut env = Vec::with_capacity(k);
+        let mut env_provided = Vec::new();
         for _ in 0..k {
             let f = vals.field(&mut c)?;
             env.push((f, vals.opt(&mut c)?));
+            if c.byte()? != 0 {
+                env_provided.push(f);
+            }
         }
         let env_changes = c.u()?;
         let mut scalars = [0u64; 6];
@@ -1298,6 +1306,7 @@ impl Engine {
                 .collect::<R<Vec<_>>>()?,
             finals,
             env,
+            env_provided,
             env_changes,
             scalars,
             has_finals,
@@ -1342,6 +1351,7 @@ impl Engine {
         {
             let mut env = self.env.values.write();
             env.extend(d.env);
+            self.env.provided.write().extend(d.env_provided);
             self.env.changes.store(d.env_changes, Ordering::Release);
         }
         // (the units and segments)

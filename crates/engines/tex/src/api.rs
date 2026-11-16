@@ -24,7 +24,7 @@ use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
-pub use persist::LoadStats;
+pub use persist::{EnvReask, LoadStats};
 
 /// Finds a file by the name TeX asks for: the name to print and the
 /// bytes. The key is TeX's own lookup (`\\input`, `\\openin`,
@@ -40,6 +40,20 @@ pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 /// `tex` format, so `\\input CJK.enc` reads TEXINPUTS's `CJK.enc`, not an
 /// encoding of ENCFONTS's: two lookups, two keys.
 pub const FONT_KEY: &str = "\u{1}font:";
+
+/// The environment's field of a file's modification time (seconds),
+/// by its path: `fdate:<path>` (`\pdffilemoddate`'s, [`Graph::provide`]).
+pub(crate) const FILE_DATE: &str = "fdate:";
+
+/// The modification time (seconds since the epoch) of the file at
+/// `path` on this machine's disk; none where it has none.
+fn file_date(path: &str) -> Option<i64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+}
 
 /// pdfTeX's banner as its terminal's first line begins: `\pdftexbanner`
 /// without kpathsea's version.
@@ -3666,6 +3680,21 @@ impl Graph {
         }
     }
 
+    /// Whether the provider's answer for field `name` is made of something
+    /// besides the format and this code ([`Graph::provide`]): the files
+    /// (`file:`, `dfile:`, `fsize:`, a tool's `tfile:`, a file's time
+    /// [`FILE_DATE`]) and the lines a cut file's pieces are given
+    /// (`dline:`). Every other answer (the
+    /// format's bindings, a box register's default, a field the format
+    /// does not bind) is the format's and the code's, keyed by them: a
+    /// loaded graph asks again only these ([`Build::reask_environment`]).
+    /// Every kind the provider answers is listed here.
+    pub(crate) fn outside_answer(name: &str) -> bool {
+        ["file:", "dfile:", "fsize:", "tfile:", "dline:", FILE_DATE]
+            .iter()
+            .any(|p| name.starts_with(p))
+    }
+
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
@@ -3750,6 +3779,12 @@ impl Graph {
                     }
                     val
                 }));
+            }
+            // (a file's time by its path, `\\pdffilemoddate`'s, [`FILE_DATE`]:
+            // its modification time in seconds, none where no disk here has
+            // it)
+            if let Some(path) = field.strip_prefix(FILE_DATE) {
+                return Some(file_date(path).map(|t| v.int(t)));
             }
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
@@ -7615,6 +7650,23 @@ impl Build {
         // dropped and the nodes whose loads list it ran again, its value
         // made anew first, Grail's `r` 7 s)
         let unchanged = self.restage_unchanged(name, held, f_absent, cut, found.as_ref());
+        // (its time, where a run asked it (`\\pdffilemoddate`, [`FILE_DATE`]),
+        // asked again at its path then and now: a file touched, its bytes
+        // the same, moves it alone)
+        {
+            let v = self.g.eng.values();
+            let mut dates: Vec<Field> = old
+                .first()
+                .map(|&p| str_of(v, p))
+                .into_iter()
+                .chain(found.as_ref().map(|(p, _)| p.clone()))
+                .map(|p| v.field(&format!("{FILE_DATE}{p}")))
+                .collect();
+            dates.dedup();
+            if self.g.eng.reask_answers(&dates) > 0 {
+                self.staged = true;
+            }
+        }
         // (`PHITEX_STAGE_TRACE`, observe: each file staged, what the build
         // held of it and whether it changed)
         if crate::exec::obs_flag!("PHITEX_STAGE_TRACE") {
@@ -10908,6 +10960,30 @@ fn job_env(
         base
     };
     let v = g.eng.values();
+    let sets = job_sets(v, &base, opts);
+    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
+        // (the check reads the format's bindings too: all of them made)
+        g.start_env.extend(
+            env.bindings(v, made, 0..env.len())
+                .iter()
+                .chain(&sets)
+                .copied(),
+        );
+    }
+    // (spec-final §4.5: the job's bindings go with the environment, one
+    // push for all of them, made again only where an entry changed; the
+    // graph has one unit, so the unit's start and the environment are
+    // one place to read them)
+    let _ = unit;
+    g.job = by_field(sets);
+    let env = g.environment(opts.fixpoint);
+    g.push_env(env);
+}
+
+/// The job's bindings (its name, program, date, shell escape, TCX), as
+/// the options give them over the format's (`base`): [`job_env`]'s, and
+/// a loaded build's made again ([`Build::reask_environment`]).
+fn job_sets(v: &Values, base: &EnvBase, opts: &Options) -> Vec<(Field, ValueId)> {
     let mut sets = vec![
         (v.field("jobname"), v.str(&opts.jobname)),
         (v.field(PROGRAM), v.str(&opts.program)),
@@ -10941,24 +11017,10 @@ fn job_env(
         for (k, x) in date_params(t) {
             sets.push((v.field(k), v.int(x)));
         }
+        // (the date whole, for XeTeX's PDF, `crate::xdvpdf::file`)
+        sets.push((v.field(crate::xdvpdf::EPOCH), v.int(t)));
     }
-    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-        // (the check reads the format's bindings too: all of them made)
-        g.start_env.extend(
-            env.bindings(v, made, 0..env.len())
-                .iter()
-                .chain(&sets)
-                .copied(),
-        );
-    }
-    // (spec-final §4.5: the job's bindings go with the environment, one
-    // push for all of them, made again only where an entry changed; the
-    // graph has one unit, so the unit's start and the environment are
-    // one place to read them)
-    let _ = unit;
-    g.job = by_field(sets);
-    let env = g.environment(opts.fixpoint);
-    g.push_env(env);
+    sets
 }
 
 /// `base` with `over` over it, both by field with each field once: by

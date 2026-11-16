@@ -1803,6 +1803,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (the records the builds changed, stored before the watch ends;
         // the exact PDF file and, with `--log`, the log)
         s.flush_records();
+        // (the persisted graph, `PHITEX_GRAPH=1`, docs/spec-persisted-graph.md
+        // step 3: saved as the watch ends, its build quiet)
+        let _ = s.save_graph();
+        modern::graph_notes(s, o, ui);
         if let Some(u) = &s.updates()
             && let Err(e) = session::compact(u)
         {
