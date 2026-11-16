@@ -1226,7 +1226,7 @@ impl Session {
             return Some(l);
         }
         let t0 = Instant::now();
-        let body = b.save();
+        let (body, client_ms, engine_ms) = b.save_timed();
         let enc_ms = t0.elapsed().as_secs_f64() * 1e3;
         let m = crate::graph::Manifest {
             text: self.built_text.as_deref().unwrap_or_default().to_owned(),
@@ -1261,7 +1261,7 @@ impl Session {
         let t1 = Instant::now();
         store.put_graph(&bytes);
         let l = format!(
-            "graph: saved {:.1} MB in {:.0} ms (encoded {enc_ms:.0}, written {:.0})",
+            "graph: saved {:.1} MB in {:.0} ms (encoded {enc_ms:.0}: the client's {client_ms:.0}, the engine's {engine_ms:.0}; written {:.0})",
             bytes.len() as f64 / 1e6,
             t0.elapsed().as_secs_f64() * 1e3,
             t1.elapsed().as_secs_f64() * 1e3,

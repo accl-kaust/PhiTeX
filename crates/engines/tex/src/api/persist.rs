@@ -448,6 +448,14 @@ impl Build {
     /// tables. Call between evaluations. Nothing of the build changes.
     #[must_use]
     pub fn save(&self) -> Vec<u8> {
+        self.save_timed().0
+    }
+
+    /// [`Build::save`], with how long the client's tables and the
+    /// engine's export took (ms).
+    #[must_use]
+    pub fn save_timed(&self) -> (Vec<u8>, f64, f64) {
+        let t0 = std::time::Instant::now();
         let v = self.g.eng.values();
         let mut e = Enc {
             v,
@@ -459,7 +467,10 @@ impl Build {
         let mut roots = std::mem::take(&mut e.roots);
         roots.sort_unstable();
         roots.dedup();
+        let client_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let t1 = std::time::Instant::now();
         let eng = self.g.eng.export(&roots);
+        let engine_ms = t1.elapsed().as_secs_f64() * 1e3;
         let mut out = Vec::with_capacity(8 + 4 + 8 + eng.len() + 16 + client.len());
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
@@ -468,7 +479,7 @@ impl Build {
         out.extend_from_slice(&(client.len() as u64).to_le_bytes());
         out.extend_from_slice(&phitex_defuse::hash_bytes(HASH_SEED, &client).to_le_bytes());
         out.extend_from_slice(&client);
-        out
+        (out, client_ms, engine_ms)
     }
 
     #[allow(clippy::too_many_lines)]
