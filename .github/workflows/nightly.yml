@@ -221,8 +221,16 @@ jobs:
       - name: the nightly, in place of the last
         env:
           GH_TOKEN: ${{ github.token }}
+        # (the new one made whole first, a draft with every file, while the last
+        # stays served; only then the last taken down and the draft published as
+        # `nightly`. A refused create or upload (an HTTP 403 on 2026-11-16, after
+        # the delete) left no nightly at all; now it leaves the last one)
         run: |
           v=${{ needs.which.outputs.version }} sha=${{ needs.which.outputs.sha }}
-          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
           printf 'PhiTeX %s, built from dev %s (its checks green). A development build: `phitex upgrade` takes it only with `update-channel = "nightly"`; the stable releases never point here.\n' "$v" "$sha" > notes.md
-          gh release create nightly --prerelease --target "$sha" --title "PhiTeX nightly $v" --notes-file notes.md dist/*
+          # (a draft a failed run left: gone first)
+          gh release delete nightly-next --yes 2>/dev/null || true
+          gh release create nightly-next --draft --prerelease --target "$sha" --title "PhiTeX nightly $v" --notes-file notes.md dist/*
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release edit nightly-next --tag nightly --target "$sha" --draft=false --prerelease
+          gh release view nightly --json tagName,isDraft,assets -q '"\(.tagName) draft=\(.isDraft) files=\(.assets|length)"'
