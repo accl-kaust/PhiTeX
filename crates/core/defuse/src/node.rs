@@ -84,6 +84,18 @@ pub(crate) struct Node {
     /// and moved back (a citation's first pass and its last, the font the
     /// pass between loaded first).
     pub(crate) prior: Mx<Option<Arc<RunRecord>>>,
+    /// The fields its predictions were filed for at its placement, and
+    /// their relations (`commit::file_predicted`), not walked yet: the
+    /// walk its placer owes the readers after it (`settle_predictions`),
+    /// whatever the node's own run did meanwhile. A run that commits
+    /// before that walk confirms the predictions, changes nothing and
+    /// walks nothing, and a walk that looked for a provisional record
+    /// found it run and went nowhere: floats2col at -j16, a page's
+    /// finisher placed with its `\@currlist` predicted empty ran and
+    /// committed between its placement and its placer's walk, and the
+    /// float's append after it kept the list its definer before it gave,
+    /// "Float(s) lost" (#40).
+    pub(crate) owed: Mx<Vec<(Field, Option<Rel>)>>,
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
     /// A re-ask that came while it ran (`sched::mark_stale` leaves a
@@ -447,6 +459,7 @@ impl Node {
             serial: AtomicU32::new(0),
             last: Mx::new(None),
             prior: Mx::new(None),
+            owed: Mx::new(Vec::new()),
             woke: Mx::new(None),
             stale_wake: Mx::new(None),
             filed_floor: AtomicU32::new(0),
