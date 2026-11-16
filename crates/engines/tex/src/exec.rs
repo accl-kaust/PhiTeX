@@ -1560,27 +1560,37 @@ fn trace(n: usize, threads: usize) {
     }
 }
 
+#[cfg(feature = "rayon")]
 fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
-    on_pool(threads, n, grain, f);
-    flush_workers(threads);
+    // (none after [`end_threads`]: the pass in order, here)
+    let Some(pool) = pool(threads) else {
+        (0..n).for_each(f);
+        return;
+    };
+    on_pool(&pool, n, grain, f);
+    flush_workers(&pool);
 }
 
-/// `f(i)` for every `i < n` on the pool of `threads` workers.
+#[cfg(not(feature = "rayon"))]
+fn parallel(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
+    scoped(threads, n, grain, f);
+}
+
+/// `f(i)` for every `i < n` on `pool`.
 #[cfg(feature = "rayon")]
-fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
+fn on_pool(pool: &rayon::ThreadPool, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
     use rayon::prelude::*;
-    pool(threads).install(|| {
+    pool.install(|| {
         (0..n).into_par_iter().with_min_len(grain).for_each(f);
     });
 }
 
-/// Every worker of the pool of `threads` adds its probe counts and spans
-/// to the totals (a no-op without the `profile` feature, so the broadcast
-/// is skipped).
+/// Every worker of `pool` adds its probe counts and spans to the totals
+/// (a no-op without the `profile` feature, so the broadcast is skipped).
 #[cfg(feature = "rayon")]
-fn flush_workers(threads: usize) {
+fn flush_workers(pool: &rayon::ThreadPool) {
     if cfg!(feature = "profile") {
-        pool(threads).broadcast(|_| {
+        pool.broadcast(|_| {
             phitex_defuse::obs::flush();
             crate::prof::caches::flush();
         });
@@ -1589,44 +1599,64 @@ fn flush_workers(threads: usize) {
     }
 }
 
-/// The persistent pool of `threads` workers (an operation's fan-out runs
-/// on threads of its own, [`Inner`]).
+/// The persistent pools of workers, by their count; none once
+/// [`end_threads`] has dropped them.
 #[cfg(feature = "rayon")]
-fn pool(threads: usize) -> std::sync::Arc<rayon::ThreadPool> {
-    use std::sync::{Arc, Mutex, PoisonError};
-    type Pools = Mutex<phitex_defuse::FxHashMap<usize, Arc<rayon::ThreadPool>>>;
+type Pools = std::sync::Mutex<Option<FxHashMap<usize, std::sync::Arc<rayon::ThreadPool>>>>;
+
+#[cfg(feature = "rayon")]
+fn pools() -> &'static Pools {
     static POOLS: OnceLock<Pools> = OnceLock::new();
-    let mut m = POOLS
-        .get_or_init(|| Mutex::new(phitex_defuse::FxHashMap::default()))
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    m.entry(threads)
-        .or_insert_with(|| {
-            let b = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .thread_name(|i| format!("phitex-{i}"));
-            let pool = if let Some(spawn) = SPAWN.get() {
-                b.spawn_handler(move |t| {
-                    spawn(Box::new(move || t.run()));
-                    Ok(())
-                })
-                .build()
-            } else {
-                b.build()
-            };
-            Arc::new(pool.expect("the worker pool"))
-        })
-        .clone()
+    POOLS.get_or_init(|| std::sync::Mutex::new(Some(FxHashMap::default())))
 }
 
-#[cfg(not(feature = "rayon"))]
-fn on_pool(threads: usize, n: usize, grain: usize, f: &(dyn Fn(usize) + Sync)) {
-    scoped(threads, n, grain, f);
+/// The engine's threads end ([`phitex_defuse::end_threads`]) and the
+/// client's pools with them: each pool dropped, its workers returning
+/// once the pass they are in is done; a pass after this runs in order on
+/// its caller's thread. For a host whose process ends with them (a wasm
+/// core's end: its threads are the host's workers, which leave only when
+/// their threads return); for good.
+pub fn end_threads() {
+    #[cfg(feature = "rayon")]
+    {
+        // (dropped outside the lock: a pool's drop tells its workers to end)
+        let gone = pools()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(gone);
+    }
+    phitex_defuse::end_threads();
 }
 
-/// (The scoped threads flush their counts as they end.)
-#[cfg(not(feature = "rayon"))]
-fn flush_workers(_: usize) {}
+/// The persistent pool of `threads` workers (an operation's fan-out runs
+/// on threads of its own, [`Inner`]); none once [`end_threads`] has been
+/// called.
+#[cfg(feature = "rayon")]
+fn pool(threads: usize) -> Option<std::sync::Arc<rayon::ThreadPool>> {
+    use std::sync::{Arc, PoisonError};
+    let mut m = pools().lock().unwrap_or_else(PoisonError::into_inner);
+    let m = m.as_mut()?;
+    Some(
+        m.entry(threads)
+            .or_insert_with(|| {
+                let b = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .thread_name(|i| format!("phitex-{i}"));
+                let pool = if let Some(spawn) = SPAWN.get() {
+                    b.spawn_handler(move |t| {
+                        spawn(Box::new(move || t.run()));
+                        Ok(())
+                    })
+                    .build()
+                } else {
+                    b.build()
+                };
+                Arc::new(pool.expect("the worker pool"))
+            })
+            .clone(),
+    )
+}
 
 /// `f(i)` for every `i < n` on `threads` threads of its own, made for
 /// the call and joined at its end.

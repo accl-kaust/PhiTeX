@@ -18,6 +18,7 @@
 //! state is not (tens of MB, read once).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use phitex_live::host::{Key, Store};
@@ -36,6 +37,8 @@ pub struct Kept {
     answered: Condvar,
     ask: Ask,
     put: Put,
+    /// The core ended ([`Kept::end`]; set with `slots` held).
+    ended: AtomicBool,
 }
 
 impl Kept {
@@ -45,7 +48,19 @@ impl Kept {
             answered: Condvar::new(),
             ask,
             put,
+            ended: AtomicBool::new(false),
         }
+    }
+
+    /// The core ended (`ph_end`): the host hears nothing more, so nothing
+    /// is asked or put, a key not had is empty, and every thread waiting
+    /// for one goes on. Nothing a build makes after its core's end is kept:
+    /// it read files the host no longer gave.
+    pub fn end(&self) {
+        let s = self.lock();
+        self.ended.store(true, Ordering::SeqCst);
+        drop(s);
+        self.answered.notify_all();
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Slot>> {
@@ -68,6 +83,8 @@ impl Kept {
         let mut s = self.lock();
         loop {
             match s.get(key) {
+                // (the core ended: nothing comes that was not here)
+                None | Some(Slot::Asked) if self.ended.load(Ordering::SeqCst) => return None,
                 // (not asked yet, or handed over to another asker)
                 None => {
                     s.insert(key.to_owned(), Slot::Asked);
@@ -100,6 +117,9 @@ impl Kept {
 
     fn put_key(&self, key: &str, bytes: &[u8], keep: bool) {
         let mut s = self.lock();
+        if self.ended.load(Ordering::SeqCst) {
+            return;
+        }
         if keep {
             s.insert(key.to_owned(), Slot::Given(Some(bytes.to_vec())));
         } else if matches!(s.get(key), Some(Slot::Given(_))) {

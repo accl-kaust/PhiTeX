@@ -71,6 +71,8 @@ struct State {
     asked: HashSet<String>,
     /// The host's answers, waiting to be taken: the bytes as served, or why not.
     arrived: HashMap<String, Result<Vec<u8>, String>>,
+    /// The core ended ([`Files::end`]): the host answers nothing more.
+    ended: bool,
 }
 
 /// TEXINPUTS as the browser searches it: its elements, folders relative
@@ -158,6 +160,15 @@ impl Files {
         s.index = index.map(Arc::new);
         s.bundled = bundled;
         s.shelves.clear();
+    }
+
+    /// The core ended (`ph_end`): the host hears no more asks, so none is
+    /// made and none waited for. A file not had is nowhere, a pack not had
+    /// could not be had, now and from now on: every thread waiting for one
+    /// goes on (and its build to its end), so the core's threads return.
+    pub fn end(&self) {
+        self.lock().ended = true;
+        self.answered.notify_all();
     }
 
     /// Each pack's fetch told to `hook` from now on (the document opened).
@@ -379,6 +390,9 @@ impl Files {
     }
 
     fn by_name<'a>(&'a self, mut s: MutexGuard<'a, State>, name: &str) -> Option<Kept> {
+        if s.ended && !matches!(s.by_name.get(name), Some(Entry::Given(_))) {
+            return None;
+        }
         if !s.by_name.contains_key(name) {
             s.by_name.insert(name.to_owned(), Entry::Asked);
             if let Some(h) = self.host.get() {
@@ -395,6 +409,10 @@ impl Files {
             if !crate::THREADED {
                 // (no thread to answer later: not answered in the call, nowhere)
                 s.by_name.insert(name.to_owned(), Entry::Given(None));
+                return None;
+            }
+            // (the core ended while this waited: no answer comes)
+            if s.ended {
                 return None;
             }
             s = self.wait(s);
@@ -486,10 +504,11 @@ impl PackSource for HostPacks {
     fn packs(&self, ids: &[&str]) -> Vec<Result<Vec<u8>, String>> {
         let f = &self.0;
         let mut s = f.lock();
+        // (none asked once the core has ended: nobody hears it)
         let new: Vec<&str> = ids
             .iter()
             .copied()
-            .filter(|id| !s.asked.contains(*id) && !s.arrived.contains_key(*id))
+            .filter(|id| !s.ended && !s.asked.contains(*id) && !s.arrived.contains_key(*id))
             .collect();
         for id in &new {
             s.asked.insert((*id).to_owned());
@@ -502,7 +521,7 @@ impl PackSource for HostPacks {
             }
         }
         s = f.lock();
-        while crate::THREADED && !ids.iter().all(|id| s.arrived.contains_key(*id)) {
+        while crate::THREADED && !s.ended && !ids.iter().all(|id| s.arrived.contains_key(*id)) {
             s = f.wait(s);
         }
         ids.iter()

@@ -255,6 +255,10 @@ pub(crate) fn set_index(tsv: &[u8], release: &[u8], table: &[u8], bundled: &str)
 /// document open before is closed.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn open(req: &[u8]) -> i32 {
+    // (the core ended: no session thread again)
+    if ENDED.load(std::sync::atomic::Ordering::SeqCst) {
+        return 2;
+    }
     // (a step under way, in the host's turn: the open waits for its end)
     if STEPPING.load(std::sync::atomic::Ordering::Relaxed) {
         *lock(&OUTPUT) = b"a build is under way: open again once ph_step returns".to_vec();
@@ -629,6 +633,29 @@ pub(crate) fn close() {
         o.wake.set(true);
     }
     lock(&STEPPED).take();
+}
+
+/// The core ended ([`end`]): no document opens again.
+static ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The core ends, for good: every thread of its own returns from
+/// `wasi_thread_start`, so the host's workers leave (a host joins them;
+/// a Node host then exits by itself). The open document closed (its
+/// session thread returns after the step it is in); every ask waiting for
+/// the host (a file, a pack, the store's bytes, a `\write18` command)
+/// answered as not had, and none made from now on, nor anything put in
+/// the store; the engine's threads kept between builds (the defuse crew,
+/// the client's pools) told to end, each returning at once if at rest,
+/// else once its job is done. A build under way runs to its end on what
+/// it has, then its threads return too. Thread 0's own: it waits for
+/// nothing.
+pub(crate) fn end() {
+    ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+    close();
+    files().end();
+    kept().end();
+    shell_hook().end();
+    phitex_tex::end_threads();
 }
 
 /// A viewer's request (JSON, `{"id","op",...}`), answered: the reply

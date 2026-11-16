@@ -109,6 +109,15 @@ pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_valu
 /// job 21489; `\number` 336, conditionals 456): 10 MB, with room for
 /// the run below them.
 pub const WORKER_STACK: usize = 16 << 20;
+
+/// The engine's threads, kept for the life of the process (an
+/// evaluation's own and its pool's), end: each at rest returns now, each
+/// working once its job is done, and none is kept again. For a host whose
+/// process ends with them (a wasm core's end: its threads are the host's
+/// workers); for good.
+pub fn end_threads() {
+    crew::end();
+}
 pub use values::{
     Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words,
 };

@@ -228,6 +228,14 @@ pub extern "C" fn ph_close() {
     });
 }
 
+/// [`session::end`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_end() {
+    session::host_turn(|| {
+        session::end();
+    });
+}
+
 /// [`session::request`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_request(p: *const u8, n: usize) -> i32 {
