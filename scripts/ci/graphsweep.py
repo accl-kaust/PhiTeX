@@ -33,6 +33,7 @@ Red: one line each on stdout, `graphsweep: ...`; exit 1 if any.
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -278,6 +279,10 @@ def one(args, c):
         other = 8 if args.threads == 1 else 1
         s1 = h.step(f"unchanged at -j {other}", True, ref=s1, threads=other, nodes0=True)
         s1 = h.step("unchanged again", True, ref=s1, nodes0=True)
+        # (the last save, after its process has ended, done: its lock)
+        for lk in (h.cache / "docs").rglob("graph.lock"):
+            with open(lk) as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
         g = next((h.cache / "docs").rglob("graph"), None)
         if g is None:
             h.red.append("no graph file in the cache")

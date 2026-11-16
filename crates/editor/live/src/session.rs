@@ -614,6 +614,11 @@ pub struct Session {
     /// The build is the graph loaded and nothing moved since: no save
     /// (the file stays, spec §6).
     graph_same: bool,
+    /// The graph's keys, as the session's first build had them
+    /// ([`Session::graph_key`]): a save after this process said it is
+    /// done keys the build as it was made, whatever the files' places are
+    /// by then.
+    graph_key: std::sync::OnceLock<crate::graph::Key>,
 }
 
 /// A clean build's options and format ([`Session::prepare_cold`]).
@@ -780,6 +785,7 @@ impl Session {
             outside: crate::graph::on().then(Arc::default),
             cold_ms: 0,
             graph_same: false,
+            graph_key: std::sync::OnceLock::new(),
         }
     }
 
@@ -979,7 +985,12 @@ impl Session {
     /// every option that changes what a build makes (not its threads), the
     /// process's variables of [`crate::graph::KEY_VARS`], and XeTeX's font
     /// index. Any one that differs, no load.
-    fn graph_key(&self) -> crate::graph::Key {
+    fn graph_key(&self) -> &crate::graph::Key {
+        self.graph_key.get_or_init(|| self.graph_key_now())
+    }
+
+    /// [`Session::graph_key`] as made now.
+    fn graph_key_now(&self) -> crate::graph::Key {
         let j = &self.job;
         let canon = |p: &Path| self.host.canonical(p).to_string_lossy().into_owned();
         let mut k: crate::graph::Key = [
@@ -1106,7 +1117,7 @@ impl Session {
         let bytes = bytes.ok_or("none saved")?;
         let read_ms = t0.elapsed().as_secs_f64() * 1e3;
         let parts = crate::graph::decode(&bytes).inspect_err(|_| store.remove_graph())?;
-        if let Some(k) = crate::graph::key_differs(&parts.key, &self.graph_key()) {
+        if let Some(k) = crate::graph::key_differs(&parts.key, self.graph_key()) {
             return Err(format!("its key `{k}` differs"));
         }
         if p.prelude.is_some() && p.cached_key != Some(parts.prelude) {
@@ -1285,7 +1296,7 @@ impl Session {
                 .unwrap_or_default(),
             cold_ms: self.cold_ms,
         };
-        let bytes = crate::graph::encode(&self.graph_key(), &b.prelude_key(), &m, &body);
+        let bytes = crate::graph::encode(self.graph_key(), &b.prelude_key(), &m, &body);
         drop(body);
         let t1 = Instant::now();
         store.put_graph(&bytes);
@@ -1716,6 +1727,8 @@ impl Session {
             && self.graph_on
             && self.store.is_some()
         {
+            // (the keys as the build is made, kept for its save)
+            let _ = self.graph_key();
             match self.prepare_cold(&text) {
                 Ok(p) => match self.load_graph(&p) {
                     Ok(note) => {

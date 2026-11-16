@@ -366,6 +366,154 @@ fn put(inst: u64, id: u64, mut g: PageGlyphs, shipped: bool) {
     m.insert((inst, id), (Arc::new(g), shipped));
 }
 
+/// What the memos hold of the pages `ids` of value store `inst` (their
+/// glyphs as their writers showed them, the pieces they show, their
+/// objects' codes), written for a persisted graph
+/// (docs/spec-persisted-graph.md §2.2.4): the writer that made them runs
+/// again only for a page that changes, so a loaded build's untouched
+/// pages have them only from here. Their ids name their values, the same
+/// in the loading store.
+pub(crate) fn save_kept(e: &mut crate::api::persist::Enc<'_>, inst: u64, ids: &[u64]) {
+    let glyphs = glyph_memo().locked();
+    let pieces = piece_memo().locked();
+    let holes = hole_memo().locked();
+    let kept: Vec<u64> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            let k = (inst, *id);
+            glyphs.contains_key(&k) || pieces.contains_key(&k) || holes.contains_key(&k)
+        })
+        .collect();
+    e.n(kept.len());
+    for id in kept {
+        let k = (inst, id);
+        e.u(id);
+        match glyphs.get(&k) {
+            None => e.b(false),
+            Some((g, shipped)) => {
+                e.b(true);
+                e.b(*shipped);
+                e.n(g.codes.len());
+                for c in &g.codes {
+                    e.byte(c.kind);
+                    e.b(c.first);
+                    e.u(u64::from(c.ch));
+                    e.u(u64::from(c.lig_n));
+                    e.u(u64::from(c.lig));
+                    for x in [c.h, c.v, c.w, c.size] {
+                        e.i(i64::from(x));
+                    }
+                    e.byte(c.level);
+                    e.u(u64::from(c.context));
+                }
+                e.n(g.lig.len());
+                for &l in &g.lig {
+                    e.u(u64::from(l));
+                }
+                e.n(g.xcodes.len());
+                for &(o, n) in &g.xcodes {
+                    e.u(u64::from(o));
+                    e.n(n);
+                }
+            }
+        }
+        match pieces.get(&k) {
+            None => e.b(false),
+            Some(p) => {
+                e.b(true);
+                e.n(p.len());
+                for &x in p.iter() {
+                    e.i(x);
+                }
+            }
+        }
+        match holes.get(&k) {
+            None => e.b(false),
+            Some(h) => {
+                e.b(true);
+                e.n(h.len());
+                for x in h.iter() {
+                    e.u(x.map_or(0, |n| n as u64 + 1));
+                }
+            }
+        }
+    }
+}
+
+/// [`save_kept`]'s pages read back into the memos of value store `inst`.
+pub(crate) fn load_kept(d: &mut crate::api::persist::Dec<'_>, inst: u64) -> Result<(), String> {
+    let small = |x: u64| u32::try_from(x).map_err(|_| "a page's code out of range".to_owned());
+    let scaled = |x: i64| Scaled::try_from(x).map_err(|_| "a page's place out of range".to_owned());
+    let n = d.n()?;
+    for _ in 0..n {
+        let id = d.u()?;
+        let k = (inst, id);
+        if d.b()? {
+            let shipped = d.b()?;
+            let m = d.n()?;
+            let mut codes = Vec::with_capacity(m.min(1 << 20));
+            for _ in 0..m {
+                let kind = d.byte()?;
+                let first = d.b()?;
+                let ch = u16::try_from(d.u()?).map_err(|_| "a code out of range")?;
+                let lig_n = u16::try_from(d.u()?).map_err(|_| "a code out of range")?;
+                let lig = small(d.u()?)?;
+                let (h, v, w, size) = (
+                    scaled(d.i()?)?,
+                    scaled(d.i()?)?,
+                    scaled(d.i()?)?,
+                    scaled(d.i()?)?,
+                );
+                let level = d.byte()?;
+                let context = small(d.u()?)?;
+                codes.push(Code {
+                    kind,
+                    first,
+                    ch,
+                    lig_n,
+                    lig,
+                    h,
+                    v,
+                    w,
+                    size,
+                    level,
+                    context,
+                });
+            }
+            let m = d.n()?;
+            let lig = (0..m)
+                .map(|_| u16::try_from(d.u()?).map_err(|_| "a ligature out of range".to_owned()))
+                .collect::<Result<Vec<_>, String>>()?;
+            let m = d.n()?;
+            let xcodes = (0..m)
+                .map(|_| Ok((small(d.u()?)?, d.n()?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            glyph_memo()
+                .locked()
+                .insert(k, (Arc::new(PageGlyphs { codes, lig, xcodes }), shipped));
+        }
+        if d.b()? {
+            let m = d.n()?;
+            let p = (0..m).map(|_| d.i()).collect::<Result<Vec<_>, String>>()?;
+            piece_memo().locked().insert(k, Arc::from(p));
+        }
+        if d.b()? {
+            let m = d.n()?;
+            let h = (0..m)
+                .map(|_| {
+                    d.u()?
+                        .checked_sub(1)
+                        .map(|n| usize::try_from(n).map_err(|_| "a code out of range".to_owned()))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            hole_memo().locked().insert(k, Arc::from(h));
+        }
+    }
+    Ok(())
+}
+
 /// Page `id`'s glyphs (value store `inst`) dropped: its record is gone.
 pub(crate) fn forget(inst: u64, id: u64) {
     glyph_memo().locked().remove(&(inst, id));

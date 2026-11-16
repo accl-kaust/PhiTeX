@@ -121,8 +121,8 @@ impl Session {
         let other = (stem.as_deref() != Some(job.jobname.as_str())).then(|| job.jobname.clone());
         let store = cache.map(|cache| {
             Arc::new(Kept {
+                dir: cache.doc_dir(&job.path),
                 cache,
-                doc: job.path.clone(),
                 job: other,
             }) as Arc<dyn Store>
         });
@@ -346,8 +346,11 @@ impl Host for Machine {
 /// package loads' records, the document's files under its own directory.
 struct Kept {
     cache: Cache,
-    /// The main file, whose directory in the cache is the document's.
-    doc: PathBuf,
+    /// The document's directory in the cache, by its main file's
+    /// canonical path when the session began (a save after this process
+    /// has said it is done, `phitex build`'s worker, is not moved by what
+    /// the document's folder is meanwhile).
+    dir: PathBuf,
     /// The job's name where it is not the main file's (none: the main
     /// file's): the document's records are its job's (the files its job
     /// writes and reads back are named by it), each kept apart.
@@ -358,7 +361,7 @@ impl Kept {
     fn path(&self, key: Key<'_>) -> PathBuf {
         match key {
             Key::Doc(f) => {
-                let dir = self.cache.doc_dir(&self.doc);
+                let dir = &self.dir;
                 match &self.job {
                     Some(j) => {
                         dir.join(format!("{f}-{:016x}", tex::Fnv::new().add(j.as_bytes()).0))

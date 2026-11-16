@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 const MAGIC: &[u8; 8] = b"PXBUILD\x01";
 /// The client's encoding's version: any change of its layout bumps it.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HASH_SEED: u64 = 0x7078_6275_696c_6431;
 
 type R<T> = Result<T, String>;
@@ -775,6 +775,26 @@ impl Build {
         // (the link's pages and read-time commands, docs/spec-persisted-graph.md
         // §2.2.4)
         crate::pdfout::save_link(e, &o.pdf_cmds);
+        e.tag(14);
+        // (the pages' glyph origins, where they are kept: what their
+        // writers showed, the SyncTeX file's and the viewer's source)
+        e.b(o.origins.load(Relaxed));
+        if o.origins.load(Relaxed) {
+            crate::origins::save_kept(e, e.v.instance(), &self.shown_ids());
+        }
+    }
+
+    /// The pages' identities in the link, in order (`pdfout::SHOWN`).
+    fn shown_ids(&self) -> Vec<u64> {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field(crate::pdfout::SHOWN))
+            .and_then(|x| v.seq_to_vec(x).first().map(|&l| crate::val::list_of(v, l)))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|x| u64::from_ne_bytes(crate::val::int_of(v, x).to_ne_bytes()))
+            .collect()
     }
 
     /// A build of the bytes [`Build::save`] wrote, in this process, with
@@ -1197,6 +1217,10 @@ impl Build {
         crate::pic::learn(&refused, &many);
         d.tag(13)?;
         let link = crate::pdfout::load_link(&mut d)?;
+        d.tag(14)?;
+        if d.b()? {
+            crate::origins::load_kept(&mut d, v.instance())?;
+        }
         if d.i != client.len() {
             return Err("bytes left after the client's tables".into());
         }
