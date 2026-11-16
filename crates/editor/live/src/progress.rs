@@ -179,7 +179,12 @@ impl Meter {
     /// Page `p` streamed: the listeners told, with the pages shipped so
     /// far.
     pub fn streamed(&self, p: &phitex_tex::StreamedPage) {
-        let pages = lock(&self.state).pages.max(p.page);
+        // (a page withdrawn grows nothing)
+        let pages = if p.gone {
+            lock(&self.state).pages
+        } else {
+            lock(&self.state).pages.max(p.page)
+        };
         for f in lock(&self.pages).iter() {
             f(p, pages);
         }
@@ -346,6 +351,7 @@ mod tests {
                 hash: k,
                 pdf: vec![0],
                 exact: true,
+                gone: false,
             });
         }
         let g = lock(&got).clone();

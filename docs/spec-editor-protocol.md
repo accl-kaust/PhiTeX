@@ -192,6 +192,23 @@ pages an edit leaves alone are never sent):
   (`hashes`/`pages`) and, as `"inexact": [k, …]`, those not exact. The
   list is empty once the build is in.
 
+A page is streamed as the build's work ahead makes it, before what it
+rests on is known for sure. When a page streamed turns out not to stand
+as sent (the run that made it was refuted: an edit took its page out,
+or moved it, before that run saw the edit), and no page streamed since
+was sent in its place, it is withdrawn before `settled`:
+
+```json
+{"event": "withdrawn", "k": 20, "pages": 21}
+```
+
+- `k`: the page, from 0. The viewer shows the page the last build had
+  there again (its `frame` and `strips` draw it from the last build's
+  file), or none where the last build had fewer pages.
+- `pages`: the pages there are now, the last build's or as far as a
+  page streamed that stands. Drop the pages past it.
+- A page withdrawn is sent again (`page`) if a later run makes it.
+
 ### 2.1d Glyph origins: made per page, when asked
 
 A build makes no glyph origins. The `origins` op (`{"op":"origins","page":K}`)

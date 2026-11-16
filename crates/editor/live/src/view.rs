@@ -382,6 +382,23 @@ impl Streamed {
         )
     }
 
+    /// Page `k` streamed withdrawn ([`Viewer::withdraw_page`]): no file of
+    /// its own, its identity none; and the `withdrawn` event to tell,
+    /// `settled` the pages the build in has (none: it was not streamed).
+    fn withdraw(&mut self, k: usize, settled: usize) -> Option<String> {
+        if !matches!(self.hashes.get(k), Some(Some(_))) {
+            return None;
+        }
+        self.hashes[k] = None;
+        while self.hashes.last() == Some(&None) {
+            self.hashes.pop();
+        }
+        self.pdfs.remove(&k);
+        self.inexact.remove(&k);
+        let n = settled.max(self.hashes.len());
+        Some(json!({"event": "withdrawn", "k": k, "pages": n}).to_string())
+    }
+
     /// `hashes` with the pages streamed over them (a viewer that asks
     /// while the build runs is shown them), and those drawn otherwise
     /// than the build's file will.
@@ -868,6 +885,19 @@ impl Viewer {
         }
     }
 
+    /// Page `k` (from 0) of the diff's build streamed while it runs is
+    /// withdrawn, as [`Viewer::withdraw_page`] is the document's.
+    pub fn diff_withdraw_page(&self, k: usize) {
+        let mut d = lock(&self.diff);
+        let settled = d.hashes.len();
+        let told = d.streamed.withdraw(k, settled);
+        let shown = d.shown;
+        drop(d);
+        if let Some(e) = told.filter(|_| shown) {
+            self.emit(&e);
+        }
+    }
+
     /// The diff is (still) under way: its state, PDF, pages and text; the
     /// browsers told, and given its pages if they are the ones shown (the
     /// pages it streamed, its own from now on).
@@ -1049,6 +1079,23 @@ impl Viewer {
             return;
         }
         let told = lock(&self.streamed).put(k, hash, pdf, pages, exact);
+        if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
+            self.emit(&e);
+        }
+    }
+
+    /// Page `k` (from 0) streamed while the build runs is withdrawn
+    /// ([`phitex_tex::StreamedPage::gone`]: the run that made it was
+    /// refuted, and no page that stands is there as told): its file
+    /// dropped, the page the last build has there shown again, or none
+    /// past those, and the viewers told,
+    /// `{"event":"withdrawn","k":K,"pages":N}` (`N` the pages there are
+    /// now: the last build's, or as far as a page streamed that stands).
+    /// Told only while the document's pages are the ones shown, as
+    /// [`Viewer::stream_page`]'s.
+    pub fn withdraw_page(&self, k: usize) {
+        let settled = lock(&self.pages).hashes.len();
+        let told = lock(&self.streamed).withdraw(k, settled);
         if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
             self.emit(&e);
         }
@@ -1858,6 +1905,56 @@ mod tests {
         let e = take();
         assert_eq!(e.len(), 1, "{e:?}");
         assert_eq!(e[0]["event"], "page");
+    }
+
+    /// A page streamed and then withdrawn (the run that made it refuted)
+    /// is the last build's page again, or no page past those: its file
+    /// dropped, the viewers told the pages there are now. One never
+    /// streamed, or withdrawn already, tells nothing.
+    #[test]
+    fn a_page_withdrawn_is_the_builds_again() {
+        let v = Viewer::default();
+        let got: Arc<Mutex<Vec<Value>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| {
+                lock(&got).push(serde_json::from_str(t).unwrap());
+            }));
+        }
+        let take = || std::mem::take(&mut *lock(&got));
+        let pages = |v: &Viewer| -> Value {
+            serde_json::from_str::<Value>(&v.answer(&json!({"id": 1, "op": "pages"}))).unwrap()
+                ["json"]["pages"]
+                .clone()
+        };
+        v.built(&Built {
+            pdf: None,
+            hashes: vec![0x21, 0x22],
+            history: 0,
+            ms: 0.0,
+            diagnostics: Some(Vec::new()),
+            since_ms: None,
+            origins: None,
+            changed: None,
+            parts: serde_json::Map::new(),
+        });
+        take();
+        v.stream_page(1, 0x23, vec![6; 10], 2, true);
+        v.stream_page(3, 0x24, vec![7; 10], 4, true);
+        assert_eq!(take().len(), 2);
+        // (a page past the build's: none there again, the pages two)
+        v.withdraw_page(3);
+        assert_eq!(take(), [json!({"event": "withdrawn", "k": 3, "pages": 2})]);
+        assert_eq!(v.streamed_hashes(), vec![None, Some(0x23 ^ STREAMED)]);
+        // (one of the build's: its page again)
+        v.withdraw_page(1);
+        assert_eq!(take(), [json!({"event": "withdrawn", "k": 1, "pages": 2})]);
+        assert_eq!(v.streamed_hashes(), Vec::<Option<u64>>::new());
+        assert_eq!(pages(&v), json!(["0000000000000021", "0000000000000022"]));
+        // (nothing streamed there: nothing told)
+        v.withdraw_page(1);
+        v.withdraw_page(7);
+        assert_eq!(take(), Vec::<Value>::new());
     }
 
     #[test]
