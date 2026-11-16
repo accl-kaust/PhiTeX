@@ -14,13 +14,22 @@ use std::sync::{Arc, Mutex};
 
 use phitex_tex::{Options, ShellHook, ShellRan};
 
+/// The jobs of the evaluation `sleep` waits to see finished before it
+/// returns.
+const SLEEP_JOBS: u64 = 300;
+/// How long `sleep` waits for them: a build held by the command finishes
+/// none, and this ends the wait so the test can say so (no measure: an
+/// unloaded build finishes them in under 2 s).
+const SLEEP_HELD: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The fake commands (`fakecmd WHAT ARGS`, quoted as restricted mode
 /// quotes them):
 /// - `up IN OUT`: `OUT` is `\gdef\made{TEXT}` with `IN`'s text in capitals;
 ///   reads `IN`;
 /// - `hl IN OUT`: as minted's `highlight`: `OUT` (a cache file) from
 ///   `IN`'s text in brackets, `IN` removed; reads `IN`;
-/// - `sleep`: 2 s, noting the jobs the build finished meanwhile;
+/// - `sleep`: until the evaluation has finished [`SLEEP_JOBS`] jobs (at
+///   most [`SLEEP_HELD`]), noting how many it had when it returned;
 /// - `gone`: not run, the host says why (status 127, nothing written);
 ///   any other: status 127, no why (a command that ran and failed).
 #[derive(Default)]
@@ -28,8 +37,8 @@ struct Fake {
     /// Each call: the command and the texts of the files it read.
     calls: Mutex<Vec<String>>,
     progress: Mutex<Option<Arc<phitex_tex::Progress>>>,
-    /// The jobs finished while `sleep` slept.
-    during: Mutex<Vec<u64>>,
+    /// The jobs the evaluation had finished as each `sleep` returned.
+    done_at: Mutex<Vec<u64>>,
     /// `gate` waits until a run has handed an `up` command to a child
     /// (`ShellHook::handed`); `None`: it returns at once.
     gate: Option<Gate>,
@@ -113,13 +122,15 @@ impl ShellHook for Fake {
             },
             "sleep" => {
                 let p = self.progress.lock().unwrap().clone();
-                let before = p.as_ref().map_or(0, |p| p.done());
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let after = p.as_ref().map_or(0, |p| p.done());
-                self.during
-                    .lock()
-                    .unwrap()
-                    .push(after.saturating_sub(before));
+                let done = || p.as_ref().map_or(0, |p| p.done());
+                let held = std::time::Instant::now() + SLEEP_HELD;
+                while done() < SLEEP_JOBS && std::time::Instant::now() < held {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                if done() < SLEEP_JOBS {
+                    eprintln!("sleep: held, {} jobs finished after {SLEEP_HELD:?}", done());
+                }
+                self.done_at.lock().unwrap().push(done());
                 ShellRan {
                     read: Some(Vec::new()),
                     ..ShellRan::default()
@@ -534,8 +545,18 @@ fn a_command_not_allowed_is_not_run() {
     assert!(fake.distinct().is_empty());
 }
 
-/// A command that takes 2 s holds nothing the other workers need: the
-/// 300 paragraphs after it are run meanwhile, at -j8.
+/// A slow command holds nothing the other workers need: the 300
+/// paragraphs after it are run before it returns, at -j8. The command
+/// (`sleep`) returns once the evaluation has finished [`SLEEP_JOBS`] jobs:
+/// an order, not a time; a command that held the workers would see them
+/// never finish, and returns after [`SLEEP_HELD`] to say so. It had slept
+/// 2 s and counted the jobs finished from its start, on a loaded machine
+/// (8 copies on 16 CPUs) 192 to 291 of them, the build going on all the
+/// while (wall 2.2 s, as unloaded): the count measured the machine's
+/// speed, and when the command's child ran: handed to a child at the
+/// paragraph's run, it runs once the text before it has settled, by then
+/// (mc 87762, 177 ms in) most of the text after it had run too, 162 jobs
+/// left to do beside it.
 #[test]
 fn the_evaluation_goes_on_while_a_command_runs() {
     let (src, _) = common::plain_paragraphs(300, false);
@@ -554,15 +575,15 @@ fn the_evaluation_goes_on_while_a_command_runs() {
     let t = std::time::Instant::now();
     let b = common::build(opts, Some(&common::plain()), &src);
     let wall = t.elapsed();
-    let during = fake.during.lock().unwrap().clone();
+    let done_at = fake.done_at.lock().unwrap().clone();
     eprintln!(
-        "sleep: wall {wall:?}, jobs finished while the command ran {during:?}, {} pages",
+        "sleep: wall {wall:?}, jobs finished as the command returned {done_at:?}, {} pages",
         b.pages().len()
     );
-    assert!(!during.is_empty(), "the command never ran");
+    assert!(!done_at.is_empty(), "the command never ran");
     assert!(
-        during.iter().any(|&n| n >= 300),
-        "jobs finished while it slept: {during:?}"
+        done_at.iter().any(|&n| n >= SLEEP_JOBS),
+        "jobs finished as it returned: {done_at:?} (it returns at {SLEEP_JOBS}, or after {SLEEP_HELD:?} with fewer)"
     );
 }
 
