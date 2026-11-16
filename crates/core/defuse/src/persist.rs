@@ -39,7 +39,7 @@ use crate::values::{Field, FxHashMap, Value, ValueId, Values, hash_bytes};
 
 const MAGIC: &[u8; 8] = b"PXGRAPH\x01";
 /// The encoding's version: any change of the bytes' layout bumps it.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HASH_SEED: u64 = 0x7078_6772_6170_6831;
 
 const C_VALUES: u32 = 1;
@@ -592,6 +592,12 @@ const NF_PRIOR: u32 = 1 << 10;
 const NF_PARKED: u32 = 1 << 11;
 const NF_EDITED: u32 = 1 << 12;
 const NF_MOVED: u32 = 1 << 13;
+/// A run of it stopped at the settling layer's frontier
+/// (`Node::held_frontier`): learnt, never cleared, it decides whether its
+/// next run begins before the frontier passes it. Dropped, an edit after
+/// a load ran such a node once more than the build that saved it, the
+/// run thrown away at the frontier (acm's resume node at -j1).
+const NF_HELD_FRONTIER: u32 = 1 << 14;
 /// A slot of the nodes' table reserved and never set (a placement a
 /// commit made ready and did not place).
 const EMPTY_SLOT: u8 = 0xff;
@@ -837,6 +843,7 @@ impl Engine {
                 (parked.is_some(), NF_PARKED),
                 (ld(&n.edited), NF_EDITED),
                 (ld(&n.moved), NF_MOVED),
+                (ld(&n.held_frontier), NF_HELD_FRONTIER),
             ] {
                 if on {
                     flags |= bit;
@@ -1397,6 +1404,7 @@ impl Engine {
             node.run_chained.store(fl(NF_RUN_CHAINED), Ordering::Release);
             node.edited.store(fl(NF_EDITED), Ordering::Release);
             node.moved.store(fl(NF_MOVED), Ordering::Release);
+            node.held_frontier.store(fl(NF_HELD_FRONTIER), Ordering::Release);
             // (a node gone has left the line: it claims nothing, `commit::release_leaving`)
             *node.claim_mx.lock() = dn.state == State::Gone;
             if fl(NF_EDITED) {
