@@ -1634,22 +1634,6 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     && kn.rank() == rank
                     && !stranded(eng, &inner, &others, node.id, anchor, slot, sfloor, kpos, rank)
                 {
-                    if crate::obs::enabled()
-                        && crate::sched::kept_log()
-                        && (kn.anchor() != Some(anchor) || kn.slot() != slot)
-                    {
-                        elog!(
-                            "kept-anchor: node {} (op {:?}) placed by {} kept at {} anchor {:?} slot {}, placed now after {} slot {}",
-                            k.raw(),
-                            kn.op(),
-                            node.id.raw(),
-                            kpos.0,
-                            kn.anchor().map(NodeId::raw),
-                            kn.slot(),
-                            anchor.raw(),
-                            slot
-                        );
-                    }
                     // (kept, it is placed after the node it is placed after
                     // now: what moves that node moves it, `relocate`, and
                     // the checks of slots under a node, `slot_under`, find
@@ -1657,8 +1641,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     // anchor it stayed behind when that one moved, and was
                     // foreign between its new anchor and its continuation,
                     // which was made anew, #45)
+                    // (every field of where it stands as a placement made
+                    // here sets them: anchor, slot, rank, continuation or
+                    // child)
                     kn.anchor.store(anchor.raw() + 1, Ordering::Release);
                     kn.slot.store(slot, Ordering::Release);
+                    kn.rank.store(rank, Ordering::Release);
+                    kn.follows
+                        .store(!matches!(what, Placement::Child(..)), Ordering::Release);
                     placed.push(k);
                     kept_end = Some(k);
                     prev = Some(k);

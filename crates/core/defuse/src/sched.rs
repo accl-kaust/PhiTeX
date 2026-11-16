@@ -2471,14 +2471,6 @@ pub(crate) fn log_frontier(eng: &Engine, old: u64, new: u64, by: Option<NodeId>,
     );
 }
 
-/// (`PHITEX_KEPT_LOG`, profile) Whether a placement kept where it stands
-/// while its anchor or slot differs from the placement's now is printed.
-pub(crate) fn kept_log() -> bool {
-    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    crate::obs::enabled()
-        && *F.get_or_init(|| std::env::var_os("PHITEX_KEPT_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
-}
-
 pub(crate) fn wake_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("PHITEX_WAKE_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
