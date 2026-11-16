@@ -659,10 +659,12 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
         if grep -aq 'graph-check: load refused\|graph-check: load: DIFFER' "$e"; then
           red "persist: $id: $(grep -a -m1 'graph-check: load refused\|graph-check: load: DIFFER' "$e" | cut -c1-300)"
         elif grep -aq 'graph-check: edit [0-9]*: DIFFER' "$e"; then
-          # (an edit's twin may differ in its PDF and log where the build
-          # held link state the save leaves out, never in its runs)
-          if grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep -vq 'runs by op same\|not compared'; then
-            red "persist: $id: $(grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep -v 'runs by op same\|not compared' | head -1 | cut -c1-300)"
+          # (an edit's twin may differ where the build held link state
+          # the save leaves out: its PDF and log, and the runs reading
+          # what its link gives back. One whose PDF is the build's but
+          # whose runs differ is red whatever the link state)
+          if grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep 'pdf same' | grep -vq 'runs by op same\|not compared'; then
+            red "persist: $id: $(grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep 'pdf same' | grep -v 'runs by op same\|not compared' | head -1 | cut -c1-300)"
           elif grep -a 'graph-check: load:' "$e" | grep -vq "the link's 0 pages and 0 commands"; then
             echo "persist: $id: an edit after a load differs; the link's state not saved: $(grep -a -o "the link's [0-9]* pages and [0-9]* commands" "$e" | tail -1)" >> "$r/known-red.txt"
           else
