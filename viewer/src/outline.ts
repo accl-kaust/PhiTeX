@@ -7,10 +7,12 @@
 
 import { html } from "./html.ts";
 
-/** An outline item: its title, its page (from 0) and top in points (null: none), its children. */
+/** An outline item: its title, its page (from 0), its page's number as the document prints it, its top in points (null: none), its children. */
 export interface Entry {
   t: string;
   p: number | null;
+  /** The page's printed number ("iv", "A-3": the PDF's page labels); absent: the page's place, from 1. */
+  l?: string | null;
   y: number | null;
   k: Entry[];
 }
@@ -72,7 +74,7 @@ export class Outline {
         const p = `${path}/${e.t}`;
         const kids = e.k.length ? list(e.k, p, depth + 1) : "";
         const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
-        return html`<li data-i="${i}" data-path="${p}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? html`<span class="phx-fold" aria-hidden="true"></span>` : html`<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${e.t}">${e.t}</a>${e.p != null ? html`<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
+        return html`<li data-i="${i}" data-path="${p}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? html`<span class="phx-fold" aria-hidden="true"></span>` : html`<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${e.t}">${e.t}</a>${e.p != null ? html`<span class="phx-p" title="${e.l != null && e.l !== String(Number(e.p) + 1) ? `page ${e.l} (the PDF's page ${Number(e.p) + 1})` : `page ${Number(e.p) + 1}`}">${e.l ?? Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
       })}</ul>`;
     this.el.replaceChildren(list(items, "", 0));
     for (const li of this.el.querySelectorAll<HTMLElement>("li")) {

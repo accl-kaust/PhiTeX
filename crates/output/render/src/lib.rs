@@ -952,6 +952,10 @@ fn probe_with(
 pub struct Entry {
     pub title: String,
     pub page: Option<usize>,
+    /// Its page's number as the document prints it (the catalog's
+    /// `/PageLabels`, hyperref's `\thepage`: "iv", "A-3"); `None`: no labels,
+    /// the page's place stands for its number.
+    pub label: Option<String>,
     pub y: Option<f64>,
     pub kids: Vec<Entry>,
 }
@@ -1015,6 +1019,7 @@ fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
             out.push(Entry {
                 title,
                 page: place.map(|p| p.0),
+                label: None,
                 y: place.and_then(|p| p.1),
                 kids,
             });
@@ -1035,7 +1040,135 @@ fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
     };
     // (at most this many entries: a cycle of /Next ends there)
     let mut budget = 100_000usize;
-    level(pdf, pages, first, &mut budget, names)
+    let mut out = level(pdf, pages, first, &mut budget, names);
+    if let Some(labels) = page_labels(&root, pages.len()) {
+        fn name(es: &mut [Entry], labels: &[String]) {
+            for e in es {
+                e.label = e.page.and_then(|k| labels.get(k)).cloned();
+                name(&mut e.kids, labels);
+            }
+        }
+        name(&mut out, &labels);
+    }
+    out
+}
+
+/// Each page's number as the document prints it, from the catalog's
+/// `/PageLabels` number tree (ISO 32000 12.4.2: a range from each key, its
+/// style `/S`, prefix `/P` and first number `/St`); `None` where the PDF
+/// has none.
+fn page_labels(root: &Dict<'_>, n: usize) -> Option<Vec<String>> {
+    let tree = root.get::<Dict<'_>>(b"PageLabels")?;
+    let mut ranges: Vec<(usize, Option<Dict<'_>>)> = Vec::new();
+    let mut stack = vec![tree];
+    // (at most this many nodes: a cycle of /Kids ends there)
+    let mut budget = 10_000usize;
+    while let Some(node) = stack.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        if let Some(nums) = node.get::<Array<'_>>(b"Nums") {
+            let mut it = nums.iter::<Object<'_>>();
+            while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                let Object::Number(k) = k else { continue };
+                let Ok(k) = usize::try_from(k.as_i64()) else {
+                    continue;
+                };
+                ranges.push((
+                    k,
+                    if let Object::Dict(d) = v {
+                        Some(d)
+                    } else {
+                        None
+                    },
+                ));
+            }
+        }
+        if let Some(kids) = node.get::<Array<'_>>(b"Kids") {
+            stack.extend(kids.iter::<Dict<'_>>());
+        }
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_by_key(|r| r.0);
+    let mut out = Vec::with_capacity(n);
+    let mut r = 0;
+    for k in 0..n {
+        while r + 1 < ranges.len() && ranges[r + 1].0 <= k {
+            r += 1;
+        }
+        let (start, d) = &ranges[r];
+        if *start > k {
+            // (before the first range: no label given, the page's place)
+            out.push((k + 1).to_string());
+            continue;
+        }
+        let Some(d) = d else {
+            out.push(String::new());
+            continue;
+        };
+        let prefix = d
+            .get::<Object<'_>>(b"P")
+            .and_then(Object::into_string)
+            .map(|s| text_string(s.as_bytes()))
+            .unwrap_or_default();
+        let first = match d.get::<Object<'_>>(b"St") {
+            Some(Object::Number(v)) => v.as_i64().max(1),
+            _ => 1,
+        };
+        let num = u64::try_from(first).unwrap_or(1) + (k - start) as u64;
+        let style = match d.get::<Object<'_>>(b"S") {
+            Some(Object::Name(s)) => s.as_str().to_owned(),
+            _ => String::new(),
+        };
+        let body = match style.as_str() {
+            "D" => num.to_string(),
+            "R" => roman(num).to_uppercase(),
+            "r" => roman(num),
+            "A" => letters(num).to_uppercase(),
+            "a" => letters(num),
+            _ => String::new(),
+        };
+        out.push(prefix + &body);
+    }
+    Some(out)
+}
+
+/// `n` in lowercase roman numerals.
+fn roman(mut n: u64) -> String {
+    const R: [(u64, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut s = String::new();
+    for (v, t) in R {
+        while n >= v {
+            s.push_str(t);
+            n -= v;
+        }
+    }
+    s
+}
+
+/// `n` as PDF's letter numbering: a to z, then aa to zz, aaa…
+#[allow(clippy::cast_possible_truncation)]
+fn letters(n: u64) -> String {
+    let n = n.max(1) - 1;
+    let c = char::from(b'a' + (n % 26) as u8);
+    std::iter::repeat_n(c, (n / 26) as usize + 1).collect()
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

@@ -3445,7 +3445,7 @@ var Outline = class {
       const p = `${path}/${e.t}`;
       const kids = e.k.length ? list(e.k, p, depth + 1) : "";
       const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
-      return html`<li data-i="${i}" data-path="${p}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? html`<span class="phx-fold" aria-hidden="true"></span>` : html`<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${e.t}">${e.t}</a>${e.p != null ? html`<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
+      return html`<li data-i="${i}" data-path="${p}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? html`<span class="phx-fold" aria-hidden="true"></span>` : html`<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${e.t}">${e.t}</a>${e.p != null ? html`<span class="phx-p" title="${e.l != null && e.l !== String(Number(e.p) + 1) ? `page ${e.l} (the PDF's page ${Number(e.p) + 1})` : `page ${Number(e.p) + 1}`}">${e.l ?? Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
     })}</ul>`;
     this.el.replaceChildren(list(items, "", 0));
     for (const li of this.el.querySelectorAll("li")) {

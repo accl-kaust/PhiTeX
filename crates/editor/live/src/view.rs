@@ -711,12 +711,12 @@ impl Viewer {
     }
 
     /// The outline of the PDF shown, as the viewer's entries
-    /// (`viewer/src/outline.ts`' `Entry`: title, page, place, entries).
+    /// (`viewer/src/outline.ts`' `Entry`: title, page, its printed number, place, entries).
     fn outline_json(&self) -> Value {
         fn conv(es: &[phitex_render::Entry]) -> Value {
             Value::Array(
                 es.iter()
-                    .map(|e| json!({"t": e.title, "p": e.page, "y": e.y, "k": conv(&e.kids)}))
+                    .map(|e| json!({"t": e.title, "p": e.page, "l": e.label, "y": e.y, "k": conv(&e.kids)}))
                     .collect(),
             )
         }
