@@ -55,6 +55,9 @@ pub struct PersistProbe {
     pub env: u64,
     /// Value bytes only the environment reaches.
     pub env_value_bytes: u64,
+    /// Values, value bytes and string bytes the records reach beyond
+    /// the environment's values.
+    pub beyond_env: [u64; 3],
     pub paths: u64,
     pub memo: u64,
     /// Client roots given, and the values only they reach.
@@ -91,7 +94,7 @@ impl PersistProbe {
              defs {} contribs {} placed {} sources {} text-values {}; engine-read-bytes {:.2} MB; \
              values {} (strs {} {:.2} MB, lists {}, ropes {}); env {} paths {} memo {}; client roots {} new values {}; \
              bytes {:.2} MB [values {:.2} (env-only {:.2}) nodes {:.2} records {:.2} reads {:.2} env+paths+memo {:.2} client+env values {:.2}]; \
-             encode {:.1} ms, decode values {:.1} ms, decode records {:.1} ms, verify {:.1} ms over {} reads, moved {} in {} nodes {:?}; roundtrip differ {}",
+             encode {:.1} ms, decode values {:.1} ms, decode records {:.1} ms, verify {:.1} ms over {} reads, moved {} in {} nodes {:?}; roundtrip differ {}; beyond the environment: values {} bytes {:.2} MB strings {:.2} MB",
             self.nodes[0],
             self.nodes[1],
             self.nodes[2],
@@ -146,6 +149,9 @@ impl PersistProbe {
             self.verify_moved_nodes,
             self.verify_moved,
             self.roundtrip_differ,
+            self.beyond_env[0],
+            mb(self.beyond_env[1]),
+            mb(self.beyond_env[2]),
         )
     }
 }
@@ -639,6 +645,32 @@ impl Engine {
         let n_values = t.n as usize;
         let table_at = std::mem::take(&mut t.at);
         drop(t);
+        // (what a graph must hold beyond the environment's values, which
+        // a load is given again by the provider: the format's bindings and
+        // the files read. The same values, the environment's first)
+        {
+            let mut tb = Table {
+                v,
+                at: FxHashMap::default(),
+                out: Vec::new(),
+                n: 0,
+                strs: 0,
+                str_bytes: 0,
+                lists: 0,
+                ropes: 0,
+            };
+            for (f, x) in self.env.values.read().iter() {
+                tb.put(f.0);
+                if let Some(x) = *x {
+                    tb.put(x);
+                }
+            }
+            let (b0, s0, n0) = (tb.out.len() as u64, tb.str_bytes, tb.n);
+            for &x in table_at.keys() {
+                tb.put(x);
+            }
+            p.beyond_env = [u64::from(tb.n - n0), tb.out.len() as u64 - b0, tb.str_bytes - s0];
+        }
 
         // (decoding: the values into a fresh store, then the records)
         let t1 = Instant::now();
@@ -848,8 +880,31 @@ impl Engine {
                 let a = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::read::answer_in(self, n, rd.kind(), rd.path(), &mut memo)
                 }));
-                if a.map_or(true, |a| a != rd.seen()) {
+                if a.as_ref().map_or(true, |a| *a != rd.seen()) {
                     p.verify_moved[kind_code(rd.kind()).1] += 1;
+                    if p.verify_moved.iter().sum::<u64>() <= 12 {
+                        let op = self
+                            .ops
+                            .get(n.op.load(std::sync::atomic::Ordering::Acquire) as usize)
+                            .map_or("?", |o| o.name());
+                        let cut = |x: Option<ValueId>| {
+                            x.map_or_else(|| "none".to_owned(), |x| v.render(x).chars().take(160).collect())
+                        };
+                        eprintln!(
+                            "persist-probe: moved: node {} {op} kind {:?} path {} seen {} now {}",
+                            n.id.raw(),
+                            rd.kind(),
+                            rd.path().0,
+                            cut(rd.seen()),
+                            a.as_ref().map_or_else(|_| "panic".to_owned(), |a| cut(*a)),
+                        );
+                        if let Some(f) = rd.kind().field() {
+                            eprintln!(
+                                "persist-probe: moved: field {}",
+                                v.render(f.0).chars().take(160).collect::<String>()
+                            );
+                        }
+                    }
                     moved = true;
                 }
             }
