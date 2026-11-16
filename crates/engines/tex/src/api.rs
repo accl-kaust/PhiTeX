@@ -8673,6 +8673,29 @@ impl Build {
         stats.pkg_on_critical = loads.iter().filter(|n| on.contains(&n.raw())).count() as u64;
     }
 
+    /// (observe) The persisted graph's probe (docs/spec-persisted-graph.md
+    /// §9): the engine's state encoded and decoded, the client's values
+    /// with it, and the build's own tables counted. Call between
+    /// evaluations; the client's caches of ids are dropped as a
+    /// collection drops them (`crate::collect`), nothing else changes.
+    #[must_use]
+    pub fn persist_probe(&self) -> (String, Vec<u8>) {
+        let eng = &self.g.eng;
+        let p = eng.persist_probe(Some(&mut |keep: &mut dyn FnMut(ValueId)| {
+            eng.client_roots(keep)
+        }));
+        let line = format!(
+            "{}; build: text {} B, text nodes {}, dlines {}, files read {}, pdf {} B",
+            p.line(),
+            self.text.len(),
+            self.nodes.len(),
+            self.dlines.len(),
+            self.files_read().len(),
+            self.output_bytes().len(),
+        );
+        (line, p.bytes)
+    }
+
     /// The files the document's runs opened for reading, with a hash of
     /// the text each read, in the order read (the format's are in its
     /// key, [`Self::prelude_key`]).

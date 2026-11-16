@@ -1357,6 +1357,34 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     // (the records the build changed, stored once it is done)
     s.flush_records();
     phitex_tex::timeline::lap("cli: the records stored");
+    // (observe, docs/spec-persisted-graph.md §9: an edit with nothing
+    // changed in this process, then the persisted graph's probe; the
+    // bytes to the file the variable names)
+    if let Some(dest) = std::env::var_os("PHITEX_PERSIST_PROBE") {
+        for k in 0..3 {
+            let t0 = std::time::Instant::now();
+            let r2 = s.build();
+            let wall = t0.elapsed();
+            let runs: u64 = s.runs_by_op().iter().map(|(_, n)| *n).sum();
+            eprintln!(
+                "persist-probe: in-process edit with nothing changed #{k}: {:.2} ms, runs {runs}, pages {}",
+                wall.as_secs_f64() * 1e3,
+                r2.pages()
+            );
+        }
+        if let Some((line, bytes)) = s.persist_probe() {
+            eprintln!("{line}");
+            if dest != "1" {
+                let t0 = std::time::Instant::now();
+                let _ = std::fs::write(&dest, &bytes);
+                eprintln!(
+                    "persist-probe: written {} B in {:.2} ms",
+                    bytes.len(),
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        }
+    }
     cache_summary(t, ui);
     phitex_tex::timeline::lap("cli: the cache's summary");
     if let Some(full) = o.report {
