@@ -142,7 +142,8 @@ client's state is one of:
 
 **Values keep their places.** A product that hashes value ids (a page's
 key, a read-time command's serial, a sealed line's head hash, a cut
-file's line owner, the finishers' table key, the pages' shown ids) is
+file's line owner, the finishers' table key, the pages' shown ids, the
+buckets of the fields a piece read across its candidates) is
 only the same in two stores that hold every value under the same id. The
 import puts each plain value at its place in the exporting store (its
 payload less the store's base, `Values::stable_raw`), each sequence at
@@ -155,7 +156,10 @@ hyphenation patterns) never take one store's value for another's. Before
 this, a loaded build's runs remade those products under other ids: a
 sealed line made before the save was not found by its head hash after
 it, the finishers' table was missed, a cut file's lines were given under
-another field.
+another field, and every finisher reading `pages:used:<piece>` ran again
+(its buckets by raw field ids). The link's pages and their records are
+kept by the store's instance and key (their keys are the same in two
+stores of one process that hold the same page).
 
 #### 2.2.1 The ops (`run::Ops`)
 
@@ -668,9 +672,12 @@ Steps 1 and 2 change no output and load nothing across processes. Step
   to the twin, and their runs, runs by operation and outputs compared;
   one `graph-check:` line each on stderr. The gate's mode:
   `scripts/accl/gate-fast persist [COMMIT] [N] [J]` (gate-shard.sh
-  `persist`: ci/research.json under `editsweep.py --threads J` with the
-  check on; red for a refused or changed load, or an edit whose twin
-  differs without unsaved link state; one with it is reported apart).
+  `persist`: ci/research.json under `editsweep.py --threads J
+  --graph-check`; red for a refused or changed load, an edit whose
+  twin ran otherwise at -j1, or one whose twin's output differs without
+  unsaved link state; one with it is reported apart). At more threads
+  the runs are reported, not compared (two evaluations of one change
+  run ahead of their inputs as their schedules have it).
 
 Measured on acclnode11 (local disk, release, `--shelf --exact-pdf`,
 the check's own lines; ms, one thread for save and load):
