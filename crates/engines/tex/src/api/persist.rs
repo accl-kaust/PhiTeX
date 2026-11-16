@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 const MAGIC: &[u8; 8] = b"PXBUILD\x01";
 /// The client's encoding's version: any change of its layout bumps it.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HASH_SEED: u64 = 0x7078_6275_696c_6431;
 
 type R<T> = Result<T, String>;

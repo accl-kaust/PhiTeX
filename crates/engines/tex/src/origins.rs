@@ -395,17 +395,23 @@ pub(crate) fn save_kept(e: &mut crate::api::persist::Enc<'_>, inst: u64, ids: &[
                 e.b(true);
                 e.b(*shipped);
                 e.n(g.codes.len());
+                // (a page's places, sizes and contexts as differences
+                // from the code before: most are 0 or a glyph's width,
+                // a byte or two each)
+                let mut last = [0i64; 4];
                 for c in &g.codes {
                     e.byte(c.kind);
                     e.b(c.first);
                     e.u(u64::from(c.ch));
                     e.u(u64::from(c.lig_n));
                     e.u(u64::from(c.lig));
-                    for x in [c.h, c.v, c.w, c.size] {
-                        e.i(i64::from(x));
+                    let now = [c.h, c.v, c.size, c.context.cast_signed()].map(i64::from);
+                    for (x, l) in now.iter().zip(&mut last) {
+                        e.i(x - *l);
+                        *l = *x;
                     }
+                    e.i(i64::from(c.w));
                     e.byte(c.level);
-                    e.u(u64::from(c.context));
                 }
                 e.n(g.lig.len());
                 for &l in &g.lig {
@@ -453,20 +459,23 @@ pub(crate) fn load_kept(d: &mut crate::api::persist::Dec<'_>, inst: u64) -> Resu
             let shipped = d.b()?;
             let m = d.n()?;
             let mut codes = Vec::with_capacity(m.min(1 << 20));
+            let mut last = [0i64; 4];
             for _ in 0..m {
                 let kind = d.byte()?;
                 let first = d.b()?;
                 let ch = u16::try_from(d.u()?).map_err(|_| "a code out of range")?;
                 let lig_n = u16::try_from(d.u()?).map_err(|_| "a code out of range")?;
                 let lig = small(d.u()?)?;
-                let (h, v, w, size) = (
-                    scaled(d.i()?)?,
-                    scaled(d.i()?)?,
-                    scaled(d.i()?)?,
-                    scaled(d.i()?)?,
-                );
+                for l in &mut last {
+                    *l = l.checked_add(d.i()?).ok_or("a page's place out of range")?;
+                }
+                let [h, v, size, context] = last;
+                let (h, v, size) = (scaled(h)?, scaled(v)?, scaled(size)?);
+                let context = i32::try_from(context)
+                    .map_err(|_| "a code out of range".to_owned())?
+                    .cast_unsigned();
+                let w = scaled(d.i()?)?;
                 let level = d.byte()?;
-                let context = small(d.u()?)?;
                 codes.push(Code {
                     kind,
                     first,
