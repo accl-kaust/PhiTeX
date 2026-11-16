@@ -98,7 +98,7 @@ def one(args, c):
         # build and checks a twin loaded of it; its lines on the stderr)
         env["PHITEX_GRAPH_CHECK"] = "1"
     p = subprocess.Popen([args.bin, "watch", "--no-view", "--json", "--exact-pdf", "--no-synctex",
-                          "--engine", c["engine"], "-j", str(args.threads), main], cwd=d, env=env,
+                          "--engine", c["engine"], "-j", str(args.threads), *args.extra, main], cwd=d, env=env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
 
     def build(timeout):
@@ -165,7 +165,7 @@ def one(args, c):
     ccache.mkdir(parents=True)
     os.symlink(WORK / "fcache" / "formats", ccache / "formats")
     cenv = manuals.side_env(c["engine"], {"PHITEX_CACHE_DIR": str(ccache)}, phitex=True)
-    common.run([args.bin, "build", "--exact-pdf", "--no-synctex", "--engine", c["engine"], "-j", str(args.threads), main],
+    common.run([args.bin, "build", "--exact-pdf", "--no-synctex", "--engine", c["engine"], "-j", str(args.threads), *args.extra, main],
                cold, cenv, args.timeout, out=cold / "term.txt")
     res["history_md5"], res["cold_md5"] = hist, md5(cold / f"{job}.pdf")
     if len(res["edits"]) == len(PLACES) and hist != res["cold_md5"]:
@@ -211,6 +211,8 @@ def main():
     ap.add_argument("--threads", type=int, default=1)
     # (the watch with PHITEX_GRAPH_CHECK=1: gate-shard.sh persist)
     ap.add_argument("--graph-check", action="store_true")
+    # (more flags for the watch and the cold build: `--extra=--shelf`)
+    ap.add_argument("--extra", action="append", default=[])
     args = ap.parse_args()
     items = shards.docs("edits", manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
