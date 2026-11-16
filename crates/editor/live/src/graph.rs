@@ -93,12 +93,13 @@ pub struct Manifest {
 
 /// The lookups and reads XeTeX's fonts and its PDF's writer made through
 /// the host, not through the engine's environment (their files are not
-/// `file:` fields): each lookup with its answer, each file read with its
-/// stat key when first read (empty: read under two keys).
+/// `file:` fields): each lookup with its answer, each file read with
+/// whether it was there and its stat key when first read (empty: read
+/// under two keys).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutsideLog {
     pub finds: BTreeMap<(u8, String, u8, String), Option<String>>,
-    pub reads: BTreeMap<String, Option<Vec<u8>>>,
+    pub reads: BTreeMap<String, (bool, Option<Vec<u8>>)>,
 }
 
 /// [`OutsideLog`], shared by the wrappers that fill it.
@@ -108,14 +109,15 @@ pub type Outside = Arc<Mutex<OutsideLog>>;
 const FONTS: u8 = 1;
 const DPX: u8 = 2;
 
-fn note_read(log: &Outside, host: &dyn Host, path: &str) {
-    let k = host.stamp(Path::new(path));
+/// File `path` read, its key `k` taken before the read: whether it was
+/// there.
+fn note_read(log: &Outside, path: &str, k: Option<Vec<u8>>, found: bool) {
     let mut l = log.lock().unwrap_or_else(PoisonError::into_inner);
     match l.reads.get_mut(path) {
-        Some(old) if *old != k => *old = Some(Vec::new()),
+        Some(old) if *old != (found, k.clone()) => *old = (found, Some(Vec::new())),
         Some(_) => {}
         None => {
-            l.reads.insert(path.to_owned(), k);
+            l.reads.insert(path.to_owned(), (found, k));
         }
     }
 }
@@ -209,8 +211,10 @@ pub struct KeyedFonts {
 
 impl phitex_tex::FontSource for KeyedFonts {
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {
-        note_read(&self.log, &*self.host, path);
-        self.inner.read(path)
+        let k = self.host.stamp(Path::new(path));
+        let b = self.inner.read(path);
+        note_read(&self.log, path, k, b.is_some());
+        b
     }
 
     fn find_file(&self, name: &str, format: phitex_tex::KpseFormat) -> Option<String> {
@@ -268,8 +272,11 @@ impl phitex_xdvipdfmx::io::Files for KeyedDpx {
     }
 
     fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
-        note_read(&self.log, &*self.host, &String::from_utf8_lossy(path));
-        self.inner.read(path)
+        let p = String::from_utf8_lossy(path);
+        let k = self.host.stamp(Path::new(&*p));
+        let b = self.inner.read(path);
+        note_read(&self.log, &p, k, b.is_some());
+        b
     }
 
     fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
@@ -319,9 +326,16 @@ pub fn outside_moved(
             return Some(format!("the font file {name} is found elsewhere"));
         }
     }
-    for (path, was) in &log.reads {
+    for (path, (found, was)) in &log.reads {
         let now = host.stamp(Path::new(path));
-        if was.as_ref().is_none_or(Vec::is_empty) || now != *was {
+        // (one read: its key, not empty, the same; one not there: still
+        // not there)
+        let same = if *found {
+            was.as_ref().is_some_and(|k| !k.is_empty()) && now == *was
+        } else {
+            was.as_ref().is_none_or(|k| !k.is_empty()) && now.is_none()
+        };
+        if !same {
             return Some(format!("the font file {path} changed"));
         }
     }
@@ -370,8 +384,9 @@ pub fn encode(key: &Key, prelude: &[u8; 32], manifest: &Manifest, build: &[u8]) 
         e.os(found.as_deref());
     }
     e.n(manifest.outside.reads.len());
-    for (p, k) in &manifest.outside.reads {
+    for (p, (found, k)) in &manifest.outside.reads {
         e.s(p);
+        e.b(*found);
         e.b(k.is_some());
         if let Some(k) = k {
             e.by(k);
@@ -464,8 +479,9 @@ pub fn decode(b: &[u8]) -> Result<Parts<'_>, String> {
     }
     for _ in 0..d.n()? {
         let p = d.s()?;
+        let found = d.b()?;
         let k = if d.b()? { Some(d.by()?.to_vec()) } else { None };
-        outside.reads.insert(p, k);
+        outside.reads.insert(p, (found, k));
     }
     let cold_ms = d.u()?;
     let build = &payload[d.i..];
@@ -605,7 +621,8 @@ mod tests {
         );
         outside
             .reads
-            .insert("/f/lm.otf".into(), Some(vec![1, 2, 3]));
+            .insert("/f/lm.otf".into(), (true, Some(vec![1, 2, 3])));
+        outside.reads.insert("/f/lm.otf/rsrc".into(), (false, None));
         let m = Manifest {
             text: "\\documentclass{article}\n".into(),
             inputs: vec![
