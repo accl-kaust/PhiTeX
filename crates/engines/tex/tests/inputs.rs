@@ -289,7 +289,22 @@ fn a_touched_files_date_is_read_again() {
     // (2001-09-09 and 2004-01-10, UTC)
     at(1_000_000_000);
     let src = "\\immediate\\write16{[\\pdffilemoddate{dated.tex}]}\\input dated \\bye\n";
-    let opts = common::options("./dated-doc.tex", "dated-doc", "", &dir);
+    // (the file at its whole path: the test finder's `./dated.tex` is
+    // the folder's, and this process's working folder is another)
+    let opts = {
+        let inner = common::finder(&dir);
+        let whole = f.display().to_string();
+        let finder: phitex_tex::Finder = std::sync::Arc::new(move |key: &str| {
+            if key == "dated.tex" || key == "dated" {
+                return Some((whole.clone(), std::fs::read(&whole).ok()?));
+            }
+            inner(key)
+        });
+        phitex_tex::Options {
+            finder,
+            ..common::options("./dated-doc.tex", "dated-doc", "", &dir)
+        }
+    };
     let mut b = common::build(opts, Some(&common::plain()), src);
     let log = b.output().1;
     assert!(log.contains("[D:20010909"), "{log}");

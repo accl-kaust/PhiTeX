@@ -1066,11 +1066,14 @@ impl Session {
     /// all, its stat key another, or not found then and found now (but
     /// where the job wrote it). [`Session::reread_all`]'s check, and each
     /// name found resolved again: a file the project now has shadows the
-    /// distribution's.
-    fn graph_moved_inputs(&self) -> Vec<String> {
+    /// distribution's. The session's table takes each one's place now:
+    /// kept, the graph saved after the build that staged it had the old
+    /// place, and every later load found the name moved again.
+    fn graph_moved_inputs(&mut self) -> Vec<String> {
         let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
         let mut out = Vec::new();
-        for (n, found, p, _) in &self.inputs {
+        let mut placed = Vec::new();
+        for (i, (n, found, p, _)) in self.inputs.iter().enumerate() {
             if !found {
                 self.host.look_again(n);
             }
@@ -1089,7 +1092,21 @@ impl Session {
             };
             if moved {
                 out.push(plain_name(n));
+                if now != *p {
+                    placed.push((i, now));
+                }
             }
+        }
+        drop(stamps);
+        for (i, now) in placed {
+            let ours = now.as_ref().is_some_and(|q| !self.host.distribution(q));
+            let e = &mut self.inputs[i];
+            e.1 = now.is_some();
+            if let Some(q) = &now {
+                self.inputs_by.key(plain_name(&q.to_string_lossy()), i);
+            }
+            e.2 = now;
+            e.3 = ours;
         }
         out
     }
