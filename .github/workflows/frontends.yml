@@ -195,6 +195,11 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: fe
         run: node build/vscode/dist/disk.mjs
+      # (a core's end leaves no worker, and the process exits by itself: #46)
+      - name: VS Code's built-in wasm engine ended
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node build/vscode/dist/end.mjs
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
