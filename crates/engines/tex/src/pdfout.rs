@@ -95,7 +95,9 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
             .zip(&rs)
             .filter_map(|(&x, r)| {
                 let Rec::Page(k) = *r else { return None };
-                let (pid, c) = m.get(&u64::from_ne_bytes(k.to_ne_bytes()))?.brk?;
+                let (pid, c) = m
+                    .get(&(v.instance(), u64::from_ne_bytes(k.to_ne_bytes())))?
+                    .brk?;
                 Some((x, pid, c))
             })
             .collect()
@@ -170,7 +172,7 @@ pub(crate) fn order_line(v: &Values, xpages: &[ValueId]) -> Vec<ValueId> {
 pub(crate) fn line_show(v: &Values, x: ValueId) -> String {
     if let Some(k) = v.as_int(x) {
         let m = pieces().locked();
-        return match m.get(&u64::from_ne_bytes(k.to_ne_bytes())) {
+        return match m.get(&(v.instance(), u64::from_ne_bytes(k.to_ne_bytes()))) {
             Some(pc) => format!(
                 "page {} node {} brk {:?}",
                 pc.pj,
@@ -430,7 +432,11 @@ pub(crate) struct PagePiece {
     inst: u64,
 }
 
-type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
+/// By the store's instance and the page's key: a key is a hash of the
+/// page's values' stable ids (`Values::stable_raw`), the same in two
+/// stores of one process that hold the same page (a graph loaded beside
+/// the build it was saved from), whose pages are each store's own.
+type PieceMemo = Mutex<FxHashMap<(u64, u64), Arc<PagePiece>>>;
 
 /// A page's box ([`PagePiece::bx`]) and, where its sealed lines are
 /// filled in, the units they were read from ([`lines_key`]) and what the
@@ -476,7 +482,8 @@ type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 /// the link, `crate::origins`), dropped with the record: a page's
 /// glyphs of lines it no longer has were kept beside every other version
 /// before (the `TikZ` manual's viewer: 0.9 GB at -j16, 900 s).
-type RecordMemo = Mutex<FxHashMap<u64, (Lines, Arc<OnceLock<Made>>, Option<(u64, u64)>)>>;
+/// By the store's instance and the page's key, as [`PieceMemo`].
+type RecordMemo = Mutex<FxHashMap<(u64, u64), (Lines, Arc<OnceLock<Made>>, Option<(u64, u64)>)>>;
 
 /// The glyphs kept of records dropped ([`RecordMemo`]).
 fn forget_glyphs(gone: impl IntoIterator<Item = Option<(u64, u64)>>) {
@@ -586,7 +593,7 @@ fn record_of(
             gone.extend(all.drain().map(|(_, e)| e.2));
         }
         let e = all
-            .entry(key)
+            .entry((inst, key))
             .or_insert_with(|| (h.clone(), Arc::default(), None));
         if e.0 != *h {
             gone.push(e.2.take());
@@ -630,10 +637,10 @@ fn record_of(
 
 /// Whether the record of page `key` with lines `h` is made
 /// ([`record_of`]'s memo).
-fn record_made(key: u64, h: &Lines) -> bool {
+fn record_made(v: &Values, key: u64, h: &Lines) -> bool {
     records()
         .locked()
-        .get(&key)
+        .get(&(v.instance(), key))
         .is_some_and(|(l, m, _)| l == h && m.get().is_some())
 }
 
@@ -2178,7 +2185,7 @@ fn command_with(
 pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn FnMut(ValueId)) {
     let inst = v.instance();
     let mut m = pieces().locked();
-    m.retain(|k, pc| pc.inst != inst || live.contains(k));
+    m.retain(|k, pc| pc.inst != inst || live.contains(&k.1));
     for pc in m.values().filter(|pc| pc.inst == inst) {
         pc.params.iter().chain(&pc.lazy).for_each(|&x| keep(x));
         keep(pc.page);
@@ -2229,7 +2236,7 @@ pub(crate) fn prune_pieces(v: &Values, line: &[ValueId]) {
         .collect();
     let inst = v.instance();
     let mut m = pieces().locked();
-    m.retain(|k, pc| pc.inst != inst || keep.contains(k));
+    m.retain(|k, pc| pc.inst != inst || keep.contains(&k.1));
     let mut rs = records().locked();
     forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
 }
@@ -2735,10 +2742,11 @@ fn ship_apart(
 /// fonts compared whole). The key it is under.
 fn keep_piece(pc: PagePiece, mut key: u64) -> u64 {
     let mut m = pieces().locked();
+    let inst = pc.inst;
     loop {
-        match m.get(&key) {
+        match m.get(&(inst, key)) {
             None => {
-                m.insert(key, Arc::new(pc));
+                m.insert((inst, key), Arc::new(pc));
                 return key;
             }
             Some(o)
@@ -2872,7 +2880,7 @@ impl phitex_defuse::Operation for PdfPage {
             return Ok(ValueId::UNIT);
         };
         let key = u64::from_ne_bytes(k.to_ne_bytes());
-        let pc = pieces().locked().get(&key).cloned();
+        let pc = pieces().locked().get(&(v.instance(), key)).cloned();
         // (its sealed lines from their pieces' units, read whole: the
         // page's writer reads its lines, `crate::pages::seal`)
         let Some(pc) = pc else {
@@ -5539,7 +5547,9 @@ fn line_cache(
         let m = pieces().locked();
         rs.iter()
             .map(|r| match *r {
-                Rec::Page(k) => m.get(&u64::from_ne_bytes(k.to_ne_bytes())).cloned(),
+                Rec::Page(k) => m
+                    .get(&(v.instance(), u64::from_ne_bytes(k.to_ne_bytes())))
+                    .cloned(),
                 _ => None,
             })
             .collect()
@@ -6042,7 +6052,7 @@ fn link(
                         h.as_ref().is_some_and(|h| {
                             let key =
                                 u64::from_ne_bytes(v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes());
-                            !record_made(key, h)
+                            !record_made(v, key, h)
                         })
                     })
             })
