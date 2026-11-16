@@ -1994,8 +1994,9 @@ impl<'a> Ctx<'a> {
     }
 
     /// A read of `f` before my run's first command is done (nothing to
-    /// throw away): with the speculation window on (a clean build's
-    /// evaluation, more than one thread), where a node before me in my
+    /// throw away): with the first-read wait on (a clean build's
+    /// evaluation, [`Engine::set_first_read_wait`]) and more than one
+    /// thread, where a node before me in my
     /// unit has not committed and its operation names `f` among what it
     /// may define, the run waits for the nearest such node and runs when
     /// it commits: a wait, not a run (docs/spec-window.md, First reads).
@@ -2004,8 +2005,7 @@ impl<'a> Ctx<'a> {
     /// before, and a definition that moves it re-asks it.
     pub fn wait_for_first_definer(&mut self, f: Field) -> Result<(), Stop> {
         use std::sync::atomic::Ordering::Acquire;
-        if !self.eng.window_on.load(Acquire)
-            || !self.eng.first_reads_on.load(Acquire)
+        if !self.eng.first_read_wait.load(Acquire)
             || !self.has_other_threads()
             || self.seen.contains_key(&f)
             || !self.eng.op(self.me.op()).text()

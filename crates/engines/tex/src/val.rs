@@ -233,6 +233,15 @@ pub(crate) fn cs_counts() -> (u32, u32) {
     (t.1, t.2)
 }
 
+/// The internal names numbered `from` and after, in order (a test's
+/// look at what a session minted).
+pub(crate) fn internal_names_from(from: u32) -> Vec<String> {
+    let n = cs_counts().0;
+    (from..n)
+        .map(|i| CsId::from_index(i as usize).name().to_owned())
+        .collect()
+}
+
 /// A control sequence: its interned entry ([`CsEntry`]).
 #[derive(Clone, Copy)]
 pub(crate) struct CsId(&'static CsEntry);

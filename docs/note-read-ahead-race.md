@@ -1,5 +1,12 @@
 # Pieces that read ahead of their definer (2026-11-10)
 
+(2026-11-16: the first-read wait below, `Ctx::wait_for_first_definer`,
+is on for every clean build at more than one thread, not only with the
+window: `chain::census_plain` failed under load, para400dvi 1.29 to 1.67
+runs a node, every rerun `param:hsize` (45 of 104 under 8 copies on 16
+CPUs, mc 87750); with the wait 0 of 584 so loaded and 0 of 200 alone,
+mc 87744/87764/87769. docs/spec-window.md, First reads.)
+
 For cut1's speculation window (`PHITEX_SPEC_WINDOW`). This is why
 `chain::chains` stays known-red (`scripts/accl/gate-known-reds.txt`,
 issue #10): its `pages` fixture runs 57 to 65 times for 46 nodes, 11 or

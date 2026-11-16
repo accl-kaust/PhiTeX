@@ -163,8 +163,11 @@ its `\hsize=6in` (docs/note-read-ahead-race.md). The value read is
 defined (the format's), so the wait for a definer of an undefined
 control sequence did not catch it.
 
-The rule, the window's own (on where the window is: a clean build's
-evaluation at more than one thread): a text node's read of a field
+The rule (on for every clean build's evaluation at more than one
+thread, the window on or not, `Engine::set_first_read_wait`; it was the
+window's alone until para400dvi's runs a node moved from 1.00 to 1.67
+with the machine's load, the census red under the gate, mc 87739): a
+text node's read of a field
 before its run's first command is done (`Run::load_slow`, `cmds <= 1`:
 nothing to throw away) waits for the nearest node before it in its unit
 that has not committed and whose operation names that field among what
@@ -184,8 +187,8 @@ definition that moves it re-asks it.
 - **Order.** A wait is always for a node before the reader, so waits
   form no cycle; the node waited for is let go by the window's rules
   like any other, and a held one at the latest when nothing else runs.
-- **Edits.** Off with the window: an edit leaves almost every node
-  committed, and edit speed wins ties.
+- **Edits.** Off: an edit leaves almost every node committed, and edit
+  speed wins ties.
 
 ## What it does not do: floats2col
 

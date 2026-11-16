@@ -104,6 +104,13 @@ pub fn boxscope_on() -> bool {
 pub fn interned_names() -> (u32, u32) {
     val::cs_counts()
 }
+/// The internal names numbered `from` and after, in the order they were
+/// first seen (a test's look at what a session minted).
+#[doc(hidden)]
+#[must_use]
+pub fn internal_names_from(from: u32) -> Vec<String> {
+    val::internal_names_from(from)
+}
 /// Interns control sequence `name` in this process's table, as a build
 /// meeting it would (a test's way to fill the table first).
 #[doc(hidden)]

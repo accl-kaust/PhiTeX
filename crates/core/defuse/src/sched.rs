@@ -3510,6 +3510,13 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     im_park(node, "wait", on);
     let committed = |n: NodeId| settled_node(eng, n);
     if node.state() != State::Running || on.is_none_or(committed) || !node.cas_state(State::Running, State::Dirty) {
+        // (queued again at once, not parked: no quiet point let it go,
+        // and its next take checks its holds again (`work`'s `quiet`). Its
+        // `held` kept, the take ran past them: a reader held for the
+        // edited definer that committed as it parked ran beside the five
+        // still to run, and again once they had, block_heads at -j8 201
+        // runs for 200 readers, 3 to 31 in 200 on mc 87778-87785)
+        node.held.store(false, Ordering::Release);
         end_run(eng, pool, w, node, State::Dirty);
         return;
     }
@@ -3526,6 +3533,8 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     std::sync::atomic::fence(Ordering::SeqCst);
     if committed(on) {
         drop(m);
+        // (queued again at once: as above)
+        node.held.store(false, Ordering::Release);
         w.ready().push(eng, node);
         w.offer();
         return;
