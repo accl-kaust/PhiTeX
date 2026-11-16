@@ -492,6 +492,32 @@ impl Colors {
             .any(|(&w, c)| c.page == k && c.hash == t.hash && live(w) && page_of(c.id) == Some(k))
     }
 
+    /// Writer `writer` (its node, and which page it made: [`PageId`])
+    /// streams page `k` (from 1), `hash` its identity: the page it told
+    /// before in this evaluation, elsewhere, withdrawn where no other
+    /// stream holds it as told (`page_of`: where a page is now), and
+    /// given (none: nothing to withdraw).
+    fn claim(
+        &mut self,
+        k: u64,
+        hash: u64,
+        writer: (u64, PageId),
+        page_of: &dyn Fn(PageId) -> Option<u64>,
+    ) -> Option<u64> {
+        self.writers.insert(writer.0);
+        let claim = Claim {
+            page: k,
+            id: writer.1,
+            hash,
+        };
+        let b = self.claims.insert(writer.0, claim)?.page;
+        if b == k || !self.told_now.contains(&b) || self.stands(b, &|_| true, page_of) {
+            return None;
+        }
+        self.withdraw(b);
+        Some(b)
+    }
+
     /// Page `k` (from 1) withdrawn: nothing of it told, nor waiting to be
     /// made again from its colours.
     fn withdraw(&mut self, k: u64) {
@@ -824,25 +850,9 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // (the writer's page now this one: the one it told before,
-            // elsewhere, withdrawn where nothing else holds it)
-            c.writers.insert(writer.0);
-            let before = c.claims.insert(
-                writer.0,
-                Claim {
-                    page: k,
-                    id: writer.1,
-                    hash,
-                },
-            );
-            if let Some(b) = before
-                && b.page != k
-                && c.told_now.contains(&b.page)
-                && !c.stands(b.page, &|_| true, &|id| self.page_of(id.0, id.1))
-            {
-                c.withdraw(b.page);
+            if let Some(b) = c.claim(k, hash, writer, &|id| self.page_of(id.0, id.1)) {
                 drop(c);
-                (h.page)(StreamedPage::withdrawn(self.evaluation(), b.page));
+                (h.page)(StreamedPage::withdrawn(self.evaluation(), b));
                 c = self
                     .colors
                     .lock()
@@ -1786,11 +1796,13 @@ pub(crate) fn lock_waits() -> Vec<(String, u64, std::time::Duration)> {
 mod tests {
     use super::*;
 
-    /// A progress whose pages streamed are kept as told: each page (from
-    /// 1) and whether it was withdrawn.
-    fn streaming() -> (Arc<Progress>, Arc<std::sync::Mutex<Vec<(u64, bool)>>>) {
+    /// The pages told: each page (from 1) and whether it was withdrawn.
+    type Heard = Arc<std::sync::Mutex<Vec<(u64, bool)>>>;
+
+    /// A progress whose pages streamed are kept as told ([`Heard`]).
+    fn streaming() -> (Arc<Progress>, Heard) {
         let p = Arc::new(Progress::new(2));
-        let told: Arc<std::sync::Mutex<Vec<(u64, bool)>>> = Arc::default();
+        let told: Heard = Arc::default();
         let t = told.clone();
         p.on_stream(StreamHook {
             page: Box::new(move |s| t.lock().unwrap().push((s.page, s.gone))),
