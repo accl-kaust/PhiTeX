@@ -576,6 +576,11 @@ impl Host for ShelfHost {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
+    /// Shelf's release: a pack's files all have one stamp.
+    fn release(&self) -> String {
+        format!("Shelf {}", self.files.index().release())
+    }
+
     /// A pack's file (the cache's fonts too).
     fn distribution(&self, path: &Path) -> bool {
         path.to_string_lossy().starts_with(phitex_shelf::TL)

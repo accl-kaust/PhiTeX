@@ -217,6 +217,14 @@ pub trait Host: Send + Sync {
         0
     }
 
+    /// What names the files' release the host serves, beyond the
+    /// files' own keys ([`Host::stamp`]): Shelf's release, whose packs'
+    /// files all have one stamp; TeX Live's trees. A persisted graph
+    /// ([`crate::graph`]) is kept by it. Empty: none.
+    fn release(&self) -> String {
+        String::new()
+    }
+
     /// A cold build's engine began, its progress `progress` (a host may
     /// watch it from outside, the CLI's `PHITEX_SNAPSHOT_SECS`).
     fn progress(&self, _progress: &Arc<phitex_tex::Progress>) {}
@@ -238,6 +246,15 @@ pub trait Store: Send + Sync {
     /// Format `name`'s evaluated state and the key it was stored with.
     fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)>;
     fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]);
+    /// [`Store::put`], durable: written whole where a crash leaves the
+    /// old bytes or the new ones, never a mix (the CLI's: a temporary
+    /// file, synced, renamed). The persisted graph's
+    /// ([`crate::graph`]).
+    fn put_durable(&self, key: Key<'_>, bytes: &[u8]) {
+        self.put(key, bytes);
+    }
+    /// Record `key` removed (a graph file refused: never read again).
+    fn remove(&self, _key: Key<'_>) {}
 }
 
 /// The version of the encodings this crate gives the document's records
@@ -304,6 +321,23 @@ impl Records {
     #[must_use]
     pub fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
         self.store.format(name)
+    }
+
+    /// The persisted graph's file ([`crate::graph`]): unstamped, its own
+    /// head keys it (the engine among its keys).
+    #[must_use]
+    pub fn graph(&self) -> Option<Vec<u8>> {
+        self.store.get(Key::Doc("graph"))
+    }
+
+    /// The persisted graph's file stored, durably.
+    pub fn put_graph(&self, bytes: &[u8]) {
+        self.store.put_durable(Key::Doc("graph"), bytes);
+    }
+
+    /// The persisted graph's file removed (refused).
+    pub fn remove_graph(&self) {
+        self.store.remove(Key::Doc("graph"));
     }
 
     pub fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {

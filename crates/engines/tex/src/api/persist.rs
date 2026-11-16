@@ -1269,4 +1269,105 @@ impl Build {
         self.settle();
         self.stats.nodes_run
     }
+
+    /// A loaded build's environment as this process gives it
+    /// (docs/spec-persisted-graph.md §3.3), what moved staged as an edit's
+    /// change is, for the next evaluation:
+    /// - the job's bindings made again from the options (the date where
+    ///   `SOURCE_DATE_EPOCH` gives none, the job's name, the TCX);
+    /// - every answer the provider gave asked of it again
+    ///   ([`phitex_defuse::Engine::reask_provided`]), a tool's file
+    ///   among them, but those keyed elsewhere: the format's bindings (by
+    ///   the format's key) and the files the build holds by their names
+    ///   (the session's manifest: their stat keys, their names resolved
+    ///   again, [`Build::stage_file`] where one moved).
+    ///
+    /// Call between [`Build::load`] and the first evaluation.
+    pub fn reask_environment(&mut self) -> EnvReask {
+        let mut out = EnvReask::default();
+        // (the job's bindings)
+        if let Some(base) = self.g.env_base.clone() {
+            let v = self.g.eng.values();
+            let fresh = super::by_field(super::job_sets(v, &base, &self.opts));
+            if fresh != self.g.job {
+                out.moved.extend(
+                    fresh
+                        .iter()
+                        .filter(|e| !self.g.job.contains(e))
+                        .map(|&(f, _)| crate::val::field_name(v, f)),
+                );
+                self.g.job = fresh;
+                let env = self.g.environment(self.opts.fixpoint);
+                self.g.push_env_as(env, true);
+                self.staged = true;
+            }
+        }
+        // (the provider as an evaluation installs it)
+        let finder = self.opts.finder.clone();
+        self.g.provide(&finder);
+        let v = self.g.eng.values();
+        let held: phitex_defuse::FxHashSet<Field> = self
+            .g
+            .files
+            .iter()
+            .map(|&(f, _)| f)
+            .chain(self.g.absent.iter().copied())
+            .filter(|&f| v.with_str(f.0, |n| !n.starts_with("tfile:")) == Some(true))
+            .collect();
+        let fmt = Arc::clone(&self.prelude.env);
+        let (asked, moved) = self
+            .g
+            .eng
+            .reask_provided(&|f| held.contains(&f) || fmt.binds(v, f));
+        out.asked = asked;
+        out.moved
+            .extend(moved.iter().map(|&(f, _)| crate::val::field_name(v, f)));
+        // (a moved field the client holds, a tool's file: its table and
+        // what it last pushed take the new answer, so the next push finds
+        // nothing changed in it)
+        for &(f, x) in &moved {
+            let g = &mut self.g;
+            g.files.retain(|&(h, _)| h != f);
+            g.absent.retain(|&h| h != f);
+            match x {
+                Some(x) => g.files.push((f, x)),
+                None => g.absent.push(f),
+            }
+            match (
+                g.env_pushed
+                    .binary_search_by_key(&f.0.raw(), |e| e.0.0.raw()),
+                x,
+            ) {
+                (Ok(i), Some(x)) => g.env_pushed[i].1 = x,
+                (Ok(i), None) => {
+                    g.env_pushed.remove(i);
+                }
+                (Err(i), Some(x)) => g.env_pushed.insert(i, (f, x)),
+                (Err(_), None) => {}
+            }
+            if x.is_none() {
+                if let Err(i) = g
+                    .absent_pushed
+                    .binary_search_by_key(&f.0.raw(), |h| h.0.raw())
+                {
+                    g.absent_pushed.insert(i, f);
+                }
+            } else {
+                g.absent_pushed.retain(|&h| h != f);
+            }
+        }
+        if !moved.is_empty() {
+            self.staged = true;
+        }
+        out
+    }
+}
+
+/// What [`Build::reask_environment`] found: the provider's answers asked
+/// again, and the fields that moved (the job's bindings' and the
+/// provider's), by name.
+#[derive(Debug, Default, Clone)]
+pub struct EnvReask {
+    pub asked: usize,
+    pub moved: Vec<String>,
 }

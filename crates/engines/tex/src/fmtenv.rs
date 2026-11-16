@@ -118,6 +118,12 @@ impl FormatEnv {
         Some(self.value(v, k, made))
     }
 
+    /// Whether the format binds field `f` (its answer is the format's,
+    /// keyed by the format's key).
+    pub(crate) fn binds(&self, v: &Values, f: Field) -> bool {
+        v.with_str(f.0, |name| self.find(name).is_some()) == Some(true)
+    }
+
     /// The value node bound to `name`: among the bindings under its key,
     /// the one of this name.
     fn find(&self, name: &str) -> Option<u32> {

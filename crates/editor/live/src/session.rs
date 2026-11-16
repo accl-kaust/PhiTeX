@@ -594,6 +594,35 @@ pub struct Session {
     /// process ([`Build::save`], [`Build::load`]), which must run nothing
     /// with nothing changed and the next change as the build runs it.
     graph_check: Option<GraphCheck>,
+    /// Whether the session keeps its graph between sessions
+    /// ([`crate::graph`]: `PHITEX_GRAPH=1`, [`Session::keep_graphs`]).
+    graph_on: bool,
+    /// The session's first build may take the graph the document's last
+    /// session saved: until it ran.
+    graph_first: bool,
+    /// What became of that graph (loaded, or why not), and of the last
+    /// save: a line each, for `-v`.
+    graph_notes: Mutex<Vec<String>>,
+    /// The last run ended at a quiet point (no evaluation failure): its
+    /// graph may be saved.
+    graph_quiet: bool,
+    /// What the builds read outside the environment (XeTeX's fonts, its
+    /// PDF's files), where graphs are kept ([`crate::graph::Outside`]).
+    outside: Option<crate::graph::Outside>,
+    /// The cold build's wall (ms): a loaded build's stuck bound.
+    cold_ms: u64,
+    /// The build is the graph loaded and nothing moved since: no save
+    /// (the file stays, spec §6).
+    graph_same: bool,
+}
+
+/// A clean build's options and format ([`Session::prepare_cold`]).
+struct ColdPrep {
+    opts: Options,
+    prelude: Option<String>,
+    /// The format's key as the store holds it (none: not stored).
+    cached_key: Option<[u8; 32]>,
+    progress: Arc<phitex_tex::Progress>,
 }
 
 /// [`Session::graph_check`]: the options and format the cold build had,
@@ -738,6 +767,13 @@ impl Session {
             synctex_due: std::sync::atomic::AtomicBool::new(false),
             lines: LineMarks::default(),
             graph_check: None,
+            graph_on: crate::graph::on(),
+            graph_first: true,
+            graph_notes: Mutex::default(),
+            graph_quiet: false,
+            outside: crate::graph::on().then(Arc::default),
+            cold_ms: 0,
+            graph_same: false,
         }
     }
 
@@ -900,6 +936,335 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Whether the session keeps its graph between sessions (its default:
+    /// `PHITEX_GRAPH=1`, docs/spec-persisted-graph.md step 3): its first
+    /// build loads the graph a session of the document saved, and
+    /// [`Session::save_graph`] saves its own. Set before the first build.
+    pub fn keep_graphs(&mut self, on: bool) {
+        self.graph_on = on;
+        if on && self.outside.is_none() {
+            self.outside = Some(Arc::default());
+        }
+    }
+
+    /// A line about the persisted graph for `-v` ([`Session::graph_notes`]).
+    fn note_graph(&self, l: String) {
+        self.graph_notes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(l);
+    }
+
+    /// What became of the persisted graph since last asked: loaded, or why
+    /// not; saved, or why not (`PHITEX_GRAPH=1`, docs/spec-persisted-graph.md).
+    pub fn graph_notes(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .graph_notes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// The persisted graph's keys (docs/spec-persisted-graph.md §3.1):
+    /// the engine, the files' release, the document and its outputs' place,
+    /// every option that changes what a build makes (not its threads), the
+    /// process's variables of [`crate::graph::KEY_VARS`], and XeTeX's font
+    /// index. Any one that differs, no load.
+    fn graph_key(&self) -> crate::graph::Key {
+        let j = &self.job;
+        let canon = |p: &Path| self.host.canonical(p).to_string_lossy().into_owned();
+        let mut k: crate::graph::Key = [
+            ("engine", format!("{:016x}", phitex_tex::engine_id())),
+            ("graph file", crate::graph::VERSION.to_string()),
+            ("files", self.host.release()),
+            ("program", j.engine.name.to_owned()),
+            ("output", format!("{:?}", j.engine.output)),
+            ("ini", format!("{} {}", j.ini, j.etex)),
+            ("main", canon(&j.path)),
+            ("jobname", j.jobname.clone()),
+            ("output directory", canon(&j.out_dir)),
+            ("speculation", format!("{:?}", j.spec)),
+            ("wait long", j.wait_long.to_string()),
+            ("node records", j.node_records.to_string()),
+            ("synctex", j.synctex.to_string()),
+            ("origins", j.origins.to_string()),
+            ("shell escape", j.shell_escape.to_string()),
+            ("fixpoint", j.fixpoint.to_string()),
+            ("search paths", format!("{:?}", j.inputs)),
+            (
+                "layout",
+                (self.sink.updates() || self.view_layout).to_string(),
+            ),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_owned(), b))
+        .collect();
+        for v in crate::graph::KEY_VARS {
+            k.push((
+                format!("${v}"),
+                std::env::var(v).unwrap_or_else(|_| "(unset)".to_owned()),
+            ));
+        }
+        if j.engine.xetex() {
+            let index = self
+                .host
+                .xetex()
+                .and_then(|x| x.font_index)
+                .map(|i| format!("{:016x}", crate::tex::words_hash(&i.to_bytes())));
+            k.push(("font index".to_owned(), index.unwrap_or_default()));
+        }
+        k
+    }
+
+    /// XeTeX's fonts and its PDF's files, each lookup and read noted for
+    /// the persisted graph ([`crate::graph::KeyedFonts`]), where graphs are
+    /// kept; its native fonts loaded afresh for the session, so that each
+    /// one it uses is read through them.
+    fn xetex_keyed(&self, x: phitex_tex::XeTeX) -> phitex_tex::XeTeX {
+        let Some(log) = &self.outside else {
+            return x;
+        };
+        phitex_tex::XeTeX {
+            fonts: x.fonts.map(|f| {
+                Arc::new(crate::graph::KeyedFonts {
+                    inner: f,
+                    host: self.host.clone(),
+                    log: log.clone(),
+                }) as phitex_tex::FontFiles
+            }),
+            pdf: x.pdf.map(|p| phitex_tex::XdvPdf {
+                files: crate::graph::keyed_dpx(p.files, self.host.clone(), log.clone()),
+                ..p
+            }),
+            native: Arc::default(),
+            ..x
+        }
+    }
+
+    /// The names the builds read whose file moved since its key was kept
+    /// (docs/spec-persisted-graph.md §3.2): found now elsewhere or not at
+    /// all, its stat key another, or not found then and found now (but
+    /// where the job wrote it). [`Session::reread_all`]'s check, and each
+    /// name found resolved again: a file the project now has shadows the
+    /// distribution's.
+    fn graph_moved_inputs(&self) -> Vec<String> {
+        let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out = Vec::new();
+        for (n, found, p, _) in &self.inputs {
+            if !found {
+                self.host.look_again(n);
+            }
+            let now = self.host.locate_key(n);
+            let moved = match (found, p, &now) {
+                (true, Some(p), Some(q)) if p == q => {
+                    !matches!((stamps.get(p), self.host.stamp(p)), (Some(a), Some(b)) if !a.is_empty() && *a == b)
+                }
+                (false, _, None) => false,
+                // (found now where the job wrote it, its key the one it
+                // was written with: the build's own)
+                (false, _, Some(q)) => {
+                    !matches!((stamps.get(q), self.host.stamp(q)), (Some(a), Some(b)) if !a.is_empty() && *a == b)
+                }
+                _ => true,
+            };
+            if moved {
+                out.push(plain_name(n));
+            }
+        }
+        out
+    }
+
+    /// The graph the document's last session saved, made the session's
+    /// build (docs/spec-persisted-graph.md §4.2, step 3), with the options
+    /// and format of `p`: its keys checked, its build decoded whole, the
+    /// session's tables of it; the files that moved since staged for the
+    /// build, an edit's, and the environment's other answers asked again
+    /// ([`Build::reask_environment`]). A line for `-v`.
+    ///
+    /// # Errors
+    ///
+    /// None saved, a key that differs, a font file read outside the
+    /// environment that moved, the file refused (cut, a hash wrong, the
+    /// build's bytes not decoding: the file is removed): the build is then
+    /// a clean build.
+    fn load_graph(&mut self, p: &ColdPrep) -> Result<String, String> {
+        let t0 = Instant::now();
+        let store = self.store.clone().ok_or("no cache")?;
+        let bytes = store.graph().ok_or("none saved")?;
+        let read_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let parts = crate::graph::decode(&bytes).inspect_err(|_| store.remove_graph())?;
+        if let Some(k) = crate::graph::key_differs(&parts.key, &self.graph_key()) {
+            return Err(format!("its key `{k}` differs"));
+        }
+        if p.prelude.is_some() && p.cached_key != Some(parts.prelude) {
+            return Err("the format differs".into());
+        }
+        let m = parts.manifest;
+        let xe = p.opts.xetex.as_ref();
+        if let Some(why) = crate::graph::outside_moved(
+            &m.outside,
+            &*self.host,
+            xe.and_then(|x| x.fonts.as_ref()),
+            xe.and_then(|x| x.pdf.as_ref()).map(|x| &x.files),
+        ) {
+            return Err(why);
+        }
+        let t1 = Instant::now();
+        let opts = p.opts.clone();
+        let (mut b, st) =
+            match crate::panics::catch(|| Build::load(opts, p.prelude.as_deref(), parts.build)) {
+                Ok(Ok(x)) => x,
+                Ok(Err(e)) => {
+                    store.remove_graph();
+                    return Err(format!("refused: {e}"));
+                }
+                Err(e) => {
+                    store.remove_graph();
+                    return Err(format!("the load stopped: {e}"));
+                }
+            };
+        if b.prelude_key() != parts.prelude {
+            return Err("the format differs".into());
+        }
+        let load_ms = t1.elapsed().as_secs_f64() * 1e3;
+        // (the session's tables: what the saved session read, with the
+        // keys it read them under, and the text the build is for)
+        self.inputs = m
+            .inputs
+            .into_iter()
+            .map(|(n, f, p, o)| (n, f, p.map(PathBuf::from), o))
+            .collect();
+        self.inputs_by = InputIndex::default();
+        for (i, (n, _, p, _)) in self.inputs.iter().enumerate() {
+            self.inputs_by.add(n, p.as_deref(), i);
+        }
+        *self.stamps.lock().unwrap_or_else(PoisonError::into_inner) = m
+            .stamps
+            .into_iter()
+            .map(|(p, k)| (PathBuf::from(p), k))
+            .collect();
+        if let Some(log) = &self.outside {
+            let mut l = log.lock().unwrap_or_else(PoisonError::into_inner);
+            l.finds.extend(m.outside.finds);
+            l.reads.extend(m.outside.reads);
+        }
+        self.built_text = Some(Arc::from(m.text));
+        self.lines = LineMarks::default();
+        self.page_hashes = b.pages();
+        self.cold_ms = m.cold_ms;
+        if std::env::var_os("PHITEX_STUCK_SECS").is_none() {
+            b.set_stuck_after(Some(
+                (Duration::from_millis(m.cold_ms) * 5).max(Duration::from_secs(60)),
+            ));
+        }
+        // (what moved since: the files, staged by the edit; the
+        // environment's other answers)
+        let t2 = Instant::now();
+        let moved = self.graph_moved_inputs();
+        let re = b.reask_environment();
+        let check_ms = t2.elapsed().as_secs_f64() * 1e3;
+        self.changed.extend(moved.iter().cloned());
+        self.graph_same = moved.is_empty() && re.moved.is_empty();
+        self.build = Some(b);
+        Ok(format!(
+            "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0}; checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}",
+            bytes.len() as f64 / 1e6,
+            t0.elapsed().as_secs_f64() * 1e3,
+            st.import_ms,
+            st.client_ms,
+            moved.len(),
+            if moved.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({})",
+                    moved.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                )
+            },
+            re.asked,
+            re.moved.len(),
+            if re.moved.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({})",
+                    re.moved
+                        .iter()
+                        .take(5)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        ))
+    }
+
+    /// The build saved as the document's persisted graph
+    /// (docs/spec-persisted-graph.md §7, step 3, `PHITEX_GRAPH=1`): after
+    /// its outputs are written, at a quiet point (the last build ended
+    /// with no evaluation failure). A line for `-v`; none: graphs are not
+    /// kept, or there is no build.
+    pub fn save_graph(&self) -> Option<String> {
+        if !self.graph_on {
+            return None;
+        }
+        let (b, store) = (self.build.as_ref()?, self.store.as_ref()?);
+        if !self.graph_quiet {
+            let l = "graph: not saved: the last build did not end".to_owned();
+            self.note_graph(l.clone());
+            return Some(l);
+        }
+        if self.graph_same {
+            let l = "graph: unchanged since loaded, its file kept".to_owned();
+            self.note_graph(l.clone());
+            return Some(l);
+        }
+        let t0 = Instant::now();
+        let body = b.save();
+        let enc_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let m = crate::graph::Manifest {
+            text: self.built_text.as_deref().unwrap_or_default().to_owned(),
+            inputs: self
+                .inputs
+                .iter()
+                .map(|(n, f, p, o)| {
+                    (
+                        n.clone(),
+                        *f,
+                        p.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                        *o,
+                    )
+                })
+                .collect(),
+            stamps: self
+                .stamps
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .map(|(p, k)| (p.to_string_lossy().into_owned(), k.clone()))
+                .collect(),
+            outside: self
+                .outside
+                .as_ref()
+                .map(|l| l.lock().unwrap_or_else(PoisonError::into_inner).clone())
+                .unwrap_or_default(),
+            cold_ms: self.cold_ms,
+        };
+        let bytes = crate::graph::encode(&self.graph_key(), &b.prelude_key(), &m, &body);
+        drop(body);
+        let t1 = Instant::now();
+        store.put_graph(&bytes);
+        let l = format!(
+            "graph: saved {:.1} MB in {:.0} ms (encoded {enc_ms:.0}, written {:.0})",
+            bytes.len() as f64 / 1e6,
+            t0.elapsed().as_secs_f64() * 1e3,
+            t1.elapsed().as_secs_f64() * 1e3,
+        );
+        self.note_graph(l.clone());
+        Some(l)
     }
 
     /// (observe) docs/spec-persisted-graph.md §9: the build's persisted
@@ -1099,6 +1464,191 @@ impl Session {
         r
     }
 
+    /// A clean build's options, its format found (read from the store, or
+    /// none yet: the engine makes it), its progress made and watched
+    /// ([`Session::run`]'s, and a loaded graph's, [`Session::load_graph`]).
+    fn prepare_cold(&mut self, text: &Arc<str>) -> Result<ColdPrep, String> {
+        // (the format phase lasts until the engine has it, read
+        // from the cache or made: the engine says when,
+        // `Progress::on_format`, and the document's phase begins)
+        self.status.set("format");
+        let (prelude, cached) = self.prelude()?;
+        phitex_tex::timeline::lap("session: the format found, read from the cache");
+        let workers = threads(self.job.threads);
+        let xe = self.job.engine.xetex();
+        let progress = Arc::new(phitex_tex::Progress::new(workers));
+        // (its pages the session's progress records)
+        self.status.meter().build_begins(0);
+        self.status.meter().watch(&progress);
+        // (its pages streamed as they ship, where a viewer shows
+        // them, `Meter::on_streamed`: every one of them, and then
+        // each edit's, the pages it changed)
+        progress.set_streaming(self.status.meter().streams());
+        {
+            let (status, name) = (self.status.clone(), self.job.engine.name);
+            let making = std::sync::atomic::AtomicBool::new(false);
+            let made = self.making_format.clone();
+            *made.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            let format = prelude.as_deref().map(|t| self.format_name(t));
+            progress.on_format(Box::new(move |ready| {
+                use std::sync::atomic::Ordering::Relaxed;
+                if ready {
+                    if making.load(Relaxed) {
+                        status.relabel(format!("made {name} format"));
+                    }
+                    status.set("typesetting");
+                } else {
+                    making.store(true, Relaxed);
+                    made.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone_from(&format);
+                    status.relabel(format!("making {name} format"));
+                }
+                status.meter().format(ready);
+            }));
+        }
+        self.host.progress(&progress);
+        let xetex = if xe {
+            self.host.xetex().map(|x| {
+                self.xetex_keyed(phitex_tex::XeTeX {
+                    pdf: self.xdv_pdf(),
+                    ..x
+                })
+            })
+        } else {
+            None
+        };
+        // (an XeTeX job on a host with no XeTeX fonts would run as
+        // pdfTeX: its format made by pdfTeX's rules, fontspec
+        // refusing it; said instead)
+        if xe && xetex.is_none() {
+            return Err(format!(
+                "{} needs XeTeX's fonts, and this host gives none (Host::xetex)",
+                self.job.engine.name
+            ));
+        }
+        phitex_tex::timeline::lap("session: XeTeX's fonts and PDF files");
+        let finder = self.finder();
+        let prelude_finder = Some(self.format_finder());
+        phitex_tex::timeline::lap("session: the finders");
+        let (content_key, tool_finder, bibtex) = (
+            self.host.content_key(),
+            self.tool_finder(),
+            self.host.bibtex(),
+        );
+        phitex_tex::timeline::lap("session: the content key, tools, bibtex");
+        // (pdfTeX's TCX: the one a `%&` first line names, web2c's
+        // `parse_first_line`, which TeX Live's texmf.cnf turns off
+        // for `tex` only; found as kpathsea's `web2c files`)
+        let tcx = if xe || self.job.engine.name == "tex" {
+            None
+        } else {
+            text.lines()
+                .next()
+                .and_then(phitex_tex::translate_file)
+                .and_then(|n| tool_finder.as_ref()?(phitex_tex::ToolSearch::Web2c, &n))
+                .map(|(_, b)| b)
+        };
+        let shell_hook = self.host.shell_hook(&self.job);
+        phitex_tex::timeline::lap("session: the shell hook");
+        let opts = Options {
+            name: self.printed_name(),
+            jobname: self.job.jobname.clone(),
+            comment: if xe {
+                dvi_comment(self.job.pdf_date).replacen(" TeX", " XeTeX", 1)
+            } else {
+                dvi_comment(self.job.pdf_date)
+            },
+            // (XeTeX's native fonts: TeX Live's, by file and by
+            // name; its PDF written from the pages, as xelatex has
+            // xdvipdfmx make it, unless the XDV is the output)
+            xetex,
+            tcx,
+            finder,
+            prelude_finder,
+            content_key,
+            tool_finder,
+            bibtex,
+            mktex: self.host.mktex(),
+            analyses: self.host.analyses(),
+            epoch: Some(self.job.pdf_date),
+            fixpoint: self.job.fixpoint,
+            prelude_jobname: self.job.engine.name.to_owned(),
+            program: self.job.engine.name.to_owned(),
+            prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+            // (the release's own format, when the store's is none
+            // or stale: a download, not the format made here)
+            prelude_fallback: prelude.as_deref().map(|t| {
+                let (host, name) = (self.host.clone(), self.format_name(t));
+                Arc::new(move || host.published_format(&name)) as phitex_tex::PreludeSource
+            }),
+            // (resolved here, not by the engine: 1.0's default
+            // of one thread lives in the hosts, so the engine's
+            // identity, and with it Shelf's formats, stays)
+            threads: Some(threads(self.job.threads)),
+            progress: Some(progress.clone()),
+            // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
+            // else TeX Live's restricted default)
+            shell_escape: if self.job.shell_escape {
+                1
+            } else {
+                shell_escape_default()
+            },
+            // (the commands neither in process nor refused: run as
+            // processes, each in a scratch directory of its own)
+            shell_hook,
+            speculation: match self.job.spec.as_deref() {
+                Some("off") => phitex_tex::Speculation::Off,
+                Some("all") => phitex_tex::Speculation::All,
+                Some("predicted") => phitex_tex::Speculation::Predicted,
+                _ => Options::default().speculation,
+            },
+            wkeys: self.load_wkeys(),
+            written_init: self.written_init(),
+            made_init: self.made_init(),
+            // (the package loads' records: machine-wide, beside the
+            // format, from every document built with it; each
+            // load's asked as the build meets it, never all)
+            pkgrec_source: self.pkgrec_key().and_then(|n| {
+                let store = self.store.clone()?;
+                Some(
+                    Arc::new(move |key: &str| store.get(Key::Format(&n, &pkgrec_name(key))))
+                        as phitex_tex::PkgrecSource,
+                )
+            }),
+            // (the document nodes' records: the document's own)
+            noderec: self
+                .noderec_kept()
+                .then(|| self.store.as_ref()?.get(Key::Doc("noderec")))
+                .flatten()
+                .unwrap_or_default(),
+            node_records: self.job.node_records,
+            // (a recorded node's outputs predicted from its record,
+            // so its readers run ahead on them)
+            pkg_predict: true,
+            origins: self.job.origins || self.job.synctex,
+            ..Options::default()
+        };
+        let opts = Options {
+            edits: Some(self.absorb.tx.clone()),
+            // (`PHITEX_TIME_LIMIT_SECS`: a longer limit for a
+            // measurement of a document the kernel is still slow on,
+            // 0 for none, as `phitex_tex::Options::default` reads it)
+            time_limit: time_limit_of(
+                std::env::var("PHITEX_TIME_LIMIT_SECS").ok().as_deref(),
+                opts.time_limit,
+            ),
+            ..opts
+        };
+        phitex_tex::timeline::lap("session: the options (records read)");
+        Ok(ColdPrep {
+            opts,
+            cached_key: cached.map(|(k, _)| k),
+            prelude,
+            progress,
+        })
+    }
+
     fn run(&mut self, why: &str, t0: Instant) -> Report {
         let fail = |e: String, internal: Option<String>| Report {
             out: Output {
@@ -1123,6 +1673,40 @@ impl Session {
         let mut text = self.text_now();
         phitex_tex::timeline::lap("session: the text now (copied)");
         self.absorbed_at = None;
+        // (docs/spec-persisted-graph.md, step 3: the session's first build
+        // takes the graph the document's last session saved, where its
+        // keys hold, and is an edit of it, the files that moved since
+        // staged; refused, or none, a clean build)
+        let mut prep: Option<ColdPrep> = None;
+        let mut why = why;
+        if self.build.is_none()
+            && std::mem::take(&mut self.graph_first)
+            && self.graph_on
+            && self.store.is_some()
+        {
+            match self.prepare_cold(&text) {
+                Ok(p) => match self.load_graph(&p) {
+                    Ok(note) => {
+                        self.note_graph(note);
+                        why = "loaded graph";
+                        self.graph_same &= self
+                            .built_text
+                            .as_ref()
+                            .is_some_and(|b| same_text(b, &text));
+                    }
+                    Err(e) => {
+                        self.note_graph(format!("graph: not loaded: {e}"));
+                        prep = Some(p);
+                    }
+                },
+                Err(e) => {
+                    return Report {
+                        format_failed: true,
+                        ..fail(e, None)
+                    };
+                }
+            }
+        }
         // (what changed, against the text the last build took: the first
         // changed line, and the engine told the ends the texts share)
         let ends = self.built_text.as_ref().map(|old| {
@@ -1216,177 +1800,17 @@ impl Session {
                 b.absorb_pending();
                 phitex_tex::timeline::lap("engine: the rest of the edit");
             } else {
-                // (the format phase lasts until the engine has it, read
-                // from the cache or made: the engine says when,
-                // `Progress::on_format`, and the document's phase begins)
-                self.status.set("format");
-                let (prelude, cached) = self.prelude()?;
-                phitex_tex::timeline::lap("session: the format found, read from the cache");
-                let workers = threads(self.job.threads);
-                let xe = self.job.engine.xetex();
-                let progress = Arc::new(phitex_tex::Progress::new(workers));
-                // (its pages the session's progress records)
-                self.status.meter().build_begins(0);
-                self.status.meter().watch(&progress);
-                // (its pages streamed as they ship, where a viewer shows
-                // them, `Meter::on_streamed`: every one of them, and then
-                // each edit's, the pages it changed)
-                progress.set_streaming(self.status.meter().streams());
-                {
-                    let (status, name) = (self.status.clone(), self.job.engine.name);
-                    let making = std::sync::atomic::AtomicBool::new(false);
-                    let made = self.making_format.clone();
-                    *made.lock().unwrap_or_else(PoisonError::into_inner) = None;
-                    let format = prelude.as_deref().map(|t| self.format_name(t));
-                    progress.on_format(Box::new(move |ready| {
-                        use std::sync::atomic::Ordering::Relaxed;
-                        if ready {
-                            if making.load(Relaxed) {
-                                status.relabel(format!("made {name} format"));
-                            }
-                            status.set("typesetting");
-                        } else {
-                            making.store(true, Relaxed);
-                            made.lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .clone_from(&format);
-                            status.relabel(format!("making {name} format"));
-                        }
-                        status.meter().format(ready);
-                    }));
-                }
-                self.host.progress(&progress);
-                self.status.set_live(Some(live(progress.clone())));
-                let xetex = if xe {
-                    self.host.xetex().map(|x| phitex_tex::XeTeX {
-                        pdf: self.xdv_pdf(),
-                        ..x
-                    })
-                } else {
-                    None
+                let p = match prep.take() {
+                    Some(p) => p,
+                    None => self.prepare_cold(&text)?,
                 };
-                // (an XeTeX job on a host with no XeTeX fonts would run as
-                // pdfTeX: its format made by pdfTeX's rules, fontspec
-                // refusing it; said instead)
-                if xe && xetex.is_none() {
-                    return Err(format!(
-                        "{} needs XeTeX's fonts, and this host gives none (Host::xetex)",
-                        self.job.engine.name
-                    ));
-                }
-                phitex_tex::timeline::lap("session: XeTeX's fonts and PDF files");
-                let finder = self.finder();
-                let prelude_finder = Some(self.format_finder());
-                phitex_tex::timeline::lap("session: the finders");
-                let (content_key, tool_finder, bibtex) = (
-                    self.host.content_key(),
-                    self.tool_finder(),
-                    self.host.bibtex(),
-                );
-                phitex_tex::timeline::lap("session: the content key, tools, bibtex");
-                // (pdfTeX's TCX: the one a `%&` first line names, web2c's
-                // `parse_first_line`, which TeX Live's texmf.cnf turns off
-                // for `tex` only; found as kpathsea's `web2c files`)
-                let tcx = if xe || self.job.engine.name == "tex" {
-                    None
-                } else {
-                    text.lines()
-                        .next()
-                        .and_then(phitex_tex::translate_file)
-                        .and_then(|n| tool_finder.as_ref()?(phitex_tex::ToolSearch::Web2c, &n))
-                        .map(|(_, b)| b)
-                };
-                let shell_hook = self.host.shell_hook(&self.job);
-                phitex_tex::timeline::lap("session: the shell hook");
-                let opts = Options {
-                    name: self.printed_name(),
-                    jobname: self.job.jobname.clone(),
-                    comment: if xe {
-                        dvi_comment(self.job.pdf_date).replacen(" TeX", " XeTeX", 1)
-                    } else {
-                        dvi_comment(self.job.pdf_date)
-                    },
-                    // (XeTeX's native fonts: TeX Live's, by file and by
-                    // name; its PDF written from the pages, as xelatex has
-                    // xdvipdfmx make it, unless the XDV is the output)
-                    xetex,
-                    tcx,
-                    finder,
-                    prelude_finder,
-                    content_key,
-                    tool_finder,
-                    bibtex,
-                    mktex: self.host.mktex(),
-                    analyses: self.host.analyses(),
-                    epoch: Some(self.job.pdf_date),
-                    fixpoint: self.job.fixpoint,
-                    prelude_jobname: self.job.engine.name.to_owned(),
-                    program: self.job.engine.name.to_owned(),
-                    prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
-                    // (the release's own format, when the store's is none
-                    // or stale: a download, not the format made here)
-                    prelude_fallback: prelude.as_deref().map(|t| {
-                        let (host, name) = (self.host.clone(), self.format_name(t));
-                        Arc::new(move || host.published_format(&name)) as phitex_tex::PreludeSource
-                    }),
-                    // (resolved here, not by the engine: 1.0's default
-                    // of one thread lives in the hosts, so the engine's
-                    // identity, and with it Shelf's formats, stays)
-                    threads: Some(threads(self.job.threads)),
-                    progress: Some(progress),
-                    // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
-                    // else TeX Live's restricted default)
-                    shell_escape: if self.job.shell_escape {
-                        1
-                    } else {
-                        shell_escape_default()
-                    },
-                    // (the commands neither in process nor refused: run as
-                    // processes, each in a scratch directory of its own)
-                    shell_hook,
-                    speculation: match self.job.spec.as_deref() {
-                        Some("off") => phitex_tex::Speculation::Off,
-                        Some("all") => phitex_tex::Speculation::All,
-                        Some("predicted") => phitex_tex::Speculation::Predicted,
-                        _ => Options::default().speculation,
-                    },
-                    wkeys: self.load_wkeys(),
-                    written_init: self.written_init(),
-                    made_init: self.made_init(),
-                    // (the package loads' records: machine-wide, beside the
-                    // format, from every document built with it; each
-                    // load's asked as the build meets it, never all)
-                    pkgrec_source: self.pkgrec_key().and_then(|n| {
-                        let store = self.store.clone()?;
-                        Some(Arc::new(move |key: &str| {
-                            store.get(Key::Format(&n, &pkgrec_name(key)))
-                        }) as phitex_tex::PkgrecSource)
-                    }),
-                    // (the document nodes' records: the document's own)
-                    noderec: self
-                        .noderec_kept()
-                        .then(|| self.store.as_ref()?.get(Key::Doc("noderec")))
-                        .flatten()
-                        .unwrap_or_default(),
-                    node_records: self.job.node_records,
-                    // (a recorded node's outputs predicted from its record,
-                    // so its readers run ahead on them)
-                    pkg_predict: true,
-                    origins: self.job.origins || self.job.synctex,
-                    ..Options::default()
-                };
-                let opts = Options {
-                    edits: Some(self.absorb.tx.clone()),
-                    // (`PHITEX_TIME_LIMIT_SECS`: a longer limit for a
-                    // measurement of a document the kernel is still slow on,
-                    // 0 for none, as `phitex_tex::Options::default` reads it)
-                    time_limit: time_limit_of(
-                        std::env::var("PHITEX_TIME_LIMIT_SECS").ok().as_deref(),
-                        opts.time_limit,
-                    ),
-                    ..opts
-                };
-                phitex_tex::timeline::lap("session: the options (records read)");
+                self.status.set_live(Some(live(p.progress.clone())));
+                let ColdPrep {
+                    opts,
+                    prelude,
+                    cached_key,
+                    ..
+                } = p;
                 if std::env::var_os("PHITEX_GRAPH_CHECK").is_some_and(|x| x != "0") {
                     self.graph_check = Some(GraphCheck {
                         opts: opts.clone(),
@@ -1398,7 +1822,7 @@ impl Session {
                 }
                 let b = Build::with(opts, prelude.as_deref(), &text);
                 phitex_tex::timeline::lap("engine: the build returned");
-                self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
+                self.store_prelude(&b, prelude.as_deref(), cached_key);
                 phitex_tex::timeline::lap("session: the format stored (when new)");
                 self.build = Some(b);
             }
@@ -1427,6 +1851,7 @@ impl Session {
         // cold one: the files a later change of one is matched against)
         if let Some(b) = &self.build {
             if cold {
+                self.cold_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
                 // (an edit may take what the cold build took, five times
                 // over, at least a minute, before it is stuck: held to
                 // what this document has shown it needs, not to a clock
@@ -1616,6 +2041,10 @@ impl Session {
             .map(|d| d.message.as_str())
             .collect();
         let internal = (!failures.is_empty()).then(|| failures.join("\n"));
+        // (an evaluation that ended: its graph is quiet, and may be saved)
+        self.graph_quiet = internal.is_none();
+        // (the graph as loaded, nothing run: the file stays)
+        self.graph_same &= why == "loaded graph" && b.stats.nodes_run == 0 && b.stats.runs == 0;
         // (the format's own errors first, with their places: a format
         // that stopped on them is not the oracle's, whatever follows)
         // (the engine's failures first — a deadline, no fixpoint, an

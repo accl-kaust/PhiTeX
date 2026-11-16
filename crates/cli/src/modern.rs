@@ -1357,6 +1357,11 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     // (the records the build changed, stored once it is done)
     s.flush_records();
     phitex_tex::timeline::lap("cli: the records stored");
+    // (the persisted graph, `PHITEX_GRAPH=1`: saved after the outputs
+    // are written, docs/spec-persisted-graph.md step 3)
+    let _ = s.save_graph();
+    phitex_tex::timeline::lap("cli: the graph saved");
+    graph_notes(&s, o, ui);
     // (observe, docs/spec-persisted-graph.md §9: an edit with nothing
     // changed in this process, then the persisted graph's probe; the
     // bytes to the file the variable names)
@@ -1422,6 +1427,17 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     std::mem::forget(r);
     phitex_tex::timeline::end("cold build");
     code
+}
+
+/// The persisted graph's lines since last told (loaded, or why not;
+/// saved): with `-v`, and as `graph` events.
+pub fn graph_notes(s: &Session, o: &Options, ui: &Ui) {
+    for n in s.graph_notes() {
+        if o.verbose.max(ui.verbose) > 0 {
+            ui.line(&ui.st.dim(&format!("  {n}")));
+        }
+        ui.event(&json!({"event": "graph", "message": n}));
+    }
 }
 
 /// The files a build of job `job` writes (`clean`).

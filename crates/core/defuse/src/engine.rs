@@ -52,6 +52,11 @@ pub(crate) struct Env {
     /// its write lock before it is let go: the threads' copies of the
     /// values are of one count (`read::env_value`).
     pub(crate) changes: AtomicU64,
+    /// The fields of `values` the provider answered (on a miss), not the
+    /// client's settings: what [`Engine::reask_provided`] asks again
+    /// (docs/spec-persisted-graph.md §3.3). Taken under `values`' lock,
+    /// after it.
+    pub(crate) provided: Lock<FxHashSet<Field>>,
 }
 
 pub(crate) struct Paths {
@@ -537,6 +542,7 @@ impl Engine {
                 provider: Lock::new(None),
                 asking: Mx::new(FxHashMap::default()),
                 changes: AtomicU64::new(0),
+                provided: Lock::new(FxHashSet::default()),
             },
             paths,
             projections,
@@ -1521,8 +1527,10 @@ impl Engine {
 
     pub fn set_environment(&self, env: impl IntoIterator<Item = (Field, ValueId)>) {
         let mut vals = self.env.values.write();
+        let mut provided = self.env.provided.write();
         for (f, x) in env {
             vals.insert(f, Some(x));
+            provided.remove(&f);
             self.bump(f);
         }
         self.env.changes.fetch_add(1, Ordering::AcqRel);
@@ -1531,10 +1539,21 @@ impl Engine {
     /// Changes environment values; readers of each changed field whose
     /// read reaches the environment are re-asked.
     pub fn update_environment(&self, changes: &[(Field, Option<ValueId>)]) {
+        self.change_environment(changes, false);
+    }
+
+    /// [`Engine::update_environment`]; `provided`: the new values are the
+    /// provider's answers, asked again ([`Engine::reask_provided`]), and
+    /// stay the provider's.
+    fn change_environment(&self, changes: &[(Field, Option<ValueId>)], provided: bool) {
         {
             let mut vals = self.env.values.write();
+            let mut prov = self.env.provided.write();
             for (f, x) in changes {
                 vals.insert(*f, *x);
+                if !provided {
+                    prov.remove(f);
+                }
                 self.bump(*f);
             }
             self.env.changes.fetch_add(1, Ordering::AcqRel);
@@ -1584,6 +1603,35 @@ impl Engine {
             .iter()
             .filter_map(|(f, x)| x.map(|x| (*f, x)))
             .collect()
+    }
+
+    /// The provider's answers asked of it again (docs/spec-persisted-graph.md
+    /// §3.3, a loaded graph's environment): each field whose value the
+    /// provider gave ([`Env::provided`]), but those `skip` names (the
+    /// client keys them its own way), is asked of the provider anew. One
+    /// whose answer differs from the one held takes the new answer, and its
+    /// readers are re-asked as by [`Engine::update_environment`], the edit
+    /// path. The fields asked, and those that moved with their new answers.
+    pub fn reask_provided(&self, skip: &dyn Fn(Field) -> bool) -> (usize, Vec<(Field, Option<ValueId>)>) {
+        let mut asked: Vec<Field> = self.env.provided.read().iter().copied().filter(|&f| !skip(f)).collect();
+        asked.sort_unstable_by_key(|f| f.0.raw());
+        let moved: Vec<(Field, Option<ValueId>)> = {
+            let p = self.env.provider.read();
+            asked
+                .iter()
+                .filter_map(|&f| {
+                    // (no provider: nothing answers it now, as a build
+                    // without one would find)
+                    let now = p.as_ref().and_then(|p| p(self.values(), f)).flatten();
+                    let held = self.env.values.read().get(&f).copied().flatten();
+                    (now != held).then_some((f, now))
+                })
+                .collect()
+        };
+        if !moved.is_empty() {
+            self.change_environment(&moved, true);
+        }
+        (asked.len(), moved)
     }
 
     /// Answers environment misses.

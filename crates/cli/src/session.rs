@@ -216,6 +216,13 @@ impl Host for Machine {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
+    /// TeX Live's trees, by their folders: its files are keyed by their
+    /// stat keys each.
+    fn release(&self) -> String {
+        let dirs = self.distribution.get_or_init(|| self.tree.distribution());
+        format!("TeX Live {dirs:?}")
+    }
+
     /// Under one of TeX Live's trees, or the cache's fonts: as found (no
     /// call to the system), else canonical.
     fn distribution(&self, path: &Path) -> bool {
@@ -370,6 +377,14 @@ impl Store for Kept {
 
     fn put(&self, key: Key<'_>, bytes: &[u8]) {
         let _ = self.cache.put(&self.path(key), bytes, &[]);
+    }
+
+    fn put_durable(&self, key: Key<'_>, bytes: &[u8]) {
+        let _ = self.cache.put_synced(&self.path(key), bytes);
+    }
+
+    fn remove(&self, key: Key<'_>) {
+        let _ = std::fs::remove_file(self.path(key));
     }
 
     fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {

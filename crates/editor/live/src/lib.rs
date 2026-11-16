@@ -50,6 +50,7 @@ pub mod cites;
 pub mod document;
 pub mod dvipdf;
 pub mod failure;
+pub mod graph;
 pub mod host;
 pub mod latexmkrc;
 pub mod lsp;

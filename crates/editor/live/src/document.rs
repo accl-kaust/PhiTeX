@@ -955,6 +955,207 @@ mod tests {
         )
     }
 
+    /// Files on a disk in memory, by name, each at a path of its folder
+    /// (`/p/` or another), its key the hash of its bytes (a stat's, here).
+    #[derive(Default)]
+    struct Disk(Mutex<HashMap<String, (PathBuf, Vec<u8>)>>);
+
+    impl Disk {
+        fn put(&self, name: &str, dir: &str, text: &str) {
+            lock(&self.0).insert(
+                name.to_owned(),
+                (
+                    PathBuf::from(format!("{dir}{name}")),
+                    text.as_bytes().to_vec(),
+                ),
+            );
+        }
+    }
+
+    impl Host for Disk {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            let n = name.trim_start_matches("./");
+            let m = lock(&self.0);
+            m.get(n)
+                .or_else(|| m.get(&format!("{n}.tex")))
+                .map(|(p, _)| p.clone())
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            lock(&self.0)
+                .values()
+                .find(|(p, _)| p == path)
+                .map(|(_, b)| b.clone())
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            self.read(path)
+                .map(|b| crate::tex::words_hash(&b).to_le_bytes().to_vec())
+        }
+    }
+
+    /// A store in memory that keeps a graph, and can lose it.
+    #[derive(Default)]
+    struct Graphs(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl crate::host::Store for Graphs {
+        fn get(&self, key: crate::host::Key<'_>) -> Option<Vec<u8>> {
+            lock(&self.0).get(&format!("{key:?}")).cloned()
+        }
+        fn put(&self, key: crate::host::Key<'_>, bytes: &[u8]) {
+            lock(&self.0).insert(format!("{key:?}"), bytes.to_vec());
+        }
+        fn remove(&self, key: crate::host::Key<'_>) {
+            lock(&self.0).remove(&format!("{key:?}"));
+        }
+        fn format(&self, _name: &str) -> Option<([u8; 32], Vec<u8>)> {
+            None
+        }
+        fn put_format(&self, _name: &str, _key: &[u8; 32], _bytes: &[u8]) {}
+    }
+
+    /// One session's build of the text on `disk`, keeping graphs in
+    /// `store` (none: a clean build, no graph): its output and log, the
+    /// nodes it ran, and its graph lines (loaded or not, saved).
+    fn graph_build(
+        text: &str,
+        disk: &Arc<Disk>,
+        store: Option<&Arc<Graphs>>,
+    ) -> (Vec<u8>, String, u64, Vec<String>) {
+        let mut s = Session::new(
+            job(),
+            Arc::from(text),
+            disk.clone(),
+            store.map(|s| s.clone() as Arc<dyn crate::host::Store>),
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        s.keep_graphs(store.is_some());
+        let r = s.build();
+        assert!(r.internal.is_none(), "{:?}", r.internal);
+        s.wait_streamed();
+        let _ = s.save_graph();
+        let out = r.main_output().map(|(_, b)| b.to_vec()).unwrap_or_default();
+        assert!(!out.is_empty(), "no output");
+        (
+            out,
+            r.out.log.clone(),
+            r.runs[0].commands_run,
+            s.graph_notes(),
+        )
+    }
+
+    /// The persisted graph (docs/spec-persisted-graph.md, step 3): a
+    /// session's build saved, the next session of the document loads it
+    /// and builds it as an edit, with the clean build's bytes: unchanged
+    /// (no node run, the file kept), after a file it reads changed, after
+    /// a file it looked for and did not find came, and after the name it
+    /// read is found elsewhere (a file of the project's now shadowing
+    /// another's). A file cut or with a bit flipped is refused and
+    /// removed: a clean build, the same bytes.
+    #[test]
+    fn a_session_loads_the_graph_the_last_one_saved() {
+        let text = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{\\vrule width 5pt height 5pt}\\penalty-10000 \\input chap \\openin1=extra \\ifeof1 \\else \\closein1 \\input extra \\fi \\hbox{\\vrule width 7pt height 7pt}\\penalty-10000 \\end\n";
+        let disk = Arc::new(Disk::default());
+        disk.put(
+            "chap.tex",
+            "/p/",
+            "\\hbox{\\vrule width 10pt height 5pt}\\penalty-10000 ",
+        );
+        let store = Arc::new(Graphs::default());
+        let clean = |disk: &Arc<Disk>| graph_build(text, disk, None);
+        let (cold, cold_log, _, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.contains("not loaded: none saved")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|l| l.starts_with("graph: saved")),
+            "{notes:?}"
+        );
+        // (unchanged: loaded, nothing run, the file kept)
+        let (out, log, ran, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.starts_with("graph: loaded")),
+            "{notes:?}"
+        );
+        assert!(
+            notes.iter().any(|l| l.contains("unchanged since loaded")),
+            "{notes:?}"
+        );
+        assert_eq!((ran, &out, &log), (0, &cold, &cold_log));
+        // (a file read changed)
+        disk.put(
+            "chap.tex",
+            "/p/",
+            "\\hbox{\\vrule width 20pt height 5pt}\\penalty-10000 ",
+        );
+        let (out, log, ran, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes
+                .iter()
+                .any(|l| l.starts_with("graph: loaded") && l.contains("1 files moved (chap.tex)")),
+            "{notes:?}"
+        );
+        assert!(ran > 0);
+        let (c, cl, ..) = clean(&disk);
+        assert_ne!(c, cold, "the change changes the output");
+        assert_eq!((&out, &log), (&c, &cl));
+        // (a file looked for and not found comes)
+        disk.put(
+            "extra.tex",
+            "/p/",
+            "\\hbox{\\vrule width 30pt height 3pt}\\penalty-10000 ",
+        );
+        let (out, log, _, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.contains("1 files moved (extra")),
+            "{notes:?}"
+        );
+        let (c, cl, ..) = clean(&disk);
+        assert_eq!((&out, &log), (&c, &cl));
+        // (a name found elsewhere now: the project's file over another's)
+        disk.put(
+            "chap.tex",
+            "/q/",
+            "\\hbox{\\vrule width 40pt height 4pt}\\penalty-10000 ",
+        );
+        let (out, log, _, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.contains("1 files moved (chap.tex)")),
+            "{notes:?}"
+        );
+        let (c, cl, ..) = clean(&disk);
+        assert_eq!((&out, &log), (&c, &cl));
+        // (the file cut, a bit flipped: refused, removed, a clean build)
+        let key = format!("{:?}", crate::host::Key::Doc("graph"));
+        let saved = lock(&store.0).get(&key).cloned().expect("a graph saved");
+        for bad in [saved[..saved.len() / 2].to_vec(), {
+            let mut b = saved.clone();
+            let at = b.len() - 100;
+            b[at] ^= 4;
+            b
+        }] {
+            lock(&store.0).insert(key.clone(), bad);
+            let (out, log, _, notes) = graph_build(text, &disk, Some(&store));
+            assert!(
+                notes.iter().any(|l| l.starts_with("graph: not loaded")),
+                "{notes:?}"
+            );
+            assert_eq!((&out, &log), (&c, &cl));
+            // (and saved again whole)
+            assert!(
+                notes.iter().any(|l| l.starts_with("graph: saved")),
+                "{notes:?}"
+            );
+        }
+        // (the saved file loads again)
+        let (out, _, ran, notes) = graph_build(text, &disk, Some(&store));
+        assert!(
+            notes.iter().any(|l| l.starts_with("graph: loaded")),
+            "{notes:?}"
+        );
+        assert_eq!((ran, &out), (0, &c));
+    }
+
     /// The cold build at the first step, an editor's buffer built at the
     /// next, the viewer's state and events as `phitex watch` gives them.
     #[test]

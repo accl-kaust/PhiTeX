@@ -24,7 +24,7 @@ use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
-pub use persist::LoadStats;
+pub use persist::{EnvReask, LoadStats};
 
 /// Finds a file by the name TeX asks for: the name to print and the
 /// bytes. The key is TeX's own lookup (`\\input`, `\\openin`,
@@ -10908,6 +10908,30 @@ fn job_env(
         base
     };
     let v = g.eng.values();
+    let sets = job_sets(v, &base, opts);
+    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
+        // (the check reads the format's bindings too: all of them made)
+        g.start_env.extend(
+            env.bindings(v, made, 0..env.len())
+                .iter()
+                .chain(&sets)
+                .copied(),
+        );
+    }
+    // (spec-final §4.5: the job's bindings go with the environment, one
+    // push for all of them, made again only where an entry changed; the
+    // graph has one unit, so the unit's start and the environment are
+    // one place to read them)
+    let _ = unit;
+    g.job = by_field(sets);
+    let env = g.environment(opts.fixpoint);
+    g.push_env(env);
+}
+
+/// The job's bindings (its name, program, date, shell escape, TCX), as
+/// the options give them over the format's (`base`): [`job_env`]'s, and
+/// a loaded build's made again ([`Build::reask_environment`]).
+fn job_sets(v: &Values, base: &EnvBase, opts: &Options) -> Vec<(Field, ValueId)> {
     let mut sets = vec![
         (v.field("jobname"), v.str(&opts.jobname)),
         (v.field(PROGRAM), v.str(&opts.program)),
@@ -10941,24 +10965,10 @@ fn job_env(
         for (k, x) in date_params(t) {
             sets.push((v.field(k), v.int(x)));
         }
+        // (the date whole, for XeTeX's PDF, `crate::xdvpdf::file`)
+        sets.push((v.field(crate::xdvpdf::EPOCH), v.int(t)));
     }
-    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-        // (the check reads the format's bindings too: all of them made)
-        g.start_env.extend(
-            env.bindings(v, made, 0..env.len())
-                .iter()
-                .chain(&sets)
-                .copied(),
-        );
-    }
-    // (spec-final §4.5: the job's bindings go with the environment, one
-    // push for all of them, made again only where an entry changed; the
-    // graph has one unit, so the unit's start and the environment are
-    // one place to read them)
-    let _ = unit;
-    g.job = by_field(sets);
-    let env = g.environment(opts.fixpoint);
-    g.push_env(env);
+    sets
 }
 
 /// `base` with `over` over it, both by field with each field once: by

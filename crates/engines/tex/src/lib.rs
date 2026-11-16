@@ -79,8 +79,8 @@ mod xetex;
 mod xpic;
 
 pub use api::{
-    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, FONT_KEY, Finder, Hint,
-    LoadStats, Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report,
+    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, EnvReask, FAIL_END, FONT_KEY, Finder,
+    Hint, LoadStats, Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report,
     Severity, Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key,
     font_name, terminal_banner,
 };
