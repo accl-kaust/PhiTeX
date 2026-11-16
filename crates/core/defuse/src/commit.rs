@@ -2763,7 +2763,7 @@ fn file_here_reads(
 /// environment readers, and the fields a read-back node defined anew
 /// (`changed`) marked to be published. A read at a node gone by now
 /// that found a value there goes to `anchor_gone`. The commit's filing
-/// and a load's; a reader whose answer moved
+/// and a load's ([`file_record_reads`]); a reader whose answer moved
 /// meanwhile is asked again (`w`'s deque, or pending with none).
 fn file_elsewhere(
     eng: &Engine,
@@ -2854,6 +2854,90 @@ fn file_elsewhere(
     for (f, r) in env_reads {
         eng.ranges.add_envs(f, vec![r], |x| live(eng, x.node, x.serial));
     }
+}
+
+/// A load's filing of a node's record (`Engine::import`, the products
+/// half): its brackets, its definitions at their depths and its
+/// contributions filed at its label in its segment (`inner`, under its
+/// lock), with the field indexes, as its commit filed them
+/// ([`file_defs`], [`file_contribs`]). `defs` are the record's, a
+/// relation's value as the line holds it now (put right in place since
+/// the commit, `settle_rel`). The fields whose definitions it filed: a
+/// read-back node's are published at the next quiet point
+/// ([`file_record_reads`]).
+pub(crate) fn file_record_products(
+    eng: &Engine,
+    seg: &Segment,
+    inner: &mut Inner,
+    node: &Node,
+    defs: &[DefRec],
+    contribs: &[(Field, ValueId)],
+    effect: Effect,
+) -> Vec<Field> {
+    let pos = node.pos_hint();
+    let brackets = effect.brackets();
+    file_brackets(eng, inner, node, pos, brackets);
+    if eng.op(node.op()).settles_at_quiet() {
+        for d in defs {
+            eng.mark_settled(d.f);
+        }
+    }
+    let filed = filed_defs(&eng.values, defs, &brackets);
+    let mut st = CommitStats::default();
+    let (mut replaced, mut changed, mut rels, mut changed_contribs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut ix = IndexOps::default();
+    file_defs(
+        inner,
+        node.id,
+        pos,
+        &filed,
+        false,
+        &mut st,
+        &mut replaced,
+        &mut changed,
+        &mut rels,
+        &mut ix,
+    );
+    file_contribs(inner, pos, contribs, &mut changed_contribs, &mut ix);
+    changed_contribs.sort_unstable();
+    changed_contribs.dedup();
+    for &f in &changed_contribs {
+        inner.resum(eng, f);
+        eng.bump(f);
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    for &f in &changed {
+        eng.bump(f);
+    }
+    ix.apply(eng, seg, inner);
+    changed
+}
+
+/// A load's filing of a node's record (`Engine::import`, the reads
+/// half, once every record's products are filed): every read filed as
+/// its commit files a run's that did not go on from another
+/// ([`plan_reads`], [`file_here_reads`], [`file_elsewhere`], the sibling
+/// reads with the nodes they passed), at the record's serial. `changed`:
+/// the fields its products half filed. False where a read was found not
+/// holding as filed (a `next` whose search answers otherwise, a read at
+/// a node gone): a line that was not quiet and consistent when saved.
+pub(crate) fn file_record_reads(eng: &Engine, node: &Arc<Node>, rec: &RunRecord, changed: &[Field]) -> bool {
+    let reads: Vec<crate::node::ReadRec> = rec.reads.iter().collect();
+    let serial = rec.serial;
+    let mut plan = plan_reads(eng, node, &reads, serial, true, rec.state.is_some());
+    let refuted = plan.refuted.take();
+    if let Some((seg, mut inner)) = own_write(eng, node) {
+        let mut ix = IndexOps::default();
+        file_here_reads(eng, seg, &mut inner, node.id, &mut plan.here, &mut plan.other, &mut ix);
+        ix.apply(eng, seg, &inner);
+    }
+    let mut gone = Vec::new();
+    let mut st = CommitStats::default();
+    file_elsewhere(eng, None, node, serial, plan, changed, &mut gone, &mut st);
+    file_pullers(eng, node, serial, &reads);
+    eng.note_stats(None, &st);
+    refuted.is_none() && gone.is_empty()
 }
 
 /// A record's reads as their filing takes them ([`plan_reads`]): those at

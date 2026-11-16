@@ -394,7 +394,7 @@ impl Engine {
         let mut recs_b: Vec<u8> = Vec::new();
         let mut reads_b: Vec<u8> = Vec::new();
         let mut rec_order: Vec<(usize, bool)> = Vec::new();
-        let mut enc_rec =
+        let enc_rec =
             |t: &mut Table<'_>, p: &mut PersistProbe, r: &RunRecord, recs_b: &mut Vec<u8>, reads_b: &mut Vec<u8>| {
                 let flags = u8::from(r.provisional)
                     | (u8::from(r.claim_all) << 1)

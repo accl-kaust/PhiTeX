@@ -8685,15 +8685,80 @@ impl Build {
             eng.client_roots(keep)
         }));
         let line = format!(
-            "{}; build: text {} B, text nodes {}, dlines {}, files read {}, pdf {} B",
+            "{}; build: text {} B, text nodes {}, dlines {}, files read {}, pdf {} B; {}",
             p.line(),
             self.text.len(),
             self.nodes.len(),
             self.dlines.len(),
             self.files_read().len(),
             self.output_bytes().len(),
+            self.persist_round_trip(),
         );
         (line, p.bytes)
+    }
+
+    /// (observe) The engine's half of the persisted graph, measured
+    /// (docs/spec-persisted-graph.md §11, step 1): the engine exported
+    /// with the client's roots (`Engine::export`), imported into a fresh
+    /// graph's engine (`Engine::import`; the client's tables are step 2's
+    /// and are not moved), every read of the import checked
+    /// (`Engine::verify_reads`), and an evaluation of it with nothing
+    /// changed, its runs. Nothing of this build changes.
+    fn persist_round_trip(&self) -> String {
+        let eng = &self.g.eng;
+        let mut roots = Vec::new();
+        eng.client_roots(&mut |x| roots.push(x));
+        let t0 = std::time::Instant::now();
+        let bytes = eng.export(&roots);
+        let export_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let fresh = Graph::new(None, None, None, None);
+        let t1 = std::time::Instant::now();
+        let got = fresh.eng.import(&bytes);
+        let import_ms = t1.elapsed().as_secs_f64() * 1e3;
+        let ms = |n: u64| n as f64 / 1e6;
+        match got {
+            Err(e) => format!(
+                "persist-rt: export {export_ms:.1} ms {} B; import refused: {e}",
+                bytes.len()
+            ),
+            Ok(got) => {
+                let s = &got.stats;
+                let t2 = std::time::Instant::now();
+                let rc = fresh.eng.verify_reads();
+                let verify_ms = t2.elapsed().as_secs_f64() * 1e3;
+                let orig = eng.verify_reads();
+                let threads = self.g.threads.max(1);
+                let runs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    fresh.eng.evaluate(threads).map(|r| r.runs)
+                }));
+                format!(
+                    "persist-rt: export {export_ms:.1} ms {} B ({} roots); import {import_ms:.1} ms [check {:.1} values {:.1} ({}) decode {:.1} install {:.1} products {:.1} reads {:.1}] nodes {} records {} reads {} not-holding {}; verify {verify_ms:.1} ms: {} reads in {} nodes, failed {} (the build's own: {} reads, failed {}); evaluation after: {}",
+                    bytes.len(),
+                    roots.len(),
+                    ms(s.check_ns),
+                    ms(s.values_ns),
+                    s.values,
+                    ms(s.decode_ns),
+                    ms(s.install_ns),
+                    ms(s.products_ns),
+                    ms(s.reads_ns),
+                    s.nodes,
+                    s.records,
+                    s.reads,
+                    s.not_holding,
+                    rc.reads,
+                    rc.nodes,
+                    rc.failed,
+                    orig.reads,
+                    orig.failed,
+                    match runs {
+                        Ok(Ok(k)) => format!("{k} runs"),
+                        Ok(Err(e)) => format!("error {e:?}"),
+                        Err(_) => "panicked".to_owned(),
+                    }
+                )
+            }
+        }
     }
 
     /// The files the document's runs opened for reading, with a hash of
