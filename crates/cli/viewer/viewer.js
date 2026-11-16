@@ -2528,6 +2528,8 @@ header:active { cursor: grabbing; }
 .bar > .status { min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* (the count three digits wide at least, as the page box: panel.ts's nav) */
+.pageno #pgn { display: inline-block; min-width: 3ch; }
 .pageno input { width: 3ch; height: 22px; box-sizing: content-box; padding: 0 2px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); }
 .zoomb { padding: 0 2px 0 8px; }
@@ -9709,7 +9711,7 @@ var Panel = class {
     const pg = this.$("#pgin");
     if (this.root.activeElement !== pg) pg.value = n ? String(k + 1) : "\u2013";
     this.$("#pgn").textContent = String(n);
-    pg.style.width = `${String(n || 1).length + 1.6}ch`;
+    pg.style.width = `${Math.max(3, String(n || 1).length) + 1.6}ch`;
     queueMicrotask(() => this.emit());
   }
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
@@ -10547,8 +10549,8 @@ var PreviewSession = class {
       if (none.length) this.pkg.unavailable.push(...none), this.tellPackages();
       return;
     }
-    const wanted = new Set(missing ?? []);
-    missing = [...wanted, ...guessed];
+    const wanted2 = new Set(missing ?? []);
+    missing = [...wanted2, ...guessed];
     const want = [...new Set(missing ?? [])].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
     if (!want.length) return;
     for (const n of want) this.asked.add(n);
@@ -10582,7 +10584,7 @@ var PreviewSession = class {
     void Promise.all(want.map(fetchOne)).then(() => {
       for (const [n, t] of got) {
         if (t === null) {
-          if (wanted.has(n) && !this.pkg.failed?.some((f) => f.name === n)) this.pkg.unavailable.push(n);
+          if (wanted2.has(n) && !this.pkg.failed?.some((f) => f.name === n)) this.pkg.unavailable.push(n);
           continue;
         }
         if (t === DELIVERED) continue;
@@ -12207,6 +12209,7 @@ var Pages = class {
     this.sock = sock2;
     sock2.onEvent((e) => {
       if (e.event === "stats") return void statsIn(e);
+      if (e.event === "diff") return void (this.texts = null);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e;
@@ -12484,6 +12487,7 @@ sock.onEvent((e) => {
   if (n === void 0) return;
   if (diffWait) diffWait(diffState), diffWait = void 0;
   else counted?.(n);
+  if (diffState.built && wanted !== void 0) void gotoChange(wanted);
 });
 var ask = async (op) => {
   const r = await sock.request(op);
@@ -12495,12 +12499,21 @@ var save = (name) => {
   a.download = name;
   a.click();
 };
+var goes = 0;
+var wanted;
 var words = (src) => src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
 var gotoChange = async (k) => {
+  const go = ++goes;
+  wanted = void 0;
   const c = (diffState.changes ?? [])[k - 1];
   if (!c) return;
+  if (typeof c.page !== "number" && diffState.built === false) {
+    wanted = k;
+    return void panel.msg(`Change ${k}: the diff is being typeset, its page shown once it is`, false, true);
+  }
   const q = words(c.new_text || "") || words(c.old_text || "");
   const hits = q ? await pages.find(q) : [];
+  if (go !== goes) return;
   if (typeof c.page === "number") {
     const y = c.y ?? 0;
     const near = hits.filter((h) => h.k === c.page).sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
@@ -12526,7 +12539,7 @@ var runner = {
   download: (what) => save(`diff.${what}`),
   look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
   restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => (panel.diffMarks([]), void ask({ op: "diff_stop" }))
+  stop: () => (wanted = void 0, panel.diffMarks([]), void ask({ op: "diff_stop" }))
 };
 var controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));

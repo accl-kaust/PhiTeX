@@ -3594,8 +3594,11 @@ export class Panel {
     const pg = this.$<HTMLInputElement>("#pgin");
     if (this.root.activeElement !== pg) pg.value = n ? String(k + 1) : "–";
     this.$("#pgn").textContent = String(n);
-    // (as wide as the count's digits, the most it can say)
-    pg.style.width = `${String(n || 1).length + 1.6}ch`;
+    // (as wide as the count's digits, the most it can say, three at least:
+    // as a build streams its pages the count grows, and the buttons beside
+    // it moved under the pointer, a click on Compare at page 9 landing
+    // beside it at page 15)
+    pg.style.width = `${Math.max(3, String(n || 1).length) + 1.6}ch`;
     queueMicrotask(() => this.emit());
   }
 

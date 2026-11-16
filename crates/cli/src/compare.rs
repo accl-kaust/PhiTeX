@@ -504,7 +504,8 @@ impl Compare {
         })
     }
 
-    /// The viewer's diff state: `{shown, base, to, label, changes, look}`.
+    /// The viewer's diff state: `{shown, base, to, label, changes, look,
+    /// errors, built}`.
     pub fn state(&self, shown: bool) -> Value {
         let changes = &self.live.out().changes;
         let list: Value = serde_json::from_str(&phitex_diff::changes_json(changes, &self.places))
@@ -517,7 +518,16 @@ impl Compare {
             "changes": list,
             "look": self.look.json(),
             "errors": self.report.as_ref().map_or(0, |r| r.out.errors.len()),
+            "built": self.built(),
         })
+    }
+
+    /// Whether the marked-up text is the one last built: the changes'
+    /// places are of its pages. False while a new text waits for its build
+    /// (a Compare's first state, told before it is typeset): a change with
+    /// no place yet may have one once it is.
+    fn built(&self) -> bool {
+        self.report.is_some() && self.next.as_ref().is_none_or(|t| *t == self.tex)
     }
 
     /// The look the viewer asked for, from its fields (the rest kept).

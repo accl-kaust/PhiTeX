@@ -109,6 +109,8 @@ header:active { cursor: grabbing; }
 .bar > .status { min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* (the count three digits wide at least, as the page box: panel.ts's nav) */
+.pageno #pgn { display: inline-block; min-width: 3ch; }
 .pageno input { width: 3ch; height: 22px; box-sizing: content-box; padding: 0 2px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); }
 .zoomb { padding: 0 2px 0 8px; }

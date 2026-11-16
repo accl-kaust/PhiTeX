@@ -7598,6 +7598,17 @@ fn watch_compare_streams_its_pages() {
     let changes = told["diff"]["changes"].as_array().map_or(0, Vec::len);
     assert!(changes >= 2, "{told}");
     assert!(at("diff") < at("page"), "{kinds:?}");
+    // (told as not built yet, its changes with no place: the viewer goes to
+    // a change once the diff's state says it is built, its places with it)
+    assert_eq!(told["diff"]["built"], false, "{told}");
+    let last = events.iter().rev().find(|e| e["event"] == "diff").expect("the diff told");
+    assert_eq!(last["diff"]["built"], true, "after its build: {last}");
+    assert!(
+        last["diff"]["changes"]
+            .as_array()
+            .is_some_and(|c| c.iter().all(|c| c["page"].is_u64())),
+        "each change placed once built: {last}"
+    );
     // (its build's progress, as a build's)
     assert!(
         events
