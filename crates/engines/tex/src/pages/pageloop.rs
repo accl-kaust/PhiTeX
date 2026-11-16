@@ -58,9 +58,12 @@ pub(crate) const FIRE_USED: &str = "pages:used";
 /// The lists of [`FIRE_USED`]'s first part.
 pub(crate) const FIRE_USED_BUCKETS: usize = 256;
 
-/// The list of [`FIRE_USED`]'s first part that holds field `f`.
-pub(crate) fn fire_used_bucket(f: ValueId) -> usize {
-    let h = f.raw().wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
+/// The list of [`FIRE_USED`]'s first part that holds field `f`: by its
+/// id as every store holding it at its place has it (`Values::stable_raw`),
+/// so the lists a graph loaded holds (`crate::api::Build::load`) are those
+/// its runs make again.
+pub(crate) fn fire_used_bucket(v: &Values, f: ValueId) -> usize {
+    let h = v.stable_raw(f).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
     usize::try_from(h).unwrap_or(0)
 }
 

@@ -548,7 +548,7 @@ impl Run<'_, '_> {
         let int = |k: u32| v.int(i64::from(k));
         let mut buckets = vec![Vec::new(); super::FIRE_USED_BUCKETS];
         for (f, a, b) in ranges {
-            let ys: &mut Vec<ValueId> = &mut buckets[super::fire_used_bucket(f)];
+            let ys: &mut Vec<ValueId> = &mut buckets[super::fire_used_bucket(v, f)];
             ys.push(f);
             ys.push(int(a));
             ys.push(int(b));
