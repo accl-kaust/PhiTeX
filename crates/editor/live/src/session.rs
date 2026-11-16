@@ -837,9 +837,8 @@ impl Session {
         let bytes = b.save();
         let save_ms = t0.elapsed().as_secs_f64() * 1e3;
         let (pages, cmds) = b.unsaved_link_state();
-        let tx = phitex_tex::EditSender::default();
         let opts = Options {
-            edits: Some(tx.clone()),
+            edits: Some(phitex_tex::EditSender::default()),
             progress: None,
             on_page_settled: None,
             ..gc.opts.clone()
@@ -883,7 +882,23 @@ impl Session {
                     if log { "same" } else { "DIFFER" },
                     if files { "same" } else { "DIFFER" },
                 );
-                gc.twin = Some((t, tx));
+                // (the twin the next change goes to: another load of the
+                // same bytes, untouched by the evaluation above)
+                drop(t);
+                let tx = phitex_tex::EditSender::default();
+                let opts = Options {
+                    edits: Some(tx.clone()),
+                    progress: None,
+                    on_page_settled: None,
+                    ..gc.opts.clone()
+                };
+                match Build::load(opts, gc.prelude.as_deref(), &bytes) {
+                    Ok((t, _)) => gc.twin = Some((t, tx)),
+                    Err(e) => {
+                        gc.differ += 1;
+                        eprintln!("graph-check: load refused: {e}");
+                    }
+                }
             }
         }
     }
