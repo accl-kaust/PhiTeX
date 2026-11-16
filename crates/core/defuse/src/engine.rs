@@ -2811,6 +2811,28 @@ impl Engine {
                     _ => {}
                 }
             }
+            // (a node placed after another stands after it: a placement's
+            // anchor is the node it was put after, `place_after`, and what
+            // moves the anchor moves what stands under it)
+            if !matches!(node.state(), State::Gone | State::Inert)
+                && let Some(a) = node.anchor()
+                && let Some(an) = self.placed_node(a)
+                && !matches!(an.state(), State::Gone | State::Inert)
+                && an.pos_hint() >= node.pos_hint()
+            {
+                out.push(format!(
+                    "node {} ({}, parent {:?}, slot {}) stands at {} before its anchor {} ({}, parent {:?}) at {}",
+                    n.raw(),
+                    self.op(node.op()).name(),
+                    node.parent.map(NodeId::raw),
+                    node.slot(),
+                    node.pos_hint().0,
+                    a.raw(),
+                    self.op(an.op()).name(),
+                    an.parent.map(NodeId::raw),
+                    an.pos_hint().0
+                ));
+            }
             match node.state() {
                 State::Gone | State::Inert => continue,
                 State::Dirty | State::Running | State::RunningDirty | State::RunningInert => {
