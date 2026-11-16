@@ -546,8 +546,9 @@ fn job(main: &str, engine: phitex_live::tex::Engine, ini: bool, threads: Option<
 /// The session thread: the document stepped whenever something is asked,
 /// its events to the host, until it is closed. (The records a build
 /// changed are stored as it settles, by the document: nothing is left
-/// for a quiet moment.) The persisted graph is saved once nothing has
-/// been asked for [`GRAPH_IDLE`] after a build ([`save_graph`]).
+/// for a quiet moment.) The persisted graph is saved after the first
+/// build, then once nothing has been asked for [`GRAPH_IDLE`] after a
+/// build ([`save_graph`], [`Idle::left`]).
 fn run(mut doc: Document, wake: &Wake, output: &Output, generation: u64) {
     let mut idle = Idle::new(generation);
     loop {
@@ -560,7 +561,7 @@ fn run(mut doc: Document, wake: &Wake, output: &Output, generation: u64) {
                 s = wake.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
                 continue;
             }
-            let left = GRAPH_IDLE.saturating_sub(idle.since.elapsed());
+            let left = idle.left();
             if !left.is_zero() {
                 s = wake
                     .cv
@@ -581,8 +582,11 @@ fn run(mut doc: Document, wake: &Wake, output: &Output, generation: u64) {
 }
 
 /// How long nothing is asked after a build before its graph is saved
-/// ([`save_graph`]): a pause in the typing, not every keystroke's build.
-const GRAPH_IDLE: std::time::Duration = std::time::Duration::from_millis(2000);
+/// again ([`save_graph`]; the first build's is saved at once): a long
+/// pause in the work, not every pause in the typing. A save costs the
+/// core's memory and a second or so of a thread (Grail: 1.2 s, 61 MB),
+/// and an edit that comes meanwhile gives it up, so it is kept rare.
+const GRAPH_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The persisted graph's save, as the session thread (or, without
 /// threads, the host's steps) keeps it: due after a build that left one
@@ -595,6 +599,9 @@ struct Idle {
     since: std::time::Instant,
     /// The last graph's size: the room a save asks for first.
     last_bytes: usize,
+    /// A save of this open's ended (saved, or nothing to save): the next
+    /// waits [`GRAPH_IDLE`]; before it, the first build's is saved at once.
+    saved: bool,
 }
 
 impl Idle {
@@ -604,6 +611,17 @@ impl Idle {
             due: false,
             since: std::time::Instant::now(),
             last_bytes: 0,
+            saved: false,
+        }
+    }
+
+    /// How long until the due save: none after the first build, else
+    /// what is left of [`GRAPH_IDLE`] since the last thing asked.
+    fn left(&self) -> std::time::Duration {
+        if self.saved {
+            GRAPH_IDLE.saturating_sub(self.since.elapsed())
+        } else {
+            std::time::Duration::ZERO
         }
     }
 }
@@ -660,6 +678,7 @@ fn save_graph(doc: &Document, wake: &Wake, idle: &mut Idle) {
     let guess = doc.session().graph_bytes_guess().unwrap_or(0);
     let want = idle.last_bytes.max(guess).saturating_mul(3);
     if !crate::heap::room_for(want) {
+        idle.saved = true;
         event(&json!({"event": "graph", "notes": [format!(
             "graph: not saved: no room for {} MB in the engine's memory",
             want >> 20
@@ -688,6 +707,7 @@ fn save_graph(doc: &Document, wake: &Wake, idle: &mut Idle) {
         idle.since = std::time::Instant::now();
         return;
     }
+    idle.saved = true;
     let Some(bytes) = store::Kept::take_graph() else {
         // (nothing to save: the graph as loaded, or the build not quiet)
         event(&json!({"event": "graph", "notes": notes}));
@@ -766,7 +786,7 @@ pub(crate) fn step_once() -> i32 {
         return 0;
     };
     let (pending, due) = lock(&STEPPED).as_ref().map_or((false, None), |(d, i)| {
-        (d.pending(), i.due.then_some(i.since))
+        (d.pending(), i.due.then(|| i.left()))
     });
     let save = {
         let mut s = lock(&wake.state);
@@ -776,7 +796,7 @@ pub(crate) fn step_once() -> i32 {
         if !s.0 && !pending {
             match due {
                 None => return 0,
-                Some(since) if since.elapsed() < GRAPH_IDLE => return 3,
+                Some(left) if !left.is_zero() => return 3,
                 Some(_) => true,
             }
         } else {

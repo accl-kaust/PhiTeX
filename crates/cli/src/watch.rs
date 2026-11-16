@@ -244,6 +244,13 @@ const CLOSES: bool = cfg!(any(target_os = "linux", target_os = "android"));
 /// anyway (a writer that keeps it open).
 const WRITE_WAIT: Duration = Duration::from_millis(500);
 
+/// How long nothing comes after a build before the watch saves its
+/// persisted graph again (the first build's is saved at once): a long
+/// pause in the work. A save takes a core for 0.2-0.5 s (Grail) and is
+/// given up for any event, so it never delays an edit by more than a
+/// check; kept rare all the same.
+const GRAPH_IDLE: Duration = Duration::from_secs(30);
+
 /// `changed` without the watch's own writes (`ours`: a change that
 /// leaves the bytes it wrote).
 fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
@@ -1552,6 +1559,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
     let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
+    // (the persisted graph's save due, since the build that left it: the
+    // first build's at once, later ones once nothing has come for
+    // GRAPH_IDLE; given up for any event, as the SyncTeX file is. Saved
+    // as the watch ends too: a watch killed loses at most what came since)
+    let graph_due: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
+    let graph_saved = std::cell::Cell::new(false);
     // (the last build's diagnostics at their places still to be made, and
     // its evaluation's key: low priority, after the build is announced,
     // once no event waits; an edit before then drops them)
@@ -2271,6 +2284,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (an idle point after every build: the exact file written there
         // when it is not, and said to be on disk either way)
         idle_since.set(Some(Instant::now()));
+        graph_due.set(Some(Instant::now()));
         phitex_tex::timeline::lap("watch: files written (the PDF, the log, the aux files)");
         if phitex_tex::tex_time() {
             eprintln!(
@@ -3058,9 +3072,62 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
+        // (then the persisted graph: the first build's, later ones after
+        // a long pause; any event gives it up, kept due for the next pause)
+        let graph_left = graph_due.get().map(|t| {
+            if graph_saved.get() {
+                GRAPH_IDLE.saturating_sub(t.elapsed())
+            } else {
+                Duration::ZERO
+            }
+        });
+        if graph_left == Some(Duration::ZERO)
+            && held.is_empty()
+            && !s.synctex_due()
+            && diags_due.get().is_none()
+        {
+            match rx.try_recv() {
+                Ok(e) => held.push_back(e),
+                Err(mpsc::TryRecvError::Empty) => {
+                    let came: RefCell<Option<(Instant, Event)>> = RefCell::new(None);
+                    let stop = || {
+                        if came.borrow().is_some() {
+                            return true;
+                        }
+                        match rx.try_recv() {
+                            Ok(e) => {
+                                *came.borrow_mut() = Some(e);
+                                true
+                            }
+                            Err(mpsc::TryRecvError::Empty) => false,
+                            Err(mpsc::TryRecvError::Disconnected) => true,
+                        }
+                    };
+                    at_wait.store(true, Ordering::Relaxed);
+                    let t0 = Instant::now();
+                    let _ = s.save_graph_until(&stop);
+                    at_wait.store(false, Ordering::Relaxed);
+                    busy.borrow_mut().did("the graph saved", t0);
+                    match came.into_inner() {
+                        // (given up: due again, from now)
+                        Some(e) => {
+                            graph_due.set(Some(Instant::now()));
+                            held.push_back(e);
+                        }
+                        None => {
+                            graph_due.set(None);
+                            graph_saved.set(true);
+                            modern::graph_notes(&s, o, ui);
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
         let wait = idle_since.get().map_or(Duration::from_secs(2), |t| {
             o.idle.saturating_sub(t.elapsed())
         });
+        let wait = graph_left.map_or(wait, |g| wait.min(g.max(Duration::from_millis(1))));
         let first = match held.pop_front() {
             Some(e) => e,
             None => match wait_for(&rx, wait, &at_wait) {

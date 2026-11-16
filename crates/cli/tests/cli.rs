@@ -3082,6 +3082,70 @@ fn build_rounds_are_latexmks_runs() {
     }
 }
 
+/// A watch saves its persisted graph after its first build, not only as
+/// it ends: killed then, the next build loads it and runs no round, its
+/// PDF the watch's.
+#[test]
+fn watch_saves_its_graph_after_the_first_build() {
+    let _one = one();
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let dir = scratch("watch-graph-first");
+    std::fs::write(
+        dir.join("hello.tex"),
+        "\\documentclass{article}\n\\begin{document}\nHello, world.\n\\end{document}\n",
+    )
+    .expect("the document");
+    let mut child = command(bin, &dir)
+        .env("PHITEX_GRAPH", "1")
+        .args(["watch", "--write", "--json", "--no-view", "hello.tex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    // (saved with nothing typed and the watch still running)
+    loop {
+        let g = until(&mut lines, "event", &"graph".into(), &mut seen);
+        if g["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("graph: saved"))
+        {
+            break;
+        }
+    }
+    let pdf = std::fs::read(dir.join("hello.pdf")).expect("the watch's PDF");
+    child.kill().expect("the watch killed");
+    let _ = child.wait();
+    let out = command(bin, &dir)
+        .env("PHITEX_GRAPH", "1")
+        .args(["build", "--json", "hello.tex"])
+        .output()
+        .expect("phitex runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ev = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["event"] == "build")
+        .expect("a build event");
+    assert_eq!(
+        ev["rounds"], 0,
+        "the build after the killed watch did not load its graph: {ev}"
+    );
+    assert!(
+        std::fs::read(dir.join("hello.pdf")).expect("the PDF") == pdf,
+        "the loaded build's PDF is not the watch's"
+    );
+}
+
 /// The exit statuses, as pdflatex's: 1 for a file that is not there, an
 /// unknown command or a document with errors, 0 for `--help`.
 #[test]
@@ -7601,7 +7665,11 @@ fn watch_compare_streams_its_pages() {
     // (told as not built yet, its changes with no place: the viewer goes to
     // a change once the diff's state says it is built, its places with it)
     assert_eq!(told["diff"]["built"], false, "{told}");
-    let last = events.iter().rev().find(|e| e["event"] == "diff").expect("the diff told");
+    let last = events
+        .iter()
+        .rev()
+        .find(|e| e["event"] == "diff")
+        .expect("the diff told");
     assert_eq!(last["diff"]["built"], true, "after its build: {last}");
     assert!(
         last["diff"]["changes"]
