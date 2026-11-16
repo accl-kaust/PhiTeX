@@ -10206,6 +10206,7 @@ var PreviewSession = class {
     this.host = host2;
     core.onEvent?.((e) => {
       const ev = e.event ?? "";
+      if (ev === "build" || ev === "graph") this.tr(`core: ${ev}`, e);
       if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
       if (ev === "settled") {
         const b = e;

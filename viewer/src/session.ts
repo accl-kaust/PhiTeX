@@ -454,6 +454,8 @@ export class PreviewSession {
     core.onEvent?.((e) => {
       // (a queued edit's build over, as `send` waits for it: built, failed, or the core gone)
       const ev = (e as { event?: string }).event ?? "";
+      // (the core's build facts and its persisted graph's (loaded, saved, or why not): in the trace)
+      if (ev === "build" || ev === "graph") this.tr(`core: ${ev}`, e);
       if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e as { event: string });
       // (a build's time, from every core and the watch alike: the popover's first-build and edit bars; a pass while the job's files settle is not one)
       if (ev === "settled") {
