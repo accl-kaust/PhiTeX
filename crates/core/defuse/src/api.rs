@@ -34,6 +34,19 @@ impl NodeId {
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnitId(pub(crate) u32);
 
+impl UnitId {
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// The unit numbered `raw` (an id an exported graph kept, `Engine::import`).
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> UnitId {
+        UnitId(raw)
+    }
+}
+
 /// Where a definition is seen: its scope depth. Scopes are brackets on
 /// the line (`Effect`): a node closes some before itself and opens some
 /// after itself, and the depth at a position is the count of scopes open

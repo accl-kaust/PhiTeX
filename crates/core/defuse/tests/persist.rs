@@ -747,6 +747,42 @@ fn roots_come_back_by_content() {
     }
 }
 
+/// The importing store holds every value where the exporting one held
+/// it (`Values::stable_raw`): a string, a list, a big integer, and a
+/// sequence of plain values, each the same stable id in both stores (a
+/// hash of ids a run makes is the same in each), and its raw id moved by
+/// the stores' bases alone; a value made after the import that the
+/// exporting store had too is found at its place.
+#[test]
+fn an_import_keeps_every_values_place() {
+    let (a, oa) = setup();
+    build(&a, &oa, 10);
+    a.evaluate(1).unwrap();
+    let v = a.values();
+    let s = v.str("a string kept");
+    let big = v.int(1 << 62);
+    let l = v.list(vec![s, big, v.int(3)]);
+    let q = v.seq_concat(v.seq_concat(v.seq_unit(l), v.seq_unit(s)), v.seq_unit(v.int(7)));
+    let roots = vec![s, big, l, q];
+    let bytes = a.export(&roots);
+    let (b, _) = setup();
+    let got = b.import(&bytes).unwrap();
+    let w = b.values();
+    for (x, y) in roots.iter().zip(&got.roots) {
+        assert_eq!(v.stable_raw(*x), w.stable_raw(*y));
+        assert_eq!(w.from_stable(v.stable_raw(*x)), *y);
+    }
+    assert_ne!(s.raw(), got.roots[0].raw(), "the stores' bases differ");
+    assert_eq!(w.str("a string kept"), got.roots[0]);
+    assert_eq!(
+        w.seq_concat(
+            w.seq_concat(w.seq_unit(got.roots[2]), w.seq_unit(got.roots[0])),
+            w.seq_unit(w.int(7))
+        ),
+        got.roots[3]
+    );
+}
+
 /// Random documents and random edits (a fixed generator, 16 seeds): the
 /// imported engine runs what the exporting one runs for each edit, with
 /// the same products; the import made at a random point of the edits.

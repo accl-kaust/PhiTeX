@@ -1036,7 +1036,7 @@ impl Run<'_, '_> {
         // (the run read `f` across this candidate)
         let used_here = |f: ValueId| {
             let k = i64::from(k);
-            list_of(v, buckets[super::fire_used_bucket(f)])
+            list_of(v, buckets[super::fire_used_bucket(v, f)])
                 .as_chunks::<3>()
                 .0
                 .iter()

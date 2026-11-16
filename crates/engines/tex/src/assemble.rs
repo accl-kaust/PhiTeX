@@ -365,6 +365,42 @@ impl File {
     }
 }
 
+/// (the persisted graph, `crate::api::Build::save`) The hash and bytes of
+/// the linked file output value `x` stands for, if it stands for one.
+pub(crate) fn linked_of(
+    v: &phitex_defuse::Values,
+    x: ValueId,
+) -> Option<(u64, std::sync::Arc<Vec<u8>>)> {
+    if let phitex_defuse::Value::List(xs) = &*v.get(x)
+        && xs.len() == 3
+        && str_of(v, xs[0]) == "bytes"
+    {
+        let h = u64::from_ne_bytes(int_of(v, xs[1]).to_ne_bytes());
+        return Some((h, file_bytes_shared(v, x)));
+    }
+    None
+}
+
+/// (the persisted graph, `crate::api::Build::load`) File `bytes`, kept
+/// under hash `h` in another store, kept so in values table `v`: the
+/// loaded output value `["bytes", h, n]` stands for it again.
+pub(crate) fn adopt_linked(v: &phitex_defuse::Values, h: u64, bytes: std::sync::Arc<Vec<u8>>) {
+    let mut all = linked_files().locked();
+    let k = if let Some(k) = all.iter().position(|(i, _)| *i == v.instance()) {
+        k
+    } else {
+        all.push((v.instance(), std::collections::VecDeque::new()));
+        all.len() - 1
+    };
+    let m = &mut all[k].1;
+    if !m.iter().any(|e| e.0 == h) {
+        m.push_back((h, File::Bytes(bytes)));
+        while m.len() > 4 {
+            m.pop_front();
+        }
+    }
+}
+
 /// The files linked in values table `instance` dropped: its build goes.
 pub(crate) fn forget_linked(instance: u64) {
     linked_files().locked().retain(|(i, _)| *i != instance);
@@ -646,7 +682,7 @@ pub(crate) fn dvi_file(
     }
     // (a page's identity: what it holds, its sealed lines filled in
     // ([`fill_sealed_pages`]), else its value)
-    let id_of = |i: usize| shown_ids.map_or_else(|| pages[i].raw(), |s| s[i]);
+    let id_of = |i: usize| shown_ids.map_or_else(|| v.stable_raw(pages[i]), |s| s[i]);
     let apart: Vec<Option<phitex_dvi::PageBytes>> = {
         let mut ex = crate::exec::Inner(crate::exec::threads(None));
         crate::exec::map_on(&mut ex, rest.len(), &|i| {

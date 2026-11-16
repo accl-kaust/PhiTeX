@@ -1038,13 +1038,114 @@ impl Values {
         self.same_hash.store(true, Ordering::Relaxed);
     }
 
-    /// An element's hash in this store (see [`Values::force_one_elem_hash`]).
+    /// An element's hash in this store (see [`Values::force_one_elem_hash`]),
+    /// of its id as the store places it ([`Values::stable_raw`]): a
+    /// sequence's id is the same in every store that holds its elements at
+    /// the same places (a graph imported, `crate::persist`).
     fn elem_hash_of(&self, x: ValueId) -> u64 {
         #[cfg(test)]
         if self.same_hash.load(Ordering::Relaxed) {
             return 1;
         }
-        elem_hash(x)
+        elem_hash(ValueId(self.stable_raw(x)))
+    }
+
+    /// The id's 64 bits with the store's own base taken off a plain
+    /// value's (a string, list or big integer: its place in the store):
+    /// what a value's id is in every store that holds it at the same
+    /// place. A graph imported (`crate::persist`) puts every value it holds
+    /// where the exporting store had it, so a hash of ids a run made in
+    /// one (a page's key, a box head's hash) is the hash the same run
+    /// makes in the other; [`ValueId::raw`] differs between stores of one
+    /// process by their bases.
+    #[must_use]
+    pub fn stable_raw(&self, id: ValueId) -> u64 {
+        match id.tag() {
+            T_STR | T_LIST | T_BIG => match id.payload().checked_sub(self.base) {
+                Some(i) if i < PLAIN_SPAN => ValueId::make(id.tag(), i).0,
+                _ => id.0,
+            },
+            _ => id.0,
+        }
+    }
+
+    /// The id in this store of the value another store named by
+    /// `stable` ([`Values::stable_raw`] there): the value is at the same
+    /// place here (a graph imported).
+    #[must_use]
+    pub fn from_stable(&self, stable: u64) -> ValueId {
+        let id = ValueId(stable);
+        match id.tag() {
+            T_STR | T_LIST | T_BIG if id.payload() < PLAIN_SPAN => ValueId::make(id.tag(), self.base + id.payload()),
+            _ => id,
+        }
+    }
+
+    /// A plain value's place in this store (its payload less the base),
+    /// None for another kind or another store's.
+    pub(crate) fn plain_place(&self, id: ValueId) -> Option<u64> {
+        matches!(id.tag(), T_STR | T_LIST | T_BIG)
+            .then(|| id.payload().checked_sub(self.base))
+            .flatten()
+            .filter(|&i| i < PLAIN_SPAN)
+    }
+
+    /// (import, `crate::persist`) Plain value `v` (a string, list or big
+    /// integer) put at place `at`, where the exporting store had it: its
+    /// id there. The place already holding `v` (made before the import
+    /// as the exporting store made it) is that value's; one holding
+    /// another value, or `v` held at another place, is an error.
+    pub(crate) fn place_plain(&self, at: u64, v: Value) -> Result<ValueId, String> {
+        let tag = match &v {
+            Value::Str(_) => T_STR,
+            Value::List(_) => T_LIST,
+            Value::Int(_) => T_BIG,
+            _ => return Err("a placed value not plain".to_owned()),
+        };
+        if at >= PLAIN_SPAN {
+            return Err("a value's place out of range".to_owned());
+        }
+        let id = ValueId::make(tag, self.base + at);
+        let i = usize::try_from(at).map_err(|_| "a value's place out of range".to_owned())?;
+        if self.plain.get(i).is_some() {
+            return if self.plain_is(id, &v) {
+                Ok(id)
+            } else {
+                Err(format!("value place {at} holds another value"))
+            };
+        }
+        let mut h = plain_hash(&v);
+        loop {
+            let shard = &self.plain_ix[shard_of(h)].0;
+            let mut w = shard.write();
+            match w.get(&h) {
+                Some(&o) if self.plain_is(o, &v) => {
+                    return Err(format!("a value of place {at} held at another"));
+                }
+                Some(_) => {
+                    drop(w);
+                    h = hash_words(h, &[1]);
+                }
+                None => {
+                    if self.counting.load(Ordering::Relaxed) {
+                        self.bytes[shard_of(h) % BYTE_SHARDS]
+                            .0
+                            .fetch_add(Self::weight(&v), Ordering::Relaxed);
+                    }
+                    self.plain.place(i, Slot::new(v));
+                    w.insert(h, id);
+                    return Ok(id);
+                }
+            }
+        }
+    }
+
+    /// (import) The sequence node `l` then `r` as the exporting store
+    /// shaped it (no rebalancing), both non-empty sequences of this
+    /// store: its id, which is its content's.
+    pub(crate) fn seq_node_exact(&self, l: ValueId, r: ValueId) -> Option<ValueId> {
+        let (lr, rr) = (self.rope(l)?, self.rope(r)?);
+        Some(self.node(l, &lr, r, &rr))
     }
 
     /// The one-element sequence.
@@ -1437,7 +1538,10 @@ mod tests {
         assert_eq!(v.seq_to_vec(shapes[0]), xs);
         let hc = v.rope(shapes[0]).map(|r| (r.len, r.hc));
         let want = xs.iter().fold(0, |h, &x| {
-            super::addmod(super::mulmod(h, super::B), super::elem_hash(x))
+            super::addmod(
+                super::mulmod(h, super::B),
+                super::elem_hash(ValueId::from_raw(v.stable_raw(x))),
+            )
         });
         assert_eq!(hc, Some((201, want)));
         assert_eq!(v.seq_probed(), 0);

@@ -85,6 +85,52 @@ impl SymTable {
         i
     }
 
+    /// (the persisted graph, `crate::api::Build::save`) The symbols of
+    /// each kind in their numbers' order, the register symbols' first:
+    /// register, node, steps, and a derived name's two parts.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn snapshot(&self) -> Vec<(i32, u64, i32, Option<(Box<str>, Box<str>)>)> {
+        [&self.regs, &self.names]
+            .into_iter()
+            .flat_map(|t| {
+                t.by.read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .1
+                    .clone()
+            })
+            .map(|k| match k {
+                SymKey::Reg(a, b, c) => (a, b, c, None),
+                SymKey::Name(a, b, c, d, e) => (a, b, c, Some((d, e))),
+            })
+            .collect()
+    }
+
+    /// (the persisted graph, `crate::api::Build::load`) The symbols of
+    /// [`SymTable::snapshot`], each numbered among its kind as it was, in
+    /// a table that has none yet.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn restore(&self, xs: Vec<(i32, u64, i32, Option<(Box<str>, Box<str>)>)>) {
+        for t in [&self.regs, &self.names] {
+            *t.by
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Default::default();
+        }
+        for (a, b, c, n) in xs {
+            let k = match n {
+                None => SymKey::Reg(a, b, c),
+                Some((d, e)) => SymKey::Name(a, b, c, d, e),
+            };
+            let mut t = self
+                .kind(&k)
+                .by
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let i = u32::try_from(t.1.len()).unwrap_or(u32::MAX);
+            t.0.insert(k.clone(), i);
+            t.1.push(k);
+        }
+    }
+
     /// How many register symbols and derived names are numbered.
     pub(crate) fn counts(&self) -> (u32, u32) {
         let n = |t: &KindTable| {

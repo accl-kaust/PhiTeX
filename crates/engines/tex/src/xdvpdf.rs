@@ -275,7 +275,7 @@ impl Walk {
             None => (None, [0; 10], Vec::new()),
         };
         Walk {
-            id: page.raw(),
+            id: v.stable_raw(page),
             bx,
             counts,
             offsets: crate::assemble::dvi_offsets(v, page),
@@ -1545,7 +1545,7 @@ fn shown(
     let shown = v.list(
         pages
             .iter()
-            .map(|p| v.int(i64::from_ne_bytes(p.raw().to_ne_bytes())))
+            .map(|&p| v.int(i64::from_ne_bytes(v.stable_raw(p).to_ne_bytes())))
             .collect(),
     );
     cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));

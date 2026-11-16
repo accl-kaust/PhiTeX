@@ -616,6 +616,56 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       grep -q "documents, " "$r/editsweep.txt" || red "edits: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
     fi
     ;;
+  persist)
+    # persist K N [J]: the persisted graph's check (docs/spec-persisted-graph.md,
+    # step 2): shard K of N of ci/research.json under the watch at -j J
+    # (1) with PHITEX_GRAPH_CHECK=1, a word typed early, midway and late
+    # (scripts/ci/editsweep.py). After each build the session saves the
+    # build and loads it into a twin in its process (Build::save,
+    # Build::load), which must run no node with nothing changed and give
+    # the build's PDF, log and files; the next edit goes to the twin too,
+    # its outputs the build's (and at -j 1 its runs). Red: a load refused;
+    # a loaded build that ran a node unchanged or gave other bytes; an
+    # edit whose twin differs. Nothing is carved out: pdfTeX's link state
+    # (its pages and read-time commands) is saved (spec §2.2.4).
+    k=$1 n=$2 j=${3:-1}
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "persist: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK"
+      python3 -I scripts/ci/editsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
+        --out "$r/persist" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
+        --threads "$j" --graph-check > "$r/editsweep.txt" 2>&1
+      # (the sweep's bar of two runs a node a round is -j 1's: at more
+      # threads an edit's runs ahead of their inputs are the schedule's,
+      # reported apart; without any load revtex-aip's line-308 edit ran
+      # 250, 358 and 258 runs for 132-136 nodes at -j 8 in three
+      # processes, the PDF the cold build's each time, spec §2.2.4)
+      if [ "$j" = 1 ]; then
+        grep '^editsweep:' "$r/editsweep.txt" | head -60 >> "$r/red.txt"
+      else
+        grep '^editsweep:' "$r/editsweep.txt" | grep -v ' runs for [0-9]* nodes in ' | head -60 >> "$r/red.txt"
+        grep '^editsweep:' "$r/editsweep.txt" | grep ' runs for [0-9]* nodes in ' | sed "s/^/persist (-j $j, not red): /" >> "$r/known-red.txt"
+      fi
+      grep -q "documents, " "$r/editsweep.txt" || red "persist: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
+      : > "$r/graph-check.txt"
+      for e in "$CI_WORK"/edit/*.err; do
+        [ -f "$e" ] || continue
+        id=$(basename "$e" .err)
+        grep -a '^graph-check' "$e" | sed "s/^/$id: /" >> "$r/graph-check.txt"
+        if grep -aq 'graph-check: load refused\|graph-check: load: DIFFER' "$e"; then
+          red "persist: $id: $(grep -a -m1 'graph-check: load refused\|graph-check: load: DIFFER' "$e" | cut -c1-300)"
+        elif grep -aq 'graph-check: edit [0-9]*: DIFFER' "$e"; then
+          red "persist: $id: $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-300)"
+        fi
+      done
+      grep -q 'graph-check: load' "$r/graph-check.txt" || red "persist: no graph-check line: PHITEX_GRAPH_CHECK did not reach the watches"
+      grep -q . "$r/red.txt" && status=red
+    fi
+    ;;
   research)
     # research K N [shelf]: shard K of N of ci/research.json. The oracle
     # (TeX Live's pdflatex/xelatex, BibTeX, biber, makeindex to the

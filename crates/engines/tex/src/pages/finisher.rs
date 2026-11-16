@@ -137,7 +137,7 @@ impl Operation for Finish {
         let known = ops(&self.0)
             .fin_defs
             .locked()
-            .get(&fin_key_class(t, pen))
+            .get(&fin_key_class(v, t, pen))
             .map(FinDefs::names);
         if let Some(mut names) = known {
             for n in FIN_OWN {
@@ -781,9 +781,12 @@ pub(crate) const FORCED_SPECIAL: i32 = -10001;
 /// the text ended the page, the builder chose nothing.
 pub(crate) const EJECT_PENALTY: i32 = -10000;
 
-/// [`fin_key`] of routine `t` on a page of class `pen`.
-pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {
-    t.raw()
+/// [`fin_key`] of routine `t` on a page of class `pen`: of `t`'s id as
+/// every store holding it at its place has it (`Values::stable_raw`), so
+/// the finishers' table a graph loaded holds (`crate::api::Build::load`)
+/// is found by the routines' runs after the load.
+pub(crate) fn fin_key_class(v: &Values, t: ValueId, pen: i32) -> u64 {
+    v.stable_raw(t)
         ^ u64::from(pen.cast_unsigned())
             .rotate_left(32)
             .wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -803,7 +806,7 @@ impl Finish {
             return None;
         }
         let m = o.fin_defs.locked();
-        let mut out = m.get(&fin_key_class(t, pen))?.rels.clone()?;
+        let mut out = m.get(&fin_key_class(v, t, pen))?.rels.clone()?;
         for e in m.values() {
             for &(f, _) in e.rels.iter().flatten() {
                 if !out.iter().any(|x| x.0 == f) {
@@ -840,7 +843,7 @@ impl Finish {
         let m = o.fin_defs.locked();
         let idx = fin_page_key(v, args);
         let d = (t != ValueId::UNIT)
-            .then(|| m.get(&fin_key_class(t, pen)))
+            .then(|| m.get(&fin_key_class(v, t, pen)))
             .flatten()
             .map(|d| d.at(idx));
         let d = d.as_ref();
@@ -1605,7 +1608,7 @@ impl Run<'_, '_> {
             i64::from(page.key.nth),
         );
         let e = m
-            .entry(fin_key_class(t, pen_class(page.output_penalty)))
+            .entry(fin_key_class(v, t, pen_class(page.output_penalty)))
             .or_default();
         e.gdefs = Some(gdefs);
         e.rels = Some(rels);

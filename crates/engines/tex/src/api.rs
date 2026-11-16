@@ -18,10 +18,13 @@ use phitex_defuse::{
 use phitex_source::pass;
 
 use crate::hints::Defs;
+
+pub(crate) mod persist;
 use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
+pub use persist::LoadStats;
 
 /// Finds a file by the name TeX asks for: the name to print and the
 /// bytes. The key is TeX's own lookup (`\\input`, `\\openin`,
@@ -3137,7 +3140,7 @@ impl DocFile {
                 node_args(v, &self.text, Some(&self.incr), n, loads, Some(name))
             });
             let s = n.start();
-            now.entry(a[0].raw())
+            now.entry(v.stable_raw(a[0]))
                 .and_modify(|k| *k = None)
                 .or_insert(Some(lines_before(&starts, len, s)));
         }
@@ -3178,10 +3181,10 @@ pub(crate) type RestLines = Arc<std::sync::Mutex<FxHashMap<ValueId, i64>>>;
 
 /// The lines before the piece whose frames' value is `n`, where a run
 /// cut it of a file's rest ([`RestLines`]).
-fn rest_line(rest: &RestLines, n: u64) -> Option<i64> {
+fn rest_line(v: &Values, rest: &RestLines, n: u64) -> Option<i64> {
     rest.locked()
         .iter()
-        .find_map(|(f, &k)| (f.raw() == n).then_some(k))
+        .find_map(|(f, &k)| (v.stable_raw(*f) == n).then_some(k))
 }
 
 /// [`RestLines`] for the pieces `(frames, byte)` cut of the rest of
@@ -3751,7 +3754,7 @@ impl Graph {
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
                 let n = n.parse().ok()?;
-                let k = doc_file_line(&docs, n).or_else(|| rest_line(&rest, n));
+                let k = doc_file_line(&docs, n).or_else(|| rest_line(v, &rest, n));
                 return Some(k.map(|k| v.int(k)));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the
@@ -6772,6 +6775,12 @@ pub struct Diagnostic {
 /// ([`Build::diagnostics`]).
 type DiagsKept = ((u64, usize), Vec<Diagnostic>);
 
+/// A build's number among the process's ([`Build::settled_key`]).
+fn next_serial() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A document built on the graph, kept for edits.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Build {
@@ -7106,10 +7115,7 @@ impl Build {
             diag_memo: Mutex::default(),
             diags_last: Mutex::default(),
             settles: 0,
-            serial: {
-                static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            },
+            serial: next_serial(),
             loads_ran: false,
             staged: false,
             evaluated: false,
@@ -9202,7 +9208,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
-                    .or_else(|| rest_line(&self.g.ops.rest_lines, n))
+                    .or_else(|| rest_line(v, &self.g.ops.rest_lines, n))
             },
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
@@ -9306,7 +9312,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
-                    .or_else(|| rest_line(&self.g.ops.rest_lines, n))
+                    .or_else(|| rest_line(v, &self.g.ops.rest_lines, n))
             },
             &crate::log::TermParts {
                 head,
@@ -9708,7 +9714,7 @@ impl Build {
                 let shift = match whose {
                     Some(o) => doc_shifts
                         .values()
-                        .find(|(fs, _)| fs.raw() == o)
+                        .find(|(fs, _)| v.stable_raw(*fs) == o)
                         .map_or(0, |&(_, d)| d),
                     None => piece_shift(&self.g.eng, &doc_shifts, node),
                 };

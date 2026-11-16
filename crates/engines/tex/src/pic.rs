@@ -91,6 +91,36 @@ fn end_tok() -> Tok {
 static REFUSED: std::sync::Mutex<Option<phitex_defuse::FxHashSet<u64>>> =
     std::sync::Mutex::new(None);
 
+/// (the persisted graph, `crate::api::Build::save`) The pictures this
+/// process refused and those met with more after them ([`REFUSED`],
+/// [`MANY`]), sorted: what a run here does with a picture, saved with a
+/// graph so that a run after its load does the same.
+pub(crate) fn learned() -> (Vec<u64>, Vec<u64>) {
+    let get = |m: &std::sync::Mutex<Option<phitex_defuse::FxHashSet<u64>>>| {
+        let mut xs: Vec<u64> = m
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        xs.sort_unstable();
+        xs
+    };
+    (get(&REFUSED), get(&MANY))
+}
+
+/// (the persisted graph, `crate::api::Build::load`) [`learned`]'s sets
+/// joined to this process's: a picture is refused or many here as it was
+/// where the graph was saved (both only grow in a process).
+pub(crate) fn learn(refused: &[u64], many: &[u64]) {
+    for &h in refused {
+        refuse(h);
+    }
+    for &h in many {
+        mark_many(h);
+    }
+}
+
 fn refused(hash: u64) -> bool {
     REFUSED
         .lock()
