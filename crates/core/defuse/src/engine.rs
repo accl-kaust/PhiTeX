@@ -63,7 +63,7 @@ pub(crate) struct Paths {
 }
 
 /// Path ids below this are projections' (`PathId::of_proj`).
-const PROJ_PATHS: usize = 1024;
+pub(crate) const PROJ_PATHS: usize = 1024;
 /// Nodes `push_many` files in each segment it makes: room for as many again.
 const PUSH_RUN: usize = crate::order::SEG_CAP / 2;
 

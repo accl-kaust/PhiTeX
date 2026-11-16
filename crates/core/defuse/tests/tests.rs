@@ -21,6 +21,7 @@ mod loopback;
 mod merged_wake;
 mod park;
 mod park_review;
+mod persist;
 mod placed_edit;
 mod placed_guess;
 mod placed_wait;

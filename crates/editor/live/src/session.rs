@@ -751,6 +751,35 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// (observe) docs/spec-persisted-graph.md §9: the build's persisted
+    /// graph probe ([`Build::persist_probe`]), and the time to take the
+    /// content key of every input the build read
+    /// ([`phitex_tex::file_stat_key`]), as a loaded graph's check of its
+    /// inputs would.
+    pub fn persist_probe(&self) -> Option<(String, Vec<u8>)> {
+        let b = self.build.as_ref()?;
+        let t0 = Instant::now();
+        let mut n = 0usize;
+        let mut ours = 0usize;
+        for (_, _, p, o) in &self.inputs {
+            if let Some(p) = p {
+                let _ = phitex_tex::file_stat_key(&p.to_string_lossy());
+                n += 1;
+                ours += usize::from(*o);
+            }
+        }
+        let stat = t0.elapsed();
+        let (line, bytes) = b.persist_probe();
+        Some((
+            format!(
+                "{line}; inputs {} ({n} found, {ours} the document's), their keys in {:.2} ms",
+                self.inputs.len(),
+                stat.as_secs_f64() * 1e3
+            ),
+            bytes,
+        ))
+    }
+
     /// The host: the files the build reads, the services it calls.
     pub fn host(&self) -> &Arc<dyn Host> {
         &self.host

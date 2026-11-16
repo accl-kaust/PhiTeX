@@ -81,6 +81,8 @@ mod lock;
 mod node;
 pub mod obs;
 mod order;
+mod persist;
+mod persist_probe;
 mod read;
 mod reads;
 mod sched;
@@ -96,6 +98,8 @@ pub use api::{
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
 pub use lock::held as locks_held;
+pub use persist::{ImportError, ImportStats, Imported, ReadCheck};
+pub use persist_probe::PersistProbe;
 pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_value_plus};
 
 /// The stack of every thread a run is made on (the evaluation's own and
