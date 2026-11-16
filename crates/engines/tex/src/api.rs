@@ -7419,6 +7419,9 @@ impl Build {
         self.g
             .eng
             .set_spec_window(self.opts.spec_window && self.settles == 1);
+        // (the first-read wait: the clean build's evaluation alone, the
+        // window on or not, docs/spec-window.md, First reads)
+        self.g.eng.set_first_read_wait(self.settles == 1);
         self.g.ops.spec_window.store(
             self.opts.spec_window && self.settles == 1,
             std::sync::atomic::Ordering::Release,

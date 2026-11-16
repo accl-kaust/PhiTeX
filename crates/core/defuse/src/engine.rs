@@ -257,6 +257,9 @@ pub struct Engine {
     /// first-read wait on, and the window narrowed only by a node's second
     /// refutation by the layer.
     pub(crate) first_reads_on: AtomicBool,
+    /// The first-read wait on for this evaluation
+    /// ([`Engine::set_first_read_wait`], `Ctx::wait_for_first_definer`).
+    pub(crate) first_read_wait: AtomicBool,
     pub(crate) window_wave: AtomicBool,
     /// (`PHITEX_WINDOW_CHAINS=0`, a measure) a clean build's run again
     /// waits for its moving sources (`sched::hold_for`).
@@ -341,6 +344,21 @@ impl Engine {
         // the field)
         self.settle_exact.write().insert(f);
         self.settle_marks[w].fetch_or(b, Ordering::Release);
+    }
+
+    /// The first-read wait on or off for the evaluations to come
+    /// (`Ctx::wait_for_first_definer`, docs/spec-window.md, First reads):
+    /// on for a clean build's evaluation, the window on or not. Off
+    /// (`PHITEX_FIRST_READS=0`, a measure) the pieces made at once read
+    /// what the text before them defines before it commits, and each runs
+    /// again as many times as the scheduling let it start early: para400
+    /// at -j16 ran 1.0 to 1.67 runs a node by the machine's load (the
+    /// census, mc 87739), the rest of `\hsize=6in`'s readers thrown away.
+    pub fn set_first_read_wait(&self, on: bool) {
+        self.first_read_wait.store(
+            on && std::env::var("PHITEX_FIRST_READS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
     }
 
     /// The speculation window on or off for the evaluations to come
@@ -487,6 +505,7 @@ impl Engine {
             window_missed: AtomicBool::new(false),
             window_released: AtomicU64::new(0),
             first_reads_on: AtomicBool::new(true),
+            first_read_wait: AtomicBool::new(false),
             window_wave: AtomicBool::new(false),
             window_chains: AtomicBool::new(true),
             window_aimd: AtomicBool::new(true),
