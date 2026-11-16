@@ -41,6 +41,20 @@ pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 /// encoding of ENCFONTS's: two lookups, two keys.
 pub const FONT_KEY: &str = "\u{1}font:";
 
+/// The environment's field of a file's modification time (seconds),
+/// by its path: `fdate:<path>` (`\pdffilemoddate`'s, [`Graph::provide`]).
+pub(crate) const FILE_DATE: &str = "fdate:";
+
+/// The modification time (seconds since the epoch) of the file at
+/// `path` on this machine's disk; none where it has none.
+fn file_date(path: &str) -> Option<i64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+}
+
 /// pdfTeX's banner as its terminal's first line begins: `\pdftexbanner`
 /// without kpathsea's version.
 #[must_use]
@@ -3668,14 +3682,15 @@ impl Graph {
 
     /// Whether the provider's answer for field `name` is made of something
     /// besides the format and this code ([`Graph::provide`]): the files
-    /// (`file:`, `dfile:`, `fsize:`, a tool's `tfile:`) and the lines a cut
-    /// file's pieces are given (`dline:`). Every other answer (the
+    /// (`file:`, `dfile:`, `fsize:`, a tool's `tfile:`, a file's time
+    /// [`FILE_DATE`]) and the lines a cut file's pieces are given
+    /// (`dline:`). Every other answer (the
     /// format's bindings, a box register's default, a field the format
     /// does not bind) is the format's and the code's, keyed by them: a
     /// loaded graph asks again only these ([`Build::reask_environment`]).
     /// Every kind the provider answers is listed here.
     pub(crate) fn outside_answer(name: &str) -> bool {
-        ["file:", "dfile:", "fsize:", "tfile:", "dline:"]
+        ["file:", "dfile:", "fsize:", "tfile:", "dline:", FILE_DATE]
             .iter()
             .any(|p| name.starts_with(p))
     }
@@ -3764,6 +3779,12 @@ impl Graph {
                     }
                     val
                 }));
+            }
+            // (a file's time by its path, `\\pdffilemoddate`'s, [`FILE_DATE`]:
+            // its modification time in seconds, none where no disk here has
+            // it)
+            if let Some(path) = field.strip_prefix(FILE_DATE) {
+                return Some(file_date(path).map(|t| v.int(t)));
             }
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
@@ -7629,6 +7650,23 @@ impl Build {
         // dropped and the nodes whose loads list it ran again, its value
         // made anew first, Grail's `r` 7 s)
         let unchanged = self.restage_unchanged(name, held, f_absent, cut, found.as_ref());
+        // (its time, where a run asked it (`\\pdffilemoddate`, [`FILE_DATE`]),
+        // asked again at its path then and now: a file touched, its bytes
+        // the same, moves it alone)
+        {
+            let v = self.g.eng.values();
+            let mut dates: Vec<Field> = old
+                .first()
+                .map(|&p| str_of(v, p))
+                .into_iter()
+                .chain(found.as_ref().map(|(p, _)| p.clone()))
+                .map(|p| v.field(&format!("{FILE_DATE}{p}")))
+                .collect();
+            dates.dedup();
+            if self.g.eng.reask_answers(&dates) > 0 {
+                self.staged = true;
+            }
+        }
         // (`PHITEX_STAGE_TRACE`, observe: each file staged, what the build
         // held of it and whether it changed)
         if crate::exec::obs_flag!("PHITEX_STAGE_TRACE") {

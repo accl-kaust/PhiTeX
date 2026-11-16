@@ -1634,6 +1634,39 @@ impl Engine {
         (asked.len(), moved)
     }
 
+    /// Those of `fields` whose value the provider gave asked of it again,
+    /// as [`Engine::reask_provided`] asks them all: one that moved takes
+    /// the new answer, its readers re-asked. How many moved.
+    pub fn reask_answers(&self, fields: &[Field]) -> usize {
+        let held: Vec<Field> = {
+            let prov = self.env.provided.read();
+            fields.iter().copied().filter(|f| prov.contains(f)).collect()
+        };
+        let moved: Vec<(Field, Option<ValueId>)> = held
+            .into_iter()
+            .filter_map(|f| {
+                let now = self.ask_provider(f);
+                let was = self.env.values.read().get(&f).copied().flatten();
+                (now != was).then_some((f, now))
+            })
+            .collect();
+        if !moved.is_empty() {
+            self.change_environment(&moved, true);
+        }
+        moved.len()
+    }
+
+    /// What the provider answers for field `f` now, asked of it, not of
+    /// the environment held (none: no answer, or no provider).
+    pub fn ask_provider(&self, f: Field) -> Option<ValueId> {
+        self.env
+            .provider
+            .read()
+            .as_ref()
+            .and_then(|p| p(self.values(), f))
+            .flatten()
+    }
+
     /// Answers environment misses.
     pub fn set_env_provider(&self, provider: Box<EnvProvider>) {
         *self.env.provider.write() = Some(provider);

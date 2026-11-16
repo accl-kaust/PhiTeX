@@ -145,10 +145,12 @@ class Doc:
         os.rename(self.d, keep)
         try:
             common.fresh_copy(self.src, self.d)
-            for rel, data in self.changes.items():
+            # (each file changed as the history has it, its time too:
+            # `\pdffilemoddate` reads it)
+            for rel in self.changes:
                 p = self.d / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_bytes(data)
+                shutil.copy2(keep / rel, p)
             cc = WORK / "graph" / self.tag / "clean-cache"
             shutil.rmtree(cc, ignore_errors=True)
             cc.mkdir(parents=True)

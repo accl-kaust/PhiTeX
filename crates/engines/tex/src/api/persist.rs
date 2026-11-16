@@ -1321,6 +1321,47 @@ impl Build {
         self.staged = true;
     }
 
+    /// [`Build::reask_environment`]'s tools' files: each the build holds
+    /// (pushed as its own, so no stat key of the session's keys it and the
+    /// provider's re-ask of its answers does not reach it) asked of the
+    /// provider again, by its search; one that moved, came or went pushed,
+    /// its readers re-asked.
+    fn reask_tools(&mut self, out: &mut EnvReask) {
+        let tools: Vec<(Field, Option<ValueId>)> = {
+            let v = self.g.eng.values();
+            let is_tool = |f: Field| v.with_str(f.0, |n| n.starts_with("tfile:")) == Some(true);
+            self.g
+                .files
+                .iter()
+                .map(|&(f, x)| (f, Some(x)))
+                .chain(self.g.absent.iter().map(|&f| (f, None)))
+                .filter(|&(f, _)| is_tool(f))
+                .collect()
+        };
+        let mut moved = false;
+        for (f, held) in tools {
+            out.asked += 1;
+            let now = self.g.eng.ask_provider(f);
+            if now == held {
+                continue;
+            }
+            out.moved
+                .push(crate::val::field_name(self.g.eng.values(), f));
+            self.g.files.retain(|&(h, _)| h != f);
+            self.g.absent.retain(|&h| h != f);
+            match now {
+                Some(x) => self.g.files.push((f, x)),
+                None => self.g.absent.push(f),
+            }
+            moved = true;
+        }
+        if moved {
+            let env = self.g.environment(self.opts.fixpoint);
+            self.g.push_env_as(env, true);
+            self.staged = true;
+        }
+    }
+
     /// A loaded build's environment as this process gives it
     /// (docs/spec-persisted-graph.md §3.3), what moved staged as an edit's
     /// change is, for the next evaluation:
@@ -1359,6 +1400,7 @@ impl Build {
         // (the provider as an evaluation installs it)
         let finder = self.opts.finder.clone();
         self.g.provide(&finder);
+        self.reask_tools(&mut out);
         let v = self.g.eng.values();
         let held: phitex_defuse::FxHashSet<Field> = self
             .g
@@ -1371,7 +1413,7 @@ impl Build {
         let (asked, moved) = self.g.eng.reask_provided(&|f| {
             held.contains(&f) || v.with_str(f.0, Graph::outside_answer) != Some(true)
         });
-        out.asked = asked;
+        out.asked += asked;
         out.moved
             .extend(moved.iter().map(|&(f, _)| crate::val::field_name(v, f)));
         // (a moved field the client holds, a tool's file: its table and
