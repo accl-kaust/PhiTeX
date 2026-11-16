@@ -360,9 +360,11 @@ header:active { cursor: grabbing; }
 .peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
 .peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
-.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* (the title and the line under it wrap, whole: cut at one line, the card hid the
+   title, the one thing it is for; the list scrolls past 300px) */
+.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
 .peek .pc .hd code { flex: none; font: 10.5px/1.3 ui-monospace, "DM Mono", monospace; padding: 0 4px; border-radius: 3px; background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg2); }
-.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); overflow-wrap: anywhere; }
 .peek .pc .lk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; margin-top: 2px; font-size: 11.5px; }
 .peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
 .peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }

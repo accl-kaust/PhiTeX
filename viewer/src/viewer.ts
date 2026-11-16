@@ -988,8 +988,12 @@ export class Viewer {
     }
     if (cur) parts.push(cur);
     const authors = (parts[0] ?? "").replace(/\.$/, "").split(/,\s*(?:and\s+)?|\s+and\s+/).map((a) => a.trim()).filter(Boolean);
-    const title = (parts[1] ?? parts[0] ?? text).replace(/\.$/, "");
-    const venue = parts.slice(2).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || undefined;
+    // (a sentence that is the year alone is no title: ACM's "Authors. 2025. Title. Venue."
+    // made the card's title "2025" and put the real title in the venue, cut off)
+    const rest = parts.slice(1);
+    if (rest.length > 1 && /^\(?(1[5-9]\d\d|20\d\d)[a-z]?\)?\.?$/.test(rest[0].trim())) rest.shift();
+    const title = (rest[0] ?? parts[0] ?? text).replace(/\.$/, "");
+    const venue = rest.slice(1).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || undefined;
     return { key: "", label, title, authors: parts.length > 1 ? authors : [], venue, year, doi, url, at };
   }
 

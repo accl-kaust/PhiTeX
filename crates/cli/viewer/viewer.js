@@ -1186,8 +1186,10 @@ var Viewer = class _Viewer {
     }
     if (cur) parts.push(cur);
     const authors = (parts[0] ?? "").replace(/\.$/, "").split(/,\s*(?:and\s+)?|\s+and\s+/).map((a) => a.trim()).filter(Boolean);
-    const title = (parts[1] ?? parts[0] ?? text).replace(/\.$/, "");
-    const venue = parts.slice(2).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || void 0;
+    const rest = parts.slice(1);
+    if (rest.length > 1 && /^\(?(1[5-9]\d\d|20\d\d)[a-z]?\)?\.?$/.test(rest[0].trim())) rest.shift();
+    const title = (rest[0] ?? parts[0] ?? text).replace(/\.$/, "");
+    const venue = rest.slice(1).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || void 0;
     return { key: "", label, title, authors: parts.length > 1 ? authors : [], venue, year, doi, url, at };
   }
   /**
@@ -2777,9 +2779,11 @@ header:active { cursor: grabbing; }
 .peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
 .peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
-.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* (the title and the line under it wrap, whole: cut at one line, the card hid the
+   title, the one thing it is for; the list scrolls past 300px) */
+.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
 .peek .pc .hd code { flex: none; font: 10.5px/1.3 ui-monospace, "DM Mono", monospace; padding: 0 4px; border-radius: 3px; background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg2); }
-.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); overflow-wrap: anywhere; }
 .peek .pc .lk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; margin-top: 2px; font-size: 11.5px; }
 .peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
 .peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
