@@ -1166,9 +1166,16 @@ impl Session {
             .map(|(p, k)| (PathBuf::from(p), k))
             .collect();
         if let Some(log) = &self.outside {
+            // (what the saved session read outside, the build stands on it;
+            // but the PDF writer's where its file is made again: it reads
+            // them all again, noted afresh)
             let mut l = log.lock().unwrap_or_else(PoisonError::into_inner);
-            l.finds.extend(m.outside.finds);
-            l.reads.extend(m.outside.reads);
+            let mut saved = m.outside;
+            if relink {
+                saved.writer_dropped();
+            }
+            l.finds.extend(saved.finds);
+            l.reads.extend(saved.reads);
         }
         self.built_text = Some(Arc::from(m.text));
         self.lines = LineMarks::default();

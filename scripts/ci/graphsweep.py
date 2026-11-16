@@ -155,11 +155,29 @@ class Doc:
             os.symlink(WORK / "fcache" / "formats", cc / "formats")
             _, _, code, wall = self.run(self.d, False, cc)
             sums = self.sums(self.d)
+            self.keep_outputs(self.d, "clean")
             shutil.rmtree(cc, ignore_errors=True)
             return sums, code
         finally:
             shutil.rmtree(self.d, ignore_errors=True)
             os.rename(keep, self.d)
+
+    def saved(self):
+        """The last save done (a build's worker saves after its process has
+        ended): its lock taken and let go."""
+        for lk in (self.cache / "docs").rglob("graph.lock"):
+            with open(lk) as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+
+    def keep_outputs(self, where, name):
+        """The outputs of a build in `where` kept as `name` (the last
+        step's, for a difference found)."""
+        k = WORK / "graph" / self.tag / "last" / name
+        shutil.rmtree(k, ignore_errors=True)
+        k.mkdir(parents=True)
+        for x in (*OUTS, "bbl", "blg", "toc", "out"):
+            if (where / f"{self.job}.{x}").exists():
+                shutil.copy(where / f"{self.job}.{x}", k / f"{self.job}.{x}")
 
     def clean_of(self, before):
         """A clean build (no graph) of folder `before` (the history's as it
@@ -174,6 +192,7 @@ class Doc:
             os.symlink(WORK / "fcache" / "formats", cc / "formats")
             _, _, code, _ = self.run(self.d, False, cc)
             sums = self.sums(self.d)
+            self.keep_outputs(self.d, "clean")
             shutil.rmtree(cc, ignore_errors=True)
             return sums, code
         finally:
@@ -205,6 +224,14 @@ class Doc:
         print(f"{what}: exit {code}, {wall:.2f} s, nodes {nodes}, {'same' if same else 'DIFFER'}; "
               + " | ".join(lines), file=self.log, flush=True)
         if not same:
+            # (both builds' outputs kept, with the history's terminal)
+            self.keep_outputs(self.d, "history")
+            keep = Path(self.args.out) / "files" / self.tag / f"{len(self.steps):02d}"
+            shutil.rmtree(keep, ignore_errors=True)
+            shutil.copytree(WORK / "graph" / self.tag / "last", keep)
+            term = self.d.parent / f"{self.d.name}.term"
+            if term.exists():
+                shutil.copy(term, keep / "history.term")
             diff = [x for x in OUTS if sums.get(x) != ref.get(x)]
             self.red.append(f"{what}: {', '.join(diff)} not the clean build's ({sums} / {ref}, clean exit {rcode})")
         if load is True and not loaded:
@@ -306,10 +333,7 @@ def one(args, c):
         other = 8 if args.threads == 1 else 1
         s1 = h.step(f"unchanged at -j {other}", True, ref=s1, threads=other, nodes0=True)
         s1 = h.step("unchanged again", True, ref=s1, nodes0=True)
-        # (the last save, after its process has ended, done: its lock)
-        for lk in (h.cache / "docs").rglob("graph.lock"):
-            with open(lk) as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
+        h.saved()
         g = next((h.cache / "docs").rglob("graph"), None)
         if g is None:
             h.red.append("no graph file in the cache")
@@ -318,6 +342,7 @@ def one(args, c):
             data = g.read_bytes()
             g.write_bytes(data[:rnd.randrange(1, len(data))])
             s1 = h.step("the graph file cut", False, ref=s1)
+            h.saved()
             data = g.read_bytes()
             i = rnd.randrange(len(data))
             g.write_bytes(data[:i] + bytes([data[i] ^ (1 << rnd.randrange(8))]) + data[i + 1:])

@@ -111,6 +111,15 @@ pub struct OutsideLog {
     pub reads: BTreeMap<(u8, String), (bool, Option<Vec<u8>>)>,
 }
 
+impl OutsideLog {
+    /// The PDF writer's lookups and reads dropped (its file made again:
+    /// it does them all again).
+    pub fn writer_dropped(&mut self) {
+        self.finds.retain(|k, _| k.0 != DPX);
+        self.reads.retain(|k, _| k.0 != DPX);
+    }
+}
+
 /// [`OutsideLog`], shared by the wrappers that fill it.
 pub type Outside = Arc<Mutex<OutsideLog>>;
 

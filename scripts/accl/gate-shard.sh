@@ -638,7 +638,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       mkdir -p "$CI_WORK"
       python3 -I scripts/ci/graphsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
         --out "$r/graph" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
-        --threads "$j" > "$r/graphsweep.txt" 2>&1
+        --threads "$j" ${GRAPHSWEEP_IDS:+--ids "$GRAPHSWEEP_IDS"} > "$r/graphsweep.txt" 2>&1
       grep '^graphsweep:' "$r/graphsweep.txt" | head -80 >> "$r/red.txt"
       grep -q "documents, " "$r/graphsweep.txt" || red "persist: the sweep did not start: $(tail -1 "$r/graphsweep.txt")"
       grep -q . "$r/red.txt" && status=red
