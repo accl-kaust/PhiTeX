@@ -3482,17 +3482,15 @@ pub(crate) fn settle_predictions(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>
         let (b, _) = unpack_effect(n.effect.load(Ordering::Acquire));
         reask_after_effect(eng, w, n, n.pos_hint(), Brackets::default(), b, st);
     }
-    let Some(rec) = n.record() else {
-        return;
-    };
-    if !rec.provisional {
-        return;
-    }
-    for d in &rec.defs {
-        if let Some(c) = d.rel {
-            settle_rel(eng, d.f, n.id, c);
+    // (the fields its predictions were filed for, walked whether its run
+    // has committed since or not: one that confirmed them walked nothing,
+    // `Node::owed`)
+    let owed = std::mem::take(&mut *n.owed.lock());
+    for (f, rel) in owed {
+        if let Some(c) = rel {
+            settle_rel(eng, f, n.id, c);
         }
-        reask(eng, w, d.f, n.pos_hint(), n.seg_hint(), n.id, st);
+        reask(eng, w, f, n.pos_hint(), n.seg_hint(), n.id, st);
     }
 }
 
@@ -5038,6 +5036,8 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
         }
         eng.bump(d.f);
     }
+    // (the walk owed for them, `settle_predictions`)
+    node.owed.lock().extend(rec.defs.iter().map(|d| (d.f, d.rel)));
     *node.last.lock() = Some(rec);
 }
 
@@ -8192,6 +8192,70 @@ mod tests {
         fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             Ok(cx.read(crate::values::Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
         }
+    }
+
+    /// `[f, x]`: defines f = x, and predicts it.
+    struct PredDef;
+
+    impl Operation for PredDef {
+        fn name(&self) -> &'static str {
+            "pred_def"
+        }
+
+        fn predicted_defs(
+            &self,
+            args: &[ValueId],
+            _values: &crate::values::Values,
+        ) -> Option<Vec<(crate::values::Field, ValueId)>> {
+            Some(vec![(crate::values::Field(args[0]), args[1])])
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.define(crate::values::Field(cx.args()[0]), cx.args()[1]);
+            Ok(cx.args()[1])
+        }
+    }
+
+    #[test]
+    fn a_prediction_its_node_confirms_before_its_placer_walks_still_reasks_the_readers_after() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // D defines f = 5, R after it reads f. C is placed between them
+        // with f = 7 predicted, and runs and commits before its placer's
+        // walk for the prediction (the commit queues what it placed, then
+        // walks: another worker may run it between): its run defines what
+        // was predicted, so its commit changes nothing and walks nothing.
+        // The placer's walk is still owed: R reads 7 (floats2col at -j16,
+        // a finisher's `\@currlist`, "Float(s) lost", #40).
+        let e = Engine::new();
+        let def = e.register(Arc::new(Def));
+        let pred_def = e.register(Arc::new(PredDef));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f, v.int(5)]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(5));
+        let id = NodeId::from_raw(e.nodes.reserve() as u64);
+        let (node, pred) = super::built(&e, u, None, pred_def, vec![f, v.int(7)], id);
+        let c = super::place_after(&e, d, node, pred);
+        crate::sched::enqueue(
+            &e,
+            None,
+            &c,
+            crate::node::Wake {
+                by: None,
+                cause: crate::api::Cause::Created { by: None },
+                at_ns: e.now_ns(),
+            },
+        );
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(c.id).and_then(|o| v.as_int(o)), Some(7), "C ran");
+        let mut st = super::CommitStats::default();
+        super::settle_predictions(&e, None, &c, &mut st);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(7), "R reads C's f");
     }
 
     #[test]
