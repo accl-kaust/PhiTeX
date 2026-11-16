@@ -899,9 +899,32 @@ impl Engine {
                             a.as_ref().map_or_else(|_| "panic".to_owned(), |a| cut(*a)),
                         );
                         if let Some(f) = rd.kind().field() {
+                            let own: Vec<String> = r
+                                .defs
+                                .iter()
+                                .filter(|d| d.f == f)
+                                .map(|d| {
+                                    format!("{:?}={}", d.loc, v.render(d.value).chars().take(40).collect::<String>())
+                                })
+                                .collect();
+                            let reach = self.reaching_def(n.id, f);
                             eprintln!(
-                                "persist-probe: moved: field {}",
-                                v.render(f.0).chars().take(160).collect::<String>()
+                                "persist-probe: moved: field {} own defs {own:?} reaching def {:?} (state {:?}) prior {}",
+                                v.render(f.0).chars().take(160).collect::<String>(),
+                                reach.map(|d| d.raw()),
+                                reach.map(|d| self.node(d).state()),
+                                n.prior.lock().is_some()
+                            );
+                            let defs = self.defined_by_live(f);
+                            eprintln!(
+                                "persist-probe: moved: live definers {:?}",
+                                defs.iter()
+                                    .map(|(d, x)| (
+                                        d.raw(),
+                                        v.render(*x).chars().take(20).collect::<String>(),
+                                        self.before(*d, n.id)
+                                    ))
+                                    .collect::<Vec<_>>()
                             );
                         }
                     }
