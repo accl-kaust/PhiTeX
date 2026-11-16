@@ -8682,7 +8682,7 @@ impl Build {
     pub fn persist_probe(&self) -> (String, Vec<u8>) {
         let eng = &self.g.eng;
         let p = eng.persist_probe(Some(&mut |keep: &mut dyn FnMut(ValueId)| {
-            eng.client_roots(keep)
+            eng.client_roots(keep);
         }));
         let line = format!(
             "{}; build: text {} B, text nodes {}, dlines {}, files read {}, pdf {} B; {}",
@@ -8715,6 +8715,7 @@ impl Build {
         let t1 = std::time::Instant::now();
         let got = fresh.eng.import(&bytes);
         let import_ms = t1.elapsed().as_secs_f64() * 1e3;
+        #[allow(clippy::cast_precision_loss, reason = "a duration in ms, printed")]
         let ms = |n: u64| n as f64 / 1e6;
         match got {
             Err(e) => format!(
