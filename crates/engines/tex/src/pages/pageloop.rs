@@ -94,9 +94,15 @@ pub(crate) fn fire_conflict_field(v: &Values, piece: NodeId, k: u32) -> Field {
 /// running before that definition.
 pub(crate) const FIRE_LEFT: &str = "pages:left";
 
-/// [`FIRE_LEFT`]' field of `f` in `piece`.
+/// [`FIRE_LEFT`]' field of `f` in `piece`: `f` by its id as every store
+/// holding it at its place has it (`Values::stable_raw`), so a graph
+/// loaded (`crate::api::Build::load`) names the field its runs read.
 pub(crate) fn fire_left_field(v: &Values, piece: NodeId, f: Field) -> Field {
-    v.field(&format!("{FIRE_LEFT}:{}:{}", piece.raw(), f.0.raw()))
+    v.field(&format!(
+        "{FIRE_LEFT}:{}:{}",
+        piece.raw(),
+        v.stable_raw(f.0)
+    ))
 }
 
 /// The page of a fired page, as its finisher reads it:
