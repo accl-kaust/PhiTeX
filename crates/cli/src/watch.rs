@@ -173,9 +173,37 @@ impl Wanted {
     }
 }
 
-/// `p` canonical, where it is (else as it is).
+/// `p` canonical (absolute, its links resolved, no `.` or `..`), whether
+/// or not a file is there now: the longest part of it that exists made
+/// canonical, the rest joined. A file read is known by this one name
+/// however it was named (`./linked/far.png`, a folder's link, macOS's
+/// `/var` for `/private/var`) and so is each event of it, which the
+/// system reports at the real path: also while a save has it removed for
+/// a moment (an editor's or a program's save that removes the file and
+/// writes it anew, a build made in that moment), else its name kept as
+/// the build gave it and every later event of the file missed.
 fn canonical(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    let parts: Vec<std::path::Component> = p.components().collect();
+    for k in (1..parts.len()).rev() {
+        let head: PathBuf = parts[..k].iter().collect();
+        let Ok(mut c) = head.canonicalize() else {
+            continue;
+        };
+        for part in &parts[k..] {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    c.pop();
+                }
+                other => c.push(other),
+            }
+        }
+        return c;
+    }
+    p.to_path_buf()
 }
 
 /// The system's watcher and the folders it watches outside the watch's
@@ -237,6 +265,8 @@ fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
 /// editor that saves by renaming the old file to a backup and writing a
 /// new one (vim's `backupcopy=no`, many others) leaves no file at that
 /// name for a moment, and a build read then is one of an empty text.
+/// Where the system says no close, a file is read at each event of it,
+/// and one not there waits as one removed.
 fn watcher(
     root: &Path,
     wanted: WantedRef,
@@ -279,6 +309,28 @@ fn watcher(
             let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
             ev.paths.into_iter().filter(|p| w.wants(&r, p)).collect()
         };
+        let mut open = writing.lock().unwrap_or_else(PoisonError::into_inner);
+        // (`p` read after WRITE_WAIT unless an event of it comes first
+        // that reads it: its writer keeps it open, or it stays gone)
+        let wait = |open: &mut HashSet<PathBuf>, p: PathBuf| {
+            if open.insert(p.clone()) {
+                let (writing, ours, tx) = (writing.clone(), ours.clone(), tx.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(WRITE_WAIT);
+                    let late = writing
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&p);
+                    let mut changed = vec![p];
+                    if late {
+                        not_ours(&ours, &mut changed);
+                        if !changed.is_empty() {
+                            let _ = tx.send((Instant::now(), Event::Files(changed)));
+                        }
+                    }
+                });
+            }
+        };
         if CLOSES {
             let written = matches!(
                 ev.kind,
@@ -291,27 +343,10 @@ fn watcher(
                 ev.kind,
                 EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))
             );
-            let mut open = writing.lock().unwrap_or_else(PoisonError::into_inner);
             if written || gone {
                 // (read after WRITE_WAIT if its writer keeps it open)
                 for p in changed.drain(..) {
-                    if open.insert(p.clone()) {
-                        let (writing, ours, tx) = (writing.clone(), ours.clone(), tx.clone());
-                        std::thread::spawn(move || {
-                            std::thread::sleep(WRITE_WAIT);
-                            let late = writing
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .remove(&p);
-                            let mut changed = vec![p];
-                            if late {
-                                not_ours(&ours, &mut changed);
-                                if !changed.is_empty() {
-                                    let _ = tx.send((Instant::now(), Event::Files(changed)));
-                                }
-                            }
-                        });
-                    }
+                    wait(&mut open, p);
                 }
             } else if closed {
                 // (a close of a file not written changes nothing)
@@ -326,7 +361,25 @@ fn watcher(
                 // still written is read once closed)
                 changed.retain(|p| !open.contains(p));
             }
+        } else {
+            // (no close said: a file there is read now, a wait for it
+            // ended; one gone from its name, not there now, waits as on
+            // Linux. Asked of the file, not of the event's kind: macOS's
+            // are the sums of what befell the name (a file written in
+            // place comes as created, its metadata and its data
+            // modified; one removed as removed and renamed))
+            let (gone, there): (Vec<PathBuf>, Vec<PathBuf>) = changed
+                .into_iter()
+                .partition(|p| std::fs::symlink_metadata(p).is_err());
+            for p in &there {
+                open.remove(p);
+            }
+            for p in gone {
+                wait(&mut open, p);
+            }
+            changed = there;
         }
+        drop(open);
         not_ours(&ours, &mut changed);
         if log {
             eprintln!("phitex watch: changed now {changed:?}");
@@ -3590,6 +3643,36 @@ fn build_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's canonical name is the same while it is removed (a save's
+    /// moment between the old file and the new): through a folder's
+    /// link, with `.` in it, as the system's events name it.
+    #[cfg(unix)]
+    #[test]
+    fn canonical_holds_while_a_file_is_gone() {
+        let d = std::env::temp_dir().join(format!("phitex-canonical-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        std::fs::create_dir_all(d.join("project")).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("project/linked")).unwrap();
+        let named = d.join("project/./linked/far.png");
+        std::fs::write(&named, b"x").unwrap();
+        let there = canonical(&named);
+        assert_eq!(there, d.join("real/far.png").canonicalize().unwrap());
+        std::fs::remove_file(&named).unwrap();
+        assert_eq!(canonical(&named), there, "removed");
+        assert_eq!(
+            canonical(&d.join("real/far.png")),
+            there,
+            "as the events name it"
+        );
+        assert_eq!(
+            canonical(&d.join("project/linked/sub/../far.png")),
+            there,
+            "through a missing folder and back"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// Nothing runs past a narrow terminal: a part too long for any line
     /// and the name's column cut at its edge.

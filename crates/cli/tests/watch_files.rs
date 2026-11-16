@@ -300,7 +300,7 @@ fn change_each(dir: &Path, w: &Watch, at: &Path) {
             "in place",
             "in place in two writes 0.3 s apart",
             "by a rename over it",
-            "removed and written anew",
+            "removed, a build made without it, and written anew",
         ] {
             let before = clean(dir, &state);
             state[i] = 1 - state[i];
@@ -328,8 +328,10 @@ fn change_each(dir: &Path, w: &Watch, at: &Path) {
                     h.write_all(&bytes[half..]).expect("written");
                 }
             } else if how.starts_with("removed") {
+                // (gone longer than a watch waits for a file removed to
+                // come back: a build made while it is not there)
                 std::fs::remove_file(&p).expect("removed");
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(800));
                 std::fs::write(&p, &bytes).expect("written anew");
             } else {
                 // (a new file beside it, renamed to its name)
