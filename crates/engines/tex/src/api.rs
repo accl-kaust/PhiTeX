@@ -3666,6 +3666,20 @@ impl Graph {
         }
     }
 
+    /// Whether the provider's answer for field `name` is made of something
+    /// besides the format and this code ([`Graph::provide`]): the files
+    /// (`file:`, `dfile:`, `fsize:`, a tool's `tfile:`) and the lines a cut
+    /// file's pieces are given (`dline:`). Every other answer (the
+    /// format's bindings, a box register's default, a field the format
+    /// does not bind) is the format's and the code's, keyed by them: a
+    /// loaded graph asks again only these ([`Build::reask_environment`]).
+    /// Every kind the provider answers is listed here.
+    pub(crate) fn outside_answer(name: &str) -> bool {
+        ["file:", "dfile:", "fsize:", "tfile:", "dline:"]
+            .iter()
+            .any(|p| name.starts_with(p))
+    }
+
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;

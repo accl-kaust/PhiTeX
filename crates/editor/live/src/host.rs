@@ -383,6 +383,12 @@ pub trait Sink: Send + Sync {
     /// Why it could not be written.
     fn put(&self, name: &str, bytes: &[u8], hash: u64) -> Result<PathBuf, String>;
 
+    /// From now on a file the outputs' place holds with the same bytes,
+    /// written by an earlier process, is left as it is (not written
+    /// again, its time and key kept): the session's build is the graph an
+    /// earlier session saved ([`crate::graph`]). Nothing by default.
+    fn keep_same(&self) {}
+
     /// The main output (the PDF or DVI), shared, its fingerprint `hash`:
     /// a host may write only what changed since the last it wrote.
     ///

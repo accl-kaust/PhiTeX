@@ -1275,12 +1275,15 @@ impl Build {
     /// change is, for the next evaluation:
     /// - the job's bindings made again from the options (the date where
     ///   `SOURCE_DATE_EPOCH` gives none, the job's name, the TCX);
-    /// - every answer the provider gave asked of it again
-    ///   ([`phitex_defuse::Engine::reask_provided`]), a tool's file
-    ///   among them, but those keyed elsewhere: the format's bindings (by
-    ///   the format's key) and the files the build holds by their names
-    ///   (the session's manifest: their stat keys, their names resolved
-    ///   again, [`Build::stage_file`] where one moved).
+    /// - every answer the provider made of something outside the format
+    ///   and the code ([`Graph::outside_answer`]) asked of it again
+    ///   ([`phitex_defuse::Engine::reask_provided`]), a tool's file and a
+    ///   cut file's lines among them, but the files the build holds by
+    ///   their names (the session's manifest: their stat keys, their
+    ///   names resolved again, [`Build::stage_file`] where one moved).
+    ///   The rest, the format's (its bindings, the fields it does not
+    ///   bind) and the code's, are keyed by the format's key and the
+    ///   engine's identity.
     ///
     /// Call between [`Build::load`] and the first evaluation.
     pub fn reask_environment(&mut self) -> EnvReask {
@@ -1314,11 +1317,9 @@ impl Build {
             .chain(self.g.absent.iter().copied())
             .filter(|&f| v.with_str(f.0, |n| !n.starts_with("tfile:")) == Some(true))
             .collect();
-        let fmt = Arc::clone(&self.prelude.env);
-        let (asked, moved) = self
-            .g
-            .eng
-            .reask_provided(&|f| held.contains(&f) || fmt.binds(v, f));
+        let (asked, moved) = self.g.eng.reask_provided(&|f| {
+            held.contains(&f) || v.with_str(f.0, Graph::outside_answer) != Some(true)
+        });
         out.asked = asked;
         out.moved
             .extend(moved.iter().map(|&(f, _)| crate::val::field_name(v, f)));

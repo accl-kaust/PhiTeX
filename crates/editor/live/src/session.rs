@@ -1169,6 +1169,9 @@ impl Session {
         self.changed.extend(moved.iter().cloned());
         self.graph_same = moved.is_empty() && re.moved.is_empty();
         self.build = Some(b);
+        // (the outputs the saved build wrote, the same: left as they are,
+        // docs/spec-persisted-graph.md §4.2 item 6)
+        self.sink.keep_same();
         Ok(format!(
             "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0}; checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}",
             bytes.len() as f64 / 1e6,

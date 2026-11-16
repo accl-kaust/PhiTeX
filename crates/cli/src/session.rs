@@ -133,6 +133,7 @@ impl Session {
             updates: Mutex::new(None),
             writing: Mutex::new(()),
             synctex: Mutex::new(None),
+            keep_same: std::sync::atomic::AtomicBool::new(false),
         });
         (store, out)
     }
@@ -411,6 +412,19 @@ struct Out {
     /// The SyncTeX file of the outputs written last, left for idle and
     /// not written yet: its name and how it is made.
     synctex: Mutex<Option<(String, phitex_live::host::SynctexMaker)>>,
+    /// A file the outputs hold already, with the same bytes, is left as
+    /// it is ([`Sink::keep_same`]): a build loaded from its graph.
+    keep_same: std::sync::atomic::AtomicBool,
+}
+
+impl Out {
+    /// Whether the file at `p`, not written by this process, holds
+    /// `bytes` already, where such files are kept ([`Sink::keep_same`]).
+    fn same_on_disk(&self, p: &Path, bytes: &[u8]) -> bool {
+        self.keep_same.load(std::sync::atomic::Ordering::Relaxed)
+            && std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == bytes.len() as u64)
+            && std::fs::read(p).is_ok_and(|b| b == bytes)
+    }
 }
 
 impl Sink for Out {
@@ -431,8 +445,11 @@ impl Sink for Out {
     fn put(&self, name: &str, bytes: &[u8], h: u64) -> Result<PathBuf, String> {
         let p = self.dir.join(name);
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
-        // (bytes the last write wrote, still there: not written again)
-        if written.get(&p) != Some(&h) || !p.is_file() {
+        // (bytes the last write wrote, still there: not written again;
+        // nor bytes an earlier process wrote, where they are kept)
+        if (written.get(&p) != Some(&h) || !p.is_file())
+            && !(written.get(&p).is_none() && self.same_on_disk(&p, bytes))
+        {
             let tmp = p.with_file_name(format!(
                 ".{}.phitex-tmp",
                 p.file_name()
@@ -467,6 +484,11 @@ impl Sink for Out {
                 .insert(p.to_path_buf(), h);
             Ok(p.to_path_buf())
         };
+        // (the file an earlier process wrote, the same bytes: left as it
+        // is, where such files are kept)
+        if last.is_none() && self.same_on_disk(p, b) {
+            return done(&mut last);
+        }
         if let Some((lp, old)) = last.as_ref()
             && lp == p
             && std::fs::metadata(p).is_ok_and(|m| m.len() == old.len() as u64)
@@ -506,6 +528,11 @@ impl Sink for Out {
             .and_then(|()| std::fs::rename(&tmp, p))
             .map_err(err)?;
         done(&mut last)
+    }
+
+    fn keep_same(&self) {
+        self.keep_same
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn updates(&self) -> bool {

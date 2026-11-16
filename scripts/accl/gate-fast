@@ -10,11 +10,14 @@
 #                                       measurement; the gate runs 10)
 #   scripts/accl/gate-fast sweep [COMMIT] [N]   the research corpus's
 #                                       edit sweep in N shards (4)
-#   scripts/accl/gate-fast persist [COMMIT] [N] [J]   the research
-#                                       corpus's edit sweep with the
-#                                       persisted graph's check
+#   scripts/accl/gate-fast persist [COMMIT] [N] [J] [process]   the
+#                                       research corpus's edit sweep with
+#                                       the persisted graph's check
 #                                       (PHITEX_GRAPH_CHECK=1) at -j J
-#                                       in N shards (2, -j 1)
+#                                       in N shards (2, -j 1); `process`:
+#                                       across processes instead, each
+#                                       document's history of builds with
+#                                       PHITEX_GRAPH=1 (graphsweep.py)
 #   scripts/accl/gate-fast research [COMMIT]   the research corpus
 #                                       (gate-shard.sh research 0 1: ci/research.json
 #                                       against TeX Live, one job in the -doc
@@ -323,7 +326,7 @@ sweep() {
 # (default 2) at -j J (default 1), in the -doc image (gate-shard.sh
 # persist)
 persist() {
-  local opts img=${GATE_RESEARCH_IMAGE:-$ci_img} n=${2:-2} j=${3:-1} k
+  local opts img=${GATE_RESEARCH_IMAGE:-$ci_img} n=${2:-2} j=${3:-1} mode=${4:-} k
   c=$(git rev-parse "${1:-HEAD}^{commit}")
   order=""
   stage
@@ -331,8 +334,8 @@ persist() {
   build_first
   opts="-c ${GATE_EDITS_CPUS:-16} --mem=96G -t 03:00:00 -J gf-persist $(on_bins cli)"
   opts=${opts/--export=ALL,/--export=ALL,ACCL_IMAGE=$img,}
-  for k in $(seq 0 $((n - 1))); do ids+=("$(sub "$opts" persist "$k" "$n" "$j")"); done
-  echo "gate-fast: the persisted graph's check of $c at -j $j in $img, jobs ${ids[*]}" >&2
+  for k in $(seq 0 $((n - 1))); do ids+=("$(sub "$opts" "persist${mode:+-$mode}" "$k" "$n" "$j")"); done
+  echo "gate-fast: the persisted graph's check${mode:+ ($mode)} of $c at -j $j in $img, jobs ${ids[*]}" >&2
   echo "${ids[*]}"
 }
 

@@ -616,6 +616,34 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       grep -q "documents, " "$r/editsweep.txt" || red "edits: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
     fi
     ;;
+  persist-process)
+    # persist-process K N J: the persisted graph across processes
+    # (docs/spec-persisted-graph.md §5, step 3): shard K of N of
+    # ci/research.json, each document's history of `phitex build`
+    # processes with PHITEX_GRAPH=1 at -j J (scripts/ci/graphsweep.py):
+    # a clean build saving its graph; unchanged; three words typed; a
+    # .bib's entry, an image and the document class (shadowed by the
+    # document's copy) changed; the other -j; the graph file cut and a
+    # bit flipped; SOURCE_DATE_EPOCH changed. Red: a PDF, log, aux or
+    # SyncTeX file not the clean build's of the same files; a graph not
+    # loaded where it should be, or loaded where it must not; an
+    # unchanged load that ran a node.
+    k=$1 n=$2 j=${3:-1}
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "persist: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK"
+      python3 -I scripts/ci/graphsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
+        --out "$r/graph" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
+        --threads "$j" > "$r/graphsweep.txt" 2>&1
+      grep '^graphsweep:' "$r/graphsweep.txt" | head -80 >> "$r/red.txt"
+      grep -q "documents, " "$r/graphsweep.txt" || red "persist: the sweep did not start: $(tail -1 "$r/graphsweep.txt")"
+      grep -q . "$r/red.txt" && status=red
+    fi
+    ;;
   persist)
     # persist K N [J]: the persisted graph's check (docs/spec-persisted-graph.md,
     # step 2): shard K of N of ci/research.json under the watch at -j J
