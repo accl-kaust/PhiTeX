@@ -627,9 +627,9 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     # its runs and outputs the build's. Red: a load refused; a loaded
     # build that ran a node unchanged or gave other bytes; an edit whose
     # twin differs where the build held no link state the save leaves
-    # out. One that held it (pdfTeX's pages kept for the link, its
-    # read-time commands: `not saved:` in the load's line) is reported
-    # apart (known-red.txt), not red, until the save keeps it.
+    # out, or one that held it (pdfTeX's pages kept for the link, its
+    # read-time commands: `not saved:` in the load's line), named so: red
+    # until the save keeps it (spec §2.2.4).
     k=$1 n=$2 j=${3:-1}
     fetched
     bin=$w/bin/cli/rel/phitex
@@ -666,7 +666,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
           if grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep 'pdf same' | grep -vq 'runs by op same\|not compared'; then
             red "persist: $id: $(grep -a 'graph-check: edit [0-9]*: DIFFER' "$e" | grep 'pdf same' | grep -v 'runs by op same\|not compared' | head -1 | cut -c1-300)"
           elif grep -a 'graph-check: load:' "$e" | grep -vq "the link's 0 pages and 0 commands"; then
-            echo "persist: $id: an edit after a load differs; the link's state not saved: $(grep -a -o "the link's [0-9]* pages and [0-9]* commands" "$e" | tail -1)" >> "$r/known-red.txt"
+            red "persist: $id: an edit after a load differs; the link's state not saved (spec §2.2.4): $(grep -a -o "the link's [0-9]* pages and [0-9]* commands" "$e" | tail -1); $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-200)"
           else
             red "persist: $id: $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-300)"
           fi
