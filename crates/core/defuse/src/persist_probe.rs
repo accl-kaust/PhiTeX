@@ -330,6 +330,9 @@ fn kind_code(k: &ReadKind) -> (u8, usize) {
     }
 }
 
+/// The client's roots, handed to a function given ([`Engine::persist_probe`]).
+pub type ClientRoots<'a> = &'a mut dyn FnMut(&mut dyn FnMut(ValueId));
+
 /// A decoded record, as a load would hold it before filing.
 struct Lite {
     output: ValueId,
@@ -345,7 +348,7 @@ impl Engine {
     /// (observe) The persisted graph's probe ([`PersistProbe`]); `client`
     /// gives the client's own roots (`Operation::roots`), none for the
     /// engine's alone. Call with the line quiet, between evaluations.
-    pub fn persist_probe(&self, client: Option<&mut dyn FnMut(&mut dyn FnMut(ValueId))>) -> PersistProbe {
+    pub fn persist_probe(&self, client: Option<ClientRoots<'_>>) -> PersistProbe {
         let mut p = PersistProbe::default();
         let t0 = Instant::now();
         let v = &self.values;
@@ -362,24 +365,24 @@ impl Engine {
         // (the nodes kept: every one not gone, numbered in table order)
         let mut idx: Vec<u64> = vec![0; self.nodes.len()];
         let mut kept = 0u64;
-        for i in 0..self.nodes.len() {
+        for (i, slot) in idx.iter_mut().enumerate() {
             let Some(n) = self.nodes.get(i) else { continue };
             match n.state() {
                 State::Gone => p.nodes[3] += 1,
                 State::Inert | State::RunningInert => {
                     p.nodes[2] += 1;
                     kept += 1;
-                    idx[i] = kept;
+                    *slot = kept;
                 }
                 State::Clean => {
                     p.nodes[0] += 1;
                     kept += 1;
-                    idx[i] = kept;
+                    *slot = kept;
                 }
                 _ => {
                     p.nodes[1] += 1;
                     kept += 1;
-                    idx[i] = kept;
+                    *slot = kept;
                 }
             }
         }
@@ -441,11 +444,11 @@ impl Engine {
                 }
                 put(recs_b, r.sources.len() as u64);
                 for &s in r.sources.iter() {
-                    put(recs_b, nref(s) as u64);
+                    put(recs_b, nref(s));
                 }
                 put(recs_b, r.placed.len() as u64);
                 for &s in &r.placed {
-                    put(recs_b, nref(s) as u64);
+                    put(recs_b, nref(s));
                 }
                 put(recs_b, r.claim as u64);
                 match r.effect {
@@ -481,13 +484,13 @@ impl Engine {
                         ReadKind::Field {
                             at: Anchor::Before(n) | Anchor::AfterOwn(n),
                             ..
-                        } => put(reads_b, nref(n) as u64),
+                        } => put(reads_b, nref(n)),
                         ReadKind::Field { at: Anchor::End(u), .. } => put(reads_b, u64::from(u.0)),
                         ReadKind::Fold { from, to, .. } => {
-                            put(reads_b, onref(from) as u64);
-                            put(reads_b, onref(to) as u64);
+                            put(reads_b, onref(from));
+                            put(reads_b, onref(to));
                         }
-                        ReadKind::Next { after, .. } => put(reads_b, onref(after) as u64),
+                        ReadKind::Next { after, .. } => put(reads_b, onref(after)),
                         ReadKind::Placed { i, .. } | ReadKind::Following { i } => put(reads_b, i as u64),
                         _ => {}
                     }
@@ -498,20 +501,20 @@ impl Engine {
                     }
                 }
             };
-        for i in 0..self.nodes.len() {
-            if idx[i] == 0 {
+        for (i, &k) in idx.iter().enumerate() {
+            if k == 0 {
                 continue;
             }
             let Some(n) = self.nodes.get(i) else { continue };
             put(&mut nodes_b, u64::from(n.op.load(std::sync::atomic::Ordering::Acquire)));
             put(&mut nodes_b, u64::from(n.unit.0));
-            put(&mut nodes_b, onref(n.parent) as u64);
+            put(&mut nodes_b, onref(n.parent));
             put(&mut nodes_b, u64::from(n.depth));
             nodes_b.push(n.state() as u8);
             let cl = n.claimer.load(std::sync::atomic::Ordering::Acquire);
-            put(&mut nodes_b, if cl == 0 { 0 } else { nref(NodeId(cl - 1)) as u64 + 1 });
+            put(&mut nodes_b, if cl == 0 { 0 } else { nref(NodeId(cl - 1)) + 1 });
             let ce = n.claim_end.load(std::sync::atomic::Ordering::Acquire);
-            put(&mut nodes_b, if ce == 0 { 0 } else { nref(NodeId(ce - 1)) as u64 + 1 });
+            put(&mut nodes_b, if ce == 0 { 0 } else { nref(NodeId(ce - 1)) + 1 });
             let text = n.text.read().clone();
             put(&mut nodes_b, text.len() as u64);
             for &x in text.iter() {
@@ -541,7 +544,7 @@ impl Engine {
             let order = self.order(UnitId(u as u32));
             put(&mut nodes_b, order.len() as u64);
             for n in order {
-                put(&mut nodes_b, nref(n) as u64);
+                put(&mut nodes_b, nref(n));
             }
         }
         // (the environment, the paths, the memo)

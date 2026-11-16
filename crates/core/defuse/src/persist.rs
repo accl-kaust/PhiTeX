@@ -549,6 +549,7 @@ const NF_LAST: u32 = 1 << 9;
 const NF_PRIOR: u32 = 1 << 10;
 const NF_PARKED: u32 = 1 << 11;
 const NF_EDITED: u32 = 1 << 12;
+const NF_MOVED: u32 = 1 << 13;
 /// A slot of the nodes' table reserved and never set (a placement a
 /// commit made ready and did not place).
 const EMPTY_SLOT: u8 = 0xff;
@@ -613,6 +614,7 @@ struct Decoded {
     settle_exact: Vec<Field>,
     marked: Vec<NodeId>,
     movers: Vec<NodeId>,
+    settled: Vec<crate::api::Settled>,
     finals: Vec<(Field, Option<Reaching>, bool, bool)>,
     env: Vec<(Field, Option<ValueId>)>,
     env_changes: u64,
@@ -700,6 +702,15 @@ impl Engine {
         let mut movers: Vec<NodeId> = self.movers.lock().iter().copied().collect();
         movers.sort_unstable();
         ids(&mut meta, movers);
+        {
+            let st = self.settled.lock();
+            put(&mut meta, st.len() as u64);
+            for x in st.iter() {
+                put(&mut meta, x.node.raw());
+                put(&mut meta, x.version);
+                put(&mut meta, t.put(x.output));
+            }
+        }
         let finals = self.ranges.finals_state();
         put(&mut meta, finals.len() as u64);
         for (f, p, dirty, pending) in finals {
@@ -783,6 +794,7 @@ impl Engine {
                 (prior.is_some(), NF_PRIOR),
                 (parked.is_some(), NF_PARKED),
                 (ld(&n.edited), NF_EDITED),
+                (ld(&n.moved), NF_MOVED),
             ] {
                 if on {
                     flags |= bit;
@@ -1014,6 +1026,11 @@ impl Engine {
         };
         let marked_raw = raw_ids(&mut c)?;
         let movers_raw = raw_ids(&mut c)?;
+        let k = c.count(3)?;
+        let mut settled_raw = Vec::with_capacity(k);
+        for _ in 0..k {
+            settled_raw.push((c.u()?, c.u()?, vals.get(&mut c)?));
+        }
         let k = c.count(2)?;
         let mut finals_raw = Vec::with_capacity(k);
         for _ in 0..k {
@@ -1220,6 +1237,16 @@ impl Engine {
             settle_exact,
             marked: ids(marked_raw)?,
             movers: ids(movers_raw)?,
+            settled: settled_raw
+                .into_iter()
+                .map(|(n, version, output)| {
+                    Ok(crate::api::Settled {
+                        node: node_id(n)?,
+                        version,
+                        output,
+                    })
+                })
+                .collect::<R<Vec<_>>>()?,
             finals,
             env,
             env_changes,
@@ -1295,6 +1322,7 @@ impl Engine {
         debug_assert_eq!(first, 0);
         let mut on_seg: Vec<Vec<(Pos, NodeId, OpId, bool)>> = vec![Vec::new(); d.segs.len()];
         let mut recs: Vec<(NodeId, Option<DRec>, Option<DRec>)> = Vec::new();
+        let mut edited: Vec<NodeId> = Vec::new();
         for (i, dn) in d.nodes.into_iter().enumerate() {
             let Some(dn) = dn else { continue };
             let id = NodeId::from_raw(i as u64);
@@ -1326,6 +1354,12 @@ impl Engine {
             node.front.store(fl(NF_FRONT), Ordering::Release);
             node.run_chained.store(fl(NF_RUN_CHAINED), Ordering::Release);
             node.edited.store(fl(NF_EDITED), Ordering::Release);
+            node.moved.store(fl(NF_MOVED), Ordering::Release);
+            // (a node gone has left the line: it claims nothing, `commit::release_leaving`)
+            *node.claim_mx.lock() = dn.state == State::Gone;
+            if fl(NF_EDITED) {
+                edited.push(id);
+            }
             node.anchor.store(dn.anchor, Ordering::Release);
             node.slot.store(dn.slot, Ordering::Release);
             node.rank.store(dn.rank, Ordering::Release);
@@ -1367,6 +1401,12 @@ impl Engine {
             m.extend(d.movers);
             self.movers_n.store(m.len() as u64, Ordering::Release);
         }
+        {
+            let mut m = self.edited.lock();
+            m.extend(edited);
+            self.edited_n.store(m.len() as u64, Ordering::Release);
+        }
+        self.settled.lock().extend(d.settled);
         stats.nodes = n as u64;
         stats.install_ns = ns(t0);
         // (the products: each clean node's brackets, definitions and

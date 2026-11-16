@@ -746,3 +746,85 @@ fn roots_come_back_by_content() {
         assert_eq!(v.digest(*x), b.values().digest(*y));
     }
 }
+
+/// Random documents and random edits (a fixed generator, 16 seeds): the
+/// imported engine runs what the exporting one runs for each edit, with
+/// the same products; the import made at a random point of the edits.
+#[test]
+fn random_edits_after_an_import_run_what_they_run_before() {
+    for seed in 0..16u64 {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut rnd = move |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        let (a, oa) = setup();
+        let (u, u2) = build(&a, &oa, 40 + 23 * seed as usize);
+        a.evaluate(1).unwrap();
+        runs(&oa);
+        let mut engines: Vec<(Engine, Ops)> = vec![(a, oa)];
+        let at = rnd(4);
+        for step in 0..8 {
+            if step == at {
+                let b = round_trip(&engines[0].0);
+                assert_eq!(b.0.evaluate(1).unwrap().runs, 0, "seed {seed}");
+                runs(&b.1);
+                engines.push(b);
+            }
+            let (kind, k, val) = (rnd(7), rnd(1000), rnd(50) as i64);
+            let mut got = Vec::new();
+            for (e, o) in &engines {
+                let v = e.values();
+                let line: Vec<NodeId> = e.order(u).into_iter().filter(|&n| e.is_live(n)).collect();
+                let pick = |op: &str| {
+                    let xs: Vec<NodeId> = line.iter().copied().filter(|&n| op_of(e, n) == op).collect();
+                    (!xs.is_empty()).then(|| xs[k % xs.len()])
+                };
+                match kind {
+                    0 => {
+                        if let Some(n) = pick("inc") {
+                            e.replace(n, o.def, vec![v.field("c").0, v.int(val)]);
+                        }
+                    }
+                    1 => {
+                        if let Some(n) = pick("contrib") {
+                            e.replace(n, o.contrib, vec![v.field("s").0, v.int(val)]);
+                        }
+                    }
+                    2 => {
+                        if let Some(n) = pick("read") {
+                            e.insert_after(n, o.inc, vec![v.field("c").0]);
+                        }
+                    }
+                    3 => {
+                        if let Some(n) = pick("inc") {
+                            e.remove(n);
+                        }
+                    }
+                    4 => {
+                        let n = line.iter().copied().find(|&n| is(e, n, "def", "x")).unwrap();
+                        e.replace(n, o.def, vec![v.field("x").0, v.int(val % 3)]);
+                    }
+                    5 => {
+                        if let Some(n) = pick("app") {
+                            e.replace(n, o.app, vec![v.field("fonts").0, v.str(&format!("font{}", val % 4))]);
+                        }
+                    }
+                    _ => {
+                        let n = line.iter().copied().find(|&n| is(e, n, "def", "label")).unwrap();
+                        e.replace(n, o.def, vec![v.field("label").0, v.int(val % 2)]);
+                    }
+                }
+                e.evaluate(1).unwrap();
+                assert!(e.check_invariants().is_empty(), "seed {seed} step {step}");
+                got.push((runs(o), products(e, &[u, u2])));
+            }
+            for g in &got[1..] {
+                assert_eq!(got[0].0, g.0, "seed {seed} step {step} (edit {kind}): other runs");
+                assert_same(&got[0].1, &g.1, &format!("seed {seed} step {step} (edit {kind})"));
+            }
+        }
+    }
+}
