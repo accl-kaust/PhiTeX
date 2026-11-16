@@ -108,7 +108,7 @@ pub struct Manifest {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutsideLog {
     pub finds: BTreeMap<(u8, String, u8, String), Option<String>>,
-    pub reads: BTreeMap<String, (bool, Option<Vec<u8>>)>,
+    pub reads: BTreeMap<(u8, String), (bool, Option<Vec<u8>>)>,
 }
 
 /// [`OutsideLog`], shared by the wrappers that fill it.
@@ -120,13 +120,13 @@ const DPX: u8 = 2;
 
 /// File `path` read, its key `k` taken before the read: whether it was
 /// there.
-fn note_read(log: &Outside, path: &str, k: Option<Vec<u8>>, found: bool) {
+fn note_read(log: &Outside, kind: u8, path: &str, k: Option<Vec<u8>>, found: bool) {
     let mut l = log.lock().unwrap_or_else(PoisonError::into_inner);
-    match l.reads.get_mut(path) {
+    match l.reads.get_mut(&(kind, path.to_owned())) {
         Some(old) if *old != (found, k.clone()) => *old = (found, Some(Vec::new())),
         Some(_) => {}
         None => {
-            l.reads.insert(path.to_owned(), (found, k));
+            l.reads.insert((kind, path.to_owned()), (found, k));
         }
     }
 }
@@ -222,7 +222,7 @@ impl phitex_tex::FontSource for KeyedFonts {
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {
         let k = self.host.stamp(Path::new(path));
         let b = self.inner.read(path);
-        note_read(&self.log, path, k, b.is_some());
+        note_read(&self.log, FONTS, path, k, b.is_some());
         b
     }
 
@@ -284,7 +284,7 @@ impl phitex_xdvipdfmx::io::Files for KeyedDpx {
         let p = String::from_utf8_lossy(path);
         let k = self.host.stamp(Path::new(&*p));
         let b = self.inner.read(path);
-        note_read(&self.log, &p, k, b.is_some());
+        note_read(&self.log, DPX, &p, k, b.is_some());
         b
     }
 
@@ -309,16 +309,24 @@ impl phitex_xdvipdfmx::io::Files for KeyedDpx {
     }
 }
 
-/// What of [`OutsideLog`] moved now: the first lookup answered otherwise
-/// or file whose key moved, asked of `fonts` and `dpx` as this session
-/// has them (none: no XeTeX, and any noted is moved).
+/// What of [`OutsideLog`] moved now, asked of `fonts` and `dpx` as this
+/// session has them (none: no XeTeX, and any noted is moved): the first
+/// of XeTeX's fonts' lookups answered otherwise or files whose key moved
+/// (`Err`: the engine's runs read them, unrecorded: no load); else
+/// whether one of the PDF writer's did (`Ok(true)`: its file made again,
+/// [`phitex_tex::Build::relink`]).
+///
+/// # Errors
+///
+/// A font file of the engine's moved.
 pub fn outside_moved(
     log: &OutsideLog,
     host: &dyn Host,
     fonts: Option<&phitex_tex::FontFiles>,
     dpx: Option<&crate::dvipdf::FilesFor>,
-) -> Option<String> {
+) -> Result<bool, String> {
     let dpx = dpx.map(|f| f());
+    let mut writer = false;
     for ((kind, name, fmt, prog), was) in &log.finds {
         let now = match *kind {
             FONTS => fonts.zip(kpse_of(*fmt)).map(|(f, k)| f.find_file(name, k)),
@@ -332,10 +340,14 @@ pub fn outside_moved(
             _ => None,
         };
         if now.as_ref() != Some(was) {
-            return Some(format!("the font file {name} is found elsewhere"));
+            if *kind == DPX {
+                writer = true;
+                continue;
+            }
+            return Err(format!("the font file {name} is found elsewhere"));
         }
     }
-    for (path, (found, was)) in &log.reads {
+    for ((kind, path), (found, was)) in &log.reads {
         let now = host.stamp(Path::new(path));
         // (one read: its key, not empty, the same; one not there: still
         // not there)
@@ -345,10 +357,14 @@ pub fn outside_moved(
             was.as_ref().is_none_or(|k| !k.is_empty()) && now.is_none()
         };
         if !same {
-            return Some(format!("the font file {path} changed"));
+            if *kind == DPX {
+                writer = true;
+                continue;
+            }
+            return Err(format!("the font file {path} changed"));
         }
     }
-    None
+    Ok(writer)
 }
 
 /// The file's parts, read back.
@@ -393,7 +409,8 @@ pub fn encode(key: &Key, prelude: &[u8; 32], manifest: &Manifest, build: &[u8]) 
         e.os(found.as_deref());
     }
     e.n(manifest.outside.reads.len());
-    for (p, (found, k)) in &manifest.outside.reads {
+    for ((kind, p), (found, k)) in &manifest.outside.reads {
+        e.0.push(*kind);
         e.s(p);
         e.b(*found);
         e.b(k.is_some());
@@ -487,10 +504,11 @@ pub fn decode(b: &[u8]) -> Result<Parts<'_>, String> {
         outside.finds.insert((kind, name, fmt, prog), found);
     }
     for _ in 0..d.n()? {
+        let kind = d.byte()?;
         let p = d.s()?;
         let found = d.b()?;
         let k = if d.b()? { Some(d.by()?.to_vec()) } else { None };
-        outside.reads.insert(p, (found, k));
+        outside.reads.insert((kind, p), (found, k));
     }
     let cold_ms = d.u()?;
     let build = &payload[d.i..];
@@ -630,8 +648,10 @@ mod tests {
         );
         outside
             .reads
-            .insert("/f/lm.otf".into(), (true, Some(vec![1, 2, 3])));
-        outside.reads.insert("/f/lm.otf/rsrc".into(), (false, None));
+            .insert((FONTS, "/f/lm.otf".into()), (true, Some(vec![1, 2, 3])));
+        outside
+            .reads
+            .insert((DPX, "/f/lm.otf/rsrc".into()), (false, None));
         let m = Manifest {
             text: "\\documentclass{article}\n".into(),
             inputs: vec![

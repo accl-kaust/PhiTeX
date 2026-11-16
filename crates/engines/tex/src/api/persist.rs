@@ -1305,6 +1305,22 @@ impl Build {
         self.stats.nodes_run
     }
 
+    /// The output file's node run again with its text (its product
+    /// compared as any run's): what its writer read outside the
+    /// environment moved (XeTeX's PDF writer's files, a picture or a font
+    /// it embeds, as a loaded graph finds them, `phitex_live::graph`),
+    /// for the next evaluation.
+    pub fn relink(&mut self) {
+        let args = self
+            .g
+            .eng
+            .node_info(self.dvi)
+            .map(|i| i.args)
+            .unwrap_or_default();
+        self.g.eng.replace(self.dvi, self.g.dvi, args);
+        self.staged = true;
+    }
+
     /// A loaded build's environment as this process gives it
     /// (docs/spec-persisted-graph.md §3.3), what moved staged as an edit's
     /// change is, for the next evaluation:

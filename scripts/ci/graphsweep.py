@@ -161,14 +161,41 @@ class Doc:
             shutil.rmtree(self.d, ignore_errors=True)
             os.rename(keep, self.d)
 
+    def clean_of(self, before):
+        """A clean build (no graph) of folder `before` (the history's as it
+        was before a step), in the history's directory."""
+        keep = self.d.with_name("doc.history")
+        os.rename(self.d, keep)
+        try:
+            os.rename(before, self.d)
+            cc = WORK / "graph" / self.tag / "clean-cache"
+            shutil.rmtree(cc, ignore_errors=True)
+            cc.mkdir(parents=True)
+            os.symlink(WORK / "fcache" / "formats", cc / "formats")
+            _, _, code, _ = self.run(self.d, False, cc)
+            sums = self.sums(self.d)
+            shutil.rmtree(cc, ignore_errors=True)
+            return sums, code
+        finally:
+            shutil.rmtree(self.d, ignore_errors=True)
+            os.rename(keep, self.d)
+
     def step(self, what, load, ref=None, threads=None, nodes0=False):
         """A process of the history; `load`: whether it must load the graph
         (True), must not (False). Its outputs against `ref` (none: a clean
         build of the files now)."""
+        if ref is None and load is False:
+            # (refused, a clean build where the history's outputs are: its
+            # reference is one of that folder)
+            before = WORK / "graph" / self.tag / "before"
+            shutil.rmtree(before, ignore_errors=True)
+            shutil.copytree(self.d, before, symlinks=True)
         lines, nodes, code, wall = self.run(self.d, True, self.cache, threads)
         sums = self.sums(self.d)
         loaded = any(x.startswith("graph: loaded") for x in lines)
-        if ref is None:
+        if ref is None and load is False:
+            ref, rcode = self.clean_of(before)
+        elif ref is None:
             ref, rcode = self.clean()
         else:
             rcode = None

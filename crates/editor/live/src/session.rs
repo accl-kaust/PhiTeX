@@ -1125,14 +1125,12 @@ impl Session {
         }
         let m = parts.manifest;
         let xe = p.opts.xetex.as_ref();
-        if let Some(why) = crate::graph::outside_moved(
+        let relink = crate::graph::outside_moved(
             &m.outside,
             &*self.host,
             xe.and_then(|x| x.fonts.as_ref()),
             xe.and_then(|x| x.pdf.as_ref()).map(|x| &x.files),
-        ) {
-            return Err(why);
-        }
+        )?;
         let t1 = Instant::now();
         let opts = p.opts.clone();
         let (mut b, st) =
@@ -1186,15 +1184,20 @@ impl Session {
         let t2 = Instant::now();
         let moved = self.graph_moved_inputs();
         let re = b.reask_environment();
+        // (a file XeTeX's PDF writer read moved, a picture it embeds: its
+        // file made again)
+        if relink {
+            b.relink();
+        }
         let check_ms = t2.elapsed().as_secs_f64() * 1e3;
         self.changed.extend(moved.iter().cloned());
-        self.graph_same = moved.is_empty() && re.moved.is_empty();
+        self.graph_same = moved.is_empty() && re.moved.is_empty() && !relink;
         self.build = Some(b);
         // (the outputs the saved build wrote, the same: left as they are,
         // docs/spec-persisted-graph.md §4.2 item 6)
         self.sink.keep_same();
         Ok(format!(
-            "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0}; checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}",
+            "graph: loaded {:.1} MB in {:.0} ms (read {read_ms:.0}, decoded {load_ms:.0}: import {:.0}, the client's {:.0}; checked {check_ms:.1}): {} files moved{}, {} answers asked again, {} moved{}{}",
             mb(bytes.len()),
             t0.elapsed().as_secs_f64() * 1e3,
             st.import_ms,
@@ -1222,6 +1225,11 @@ impl Session {
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
+            },
+            if relink {
+                "; a file the PDF writer read moved: the file made again"
+            } else {
+                ""
             },
         ))
     }
