@@ -53,10 +53,13 @@ export class Watch {
     for (const s of [this.proc.stdout, this.proc.stderr]) s.on("data", (d) => (this.out += d));
     this.exited = new Promise((ok) => this.proc.on("exit", (c) => ok(c)));
     Watch.all.add(this);
+    Watch.made.push(this);
     this.exited.then(() => Watch.all.delete(this));
   }
   /** Every watch still running (a failed test's): killed by `killAll`. */
   static all = new Set();
+  /** Every watch started since `report` last ran, running or not: what a failed test's said. */
+  static made = [];
   static killAll() {
     for (const w of Watch.all) w.proc.kill("SIGKILL");
   }
@@ -65,6 +68,8 @@ export class Watch {
     while (Date.now() < end) {
       const m = /http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]+\//.exec(this.out);
       if (m) return m[0];
+      // (a watch that stopped before it served the viewer: said now, not when the wait is up)
+      if (this.proc.exitCode !== null || this.proc.signalCode !== null) throw new Error(`the watch exited (${this.proc.exitCode ?? this.proc.signalCode}) before its viewer's address: ${this.out}`);
       await sleep(50);
     }
     throw new Error(`no viewer address in: ${this.out}`);
@@ -120,7 +125,29 @@ export class Browser {
   }
   async tab(url = "about:blank") {
     const t = await (await fetch(`http://127.0.0.1:${this.port}/json/new?about:blank`, { method: "PUT" })).json();
-    return Tab.attach(t, url);
+    const tab = await Tab.attach(t, url);
+    this.opened.push(tab);
+    return tab;
+  }
+  /** The tabs opened since `report` last ran. */
+  opened = [];
+  /**
+   * After a test (an `afterEach`): if it failed, what its watches printed
+   * (their builds' lines, a failed build's errors) and what each of its tabs
+   * showed (the bar, the problems' list) on stderr, so the failure says what
+   * went wrong, not only what was waited for; then forgotten.
+   */
+  async report(t) {
+    const watches = Watch.made.splice(0), tabs = this.opened.splice(0);
+    if (t.passed) return;
+    const out = [`--- ${t.name} failed: what it saw ---`];
+    for (const [i, w] of watches.entries()) out.push(`watch ${i + 1} in ${w.dir}:`, w.out.length > 20000 ? `…${w.out.slice(-20000)}` : w.out);
+    for (const [i, tab] of tabs.entries()) {
+      const s = await tab.state().catch((e) => `? (${e.message})`);
+      const probs = await tab.q(`$("#diags")?.innerText ?? null`).catch(() => null);
+      out.push(`tab ${i + 1}: ${JSON.stringify(s)}`, `its problems: ${probs ?? "none shown"}`, `its errors: ${JSON.stringify(tab.errors)}`);
+    }
+    process.stderr.write(out.join("\n") + "\n");
   }
   async stop() {
     this.proc.kill("SIGKILL");

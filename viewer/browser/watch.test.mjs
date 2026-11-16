@@ -3,9 +3,9 @@
 // reported, then checks it stays fixed.
 //
 //   PHITEX_BIN=target/fastdev/phitex node --test --test-concurrency=1 viewer/browser/watch.test.mjs
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Browser, SHELF, Watch, project, sleep, git } from "./lib.mjs";
@@ -18,6 +18,8 @@ process.env.PHITEX_CACHE_DIR ??= join(home, "cache");
 let browser;
 before(async () => (browser = await Browser.start()));
 after(async () => (Watch.killAll(), await browser?.stop()));
+// (a failed test: what its watches printed and its tabs showed)
+afterEach(async (t) => browser?.report(t));
 
 const doc = (body, pre = "") => `\\documentclass{article}\n${pre}\\begin{document}\n${body}\n\\end{document}\n`;
 
@@ -94,6 +96,31 @@ test("a .bib edited while watching is read again (item 17)", async () => {
   await w.stop();
 });
 
+/** Compare with the last commit (the picker's first row, From; To the working tree): its `n` changes counted in the diff bar. */
+async function compareWith(t, n) {
+  await t.click("#b-compare");
+  await t.until(`$$("#phx-pick .row").length > 0`, "the commits");
+  // (the picker marks a range: the commit clicked is From, To the working tree; then Compare)
+  await t.click("#phx-pick .row[data-i='0']");
+  await t.until(`!$("#phx-pick .ask .yes").disabled`, "the pair marked");
+  await t.click("#phx-pick .ask .yes");
+  await t.until(`/${n} changes/.test($("#diffbar").innerText)`, "the diff", 120000);
+}
+
+/**
+ * The diff bar's Next pressed: the page (from 1) the change was shown on,
+ * once its mark is there (a mark of this press's, not the last one's) and
+ * that page is the one in view.
+ */
+async function nextChange(t, pressed = async () => {}) {
+  await t.q(`$$(".mark.fnd.cur").forEach((m) => (m.dataset.was = "")) ?? 1`);
+  await t.click("#diffbar button[data-a='next']");
+  await pressed();
+  const k = await t.until(`(() => { const m = $$(".mark.fnd.cur").find((m) => m.dataset.was === undefined); return m ? +m.closest(".slot").dataset.k + 1 : 0; })()`, "the change marked on its page", 120000);
+  await t.until(`+$("#pgin").value === ${k}`, `page ${k} in view, the change's`);
+  return k;
+}
+
 test("Next change goes to the page of that change; the style popover floats over the pages (items 24, 22)", async () => {
   const para = (i, w) => `Paragraph ${i} ${w} ` + "lorem ipsum dolor sit amet ".repeat(30) + "\n\n";
   const body = (w) => Array.from({ length: 30 }, (_, i) => para(i, i % 10 === 0 ? w : "same")).join("");
@@ -105,25 +132,43 @@ test("Next change goes to the page of that change; the style popover floats over
   w.write("main.tex", doc(body("beta")));
   const t = await browser.tab(await w.url());
   await t.until(`+$("#pgn")?.textContent > 3`, "the pages");
-  await t.click("#b-compare");
-  await t.until(`$$("#phx-pick .row").length > 0`, "the commits");
-  // (the picker marks a range: the commit clicked is From, To the working tree; then Compare)
-  await t.click("#phx-pick .row[data-i='0']");
-  await t.until(`!$("#phx-pick .ask .yes").disabled`, "the pair marked");
-  await t.click("#phx-pick .ask .yes");
-  await t.until(`/3 changes/.test($("#diffbar").innerText)`, "the diff", 120000);
+  await compareWith(t, 3);
   const pages = [];
-  for (let i = 0; i < 3; i++) {
-    await t.click("#diffbar button[data-a='next']");
-    await sleep(1200);
-    pages.push(Number(await t.q(`$("#pgin").value`)));
-  }
+  for (let i = 0; i < 3; i++) pages.push(await nextChange(t));
   assert.ok(pages[0] < pages[1] && pages[1] < pages[2], `each change on its own page, further on: ${pages}`);
   await t.click("#diffbar button[data-a='settings']");
   const box = await t.q(`(() => { const b = $("#diffset").getBoundingClientRect(), s = $("#stage").getBoundingClientRect(); return { pos: getComputedStyle($("#diffset")).position, w: b.width, stage: s.width }; })()`);
   assert.equal(box.pos, "absolute", "a popover, not a column beside the pages");
   await t.click("#diffset button[data-bars]");
   await t.until(`$("#diffset button[data-bars]").getAttribute("aria-checked") === "true"`, "the change bars on");
+  await w.stop();
+});
+
+test("Compare started while the document is typeset, Next pressed while the diff is: each change shown on its page once the diff's are in (#49)", async () => {
+  // (a long document: its build and the diff's take seconds, pages streamed
+  // as they go; the changes far apart, each paragraph's number on its page)
+  const at = [0, 150, 300];
+  const para = (i, w) => `Paragraph ${i} ${w} ` + "lorem ipsum dolor sit amet ".repeat(30) + "\n\n";
+  const body = (w) => Array.from({ length: 400 }, (_, i) => para(i, at.includes(i) ? w : "same")).join("");
+  const dir = project({ "main.tex": doc(body("alpha")) });
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "one");
+  writeFileSync(join(dir, "main.tex"), doc(body("beta")));
+  // (a home of its own: the tip its tab shows is the first, beside the status, not one over the diff bar)
+  const w = new Watch(dir, { home: mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-")) });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 3`, "the first pages");
+  assert.equal(builds(w), 0, "Compare asked while the document's first build streams its pages");
+  await compareWith(t, 3);
+  // (the changes counted at once, Next pressed then: the diff not typeset
+  // yet, no change placed, none marked along the scrollbar)
+  const pages = [await nextChange(t, async () => assert.equal(await t.q(`$$("#smarks i.change").length`), 0, "Next pressed before the changes were placed"))];
+  for (let i = 1; i < 3; i++) pages.push(await nextChange(t));
+  assert.ok(pages[0] < pages[1] && pages[1] < pages[2], `each change on its own page, further on: ${pages}`);
+  for (const [i, k] of pages.entries())
+    await t.until(`(() => { const l = $$(".slot")[${k - 1}]?.querySelector(".phx-text"); return !!l && !l.hasAttribute("data-pending") && /Paragraph ${at[i]} (alpha\\s*)?beta/.test(l.textContent); })()`, `paragraph ${at[i]}'s change on page ${k}`);
+  assert.deepEqual(t.errors, []);
   await w.stop();
 });
 
@@ -600,7 +645,17 @@ test("a note made in one column of a two-column paper is drawn in that column, a
       last = now;
     }
   };
-  await t.until(`$$(".slot text").length > 50`, "the first page's text");
+  // (the first page's text layer filled and shown: a layer is filled a page
+  // a frame once the view rests (text.ts), and the page drawn again (the
+  // build's next pass) or a zoom's end (the pages fitted to the resize)
+  // holds it out of the layout (display: none) until then. A person's press
+  // fills it; a place read from it before then was none, or every line's
+  // box at 0, 0)
+  const ready = `(() => { const l = $(".slot")?.querySelector(".phx-text"); return !!l && !l.matches(".zooming *, [data-pending], [data-hold]"); })()`;
+  // (the first build in and good: a failed one says why, the watch's output printed)
+  await waitBuild(w, 1);
+  assert.match(w.out, /^ok:\s+1\s/m, "the first build has no error");
+  await t.until(`${ready} && $(".slot").querySelectorAll("text").length > 50`, "the first page's text");
   await settled();
   // (places on the first page as fractions of it: the review's side opening
   // narrows the pages; `F` maps a screen box to them)
@@ -609,7 +664,7 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   // character (from the end if negative): the screen point at its left edge or
   // right, `f` the same as a fraction of the page; `mid` where the right column starts)
   const line = (col, li, ci, right = false) =>
-    t.q(`(() => { $(".slot").scrollIntoView({ block: "start" }); ${F} const all = [...$(".slot").querySelectorAll("text")].filter((x) => x.textContent.length > 30).map((x) => [x, x.getBoundingClientRect()]); const mid = Math.min(...all.map(([, b]) => b.left).filter((l) => l > S.left + S.width / 2)); const ls = all.filter(([, b]) => (${JSON.stringify(col)} === "L") === (b.left < mid)).sort((a, b) => a[1].top - b[1].top); const [x] = ls.at(${li}) ?? []; if (!x) return null; const n = x.textContent.length, off = ${ci} < 0 ? n + ${ci} : ${ci}; const r = document.createRange(); r.setStart(x.firstChild, off); r.setEnd(x.firstChild, off + 1); const b = r.getBoundingClientRect(); const px = ${right} ? b.right - 1 : b.left + 1, py = (b.top + b.bottom) / 2; return { x: px, y: py, f: [(px - S.left) / S.width, (py - S.top) / S.height], mid: (mid - S.left) / S.width, hyphen: x.textContent.trimEnd().endsWith("-") }; })()`);
+    t.until(`${ready} && (() => { $(".slot").scrollIntoView({ block: "start" }); ${F} const all = [...$(".slot").querySelectorAll("text")].filter((x) => x.textContent.length > 30).map((x) => [x, x.getBoundingClientRect()]); const mid = Math.min(...all.map(([, b]) => b.left).filter((l) => l > S.left + S.width / 2)); const ls = all.filter(([, b]) => (${JSON.stringify(col)} === "L") === (b.left < mid)).sort((a, b) => a[1].top - b[1].top); const [x] = ls.at(${li}) ?? []; if (!x) return null; const n = x.textContent.length, off = ${ci} < 0 ? n + ${ci} : ${ci}; const r = document.createRange(); r.setStart(x.firstChild, off); r.setEnd(x.firstChild, off + 1); const b = r.getBoundingClientRect(); const px = ${right} ? b.right - 1 : b.left + 1, py = (b.top + b.bottom) / 2; return { x: px, y: py, f: [(px - S.left) / S.width, (py - S.top) / S.height], mid: (mid - S.left) / S.width, hyphen: x.textContent.trimEnd().endsWith("-") }; })()`, `line ${li} of the ${col === "L" ? "left" : "right"} column`);
   // (from the paragraph with the footnote to the one after the float, all in the left column)
   const first = await line("L", 18, 4), last = await line("L", 30, -5, true);
   assert.ok(first && last && last.y > first.y, "the lines are there");
