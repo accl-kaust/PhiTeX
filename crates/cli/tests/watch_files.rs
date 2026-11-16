@@ -296,7 +296,12 @@ fn change_each(dir: &Path, w: &Watch, at: &Path) {
     let mut state = vec![0; files().len()];
     wait_for(w, &pdf, &clean(dir, &state), "the first build");
     for (i, f) in files().iter().enumerate() {
-        for how in ["in place", "by a rename over it"] {
+        for how in [
+            "in place",
+            "in place in two writes 0.3 s apart",
+            "by a rename over it",
+            "removed and written anew",
+        ] {
             let before = clean(dir, &state);
             state[i] = 1 - state[i];
             assert!(
@@ -305,14 +310,27 @@ fn change_each(dir: &Path, w: &Watch, at: &Path) {
             );
             let p = at.join(f);
             let bytes = content(f, state[i]);
-            if how == "in place" {
-                // (truncated and written, the same file)
+            if how.starts_with("in place") {
+                // (truncated and written, the same file; a program that
+                // writes a large file in pieces, a pause between them)
                 let mut h = std::fs::OpenOptions::new()
                     .write(true)
                     .truncate(true)
                     .open(&p)
                     .expect("the file");
-                h.write_all(&bytes).expect("written");
+                if how == "in place" {
+                    h.write_all(&bytes).expect("written");
+                } else {
+                    let half = bytes.len() / 2;
+                    h.write_all(&bytes[..half]).expect("written");
+                    h.flush().expect("written");
+                    std::thread::sleep(Duration::from_millis(300));
+                    h.write_all(&bytes[half..]).expect("written");
+                }
+            } else if how.starts_with("removed") {
+                std::fs::remove_file(&p).expect("removed");
+                std::thread::sleep(Duration::from_millis(50));
+                std::fs::write(&p, &bytes).expect("written anew");
             } else {
                 // (a new file beside it, renamed to its name)
                 let tmp = p.with_file_name(".phitex-test-save.tmp");

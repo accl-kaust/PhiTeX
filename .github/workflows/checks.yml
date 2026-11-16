@@ -127,6 +127,8 @@ jobs:
           key: macos-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: cargo test -p phitex-cli --bins --quiet -- 'attach::'
       - run: cargo test -p phitex-cli --test tests --quiet -- 'watch_files::'
+      - if: always()
+        run: tail -n 400 target/tmp/watch-files/*/*.stderr
   # (by hand: phitex on TeX Live 2025's frozen tlnet-final, the same
   # files on both systems, scripts/ci/e2e.ps1: build, watch, an edit, q)
   texlive:
