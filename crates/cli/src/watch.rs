@@ -247,7 +247,13 @@ fn watcher(
     let r = root.to_path_buf();
     // (the files written and not closed yet)
     let writing: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
+    // (the system's events as they come, on standard error, with
+    // PHITEX_WATCH_EVENTS set: what a platform really sends)
+    let log = std::env::var_os("PHITEX_WATCH_EVENTS").is_some();
     let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+        if log {
+            eprintln!("phitex watch: file event {ev:?}");
+        }
         let Ok(ev) = ev else { return };
         // (a rename's pair: its two halves come as `From` and `To` too)
         if matches!(
@@ -322,6 +328,9 @@ fn watcher(
             }
         }
         not_ours(&ours, &mut changed);
+        if log {
+            eprintln!("phitex watch: changed now {changed:?}");
+        }
         if !changed.is_empty() {
             let _ = tx.send((Instant::now(), Event::Files(changed)));
         }
@@ -3058,6 +3067,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             .filter(|p| w.wants(&root, p))
                             .partition(|p| w.is_config(p))
                     };
+                    if std::env::var_os("PHITEX_WATCH_EVENTS").is_some() {
+                        eprintln!("phitex watch: the loop takes {ps:?} (settings {settings:?})");
+                    }
                     // (a settings' file changed (a .latexmkrc, a file it
                     // `do`es, phitex.toml): the target resolved again, a
                     // new session on its search paths)
