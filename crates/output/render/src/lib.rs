@@ -48,7 +48,7 @@ use hayro::hayro_interpret::{
     InterpreterCache, InterpreterSettings, SoftMask, interpret_page,
 };
 use hayro::hayro_syntax::Pdf;
-use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Object, ObjectIdentifier};
+use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Object, ObjectIdentifier, Stream};
 use hayro::hayro_syntax::page::Page;
 use hayro::kurbo::{Affine, BezPath, PathEl, Rect, Shape};
 use hayro::vello_cpu::{self, Pixmap, RenderContext};
@@ -173,7 +173,13 @@ struct Doc {
     outline: Option<Vec<Entry>>,
     /// Its named destinations, each found once.
     names: Names,
+    /// Its images' contents, hashed once each ([`Probe::content`]).
+    contents: Contents,
 }
+
+/// The hash of each image's samples in a document, by where its
+/// dictionary is in the file's bytes.
+type Contents = HashMap<(usize, usize), u64>;
 
 /// How many documents a [`Renderer`] keeps open: the build's file and the
 /// pages streamed around the view (each streamed page is a file of its own).
@@ -257,9 +263,61 @@ struct Probe<'b> {
     saved: Vec<u64>,
     boxes: &'b mut HashMap<u128, (Rect, u64)>,
     chars: Vec<Ch>,
+    /// The document's images' contents ([`Probe::content`]), and its
+    /// file's bytes (where a dictionary there is, for good).
+    contents: &'b mut Contents,
+    file: &'b [u8],
 }
 
 impl Probe<'_> {
+    /// What image `image` draws: its samples, and its masks' (hashed once
+    /// a document where its dictionary is in the file). hayro's key of an
+    /// image hashes its dictionary's bytes only, so a picture replaced by
+    /// another of its size and kind (a figure saved over in another
+    /// colour) kept its key, and its band, once the image object was
+    /// rewritten in place: the old picture drawn on (the frontends' disk
+    /// test, a figure's second change); two such pictures on a page were
+    /// one too.
+    fn content(&mut self, image: &Image<'_, '_>) -> u64 {
+        match image {
+            Image::Raster(r) => {
+                let s = r.stream();
+                let d = s.dict().data();
+                let range = self.file.as_ptr_range();
+                let at = (d.as_ptr() as usize, d.len());
+                let kept = range.contains(&d.as_ptr());
+                let hash = || {
+                    hash_of(|h| {
+                        s.raw_data().hash(h);
+                        for m in [&b"SMask"[..], b"Mask"] {
+                            if let Some(m) = s.dict().get::<Stream<'_>>(m) {
+                                m.raw_data().hash(h);
+                            }
+                        }
+                    })
+                };
+                if kept {
+                    *self.contents.entry(at).or_insert_with(hash)
+                } else {
+                    // (an inline image: in a content stream decoded for
+                    // this drawing, its place no name of it)
+                    hash()
+                }
+            }
+            // (a stencil mask: its samples, decoded; its stream out of reach)
+            Image::Stencil(st) => {
+                let mut out = 0;
+                st.with_stencil(
+                    |luma, _| {
+                        out = hash_of(|h| (luma.width, luma.height, &luma.data).hash(h));
+                    },
+                    None,
+                );
+                out
+            }
+        }
+    }
+
     fn push(&mut self, bbox: Rect, id: u64, at: Affine) {
         if bbox.is_finite() && bbox.width() >= 0.0 && bbox.height() >= 0.0 {
             let t = at.translation();
@@ -390,12 +448,15 @@ impl<'a> Device<'a> for Probe<'_> {
                     let key = t.cache_key();
                     let (local, _) = *self.boxes.entry(key).or_insert_with(|| {
                         let mut inner = HashMap::new();
+                        let mut contents = Contents::new();
                         let mut sub = Probe {
                             items: Vec::new(),
                             around: 0,
                             saved: Vec::new(),
                             boxes: &mut inner,
                             chars: Vec::new(),
+                            contents: &mut contents,
+                            file: &[],
                         };
                         t.interpret(&mut sub, Affine::IDENTITY, Affine::IDENTITY, &props.paint);
                         let ink = sub.items.iter().map(|i| i.bbox).reduce(|a, b| a.union(b));
@@ -443,9 +504,11 @@ impl<'a> Device<'a> for Probe<'_> {
             f64::from(image.width()),
             f64::from(image.height()),
         ));
+        let content = self.content(&image);
         let id = hash_of(|h| {
             self.around.hash(h);
             image.cache_key().hash(h);
+            content.hash(h);
             props.soft_mask.as_ref().map(CacheKey::cache_key).hash(h);
             format!("{:?}", props.blend_mode).hash(h);
             lin(props.transform, h);
@@ -766,6 +829,7 @@ fn probe(
     pw: f64,
     ph: f64,
     boxes: &mut HashMap<u128, (Rect, u64)>,
+    (contents, file): (&mut Contents, &[u8]),
 ) -> (Vec<Item>, Vec<Ch>) {
     let icache = InterpreterCache::new();
     let mut probe = Probe {
@@ -774,6 +838,8 @@ fn probe(
         saved: Vec::new(),
         boxes,
         chars: Vec::new(),
+        contents,
+        file,
     };
     let mut ctx = Context::new(
         base,
@@ -996,6 +1062,7 @@ impl Renderer {
             texts: HashMap::new(),
             outline: None,
             names: Names::default(),
+            contents: Contents::new(),
         })
     }
 
@@ -1023,7 +1090,14 @@ impl Renderer {
             if let Some(page) = pages.get(k) {
                 let base = page.initial_transform(true).to_kurbo();
                 let (w, h) = page.render_dimensions();
-                let (_, chars) = probe(page, base, f64::from(w), f64::from(h), &mut self.boxes);
+                let (_, chars) = probe(
+                    page,
+                    base,
+                    f64::from(w),
+                    f64::from(h),
+                    &mut self.boxes,
+                    (&mut doc.contents, &doc.bytes),
+                );
                 let lines = lines_of(&chars, 1.0);
                 doc.texts.insert(k, lines);
             }
@@ -1065,7 +1139,8 @@ impl Renderer {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        clippy::cast_possible_wrap
+        clippy::cast_possible_wrap,
+        clippy::too_many_lines
     )]
     fn frame_of(
         &mut self,
@@ -1097,7 +1172,14 @@ impl Renderer {
 
         // (the probe: every drawing's box and identity, the text)
         let t1 = Instant::now();
-        let (items, chars) = probe(page, base, f64::from(pw), f64::from(ph), &mut self.boxes);
+        let (items, chars) = probe(
+            page,
+            base,
+            f64::from(pw),
+            f64::from(ph),
+            &mut self.boxes,
+            (&mut doc.contents, &doc.bytes),
+        );
         let text = lines_of(&chars, s);
         doc.texts.insert(k, text.clone());
         let links = links_of(pdf, pages, page, &mut doc.names);
