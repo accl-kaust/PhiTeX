@@ -53,6 +53,8 @@ pub struct PersistProbe {
     /// reads), reads, environment + paths + memo, client values.
     pub section_bytes: [u64; 6],
     pub env: u64,
+    /// Value bytes only the environment reaches.
+    pub env_value_bytes: u64,
     pub paths: u64,
     pub memo: u64,
     /// Client roots given, and the values only they reach.
@@ -88,7 +90,7 @@ impl PersistProbe {
              reads {} [me {} before {} after {} end {} final {} env {} fold {} next {} placed {} following {} hole {}]; \
              defs {} contribs {} placed {} sources {} text-values {}; engine-read-bytes {:.2} MB; \
              values {} (strs {} {:.2} MB, lists {}, ropes {}); env {} paths {} memo {}; client roots {} new values {}; \
-             bytes {:.2} MB [values {:.2} nodes {:.2} records {:.2} reads {:.2} env+paths+memo {:.2} client {:.2}]; \
+             bytes {:.2} MB [values {:.2} (env-only {:.2}) nodes {:.2} records {:.2} reads {:.2} env+paths+memo {:.2} client+env values {:.2}]; \
              encode {:.1} ms, decode values {:.1} ms, decode records {:.1} ms, verify {:.1} ms over {} reads, moved {} in {} nodes {:?}; roundtrip differ {}",
             self.nodes[0],
             self.nodes[1],
@@ -129,6 +131,7 @@ impl PersistProbe {
             self.client_values,
             mb(self.bytes.len() as u64),
             mb(s[0]),
+            mb(self.env_value_bytes),
             mb(s[1]),
             mb(s[2]),
             mb(s[3]),
@@ -534,16 +537,6 @@ impl Engine {
         }
         // (the environment, the paths, the memo)
         let mut misc: Vec<u8> = Vec::new();
-        {
-            let env = self.env.values.read();
-            p.env = env.len() as u64;
-            put(&mut misc, env.len() as u64);
-            for (f, x) in env.iter() {
-                let f = t.put(f.0);
-                put(&mut misc, u64::from(f));
-                put(&mut misc, x.map_or(0, |x| u64::from(t.put(x)) + 1));
-            }
-        }
         p.paths = self.paths.steps.len() as u64;
         put(&mut misc, p.paths);
         for i in 0..self.paths.steps.len() {
@@ -607,6 +600,21 @@ impl Engine {
             }
         }
         p.client_values = u64::from(t.n - before);
+        // (the environment last: the values only it reaches, the files'
+        // texts among them, are what a load takes from the provider again)
+        let before_env = t.out.len() as u64;
+        let mut env_b: Vec<u8> = Vec::new();
+        {
+            let env = self.env.values.read();
+            p.env = env.len() as u64;
+            put(&mut env_b, env.len() as u64);
+            for (f, x) in env.iter() {
+                let f = t.put(f.0);
+                put(&mut env_b, u64::from(f));
+                put(&mut env_b, x.map_or(0, |x| u64::from(t.put(x)) + 1));
+            }
+        }
+        p.env_value_bytes = t.out.len() as u64 - before_env;
         p.values = u64::from(t.n);
         p.strs = t.strs;
         p.str_bytes = t.str_bytes;
@@ -617,13 +625,13 @@ impl Engine {
             nodes_b.len() as u64,
             recs_b.len() as u64,
             reads_b.len() as u64,
-            misc.len() as u64,
+            misc.len() as u64 + env_b.len() as u64,
             client_b.len() as u64 + (t.out.len() as u64 - engine_values_bytes),
         ];
         let mut bytes =
             Vec::with_capacity(t.out.len() + nodes_b.len() + recs_b.len() + reads_b.len() + misc.len() + 64);
         bytes.extend_from_slice(b"PXGRAPH0");
-        for sec in [&t.out, &nodes_b, &recs_b, &reads_b, &misc, &client_b] {
+        for sec in [&t.out, &nodes_b, &recs_b, &reads_b, &misc, &client_b, &env_b] {
             bytes.extend_from_slice(&(sec.len() as u64).to_le_bytes());
             bytes.extend_from_slice(sec);
         }
@@ -638,7 +646,7 @@ impl Engine {
         let mut secs: Vec<&[u8]> = Vec::new();
         {
             let mut o = 8usize;
-            for _ in 0..6 {
+            for _ in 0..7 {
                 let n = u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap_or([0; 8])) as usize;
                 secs.push(&bytes[o + 8..o + 8 + n]);
                 o += 8 + n;
