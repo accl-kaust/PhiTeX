@@ -63,10 +63,44 @@ def words(text):
     return out
 
 
-def body(text):
+def loose(text):
+    """(offset, word) of each plain word before a line's first command, brace,
+    math or comment, on a line that does not begin with a command: `words`
+    takes none from a line with a brace (a line of text with a citation)."""
+    out, off = [], 0
+    for line in text.split("\n"):
+        s = line.lstrip()
+        if s and not s.startswith(("\\", "%")) and "\\verb" not in line:
+            cut = min((i for i in map(line.find, ("\\", "{", "$", "%")) if i >= 0), default=len(line))
+            out += [(off + m.start(1), m.group(1)) for m in WORD.finditer(line[:cut] + " ")]
+        off += len(line) + 1
+    return out
+
+
+INPUT = re.compile(r"^[^%\n]*?\\(?:input|include|subfile)\{([^}]+)\}", re.M)
+
+
+def inputs(d, text, seen):
+    """The document's .tex files `text` reads in its body (after
+    \\begin{document}, where it has one) by \\input, \\include or
+    \\subfile, and the files they read, in the order read."""
+    out = []
+    for m in INPUT.finditer(text, max(text.find("\\begin{document}"), 0)):
+        g = d / m.group(1)
+        if g.suffix != ".tex":
+            g = g.with_name(g.name + ".tex")
+        if g.is_file() and g not in seen:
+            seen.add(g)
+            t = g.read_text(encoding="latin-1")
+            out.append((g, t))
+            out += inputs(d, t, seen)
+    return out
+
+
+def body(text, find=words):
     """The words after \\begin{document} (an edit of the preamble is another test)."""
     at = text.find("\\begin{document}")
-    return [w for w in words(text) if w[0] > at] if at >= 0 else []
+    return [w for w in find(text) if w[0] > at] if at >= 0 else []
 
 
 def other(w):
@@ -86,12 +120,31 @@ def one(args, c):
     main, job = c["main"], Path(c["main"]).stem
     res = {"id": c["id"], "engine": c["engine"], "edits": [], "red": []}
     path = d / main
-    text = path.read_text(encoding="latin-1")
-    cand = body(text)
+    texts = {path: path.read_text(encoding="latin-1")}
+    cand = [(path, at, w) for at, w in body(texts[path])]
     if len(cand) < len(PLACES):
-        res["skipped"] = f"{len(cand)} plain words in the body of {main}"
-        return res
-    picks = [cand[int(f * (len(cand) - 1))] for f in PLACES]
+        # (a main file whose body is \input's: the words of the files it
+        # reads too; then, too few still, the words before a line's first
+        # command, brace or math as well)
+        # (a file read with a preamble of its own: its body's)
+        def of(t, find):
+            return body(t, find) if "\\begin{document}" in t else find(t)
+
+        read = inputs(d, texts[path], {path})
+        for f, t in read:
+            texts[f] = t
+            cand += [(f, at, w) for at, w in of(t, words)]
+        if len(cand) < len(PLACES):
+            cand = [(path, at, w) for at, w in body(texts[path], loose)]
+            for f, t in read:
+                cand += [(f, at, w) for at, w in of(t, loose)]
+    # (no more words than places: each of them; a word two places fall
+    # on, once)
+    picks = cand if len(cand) <= len(PLACES) else list(dict.fromkeys(cand[int(f * (len(cand) - 1))] for f in PLACES))
+    if not picks:
+        res["skipped"] = f"{len(cand)} plain words in the body of {main} and the files it reads"
+        if not args.graph_check:
+            return res
     err = open(d.parent / f"{tag}.err", "w")
     if args.graph_check:
         # (docs/spec-persisted-graph.md, step 2: the session saves each
@@ -124,14 +177,20 @@ def one(args, c):
         if ev is None:
             res["red"].append("the watch's first build never came")
         # (the last place first: each edit keeps the offsets before it)
-        for at, w in sorted(picks, reverse=True):
+        # (none: a document with no word to type, its cold build and the
+        # graph check's load of it alone)
+        for f, at, w in sorted(picks, key=lambda x: (str(x[0]), x[1]), reverse=True):
             if ev is None:
                 break
+            text = texts[f]
             text = text[:at] + other(w) + text[at + len(w):]
+            texts[f] = text
             line = text.count("\n", 0, at) + 1
-            tmp = path.with_suffix(".tmp")
+            if f != path:
+                line = f"{f.relative_to(d)}:{line}"
+            tmp = f.with_suffix(".tmp")
             tmp.write_text(text, encoding="latin-1")
-            os.replace(tmp, path)
+            os.replace(tmp, f)
             t0 = time.monotonic()
             ev = build(args.timeout)
             e = {"line": line, "wall_ms": round((time.monotonic() - t0) * 1e3, 1)}
@@ -164,7 +223,8 @@ def one(args, c):
     # cold build drew draft boxes where the history had the figures)
     cold = WORK / "edit-cold" / tag
     common.fresh_copy(Path(args.doc) / c["dir"], cold)
-    (cold / main).write_text(text, encoding="latin-1")
+    for f, t in texts.items():
+        (cold / f.relative_to(d)).write_text(t, encoding="latin-1")
     ccache = WORK / "edit-cache" / f"{tag}-cold"
     shutil.rmtree(ccache, ignore_errors=True)
     ccache.mkdir(parents=True)
@@ -173,7 +233,7 @@ def one(args, c):
     common.run([args.bin, "build", "--exact-pdf", "--no-synctex", "--engine", c["engine"], "-j", str(args.threads), *args.extra, main],
                cold, cenv, args.timeout, out=cold / "term.txt")
     res["history_md5"], res["cold_md5"] = hist, md5(cold / f"{job}.pdf")
-    if len(res["edits"]) == len(PLACES) and hist != res["cold_md5"]:
+    if picks and len(res["edits"]) == len(picks) and hist != res["cold_md5"]:
         # (both PDFs kept, with where they first differ, and the files
         # each build read back)
         keep = Path(args.out) / "files" / tag

@@ -641,7 +641,9 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
         --threads "$j" --graph-check > "$r/editsweep.txt" 2>&1
       # (the sweep's bar of two runs a node a round is -j 1's: at more
       # threads an edit's runs ahead of their inputs are the schedule's,
-      # reported apart)
+      # reported apart; without any load revtex-aip's line-308 edit ran
+      # 250, 358 and 258 runs for 132-136 nodes at -j 8 in three
+      # processes, the PDF the cold build's each time, spec §2.2.4)
       if [ "$j" = 1 ]; then
         grep '^editsweep:' "$r/editsweep.txt" | head -60 >> "$r/red.txt"
       else

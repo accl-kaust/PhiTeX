@@ -2,7 +2,7 @@
 
 Status: step 1 (the engine's export and import) and step 2 (the
 client's tables, `Build::save` / `Build::load` in process, §2.2, §12)
-built; step 2's pdfTeX link state not saved yet (§2.2.4). Branch
+built, with pdfTeX's link state (step 2b, §2.2.4). Branch
 `persist-design`: the design's observe-only probe (`PHITEX_PERSIST_PROBE`). It builds on
 docs/note-persisted-graph.md (the 11-01 design note),
 docs/spec-seeded-reads.md (branch `seeded-r2`: why seeding definitions alone
@@ -137,8 +137,8 @@ client's state is one of:
 - **re-asked**: from the environment (step 3: the input manifest, §3.2);
 - **dropped**: a cache, made again when asked, or per evaluation, empty
   at a quiet point;
-- **not saved (blocker)**: state a load needs that the bytes do not hold
-  yet (§2.2.4).
+- (none is left unsaved: pdfTeX's link state, the step-2 blocker, is
+  saved since step 2b, §2.2.4).
 
 **Values keep their places.** A product that hashes value ids (a page's
 key, a read-time command's serial, a sealed line's head hash, a cut
@@ -171,8 +171,8 @@ stores of one process that hold the same page).
 | `rest_lines` (keys by stable ids) | saved | the lines a file's rest's pieces are given |
 | `fmt_made` | rebuilt | a fresh `fmtenv::Made`: a format's value made again when first asked is found at its saved id (interning by content) |
 | `held` | rebuilt | made from the environment, job and files at each evaluation's start |
-| the pages the live runs name (`pdfout::PAGE_KEYS`'s pieces) | **blocker** | §2.2.4 |
-| `pdf_cmds` (the read-time commands' steps) | **blocker** | §2.2.4 |
+| the pages the live runs name (`pdfout::PAGE_KEYS`'s pieces) | saved | by their values and fonts' record, §2.2.4 |
+| `pdf_cmds` (the read-time commands' steps) | saved | as data (`pdfout::step::Step`), §2.2.4 |
 | `defs` | rebuilt | the format's definitions (`prelude_defs`), as a cold build makes them |
 | `hints`: the analyses registered (`by_name`) | saved | `TextHints` encoded (`hints::kept`); a node's hint of a file read before is the registry's, history-dependent |
 | `hints`: node hints, decoded, answers, prepared | dropped | memos of the arguments and the registry |
@@ -227,7 +227,7 @@ session's tables are step 3's, with the cache file:
 | `ops::RUN_LOG`, `COMMANDS`, `COMMANDS_BY`, `RECUTS`, `EXEC_CLAIMS`, `control::LINES_TAKEN`, `nodes::MADE_STATS`, `FIN_PREDICTED`/`FIN_UNPREDICTED`, `feedback::MISSES` | dropped: counters |
 | `val::CS_BY_ID`, `TABLE` (control sequences by number) | safe: values hold a control sequence by its name (`Tok::encode`), never by the process's number |
 
-#### 2.2.4 Not saved yet: pdfTeX's link state (the step-2 blocker)
+#### 2.2.4 pdfTeX's link state (step 2b, saved)
 
 The exact PDF's link (pdfTeX) places, besides the line's records (values,
 saved), two tables of the process that are no values:
@@ -242,27 +242,68 @@ saved), two tables of the process that are no values:
   images' files);
 - **the read-time commands** (`Ops::pdf_cmds`, by serial: `\pdfobj`,
   `\pdfannot`'s and `\pdfstartlink`'s numbers, outlines, `\pdfximage`,
-  `\pdfxform`, map lines, `\pdfglyphtounicode`, colour stacks, ...): each a
-  closure the run made, with its fonts.
+  `\pdfxform`, map lines, `\pdfglyphtounicode`, colour stacks, ...), with
+  their fonts.
 
-A loaded build has neither: with nothing changed it runs nothing and
-gives the saved PDF, but an edit that runs the link links without them,
-and the PDF differs (amsldoc: 44 pages, 694 commands; acm: 6 pages, 6017
-commands; para4000: 692 pages; XeTeX's link is made from values alone, so
-Grail's edits after a load are exact). The fix, step 2b:
+Before step 2b a loaded build had neither, and an edit that ran the link
+gave another PDF (29 pdfTeX documents of the corpus). How they are saved
+now (crates/engines/tex/src/pdfout/save.rs, pdfout/step.rs):
 
-1. the fonts made from recorded reads: `fonts_for_with` and its helpers
-   read through a trait (the run, which records each question and its
-   answer, a value; or a replay of those answers); a page and a command
-   keep their record, which is saved, its values among the roots, and the
-   load makes the fonts again from it;
-2. a page saved by its values and its fonts' record, its box decoded
-   again from its page value;
-3. each read-time command a step described by data (an enum of the
-   fifteen kinds, each with the values and bytes its closure captures:
-   `\pdfxform`'s box from its value, `\pdfximage`'s image specification
-   and parameters, `\pdfobj`'s body), the closure made from it, the data
-   saved.
+1. **Fonts by their reads.** `fonts_for_with` and its helpers
+   (`map_line_files`, `image_fonts_with`, the map and PostScript map, the
+   writer's file lookups) read through `FontAsk`: of the run
+   (`Recording`, each answer kept, in order: a value (a font's info
+   field, a file found, a cell), an expanded font's parameters, a PK
+   request), or of a record (`Replay`). The fonts keep their record
+   (`FontsRec`: the question, `ids`, `space`, `read_in`, whether
+   `image_fonts` was asked, and the answers). The save writes it (its
+   values by stable id, roots of the export) and the fonts' digest; the
+   load makes the fonts again by answering the same questions
+   (`fonts_again`), refused where a question is not the one answered or
+   the digest differs.
+2. **A page by its values.** Its words, parameters, margins, whatsits
+   (handle, value, special), its page value, fonts record, sealed lines'
+   stand-ins and handles, pieces, places, writer's inputs, chain index,
+   node and break; its box decoded again from the page value's box as the
+   page's step decodes it, its stand-ins and handles checked equal to the
+   saved ones. Kept under its key for the loading store.
+3. **The commands as data.** The closures are gone: each command is a
+   `Step` (fourteen kinds: font name/number, page reference, colour
+   stack, object reserved, object, new object number, outline, font
+   attributes, included characters, map file/line, glyph to Unicode, no
+   built-in ToUnicode, image, form), applied by `Step::apply`. A kind
+   whose bytes are a value's keeps the value: an object's `file{...}` and
+   an image's file by their text values (bytes made again of them), an
+   outline's action value, a form's box value (decoded again) and its
+   whatsits' sources (a `\special`'s node or the writer's data value, the
+   relocation map the run made of its links' numbers). The rest is bytes
+   and numbers.
+4. Collection keeps every value a command or a page's fonts record holds
+   (`pdfout::collect_cmds`, `collect_pieces`).
+
+**acm's extra resume** (24 vs 25 runs, then 19 vs 20 on sample-sigconf
+at -j1, the twin running node 478, `resume`, once more) was not the
+link's numbers: it stayed with the link saved. The run log shows the
+build holding the node at the frontier before its run, the twin running
+it and stopping at a read past the frontier (`cs:__hook para/begin`), the
+run thrown away. The node's `held_frontier` flag (learnt where a run of
+it stopped at the settling layer's frontier, never cleared) was not
+exported. Now it is (`NF_HELD_FRONTIER`, the engine's bytes version 3),
+and the twin runs what the build runs (19 / 19 and every other edit).
+
+**The two -j8 report rules.** At more than one thread the gate compares
+an edit's outputs (PDF, log, written files) after a load, not its run
+counts, and the sweep's bar of two runs a node a round is reported
+apart, not red. Both quantities depend on the schedule with the outputs
+identical, shown without any load (n11, one binary, PHITEX_GRAPH_CHECK
+off, the same history in three processes): acm sample-sigconf's first
+two edits ran 62/63/63 and 43/42/41 runs, amsldoc's the same each time,
+the PDFs identical; revtex-aip's line-308 edit at -j8 ran 250, 358 and
+258 runs for 132, 136 and 132 nodes (at -j1: 209 for 131), the history's
+PDF the cold build's each time. Runs ahead of their inputs are the
+schedule's; the bar is -j1's (scripts/ci/editsweep.py) and stays red
+there, where the persist gate compares runs, runs by operation and nodes
+too.
 
 ### 2.3 Measured sizes
 
@@ -675,11 +716,11 @@ Steps 1 and 2 change no output and load nothing across processes. Step
   `scripts/accl/gate-fast persist [COMMIT] [N] [J]` (gate-shard.sh
   `persist`: ci/research.json under `editsweep.py --threads J
   --graph-check`; red for a refused or changed load, an edit whose
-  twin ran otherwise at -j1, or one whose twin's output differs; where
-  the build held link state the save leaves out, the line names it (red
-  until step 2b, §2.2.4). At more threads
-  the runs are reported, not compared (two evaluations of one change
-  run ahead of their inputs as their schedules have it).
+  twin ran otherwise at -j1, or one whose twin's output differs at any
+  -j; nothing carved out since step 2b, §2.2.4). At more threads the
+  runs are reported, not compared, and the sweep's two-runs-a-node bar
+  reported apart: both are the schedule's, the outputs identical
+  (§2.2.4, the two -j8 report rules).
 
 Measured on acclnode11 (local disk, release, `--shelf --exact-pdf`,
 the check's own lines; ms, one thread for save and load):
