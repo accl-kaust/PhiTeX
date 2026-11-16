@@ -5795,6 +5795,580 @@ fn copied_text_has_its_word_spaces() {
     assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }
 
+/// A PNG of `w` by `h` pixels in two colours, a checkerboard of
+/// 10-pixel squares (a figure's picture for `session png`'s tests).
+#[allow(
+    clippy::many_single_char_names,
+    reason = "a picture's sizes and colours"
+)]
+fn checker_png(w: u32, h: u32, a: [u8; 3], b: [u8; 3]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for y in 0..h {
+        raw.push(0);
+        for x in 0..w {
+            raw.extend_from_slice(if (x / 10 + y / 10) % 2 == 0 { &a } else { &b });
+        }
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8], data: &[u8]| {
+        out.extend_from_slice(&u32::try_from(data.len()).expect("a chunk").to_be_bytes());
+        let mut c = kind.to_vec();
+        c.extend_from_slice(data);
+        out.extend_from_slice(&c);
+        out.extend_from_slice(&phitex_codecs::zlib::crc32(&c).to_be_bytes());
+    };
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &phitex_codecs::deflate::compress(&raw, 6));
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// A watch started with `phitex session start` in `dir` (no viewer, its
+/// glyph origins kept by --synctex; its runtime folder `run`), stopped
+/// with `phitex session stop` when dropped.
+struct PngSession {
+    dir: PathBuf,
+    run: PathBuf,
+}
+
+impl PngSession {
+    fn start(dir: &Path, main: &str, extra: &[&str]) -> PngSession {
+        let run = dir.with_extension("run");
+        let _ = std::fs::remove_dir_all(&run);
+        std::fs::create_dir_all(&run).expect("a runtime folder");
+        let s = PngSession {
+            dir: dir.to_path_buf(),
+            run,
+        };
+        let mut args = vec![
+            "session",
+            "start",
+            main,
+            "--timeout",
+            "10m",
+            "--",
+            "--no-view",
+            "--synctex",
+        ];
+        args.extend_from_slice(extra);
+        let out = s.phitex(&args);
+        assert!(
+            out.status.success(),
+            "session start: {}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            std::fs::read_to_string(dir.join(".phitex/session.log")).unwrap_or_default()
+        );
+        s
+    }
+
+    fn phitex(&self, args: &[&str]) -> std::process::Output {
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), &self.dir)
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &self.run)
+            .output()
+            .expect("phitex runs")
+    }
+
+    /// `phitex session ARGS --json`'s object, the verb done.
+    fn json(&self, args: &[&str]) -> serde_json::Value {
+        let mut all = vec!["session"];
+        all.extend_from_slice(args);
+        all.push("--json");
+        let out = self.phitex(&all);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            panic!(
+                "{args:?}: no JSON: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        assert!(out.status.success(), "{args:?}: {v}");
+        v
+    }
+}
+
+impl Drop for PngSession {
+    fn drop(&mut self) {
+        let _ = self.phitex(&["session", "stop"]);
+    }
+}
+
+/// A page's text lines and its pictures and rules (points from its top
+/// left), as the viewer's renderer reads the PDF `pdf`.
+fn page_parts(
+    pdf: &str,
+    page: usize,
+) -> (Vec<phitex_render::TextLine>, Vec<[f64; 4]>, Vec<[f64; 4]>) {
+    let bytes: std::sync::Arc<[u8]> = std::fs::read(pdf).expect("the PDF").into();
+    let mut r = phitex_render::Renderer::new();
+    let lines = r.text(&bytes, page).expect("the page's text");
+    let (_, _, marks) = r.marks(&bytes, page).expect("the page's drawings");
+    let of = |k: &phitex_render::MarkKind| {
+        marks
+            .iter()
+            .filter(|m| std::mem::discriminant(&m.kind) == std::mem::discriminant(k))
+            .map(|m| m.rect)
+            .collect::<Vec<_>>()
+    };
+    (
+        lines,
+        of(&phitex_render::MarkKind::Image),
+        of(&phitex_render::MarkKind::Path),
+    )
+}
+
+/// Whether box `b` (left, top, right, bottom) holds the text of `line`
+/// from `x0` to `x1` (its baseline's points, half an x-height up).
+fn holds_text(b: &[f64], l: &phitex_render::TextLine, x0: f64, x1: f64) -> bool {
+    let y = l.y - 0.3 * l.size;
+    b[0] - 0.5 <= x0 && x1 <= b[2] + 0.5 && b[1] <= y && y <= b[3]
+}
+
+fn holds_rect(b: &[f64], r: &[f64; 4]) -> bool {
+    b[0] - 0.5 <= r[0] && b[1] - 0.5 <= r[1] && r[2] <= b[2] + 0.5 && r[3] <= b[3] + 0.5
+}
+
+fn bbox_of(v: &serde_json::Value) -> Vec<f64> {
+    v["bbox"]
+        .as_array()
+        .expect("a bbox")
+        .iter()
+        .map(|x| x.as_f64().expect("points"))
+        .collect()
+}
+
+/// A PNG file's width and height (its IHDR).
+fn png_size(p: &str) -> (u32, u32) {
+    let b = std::fs::read(p).expect("the PNG");
+    assert_eq!(&b[..8], b"\x89PNG\r\n\x1a\n", "{p}: not a PNG");
+    let n = |i: usize| u32::from_be_bytes(b[i..i + 4].try_into().expect("4 bytes"));
+    (n(16), n(20))
+}
+
+/// The two-column article `session png`'s tests draw from: a `figure*`
+/// (a picture above its caption), a column figure (a `TikZ` picture with
+/// text in it), a table (its caption above, booktabs' rules), two
+/// subfigures with their own labels, an equation, a heading; typed
+/// paragraphs between.
+fn png_article() -> String {
+    let para = |k: usize| -> String {
+        let words = [
+            "graph", "engine", "column", "render", "glyph", "origin", "layout", "measure",
+            "signal", "theorem", "bound", "thread", "memory", "vector", "kernel", "sample",
+        ];
+        let mut out = String::new();
+        for i in 0..60 {
+            let w = words[(i * 7 + k * 3 + i / 5) % words.len()];
+            out.push_str(w);
+            out.push(if i % 11 == 10 { '.' } else { ' ' });
+            if i % 11 == 10 {
+                out.push(' ');
+            }
+            if i % 9 == 8 {
+                out.push('\n');
+            }
+        }
+        format!("Paragraph {k} begins. {out}\n\n")
+    };
+    format!(
+        "\\documentclass[twocolumn]{{article}}\n\\usepackage{{graphicx}}\n\\usepackage{{tikz}}\n\\usepackage{{subcaption}}\n\\usepackage{{booktabs}}\n\\begin{{document}}\n\\section{{Introduction}}\\label{{sec:intro}}\n{p1}{p2}\
+\\begin{{figure*}}[t]\n  \\centering\n  \\includegraphics[width=0.8\\textwidth]{{wide.png}}\n  \\caption{{A wide figure across both columns.}}\\label{{fig:wide}}\n\\end{{figure*}}\n{p3}\
+\\begin{{figure}}[t]\n  \\centering\n  \\begin{{tikzpicture}}\n    \\draw[thick] (0,0) rectangle (3,2);\n    \\node at (1.5,1) {{inside}};\n  \\end{{tikzpicture}}\n  \\caption{{A column figure.}}\\label{{fig:col}}\n\\end{{figure}}\n\
+\\begin{{table}}[t]\n  \\centering\n  \\caption{{A small table.}}\\label{{tab:t}}\n  \\begin{{tabular}}{{lr}}\\toprule Name & Value\\\\\\midrule alpha & 1\\\\ beta & 2\\\\\\bottomrule\\end{{tabular}}\n\\end{{table}}\n{p4}\
+\\begin{{figure}}[h]\n  \\centering\n  \\begin{{subfigure}}{{0.45\\columnwidth}}\\centering\\includegraphics[width=\\linewidth]{{a.png}}\\caption{{Left part}}\\label{{fig:left}}\\end{{subfigure}}\\hfill\n  \\begin{{subfigure}}{{0.45\\columnwidth}}\\centering\\includegraphics[width=\\linewidth]{{b.png}}\\caption{{Right part}}\\label{{fig:right}}\\end{{subfigure}}\n  \\caption{{Two parts side by side.}}\\label{{fig:two}}\n\\end{{figure}}\n{p5}\
+\\begin{{equation}}\n  E = mc^2 \\label{{eq:e}}\n\\end{{equation}}\n{p6}\
+The sentence on this line is the one to find.\n{p7}\\end{{document}}\n",
+        p1 = para(1),
+        p2 = para(2),
+        p3 = para(3),
+        p4 = para(4),
+        p5 = para(5),
+        p6 = para(6),
+        p7 = para(7),
+    )
+}
+
+/// The article's folder: the document and its pictures.
+fn png_article_dir(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    std::fs::write(dir.join("doc.tex"), png_article()).expect("the document");
+    for (f, w, h, a, b) in [
+        ("wide.png", 400, 120, [70, 130, 180], [200, 220, 240]),
+        ("a.png", 120, 90, [200, 80, 80], [250, 200, 200]),
+        ("b.png", 120, 90, [80, 160, 80], [200, 240, 200]),
+    ] {
+        std::fs::write(dir.join(f), checker_png(w, h, a, b)).expect("a picture");
+    }
+    dir
+}
+
+/// `phitex session png --label` on a two-column article: each label's
+/// float whole (its picture or table and its caption, a subfigure's own
+/// picture and caption), and nothing of the text around it; the PNG the
+/// part's size at the dpi asked.
+#[test]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+fn session_png_label() {
+    let _one = one();
+    let dir = png_article_dir("session-png-label");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let png = |label: &str| s.json(&["png", "--label", label, "--dpi", "100"]);
+    let parts = |v: &serde_json::Value| {
+        page_parts(
+            v["pdf"].as_str().expect("the PDF"),
+            usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page"),
+        )
+    };
+    let line = |lines: &[phitex_render::TextLine], t: &str| -> phitex_render::TextLine {
+        lines
+            .iter()
+            .find(|l| l.text.contains(t))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no line {t:?} in {:?}",
+                    lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    };
+    // (the words `t` of a line: their line and left and right)
+    let span =
+        |lines: &[phitex_render::TextLine], t: &str| -> (phitex_render::TextLine, f64, f64) {
+            let l = line(lines, t);
+            let i = l.text.find(t).expect("the words");
+            let a = l.text[..i].encode_utf16().count();
+            let e = a + t.encode_utf16().count() - 1;
+            let (x0, x1) = (l.xs[a], l.rs[e]);
+            (l, x0, x1)
+        };
+    let words = |b: &[f64], lines: &[phitex_render::TextLine], t: &str| {
+        let (l, x0, x1) = span(lines, t);
+        holds_text(b, &l, x0, x1)
+    };
+    // (no line of the text in it: a body line's middle outside)
+    let no_text = |b: &[f64], lines: &[phitex_render::TextLine], what: &str| {
+        // (the paragraphs' lines: their words, which no float has)
+        let body = [
+            "Paragraph",
+            "theorem",
+            "kernel",
+            "signal",
+            "memory",
+            "thread",
+            "sample",
+        ];
+        for l in lines
+            .iter()
+            .filter(|l| body.iter().any(|w| l.text.contains(w)))
+        {
+            let mid = l.x + l.w / 2.0;
+            assert!(
+                !holds_text(b, l, mid, mid),
+                "{what}: a line of the text in it: {:?} at {b:?}",
+                l.text
+            );
+        }
+    };
+    for (label, caption, number) in [
+        ("fig:wide", "A wide figure across both columns.", "1"),
+        ("fig:col", "A column figure.", "2"),
+        ("tab:t", "A small table.", "1"),
+        ("fig:left", "Left part", "3a"),
+        ("fig:two", "Two parts side by side.", "3"),
+        ("eq:e", "E", "1"),
+        ("sec:intro", "Introduction", "1"),
+    ] {
+        let v = png(label);
+        eprintln!("{label}: {v}");
+        let b = bbox_of(&v);
+        assert_eq!(v["number"], number, "{label}: {v}");
+        let (w, h) = png_size(v["png"].as_str().expect("its PNG"));
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(u64::from(w)), Some(u64::from(h))),
+            "{label}"
+        );
+        let px = |a: f64, z: f64| ((z - a) * 100.0 / 72.0).round();
+        assert!(
+            (f64::from(w) - px(b[0], b[2])).abs() <= 1.0
+                && (f64::from(h) - px(b[1], b[3])).abs() <= 1.0,
+            "{label}: {w}x{h} for {b:?}"
+        );
+        let (lines, images, paths) = parts(&v);
+        assert!(
+            words(&b, &lines, caption),
+            "{label}: its caption {caption:?} not in {b:?}"
+        );
+        match label {
+            "fig:wide" => {
+                let wide = images
+                    .iter()
+                    .find(|r| r[2] - r[0] > 300.0)
+                    .expect("the wide picture");
+                assert!(
+                    holds_rect(&b, wide),
+                    "{label}: its picture {wide:?} not in {b:?}"
+                );
+                no_text(&b, &lines, label);
+            }
+            "fig:col" => {
+                assert!(words(&b, &lines, "inside"), "{label}: the picture's text");
+                let frame = paths
+                    .iter()
+                    .find(|r| (r[2] - r[0] - 85.0).abs() < 4.0)
+                    .expect("the picture's frame");
+                assert!(
+                    holds_rect(&b, frame),
+                    "{label}: its picture {frame:?} not in {b:?}"
+                );
+                no_text(&b, &lines, label);
+            }
+            "tab:t" => {
+                for t in ["Name", "alpha", "beta"] {
+                    assert!(words(&b, &lines, t), "{label}: {t:?}");
+                }
+                let beta = line(&lines, "beta");
+                let rules: Vec<&[f64; 4]> = paths
+                    .iter()
+                    .filter(|r| {
+                        r[3] - r[1] < 5.0
+                            && r[0] < beta.x + 5.0
+                            && r[2] > beta.x
+                            && r[1] > b[1] - 20.0
+                            && r[1] < beta.y + 8.0
+                    })
+                    .collect();
+                assert_eq!(
+                    rules.len(),
+                    3,
+                    "{label}: booktabs' three rules: {rules:?} of {paths:?}, beta at {} {}",
+                    beta.x,
+                    beta.y
+                );
+                for r in rules {
+                    assert!(holds_rect(&b, r), "{label}: a rule {r:?} not in {b:?}");
+                }
+                no_text(&b, &lines, label);
+            }
+            "fig:left" => {
+                let left = images
+                    .iter()
+                    .find(|r| r[2] - r[0] < 150.0 && r[0] < b[0] + 30.0)
+                    .expect("its picture");
+                assert!(
+                    holds_rect(&b, left),
+                    "{label}: its picture {left:?} not in {b:?}"
+                );
+                let (right, x0, x1) = span(&lines, "Right part");
+                let mid = f64::midpoint(x0, x1);
+                assert!(
+                    !holds_text(&b, &right, mid, mid),
+                    "{label}: the other subfigure's caption in {b:?}"
+                );
+                let two = line(&lines, "Two parts");
+                assert!(
+                    two.y - 0.3 * two.size > b[3],
+                    "{label}: the figure's caption in {b:?}"
+                );
+            }
+            "fig:two" => {
+                for r in images.iter().filter(|r| r[2] - r[0] < 150.0) {
+                    assert!(holds_rect(&b, r), "{label}: a picture {r:?} not in {b:?}");
+                }
+                assert!(
+                    words(&b, &lines, "Left part") && words(&b, &lines, "Right part"),
+                    "{label}"
+                );
+                no_text(&b, &lines, label);
+            }
+            "eq:e" => {
+                assert!(words(&b, &lines, "(1)"), "{label}: its number");
+            }
+            _ => no_text(&b, &lines, label),
+        }
+    }
+    // (no such label: refused)
+    let out = s.phitex(&["session", "png", "--label", "fig:none"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `phitex session where LABEL` says the page and box `png` draws, and
+/// draws nothing; its text the same as its JSON.
+#[test]
+fn session_where() {
+    let _one = one();
+    let dir = png_article_dir("session-where");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let w = s.json(&["where", "fig:col"]);
+    assert!(w.get("png").is_none(), "{w}");
+    let p = s.json(&["png", "--label", "fig:col"]);
+    for k in ["page", "bbox", "build", "number"] {
+        assert_eq!(w[k], p[k], "{k}: where {w}, png {p}");
+    }
+    let out = s.phitex(&["session", "where", "fig:col"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let b = bbox_of(&w);
+    assert!(
+        text.starts_with(&format!(
+            "fig:col: page {}, {:.2} {:.2} {:.2} {:.2} pt",
+            w["page"], b[0], b[1], b[2], b[3]
+        )),
+        "{text}"
+    );
+}
+
+/// `phitex session png --at FILE:LINE`: the words that line made, padded
+/// by `--context`; not the lines around it.
+#[test]
+fn session_png_at_line() {
+    let _one = one();
+    let dir = png_article_dir("session-png-at");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let text = png_article();
+    let line = text
+        .lines()
+        .position(|l| l.starts_with("The sentence on this line"))
+        .expect("the line")
+        + 1;
+    let v = s.json(&["png", "--at", &format!("doc.tex:{line}"), "--context", "1"]);
+    let b = bbox_of(&v);
+    let page = usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page");
+    let (lines, _, _) = page_parts(v["pdf"].as_str().expect("the PDF"), page);
+    let all: String = lines.iter().map(|l| l.text.clone() + "\n").collect();
+    // (its words: from "The sentence" to "find.", across lines or not)
+    let mut seen = 0;
+    for l in &lines {
+        for w in ["sentence", "find."] {
+            if let Some(i) = l.text.find(w) {
+                let units = l.text[..i].encode_utf16().count();
+                let end = units + w.encode_utf16().count() - 1;
+                assert!(
+                    holds_text(&b, l, l.xs[units], l.rs[end]),
+                    "{w:?} not in {b:?}: {all}"
+                );
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 2, "{all}");
+    assert!(b[3] - b[1] < 40.0, "more than its lines: {b:?}");
+    let out = s.phitex(&["session", "png", "--at", "doc.tex:100000"]);
+    assert_eq!(out.status.code(), Some(4));
+}
+
+/// `phitex session png --diff`: the same part of the build before and of
+/// this one, side by side with the pixels that changed; none changed,
+/// none said.
+#[test]
+fn session_png_diff() {
+    let _one = one();
+    let dir = png_article_dir("session-png-diff");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    // (one build: nothing to compare with)
+    let out = s.phitex(&["session", "png", "--label", "fig:col", "--diff"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = png_article().replace("A column figure.", "A column figure, its caption longer.");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the edit");
+    let v = s.json(&["png", "--label", "fig:col", "--diff", "--dpi", "100"]);
+    assert!(v["changed"].as_u64().expect("a count") > 0, "{v}");
+    assert_eq!(
+        v["before"].as_u64(),
+        v["build"].as_u64().map(|b| b - 1),
+        "{v}"
+    );
+    let b = bbox_of(&v);
+    let w = ((b[2] - b[0]) * 100.0 / 72.0).round();
+    let (pw, ph) = png_size(v["png"].as_str().expect("its PNG"));
+    assert!(
+        (f64::from(pw) - (3.0 * w + 16.0)).abs() <= 3.0,
+        "{pw} for parts {w} wide"
+    );
+    assert_eq!(Some(u64::from(ph)), v["height"].as_u64());
+    // (the text again as it was: the build before has the edit, this one not;
+    // a save with no change between: alike)
+    std::fs::write(dir.join("doc.tex"), png_article()).expect("the edit undone");
+    let again = s.json(&["png", "--label", "fig:col", "--diff"]);
+    assert!(again["changed"].as_u64().expect("a count") > 0, "{again}");
+    std::fs::write(dir.join("doc.tex"), png_article() + "\n").expect("a blank line");
+    let same = s.json(&["png", "--label", "fig:col", "--diff"]);
+    assert_eq!(same["changed"], 0, "{same}");
+}
+
+/// `session png` of a xelatex document (fontspec): a figure and a table
+/// with its rules, each with its caption.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn session_png_xelatex() {
+    let _one = one();
+    let dir = scratch("session-png-xe");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\documentclass{article}\n\\usepackage{fontspec}\n\\usepackage{graphicx}\n\\begin{document}\n\\section{XeTeX}\nSome text before the figure, typed here, a line of it or two to show that the figure stands apart from it.\n\n\\begin{figure}[ht]\n  \\centering\n  \\includegraphics[width=5cm]{wide.png}\n  \\caption{A figure under xelatex.}\\label{fig:xe}\n\\end{figure}\nMore text after the figure, and before the table, a line or two of it.\n\n\\begin{table}[ht]\n  \\centering\n  \\caption{A xelatex table.}\\label{tab:xe}\n  \\begin{tabular}{|l|r|}\\hline A & 1\\\\\\hline B & 2\\\\\\hline\\end{tabular}\n\\end{table}\nText after the table closes the document.\n\\end{document}\n",
+    )
+    .expect("the document");
+    std::fs::write(
+        dir.join("wide.png"),
+        checker_png(400, 120, [70, 130, 180], [200, 220, 240]),
+    )
+    .expect("the picture");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    for (label, caption) in [
+        ("fig:xe", "A figure under xelatex."),
+        ("tab:xe", "A xelatex table."),
+    ] {
+        let v = s.json(&["png", "--label", label]);
+        let b = bbox_of(&v);
+        let page = usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page");
+        let (lines, images, paths) = page_parts(v["pdf"].as_str().expect("the PDF"), page);
+        let cap = lines
+            .iter()
+            .find(|l| l.text.contains(caption))
+            .expect("the caption");
+        assert!(holds_text(&b, cap, cap.x, cap.x + cap.w), "{label}: {b:?}");
+        if label == "fig:xe" {
+            assert!(
+                images.iter().all(|r| holds_rect(&b, r)),
+                "{label}: {images:?} in {b:?}"
+            );
+        } else {
+            let rules: Vec<_> = paths
+                .iter()
+                .filter(|r| r[1] > cap.y - 2.0 && r[1] < cap.y + 40.0)
+                .collect();
+            assert!(rules.len() >= 5, "{label}: {rules:?}");
+            assert!(
+                rules.iter().all(|r| holds_rect(&b, r)),
+                "{label}: {rules:?} in {b:?}"
+            );
+        }
+        for t in [
+            "Some text before",
+            "More text after",
+            "Text after the table",
+        ] {
+            let l = lines
+                .iter()
+                .find(|l| l.text.contains(t))
+                .expect("a line of text");
+            let mid = l.x + l.w / 2.0;
+            assert!(!holds_text(&b, l, mid, mid), "{label}: {t:?} in {b:?}");
+        }
+    }
+}
+
 /// `oracle/fixtures/latexmkrc/NAME/` copied (hidden files too) into a
 /// fresh directory, with an empty home of its own (no user's
 /// `.latexmkrc`) beside it.

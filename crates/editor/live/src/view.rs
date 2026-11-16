@@ -189,6 +189,19 @@ pub enum Ask {
         to: Option<String>,
         synctex: bool,
     },
+    /// What `phitex session png` and `where` look at, made now of the
+    /// last build: its exact PDF and the last build's before it, as
+    /// `build-N.pdf` in folder `dir`, the pages the lines of the source
+    /// ranges `at` (file, start, end) were placed on, and the glyph
+    /// origins of those and of `pages` (from 0): done by the session's
+    /// owner, which says when, by `id`.
+    Shot {
+        id: u64,
+        dir: String,
+        at: Vec<(String, usize, usize)>,
+        pages: Vec<usize>,
+        label: Option<String>,
+    },
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.

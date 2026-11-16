@@ -167,6 +167,73 @@ pub enum Verb {
     /// Your edits the user has not accepted yet, the verdicts and the
     /// comments on them
     Changes,
+    /// Draw what a label labels (a figure or table with its caption, a
+    /// subfigure, an equation, a heading), or what a source line made,
+    /// cropped, as a PNG: its path, page and box
+    ///
+    /// Waits for a build of the files as they are now (as `wait`), then
+    /// draws from its exact PDF; no other program is run. What a label
+    /// labels is the innermost environment around its \label (else the
+    /// paragraph or heading it ends). It is found on the page the engine
+    /// placed it on by its words; the part is their lines, what the page
+    /// draws among them, and the pictures and rules beside them that the
+    /// source puts there. Written to .phitex/png/LABEL-buildN.png
+    /// (FILE-LINE-buildN.png) unless --out. The watch's glyph origins (a
+    /// watch with its viewer, as `session start`'s, or with --synctex)
+    /// name the page at once and tell the text around it apart; without
+    /// them every page is looked at.
+    Png {
+        /// The label (as in \label{LABEL}) of what to draw
+        #[arg(
+            long,
+            value_name = "LABEL",
+            required_unless_present = "at",
+            conflicts_with = "at"
+        )]
+        label: Option<String>,
+        /// What line LINE (from 1) of FILE made, instead
+        #[arg(long, value_name = "FILE:LINE")]
+        at: Option<String>,
+        /// Pixels per inch
+        #[arg(long, value_name = "N", default_value_t = 150)]
+        dpi: u32,
+        /// Write the PNG to PATH
+        #[arg(long, value_name = "PATH")]
+        out: Option<String>,
+        /// Points of the page around it (default 3)
+        #[arg(long, value_name = "PT")]
+        context: Option<String>,
+        /// The same part of the page in the build before and in this one,
+        /// side by side, then this one with the pixels that changed in red
+        /// (.phitex/png/NAME-buildM-vs-N.png)
+        #[arg(long)]
+        diff: bool,
+        /// Give up waiting for the build after TIME (default 60s)
+        #[arg(long, value_name = "TIME")]
+        timeout: Option<String>,
+    },
+    /// Where what a label labels (or what a source line made) is: its
+    /// page and box in points from the page's top left, nothing drawn
+    ///
+    /// As `png` finds it.
+    Where {
+        /// The label (as in \label{LABEL})
+        #[arg(
+            value_name = "LABEL",
+            required_unless_present = "at",
+            conflicts_with = "at"
+        )]
+        label: Option<String>,
+        /// What line LINE (from 1) of FILE made, instead
+        #[arg(long, value_name = "FILE:LINE")]
+        at: Option<String>,
+        /// Points of the page around it (default 3)
+        #[arg(long, value_name = "PT")]
+        context: Option<String>,
+        /// Give up waiting for the build after TIME (default 60s)
+        #[arg(long, value_name = "TIME")]
+        timeout: Option<String>,
+    },
 }
 
 /// Why a verb could not be done, and the status it exits with.
@@ -621,6 +688,63 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         if v["synctex"] == true {
                             println!("{}.synctex.gz", pdf.trim_end_matches(".pdf"));
                         }
+                    }
+                    Ok(0)
+                }
+                Verb::Png {
+                    label,
+                    at,
+                    dpi,
+                    out: to,
+                    context,
+                    diff,
+                    timeout,
+                } => {
+                    let what = What::of(label.as_deref(), at.as_deref())?;
+                    let f = locate(&mut c, &s, &what, context.as_deref(), timeout.as_deref())?;
+                    let v = draw(&f, &what, *dpi, to.as_deref(), *diff)?;
+                    if as_json {
+                        out(&v);
+                    } else {
+                        println!("{}", where_line(&f, &what));
+                        println!(
+                            "{} ({}x{} px, {dpi} dpi)",
+                            v["png"].as_str().unwrap_or(""),
+                            v["width"],
+                            v["height"]
+                        );
+                        if *diff {
+                            let n = v["changed"].as_u64().unwrap_or(0);
+                            println!(
+                                "{}",
+                                if n == 0 {
+                                    format!(
+                                        "build {} and build {} draw it alike",
+                                        v["before"], f.build
+                                    )
+                                } else {
+                                    format!(
+                                        "{n} pixels differ between build {} (left) and build {} (middle; right: in red)",
+                                        v["before"], f.build
+                                    )
+                                }
+                            );
+                        }
+                    }
+                    Ok(0)
+                }
+                Verb::Where {
+                    label,
+                    at,
+                    context,
+                    timeout,
+                } => {
+                    let what = What::of(label.as_deref(), at.as_deref())?;
+                    let f = locate(&mut c, &s, &what, context.as_deref(), timeout.as_deref())?;
+                    if as_json {
+                        out(&found_json(&f, &what));
+                    } else {
+                        println!("{}", where_line(&f, &what));
                     }
                     Ok(0)
                 }
@@ -1415,8 +1539,770 @@ fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Va
     }
 }
 
+/// What `png` and `where` look for: a label, or a source line.
+#[derive(Debug)]
+enum What {
+    Label(String),
+    /// A file (as given, from here) and its line, from 1.
+    Line(String, usize),
+}
+
+impl What {
+    fn of(label: Option<&str>, at: Option<&str>) -> Result<What, Failed> {
+        if let Some(l) = label {
+            return Ok(What::Label(l.trim().to_owned()));
+        }
+        let at = at.unwrap_or("");
+        let bad = || {
+            Failed(
+                EXIT_REFUSED,
+                format!("--at {at}: FILE:LINE, such as main.tex:42"),
+            )
+        };
+        let (f, l) = at.rsplit_once(':').ok_or_else(bad)?;
+        let l: usize = l.trim().parse().map_err(|_| bad())?;
+        if l == 0 || f.is_empty() {
+            return Err(bad());
+        }
+        Ok(What::Line(f.to_owned(), l))
+    }
+
+    /// Its name in a file's name: `fig-x`, `main.tex-42`.
+    fn slug(&self) -> String {
+        let s = match self {
+            What::Label(l) => l.clone(),
+            What::Line(f, l) => format!("{f}-{l}"),
+        };
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+
+    fn said(&self) -> String {
+        match self {
+            What::Label(l) => l.clone(),
+            What::Line(f, l) => format!("{f}:{l}"),
+        }
+    }
+}
+
+/// Where `png` and `where` found it: the build, the page (from 0), the
+/// part (points from the page's top left), the PDFs, and what the .aux
+/// says of a label (its number and page as printed).
+struct Found {
+    build: u64,
+    page: usize,
+    rect: [f64; 4],
+    pdf: PathBuf,
+    before: Option<(u64, PathBuf)>,
+    number: Option<String>,
+    printed: Option<String>,
+    /// Found from the label's PDF destination, its source not found: the
+    /// part a guess around it.
+    approximate: bool,
+}
+
+/// `\newlabel{L}{{NUMBER}{PAGE}{TITLE}{ANCHOR}{…}}`'s groups.
+fn newlabel_fields(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    // (the second group's contents)
+    let Some(i) = line.find("}{").map(|i| i + 2) else {
+        return out;
+    };
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for &c in &b[i..] {
+        match c {
+            b'{' => {
+                if depth > 0 {
+                    cur.push('{');
+                }
+                depth += 1;
+            }
+            b'}' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    out.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push('}');
+                }
+            }
+            _ if depth > 0 => cur.push(char::from(c)),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The source of a project file (from the root), comments blanked.
+fn source(root: &Path, name: &str) -> Option<Vec<u8>> {
+    let p = root.join(name.trim_start_matches("./"));
+    std::fs::read(&p)
+        .or_else(|_| std::fs::read(p.with_extension("tex")))
+        .ok()
+        .map(|t| crate::shot::uncommented(&t))
+}
+
+/// The source's claims on the drawings beside the glyphs found
+/// ([`crate::shot::Claims`]).
+struct Src<'a> {
+    root: &'a Path,
+    names: &'a [String],
+    codes: &'a [crate::shot::Code],
+    /// The element's source (comments blanked), its range, and the bytes
+    /// of the words of it found on the page.
+    text: &'a [u8],
+    range: (usize, usize),
+    shown: (usize, usize),
+    texts: std::cell::RefCell<std::collections::HashMap<u32, Option<Vec<u8>>>>,
+}
+
+impl Src<'_> {
+    fn with_text<T>(&self, file: u32, f: impl FnOnce(&[u8]) -> T) -> Option<T> {
+        let mut texts = self.texts.borrow_mut();
+        let t = texts.entry(file).or_insert_with(|| {
+            let name = self.names.get(file as usize)?;
+            if Path::new(name).is_absolute() {
+                return None;
+            }
+            source(self.root, name)
+        });
+        t.as_deref().map(f)
+    }
+}
+
+impl crate::shot::Claims for Src<'_> {
+    fn ours(&self, head: bool) -> bool {
+        let ((a, b), (first, last)) = (self.range, self.shown);
+        let t = self.text;
+        let part = if head {
+            &t[a.min(t.len())..first.clamp(a, b).min(t.len())]
+        } else {
+            &t[last.clamp(a, b).min(t.len())..b.min(t.len())]
+        };
+        crate::shot::has_ink(part)
+    }
+
+    fn theirs(&self, code: usize, tail: bool) -> bool {
+        let c = self.codes[code];
+        self.with_text(c.file, |t| {
+            let (s, e) = (c.start as usize, (c.end as usize).max(c.start as usize));
+            let Some(env) = crate::shot::envs(t)
+                .into_iter()
+                .filter(|v| v.start <= s && e <= v.end && v.name != "document")
+                .min_by_key(|v| v.end - v.start)
+            else {
+                return false;
+            };
+            if tail {
+                crate::shot::has_ink(&t[e.min(env.end)..env.end])
+            } else {
+                crate::shot::has_ink(&t[env.start..s.max(env.start)])
+            }
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// A page's glyph origins from a shot's answer: its codes.
+fn page_codes(p: &Value) -> Vec<crate::shot::Code> {
+    let arr = |k: &str| p[k].as_array().cloned().unwrap_or_default();
+    let (file, start, end, x, y) = (arr("file"), arr("start"), arr("end"), arr("x"), arr("y"));
+    let synth = arr("synth");
+    let u = |a: &Value| {
+        a.as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(u32::MAX)
+    };
+    (0..file.len())
+        .map(|i| crate::shot::Code {
+            file: u(&file[i]),
+            start: u(&start[i]),
+            end: u(&end[i]),
+            synth: synth.get(i).and_then(Value::as_bool).unwrap_or(true),
+            x: x[i].as_f64().unwrap_or(f64::NAN),
+            y: y[i].as_f64().unwrap_or(f64::NAN),
+        })
+        .collect()
+}
+
+/// The source range of what `png` and `where` look for: a line's bytes;
+/// a label's element (its environment, or its paragraph) and the files
+/// it inputs, whole, after it; the file each is in, from the root.
+fn ranges_of(
+    what: &What,
+    root: &Path,
+    read: &[String],
+    main: &str,
+) -> Result<Vec<(String, usize, usize)>, Failed> {
+    let mut ranges = Vec::new();
+    match what {
+        What::Line(f, l) => {
+            let here = std::env::current_dir().unwrap_or_default();
+            let p = here.join(f);
+            let p = p.canonicalize().unwrap_or(p);
+            let top = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+            let name = p
+                .strip_prefix(&top)
+                .map_err(|_| {
+                    Failed(
+                        EXIT_REFUSED,
+                        format!("{f}: not a file of the watch's folder ({})", top.display()),
+                    )
+                })?
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read(&p).map_err(|e| Failed(EXIT_REFUSED, format!("{f}: {e}")))?;
+            let starts: Vec<usize> = std::iter::once(0)
+                .chain(
+                    text.iter()
+                        .enumerate()
+                        .filter(|x| *x.1 == b'\n')
+                        .map(|x| x.0 + 1),
+                )
+                .collect();
+            let a = *starts
+                .get(l - 1)
+                .filter(|&&a| a < text.len())
+                .ok_or_else(|| {
+                    Failed(EXIT_REFUSED, format!("{f} has {} lines", starts.len() - 1))
+                })?;
+            let b = starts.get(*l).map_or(text.len(), |e| e - 1);
+            ranges.push((name, a, b.max(a + 1)));
+        }
+        What::Label(l) => {
+            let mut files: Vec<&String> = read
+                .iter()
+                .filter(|n| {
+                    let e = Path::new(n)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    matches!(e, "tex" | "ltx" | "")
+                })
+                .collect();
+            // (the main file first)
+            files.sort_by_key(|n| n.as_str() != main);
+            for name in files {
+                let Some(t) = source(root, name) else {
+                    continue;
+                };
+                let Some((a, b)) = crate::shot::label_place(&t, l) else {
+                    continue;
+                };
+                let (start, end, _) = crate::shot::labelled(&t, a, b);
+                ranges.push((name.clone(), start, end));
+                let base = Path::new(name).parent().unwrap_or(Path::new(""));
+                for inp in crate::shot::inputs(&t, start, end) {
+                    let found = [inp.clone(), format!("{inp}.tex")]
+                        .into_iter()
+                        .flat_map(|c| [root.join(&c), root.join(base).join(&c)])
+                        .find(|p| p.is_file());
+                    if let Some(p) = found {
+                        let n = p
+                            .strip_prefix(root)
+                            .map_or_else(|_| inp.clone(), |x| x.to_string_lossy().into_owned());
+                        let len = std::fs::metadata(&p)
+                            .map_or(0, |m| usize::try_from(m.len()).unwrap_or(usize::MAX));
+                        ranges.push((n, 0, len));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    Ok(ranges)
+}
+
+/// Where an element shows best on a page: its page (from 0), the page's
+/// size, drawings and glyph words, and the match ([`crate::shot::find`])
+/// of the element's words chosen.
+struct Shown {
+    page: usize,
+    size: (f64, f64),
+    marks: Vec<phitex_render::Mark>,
+    words: Vec<crate::shot::Word>,
+    found: crate::shot::Found,
+}
+
+/// `png`'s and `where`'s search: the build of the files as they are now
+/// waited for, the label's (or the line's) source range found, the
+/// watch's shot of that build taken ([`crate::review::Hub`]'s
+/// `phitex/session/shot`), the page that shows the element's words
+/// found (those the engine placed its lines on first, then the one its
+/// .aux names, then every page) and the part of it the element is drawn
+/// on ([`crate::shot::region`]), `context` points around it.
+#[allow(clippy::too_many_lines)]
+fn locate(
+    c: &mut Conn,
+    s: &Value,
+    what: &What,
+    context: Option<&str>,
+    timeout: Option<&str>,
+) -> Result<Found, Failed> {
+    let pad = match context {
+        Some(p) => p
+            .trim()
+            .trim_end_matches("pt")
+            .parse::<f64>()
+            .ok()
+            .filter(|p| p.is_finite() && *p >= 0.0)
+            .ok_or_else(|| Failed(EXIT_REFUSED, format!("--context {p}: points, such as 12")))?,
+        None => 3.0,
+    };
+    let t = match timeout {
+        Some(t) => duration(t).map_err(|e| Failed(EXIT_REFUSED, e))?,
+        None => Some(Duration::from_secs(60)),
+    };
+    let ms = t.map_or(0, |d| d.as_millis());
+    let w = c.call(
+        "phitex/session/wait",
+        &json!({"timeout_ms": ms}),
+        t.map(|d| d + Duration::from_secs(30)),
+    )?;
+    if w["timed_out"] == true {
+        return Err(Failed(
+            EXIT_TIMEOUT,
+            "timed out: no build has read the files as they are now".into(),
+        ));
+    }
+    let root = PathBuf::from(s["root"].as_str().unwrap_or("."));
+    if let Some(said) = crate::review::make_dir(&root).map_err(|e| Failed(EXIT_REFUSED, e))? {
+        eprintln!("phitex: {said}");
+    }
+    let label = match what {
+        What::Label(l) => Some(l.clone()),
+        What::Line(..) => None,
+    };
+    let shot = |c: &mut Conn, at: &[(String, usize, usize)], pages: &[usize]| {
+        c.call(
+            "phitex/session/shot",
+            &json!({
+                "dir": ".phitex/png/builds",
+                "at": at.iter().map(|(f, a, b)| json!([f, a, b])).collect::<Vec<_>>(),
+                "pages": pages,
+                "label": label,
+            }),
+            Some(Duration::from_secs(600)),
+        )
+    };
+    let v0 = shot(c, &[], &[])?;
+    let strs = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(str::to_owned))
+            .collect()
+    };
+    let ranges = ranges_of(
+        what,
+        &root,
+        &strs(&v0["read"]),
+        v0["main"].as_str().unwrap_or(""),
+    )?;
+    let v = if ranges.is_empty() {
+        v0
+    } else {
+        shot(c, &ranges, &[])?
+    };
+    let build = v["build"].as_u64().unwrap_or(0);
+    let pdf = PathBuf::from(v["pdf"].as_str().unwrap_or(""));
+    let before = v["before"]["pdf"]
+        .as_str()
+        .map(|p| (v["before"]["build"].as_u64().unwrap_or(0), PathBuf::from(p)));
+    let fields = v["newlabel"]
+        .as_str()
+        .map(newlabel_fields)
+        .unwrap_or_default();
+    let number = fields.first().cloned().filter(|x| !x.is_empty());
+    let printed = fields.get(1).cloned().filter(|x| !x.is_empty());
+    let bytes: std::sync::Arc<[u8]> = std::fs::read(&pdf)
+        .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", pdf.display())))?
+        .into();
+    let mut r = phitex_render::Renderer::new();
+    let no_page = |k: usize| {
+        Failed(
+            EXIT_REFUSED,
+            format!("{}: no page {}", pdf.display(), k + 1),
+        )
+    };
+    if ranges.is_empty() {
+        // (no \label{…} in the files read: the label's destination, where
+        // hyperref made one, else nothing to go by)
+        let l = what.said();
+        let anchor = fields.get(3).filter(|a| !a.is_empty());
+        let place = anchor.and_then(|a| r.dest(&bytes, a));
+        let (Some((k, top, _)), true) = (place, v["newlabel"].is_string()) else {
+            return Err(Failed(
+                EXIT_REFUSED,
+                if v["newlabel"].is_string() {
+                    format!(
+                        "{l}: its \\label is in none of the files the build read (a macro's?), and the PDF has no destination of it (hyperref makes them); the .aux puts it on page {}",
+                        printed.as_deref().unwrap_or("?")
+                    )
+                } else {
+                    format!(
+                        "{l}: no such label in the build (none of its files has \\label{{{l}}}, its .aux none)"
+                    )
+                },
+            ));
+        };
+        let (w, h, _) = r.marks(&bytes, k).ok_or_else(|| no_page(k))?;
+        let top = top.unwrap_or(0.0);
+        let rect = crate::shot::padded([0.0, top, w, (top + h / 3.0).min(h)], pad, (w, h));
+        return Ok(Found {
+            build,
+            page: k,
+            rect,
+            pdf,
+            before,
+            number,
+            printed,
+            approximate: true,
+        });
+    }
+    // (the element's words, as its source has them)
+    let (file, a, b) = ranges[0].clone();
+    let text = source(&root, &file)
+        .ok_or_else(|| Failed(EXIT_REFUSED, format!("{file}: not readable")))?;
+    let mut tokens = crate::shot::tokens(&text, a, b);
+    for (f, x, y) in &ranges[1..] {
+        if let Some(t) = source(&root, f) {
+            tokens.extend(crate::shot::tokens(&t, *x, *y));
+        }
+    }
+    if tokens.is_empty() {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!(
+                "{}: its source ({file}:{a}) has no words to find on a page",
+                what.said()
+            ),
+        ));
+    }
+    // (the pages looked at: the engine's, the .aux's, every page)
+    let count = v["count"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(0);
+    let candidates: Vec<usize> = v["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|k| k.as_u64().and_then(|k| usize::try_from(k).ok()))
+        .collect();
+    let aux: Vec<usize> = printed
+        .as_deref()
+        .and_then(|p| p.parse::<usize>().ok())
+        .filter(|&p| p >= 1)
+        .map(|p| vec![p - 1, p, p.saturating_sub(2)])
+        .unwrap_or_default();
+    let mut best: Option<Shown> = None;
+    let mut seen = std::collections::HashSet::new();
+    for pass in [candidates, aux, (0..count).collect()] {
+        for k in pass {
+            if k >= count || !seen.insert(k) {
+                continue;
+            }
+            let Some((w, h, marks)) = r.marks(&bytes, k) else {
+                continue;
+            };
+            let words = crate::shot::page_words(&marks);
+            for found in crate::shot::find(&tokens, &words) {
+                if best.as_ref().is_none_or(|b| found.score > b.found.score) {
+                    best = Some(Shown {
+                        page: k,
+                        size: (w, h),
+                        marks: marks.clone(),
+                        words: words.clone(),
+                        found,
+                    });
+                }
+            }
+        }
+        // (a page that shows half its words or more: no other looked at)
+        if let Some(b) = &best
+            && 2 * b.found.pairs.len() >= tokens.len().min(40)
+        {
+            break;
+        }
+    }
+    let Some(shown) = best else {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!(
+                "{}: none of its words is on any page (its source: {file}:{a})",
+                what.said()
+            ),
+        ));
+    };
+    let k = shown.page;
+    // (the page's origins: where the shot has none of it, asked)
+    let mut pv = v["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["page"].as_u64() == u64::try_from(k).ok())
+        .cloned();
+    let mut names: Vec<String> = strs(&v["files"]);
+    if pv.is_none() {
+        let v2 = shot(c, &[], &[k])?;
+        pv = v2["pages"].as_array().and_then(|p| p.first()).cloned();
+        names = strs(&v2["files"]);
+    }
+    let codes = pv.as_ref().map(page_codes).unwrap_or_default();
+    let top = root.canonicalize().unwrap_or_else(|_| root.clone());
+    let user = |f: u32| {
+        names.get(f as usize).is_some_and(|n| {
+            !Path::new(n).is_absolute()
+                && (top.join(n).is_file() || top.join(format!("{n}.tex")).is_file())
+        })
+    };
+    let in_range = |c: &crate::shot::Code| {
+        names.get(c.file as usize).is_some_and(|n| {
+            ranges.iter().any(|(f, a, b)| {
+                crate::shot::same_file(n, f)
+                    && (c.start as usize) < *b
+                    && (c.end as usize).max(c.start as usize + 1) > *a
+            })
+        })
+    };
+    // (each glyph: the element's, found; another element's, its typed
+    // text as the origins place it; or neither)
+    let texts: std::cell::RefCell<std::collections::HashMap<u32, Option<Vec<u8>>>> =
+        std::cell::RefCell::default();
+    let sure = crate::shot::trusted(&codes, &|f, a, b| {
+        let mut texts = texts.borrow_mut();
+        let t = texts.entry(f).or_insert_with(|| {
+            names
+                .get(f as usize)
+                .filter(|n| !Path::new(n).is_absolute())
+                .and_then(|n| source(&root, n))
+        });
+        t.as_deref()
+            .is_some_and(|t| crate::shot::whole_words(t, a, b))
+    });
+    let code_at = crate::shot::codes_at(&codes);
+    let mut class: Vec<crate::shot::Class> = shown
+        .marks
+        .iter()
+        .map(|m| match m.kind {
+            phitex_render::MarkKind::Glyph { x, y, .. } => match code_at(x, y) {
+                Some(c) if sure[c] && user(codes[c].file) && !in_range(&codes[c]) => {
+                    crate::shot::Class::Sure(c)
+                }
+                _ => crate::shot::Class::Neutral,
+            },
+            _ => crate::shot::Class::Neutral,
+        })
+        .collect();
+    for &(wi, _) in &shown.found.pairs {
+        for &m in &shown.words[wi].marks {
+            class[m] = crate::shot::Class::Mine;
+        }
+    }
+    let shown_bytes = (
+        shown
+            .found
+            .pairs
+            .iter()
+            .map(|p| tokens[p.1].start)
+            .min()
+            .unwrap_or(a),
+        shown
+            .found
+            .pairs
+            .iter()
+            .map(|p| tokens[p.1].end)
+            .max()
+            .unwrap_or(b),
+    );
+    let src = Src {
+        root: &root,
+        names: &names,
+        codes: &codes,
+        text: &text,
+        range: (a, b),
+        shown: shown_bytes,
+        texts: std::cell::RefCell::default(),
+    };
+    let extend: Option<&dyn crate::shot::Claims> = match what {
+        What::Label(_) => Some(&src),
+        What::Line(..) => None,
+    };
+    let rect = crate::shot::region(&shown.marks, &class, shown.size, extend).ok_or_else(|| {
+        Failed(
+            EXIT_REFUSED,
+            format!(
+                "{}: its glyphs are not drawn on page {}",
+                what.said(),
+                k + 1
+            ),
+        )
+    })?;
+    Ok(Found {
+        build,
+        page: k,
+        rect: crate::shot::padded(rect, pad, shown.size),
+        pdf,
+        before,
+        number,
+        printed,
+        approximate: false,
+    })
+}
+
+fn found_json(f: &Found, what: &What) -> Value {
+    let r = |x: f64| (x * 100.0).round() / 100.0;
+    json!({
+        "target": what.said(),
+        "build": f.build,
+        "page": f.page + 1,
+        "bbox": f.rect.map(r),
+        "pdf": f.pdf.display().to_string(),
+        "number": f.number,
+        "printed_page": f.printed,
+        "approximate": f.approximate,
+    })
+}
+
+/// `fig:x: page 3, 72.00 96.00 300.00 250.00 pt (Figure 2; build 7)`.
+fn where_line(f: &Found, what: &What) -> String {
+    let mut about = Vec::new();
+    if let Some(n) = &f.number {
+        about.push(format!("number {n}"));
+    }
+    if let Some(p) = f
+        .printed
+        .as_ref()
+        .filter(|p| **p != (f.page + 1).to_string())
+    {
+        about.push(format!("printed page {p}"));
+    }
+    about.push(format!("build {}", f.build));
+    if f.approximate {
+        about.push(
+            "approximate: around its PDF destination, its \\label not found in the source".into(),
+        );
+    }
+    let [x0, y0, x1, y1] = f.rect;
+    format!(
+        "{}: page {}, {x0:.2} {y0:.2} {x1:.2} {y1:.2} pt from the page's top left ({})",
+        what.said(),
+        f.page + 1,
+        about.join("; ")
+    )
+}
+
+/// `png`'s drawing of what [`locate`] found: written as a PNG at `dpi`
+/// to `to` (from here) or .phitex/png/; with `diff`, the build before's
+/// beside it.
+fn draw(f: &Found, what: &What, dpi: u32, to: Option<&str>, diff: bool) -> Result<Value, Failed> {
+    if !(10..=2400).contains(&dpi) {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!("--dpi {dpi}: from 10 to 2400"),
+        ));
+    }
+    let scale = f64::from(dpi) / 72.0;
+    let mut r = phitex_render::Renderer::new();
+    let read = |p: &Path| -> Result<std::sync::Arc<[u8]>, Failed> {
+        Ok(std::fs::read(p)
+            .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", p.display())))?
+            .into())
+    };
+    let now = read(&f.pdf)?;
+    let part = r.draw_part(&now, f.page, f.rect, scale).ok_or_else(|| {
+        Failed(
+            EXIT_REFUSED,
+            format!("page {} of {} not drawn", f.page + 1, f.pdf.display()),
+        )
+    })?;
+    // (beside the builds' PDFs: .phitex/png/)
+    let dir = f
+        .pdf
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(|| PathBuf::from(".phitex/png"), Path::to_path_buf);
+    let mut v = found_json(f, what);
+    let (bytes, w, h, name) = if diff {
+        let Some((m, before)) = &f.before else {
+            return Err(Failed(
+                EXIT_REFUSED,
+                format!(
+                    "no build before build {} kept to compare with (the watch keeps the last two builds' PDFs from its start)",
+                    f.build
+                ),
+            ));
+        };
+        let old = read(before)?;
+        let was = r.draw_part(&old, f.page, f.rect, scale).ok_or_else(|| {
+            Failed(
+                EXIT_REFUSED,
+                format!("build {m} has no page {}", f.page + 1),
+            )
+        })?;
+        if (was.w, was.h) != (part.w, part.h) {
+            return Err(Failed(
+                EXIT_REFUSED,
+                format!("build {m}'s page {} is another size", f.page + 1),
+            ));
+        }
+        let (img, w, h, changed) = crate::shot::diff_image(part.w, part.h, &was.rgba, &part.rgba);
+        v["before"] = json!(m);
+        v["changed"] = json!(changed);
+        (
+            img,
+            w,
+            h,
+            format!("{}-build{m}-vs-{}.png", what.slug(), f.build),
+        )
+    } else {
+        (
+            part.rgba,
+            part.w,
+            part.h,
+            format!("{}-build{}.png", what.slug(), f.build),
+        )
+    };
+    let path = match to {
+        Some(t) => std::env::current_dir().unwrap_or_default().join(t),
+        None => dir.join(name),
+    };
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)
+            .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", d.display())))?;
+    }
+    std::fs::write(&path, crate::shot::png(w, h, &bytes))
+        .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", path.display())))?;
+    v["png"] = json!(path.display().to_string());
+    v["dpi"] = json!(dpi);
+    v["width"] = json!(w);
+    v["height"] = json!(h);
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn newlabels_read() {
+        assert_eq!(
+            newlabel_fields("\\newlabel{fig:x}{{2}{3}{A {cat}}{figure.caption.2}{}}"),
+            ["2", "3", "A {cat}", "figure.caption.2", ""]
+        );
+        assert_eq!(newlabel_fields("\\newlabel{a}{{1}{1}}"), ["1", "1"]);
+    }
 
     #[test]
     fn problems_counted_by_kind_and_file() {

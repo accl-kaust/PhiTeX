@@ -622,6 +622,9 @@ struct State {
     /// What `session pdf` asked of a watch that writes no file came to,
     /// with the build it was of (and how many were asked, to tell them).
     pdf_out: (u64, usize, Option<Result<Value, String>>),
+    /// `session png`'s shots asked of the watch (the next one's number)
+    /// and those it made, by number ([`Ask::Shot`]).
+    shots: (u64, HashMap<u64, Result<Value, String>>),
     store: Store,
     /// Every change to notes, reviews, verdicts: what `wait --notes`
     /// waits on (the user's), by sequence.
@@ -933,6 +936,12 @@ impl Hub {
         self.cv.notify_all();
     }
 
+    /// `session png`'s shot `id` made by the watch ([`Ask::Shot`]).
+    pub fn shot_made(&self, id: u64, r: Result<Value, String>) {
+        lock(&self.st).shots.1.insert(id, r);
+        self.cv.notify_all();
+    }
+
     /// `session pdf`'s write (of build `n`) done by the watch.
     pub fn pdf_written(&self, n: usize, r: Result<Value, String>) {
         let mut st = lock(&self.st);
@@ -1013,6 +1022,7 @@ impl Hub {
             "phitex/session/rebuild" => self.rebuild(p),
             "phitex/session/log" => self.log(p),
             "phitex/session/pdf" => self.pdf(p),
+            "phitex/session/shot" => self.shot(p),
             "phitex/review/mode" | "phitex/review/workspace" | "phitex/propose"
                 if !lock(&self.st).changes =>
             {
@@ -1368,6 +1378,71 @@ impl Hub {
                     Some(Err(e)) => Err(refused(e)),
                     None => Err(refused("nothing written")),
                 };
+            }
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// `session png` and `where`: the last build's exact PDF and the one
+    /// before it in folder `dir` (from the root), the pages the source
+    /// ranges `at` (`[file, start, end]`, bytes) were placed on and the
+    /// glyph origins of those and of `pages`, made by the watch
+    /// ([`Ask::Shot`]); with the project's files the build read.
+    fn shot(&self, p: &Value) -> Result<Value, Fail> {
+        let dir = p["dir"].as_str().unwrap_or(".phitex/png").to_owned();
+        let at: Vec<(String, usize, usize)> = p["at"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| {
+                let n = |i: usize| r[i].as_u64().and_then(|v| usize::try_from(v).ok());
+                Some((r[0].as_str()?.to_owned(), n(1)?, n(2)?))
+            })
+            .collect();
+        let label = p["label"].as_str().map(str::to_owned);
+        let pages: Vec<usize> = p["pages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| k.as_u64().and_then(|k| usize::try_from(k).ok()))
+            .collect();
+        let mut st = lock(&self.st);
+        let Some(last) = st.builds.back() else {
+            return Err(refused("no build yet: `phitex session wait` first"));
+        };
+        // (the project's files the build read, for the label's place)
+        let mut read: Vec<String> = last
+            .read
+            .iter()
+            .filter(|(_, h)| h.is_some())
+            .map(|(n, _)| n.clone())
+            .collect();
+        read.sort();
+        let main = st.main.clone();
+        st.shots.0 += 1;
+        let id = st.shots.0;
+        drop(st);
+        self.ask_watch(Ask::Shot {
+            id,
+            dir,
+            at,
+            pages,
+            label,
+        });
+        let mut st = lock(&self.st);
+        loop {
+            if st.ended {
+                return Err(Fail {
+                    status: EXIT_NO_SESSION,
+                    message: "the watch ended".into(),
+                });
+            }
+            if let Some(r) = st.shots.1.remove(&id) {
+                return r.map_err(refused).map(|mut v| {
+                    v["read"] = json!(read);
+                    v["main"] = json!(main);
+                    v
+                });
             }
             st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
         }

@@ -459,6 +459,18 @@ impl Reads {
         }
     }
 
+    /// The build's `.aux` text (empty: none).
+    #[must_use]
+    pub fn aux(&self) -> &str {
+        &self.aux
+    }
+
+    /// Whether the build this was taken of kept its pages' glyph origins.
+    #[must_use]
+    pub fn has_origins(&self) -> bool {
+        self.origins.is_some()
+    }
+
     /// [`Session::pages_of_source`] of the build this was taken of.
     #[must_use]
     pub fn pages_of_source(&self, file: &str, at: usize) -> Vec<usize> {

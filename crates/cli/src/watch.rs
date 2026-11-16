@@ -487,6 +487,144 @@ fn write_pdf_now(
     }))
 }
 
+/// A build's PDF as kept for `phitex session png` ([`Shots`]): the
+/// layout the build left (its exact file made when asked), or its bytes.
+#[derive(Clone)]
+enum ShotPdf {
+    Layout(phitex_pdf::Layout),
+    Bytes(Arc<Vec<u8>>),
+}
+
+impl ShotPdf {
+    /// The build's exact PDF.
+    fn exact(&self) -> Result<Arc<Vec<u8>>, String> {
+        match self {
+            ShotPdf::Layout(l) => l.exact().map_err(|e| e.to_string()),
+            ShotPdf::Bytes(b) => Ok(b.clone()),
+        }
+    }
+}
+
+/// The last two builds' PDFs (`phitex session png --diff` draws the
+/// same part of both), each with its build's number.
+#[derive(Default)]
+struct Shots {
+    now: Option<(usize, ShotPdf)>,
+    before: Option<(usize, ShotPdf)>,
+}
+
+impl Shots {
+    /// Build `n`'s report `r` kept as the last build's PDF, the one kept
+    /// before it now the one before. A build of no PDF (an engine
+    /// failure, no page) changes nothing.
+    fn keep(&mut self, n: usize, r: &session::Report) {
+        if r.internal.is_some() {
+            return;
+        }
+        let pdf = match &r.out.layout {
+            Some(l) => ShotPdf::Layout(l.clone()),
+            None if r.out.pdf.is_empty() => return,
+            None => ShotPdf::Bytes(r.out.pdf.clone()),
+        };
+        self.before = self.now.replace((n, pdf));
+    }
+}
+
+/// `phitex session png`'s files of the last build ([`Ask::Shot`]), made
+/// off the watch's loop: the exact PDFs of the last build and the one
+/// before it as `build-N.pdf` in `dir` (each written once; the folder's
+/// other builds' removed); the pages (from 0) the engine placed the
+/// lines of the source ranges `at` on (`candidates`), and the glyph
+/// origins (as `phitex_tex::PageOrigins`) of those and of `want`; the
+/// label's `\newlabel` line of the `.aux`.
+fn shot_files(
+    shots: (Option<(usize, ShotPdf)>, Option<(usize, ShotPdf)>),
+    reads: Option<phitex_live::session::Reads>,
+    dir: &Path,
+    (at, want): (&[(String, usize, usize)], &[usize]),
+    label: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let (Some((n, now)), before) = shots else {
+        return Err("the last build made no PDF".to_owned());
+    };
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let put = |k: usize, pdf: &ShotPdf| -> Result<(PathBuf, Arc<Vec<u8>>), String> {
+        let p = dir.join(format!("build-{k}.pdf"));
+        let bytes = pdf.exact()?;
+        if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
+            let tmp = dir.join(format!("build-{k}.pdf.phitex-tmp"));
+            std::fs::write(&tmp, &**bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, &p).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        Ok((p, bytes))
+    };
+    let (pdf, bytes) = put(n, &now)?;
+    let before = match &before {
+        Some((k, b)) => Some((*k, put(*k, b)?.0)),
+        None => None,
+    };
+    // (the other builds' files gone: two builds' PDFs at most)
+    let keep: Vec<String> = std::iter::once(n)
+        .chain(before.as_ref().map(|b| b.0))
+        .map(|k| format!("build-{k}.pdf"))
+        .collect();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with("build-") && name.ends_with(".pdf") && !keep.contains(&name) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let reads = reads.unwrap_or_default();
+    let newlabel = label.and_then(|l| {
+        let key = format!("\\newlabel{{{l}}}");
+        reads
+            .aux()
+            .lines()
+            .find(|x| x.starts_with(&key))
+            .map(str::to_owned)
+    });
+    let count = phitex_render::Renderer::new()
+        .pages(&Arc::<[u8]>::from(&bytes[..]))
+        .unwrap_or(0);
+    // (the pages the engine placed the ranges' first and last lines on)
+    let mut candidates = std::collections::BTreeSet::new();
+    for (file, a, b) in at {
+        for x in [*a, b.saturating_sub(1).max(*a)] {
+            candidates.extend(reads.pages_of_source(file, x));
+        }
+    }
+    let mut files: Vec<String> = Vec::new();
+    let mut pages: Vec<serde_json::Value> = Vec::new();
+    let asked: std::collections::BTreeSet<usize> = candidates
+        .iter()
+        .chain(want)
+        .copied()
+        .filter(|&k| k < count)
+        .collect();
+    for k in asked {
+        let (fs, o) = reads.page_origins(k);
+        let Some(o) = o else { continue };
+        files = fs;
+        let synth: Vec<bool> = (0..o.len()).map(|i| o.is_synth(i)).collect();
+        pages.push(json!({
+            "page": k,
+            "file": o.file, "start": o.start, "end": o.end, "synth": synth,
+            "x": o.x, "y": o.y, "w": o.w, "size": o.size,
+        }));
+    }
+    Ok(json!({
+        "build": n,
+        "pdf": pdf.display().to_string(),
+        "before": before.map(|(k, p)| json!({"build": k, "pdf": p.display().to_string()})),
+        "origins": reads.has_origins(),
+        "count": count,
+        "candidates": candidates,
+        "files": files,
+        "pages": pages,
+        "newlabel": newlabel,
+    }))
+}
+
 /// Whether `a` only reads the last build (the viewer's page origins, a
 /// source place's pages, a citation, the transcript): put off while a
 /// change waits to be built.
@@ -498,6 +636,7 @@ fn is_read(a: &Ask) -> bool {
             | Ask::Cites { .. }
             | Ask::Transcript
             | Ask::WritePdf { .. }
+            | Ask::Shot { .. }
     )
 }
 
@@ -1773,6 +1912,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let last = RefCell::new(Last::default());
     // (the last build when nothing is written: what the way out writes on a yes)
     let unwritten: RefCell<Option<session::Report>> = RefCell::new(None);
+    // (the last two builds' PDFs, for `phitex session png`)
+    let shots: RefCell<Shots> = RefCell::default();
     let asking = kept.asking.clone();
     // (the way out: it ends the process, unless the question it asks is
     // answered c, cancel: then it returns and the watch goes on)
@@ -2719,6 +2860,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if if pending { failed } else { !kept } {
             last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
         }
+        shots.borrow_mut().keep(builds, &r);
         // (nothing written: the last build kept, for the way out's question)
         if writing {
             drop(r);
@@ -3275,6 +3417,44 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             );
                             drop(mine);
                             hub.pdf_written(n, done);
+                            continue;
+                        }
+                        // (`phitex session png`: the PDFs and the pages'
+                        // origins written and read on a thread of their
+                        // own, from what the last build left)
+                        if let Ask::Shot {
+                            id,
+                            dir,
+                            at,
+                            pages,
+                            label,
+                        } = &a
+                        {
+                            let kept = {
+                                let k = shots.borrow();
+                                (k.now.clone(), k.before.clone())
+                            };
+                            let reads = s.reads();
+                            let (id, dir, at, pages, label) = (
+                                *id,
+                                root.join(dir),
+                                at.clone(),
+                                pages.clone(),
+                                label.clone(),
+                            );
+                            let hub = hub.clone();
+                            let _ = std::thread::Builder::new()
+                                .name("phitex-watch-shot".into())
+                                .spawn(move || {
+                                    let r = shot_files(
+                                        kept,
+                                        reads,
+                                        &dir,
+                                        (&at, &pages),
+                                        label.as_deref(),
+                                    );
+                                    hub.shot_made(id, r);
+                                });
                             continue;
                         }
                         if a == Ask::Transcript {
