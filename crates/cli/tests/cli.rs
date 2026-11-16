@@ -3083,8 +3083,9 @@ fn build_rounds_are_latexmks_runs() {
 }
 
 /// A watch saves its persisted graph after its first build, not only as
-/// it ends: killed then, the next build loads it and runs no round, its
-/// PDF the watch's.
+/// it ends: killed then, the next watch loads it and runs nothing. (A
+/// watch's graph is a watch's: `phitex build` writes its PDF in another
+/// layout, a key of the graph, and builds clean.)
 #[test]
 fn watch_saves_its_graph_after_the_first_build() {
     let _one = one();
@@ -3095,14 +3096,17 @@ fn watch_saves_its_graph_after_the_first_build() {
         "\\documentclass{article}\n\\begin{document}\nHello, world.\n\\end{document}\n",
     )
     .expect("the document");
-    let mut child = command(bin, &dir)
-        .env("PHITEX_GRAPH", "1")
-        .args(["watch", "--write", "--json", "--no-view", "hello.tex"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("phitex watch runs");
+    let watch = || {
+        command(bin, &dir)
+            .env("PHITEX_GRAPH", "1")
+            .args(["watch", "--write", "--json", "--no-view", "hello.tex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs")
+    };
+    let mut child = watch();
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
@@ -3118,32 +3122,23 @@ fn watch_saves_its_graph_after_the_first_build() {
             break;
         }
     }
-    let pdf = std::fs::read(dir.join("hello.pdf")).expect("the watch's PDF");
     child.kill().expect("the watch killed");
     let _ = child.wait();
-    let out = command(bin, &dir)
-        .env("PHITEX_GRAPH", "1")
-        .args(["build", "--json", "hello.tex"])
-        .output()
-        .expect("phitex runs");
+    // (the next watch: its first build from the graph, nothing run)
+    let mut child = watch();
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let again = until(&mut lines, "build", &1.into(), &mut seen);
+    child.kill().expect("the watch killed");
+    let _ = child.wait();
     assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        seen.iter().any(|l| l.contains("graph: loaded")),
+        "the watch after the killed one did not load its graph:\n{}",
+        seen.join("\n")
     );
-    let ev = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .find(|e| e["event"] == "build")
-        .expect("a build event");
-    assert_eq!(
-        ev["rounds"], 0,
-        "the build after the killed watch did not load its graph: {ev}"
-    );
-    assert!(
-        std::fs::read(dir.join("hello.pdf")).expect("the PDF") == pdf,
-        "the loaded build's PDF is not the watch's"
-    );
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["nodes_run"], 0, "{again}");
 }
 
 /// The exit statuses, as pdflatex's: 1 for a file that is not there, an
