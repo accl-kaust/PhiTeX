@@ -52,7 +52,12 @@ fn every_pair() {
         let pre = &main[..begin];
         let first_line = pre.lines().next().unwrap();
         assert!(d.tex.starts_with(first_line), "{name}: preamble");
-        assert!(!d.changes.is_empty(), "{name}: no change found");
+        // (look_quiet: comments, a reflow and a label renamed, nothing the
+        // pages show: no change, `quiet_edits_are_unmarked`)
+        assert!(
+            name == "look_quiet" || !d.changes.is_empty(),
+            "{name}: no change found"
+        );
         for c in &d.changes {
             for (files, loc, text) in [(&old, &c.old, &c.old_text), (&new, &c.new, &c.new_text)] {
                 if loc.start == loc.end {
@@ -182,7 +187,7 @@ fn floats_tables_and_citations() {
     };
     let t = run("look_table_del");
     assert!(
-        t.contains("\\begin{table*}[t]\\DIFfloatnumber{0}\\DIFblockdelbegin"),
+        t.contains("\\begin{table*}[!tp]\\DIFfloatnumber{0}\\DIFblockdelbegin"),
         "{t}"
     );
     assert!(
@@ -190,7 +195,7 @@ fn floats_tables_and_citations() {
         "{t}"
     );
     assert!(
-        t.contains("\\begin{table}[h]\\DIFfloatnumber{1}\\DIFblockdelbegin"),
+        t.contains("\\begin{table}[!htbp]\\DIFfloatnumber{1}\\DIFblockdelbegin"),
         "{t}"
     );
     let t = run("look_table_add");
@@ -203,10 +208,38 @@ fn floats_tables_and_citations() {
     assert!(t.contains("\\multicolumn{2}{c}{Runs"), "{t}");
     let t = run("look_cite_long");
     assert!(t.contains("k12,k14,"), "{t}");
+    // (one citation, the keys removed and added marked inside it; beside
+    // it where the citations are not natbib's numbers)
+    assert!(t.contains("\\DIFcite{\\cite{k01,"), "{t}");
     assert!(
-        t.contains("\\DIFdel{\\mbox{\\cite{k13}}}\\DIFadd{\\mbox{\\cite{k44,k45}}}."),
+        t.contains(
+            "\\DIFdel{\\mbox{\\cite{k13}}}\\DIFadd{\\mbox{\\cite{k44,k45}}}}{\\citealp{k01,"
+        ),
         "{t}"
     );
+    assert!(
+        t.contains("\\DIFcitesep\\DIFdel{\\mbox{\\citealp{k13}}}\\DIFcitesep\\DIFadd{\\mbox{\\citealp{k44,k45}}}}."),
+        "{t}"
+    );
+}
+
+/// Comments changed, a paragraph's lines broken otherwise and a label
+/// renamed with its references: nothing the pages show changed, so no
+/// change and no markup.
+#[test]
+fn quiet_edits_are_unmarked() {
+    let c = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/look_quiet");
+    let d = diff(
+        &Dir(c.join("old")),
+        &Dir(c.join("new")),
+        "main.tex",
+        &Options::default(),
+    )
+    .unwrap();
+    assert!(d.changes.is_empty(), "{:?}", d.changes);
+    let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF";
+    let body = &d.tex[d.tex.find(end).unwrap() + end.len()..];
+    assert!(!body.contains("\\DIF"), "{body}");
 }
 
 /// A version diffed against itself has no change, and its markup is its

@@ -227,6 +227,15 @@ impl<'a> Em<'a> {
                 (0, pair_key(t, text))
             } else if let Some(h) = cite_head(t, text) {
                 (3, h)
+            } else if let Some(h) = ref_head(t, text) {
+                (5, h)
+            } else if let Kind::Display { env, .. } = &t.kind
+                && ROW_ENVS.contains(&env.as_str())
+            {
+                use std::hash::{DefaultHasher, Hasher};
+                let mut h = DefaultHasher::new();
+                env.hash(&mut h);
+                (4, h.finish())
             } else {
                 (side, i as u64)
             }
@@ -258,6 +267,22 @@ impl<'a> Em<'a> {
                 let oe = old.get(pi + 1).map_or(old_end, |t| t.start);
                 if o.key == n.key {
                     self.same(n);
+                } else if matches!(n.kind, Kind::Display { .. }) {
+                    self.display_pair(o, n);
+                } else if ref_head(n, self.new).is_some() {
+                    // (a reference whose label was renamed: the same
+                    // thing referred to, nothing to mark)
+                    if self.renamed(o, n) {
+                        self.same(n);
+                    } else {
+                        self.block(
+                            std::slice::from_ref(o),
+                            std::slice::from_ref(n),
+                            oe,
+                            ne,
+                            ctx,
+                        );
+                    }
                 } else if !n.is_node() {
                     self.cite(o, n, oe, ne, ctx);
                 } else if alike(o, n) {
@@ -332,15 +357,40 @@ impl<'a> Em<'a> {
         }
         let start = self.out.len();
         let head = &ns[..nl.0];
+        // (a bracketed citation, `\cite`/`\citep` with no option: one
+        // citation, its keys removed and added marked inside it where the
+        // citations are natbib's numbers, `\DIFcite{beside}{inside}`;
+        // else beside it)
+        let merged = matches!(head.trim_end(), "\\cite" | "\\citep");
+        if merged {
+            // (`\citep` is bracketed in every natbib mode, `\cite` in its
+            // numbers only)
+            self.push(if head.trim_end() == "\\citep" {
+                "\\DIFcitep{"
+            } else {
+                "\\DIFcite{"
+            });
+        }
         self.push(head);
         self.push(&format!("{{{}}}", common.join(",")));
-        for (side, ks) in [(Side::Del, &gone), (Side::Add, &came)] {
-            if ks.is_empty() || (side == Side::Del && !self.show_del) {
-                continue;
-            }
+        let parts: Vec<(Side, &Vec<&str>)> = [(Side::Del, &gone), (Side::Add, &came)]
+            .into_iter()
+            .filter(|(side, ks)| !ks.is_empty() && (*side == Side::Add || self.show_del))
+            .collect();
+        for &(side, ks) in &parts {
             self.push(" ");
             let mut buf = cite_chunks(head, ks);
             self.flush(&mut buf, side, ctx);
+        }
+        if merged {
+            self.push(&format!("}}{{\\citealp{{{}}}", common.join(",")));
+            for &(side, ks) in &parts {
+                self.push("\\DIFcitesep ");
+                let mut buf =
+                    cite_chunks("\\citealp", ks).replace(" \\mbox", "\\DIFcitesep \\mbox");
+                self.flush(&mut buf, side, ctx);
+            }
+            self.push("}");
         }
         self.push(&self.new[n.cend..n.end]);
         let section = self.section.clone();
@@ -359,6 +409,23 @@ impl<'a> Em<'a> {
     /// and, if its cells' old and new text make it wider than the line,
     /// scaled down to the line's width: it stays in its column.
     fn pair(&mut self, o: &Tok, n: &Tok, ctx: Ctx) {
+        let (first, at) = (self.changes.len(), self.out.len());
+        self.pair_inside(o, n, ctx);
+        // (a float changed inside is one change, one stop for the viewer's
+        // next change: the whole float)
+        if is_float(n) && self.changes.len() > first {
+            let section = self.changes[first].section.clone();
+            self.changes.truncate(first);
+            self.changes.push(RawChange {
+                old: (o.start, o.cend),
+                new: (n.start, n.cend),
+                out: (at, self.out.len()),
+                section,
+            });
+        }
+    }
+
+    fn pair_inside(&mut self, o: &Tok, n: &Tok, ctx: Ctx) {
         self.note_section(n);
         let boxed =
             matches!(&n.kind, Kind::Env { name, kind: EnvKind::Tabular } if name != "longtable");
@@ -393,6 +460,21 @@ impl<'a> Em<'a> {
     /// Deleted tokens `old` and added `new` (where they are when empty:
     /// `old_at`, `new_at`): one change.
     fn block(&mut self, old: &[Tok], new: &[Tok], old_at: usize, new_at: usize, ctx: Ctx) {
+        // (comments and labels alone: nothing the pages show changed, so
+        // no markup and no change; the new text as it is)
+        let quiet = |t: &Tok, src: &str| {
+            matches!(t.kind, Kind::Comment | Kind::Ws)
+                || (t.kind == Kind::Unsafe && cs_at(&src[t.start..t.cend], 0).0 == "label")
+        };
+        if !(old.is_empty() && new.is_empty())
+            && old.iter().all(|t| quiet(t, self.old))
+            && new.iter().all(|t| quiet(t, self.new))
+        {
+            for t in new {
+                self.same(t);
+            }
+            return;
+        }
         let span = |t: &[Tok], at: usize| match (t.first(), t.last()) {
             (Some(a), Some(b)) => (a.start, b.cend),
             _ => (at, at),
@@ -411,6 +493,16 @@ impl<'a> Em<'a> {
         {
             self.push("\\DIFchangesep ");
         }
+        // (an image replaced by another: the two side by side, scaled
+        // together to the line if they are wider)
+        let image = |t: &[Tok], src: &str| {
+            let mut it = t.iter().filter(|t| t.kind != Kind::Ws);
+            it.next().is_some_and(|t| is_image(&src[t.start..t.cend])) && it.next().is_none()
+        };
+        let pair = image(old, self.old) && image(new, self.new) && self.show_del;
+        if pair {
+            self.push("\\DIFtabularbegin ");
+        }
         if !old.is_empty() {
             self.push(&format!("\\DIFdelbegin{fl} "));
             self.mark(old, Side::Del, ctx);
@@ -425,6 +517,9 @@ impl<'a> Em<'a> {
             self.push(&format!("\\DIFaddbegin{fl} "));
             self.mark(new, Side::Add, ctx);
             self.push(&format!("\\DIFaddend{fl} "));
+        }
+        if pair {
+            self.push("\\DIFtabularend ");
         }
         // (the section a change is in: the last one before it, or its own)
         let section = self.section.clone();
@@ -674,7 +769,7 @@ impl<'a> Em<'a> {
                 // (numbered as it was in the old version, the counter
                 // given back after it)
                 let numbered = captions(body) > 0;
-                self.push(open);
+                self.push(&near_placement(open));
                 if numbered {
                     self.push(&format!("\\DIFfloatnumber{{{}}}", self.old_number(t)));
                 }
@@ -753,7 +848,14 @@ impl<'a> Em<'a> {
             "color"
         };
         self.push(&format!("\\leavevmode\\DIF{kind}{s}begin "));
-        self.push(text);
+        match image_path(text) {
+            // (a deleted image whose file the new version may not have:
+            // its name shown where its file is gone)
+            Some(path) if side == Side::Del => {
+                self.push(&format!("\\DIFoldimage{{{path}}}{{{text}}}"));
+            }
+            _ => self.push(text),
+        }
         self.unit_end(&format!("\\DIF{kind}{s}end"), &src[t.cend..t.end]);
     }
 
@@ -767,6 +869,95 @@ impl<'a> Em<'a> {
             self.push(&format!("{cmd}{{}}"));
             self.push(ws);
         }
+    }
+
+    /// Two displays of an environment of rows (`align`, `gather`, …):
+    /// their rows diffed, a row the same on both sides as it is, a deleted
+    /// row coloured and marked `(deleted)` where its number would be
+    /// (taking none: the new version's equations keep their numbers), an
+    /// added row coloured, numbered as it is.
+    fn display_pair(&mut self, o: &Tok, n: &Tok) {
+        let (Kind::Display { body: ob, .. }, Kind::Display { env, body: nb, .. }) =
+            (&o.kind, &n.kind)
+        else {
+            return;
+        };
+        if !self.show_del || (!self.amsmath && !env.starts_with("eqnarray")) {
+            self.block(
+                std::slice::from_ref(o),
+                std::slice::from_ref(n),
+                o.start,
+                n.start,
+                Ctx::default(),
+            );
+            return;
+        }
+        let start = self.out.len();
+        let orows = math_rows(&self.old[ob.0..ob.1]);
+        let nrows = math_rows(&self.new[nb.0..nb.1]);
+        let key = |r: &str| {
+            use std::hash::{DefaultHasher, Hasher};
+            let mut h = DefaultHasher::new();
+            crate::tok::norm_hash(r, &mut h);
+            h.finish()
+        };
+        let ok: Vec<u64> = orows.iter().map(|r| key(r.0)).collect();
+        let nk: Vec<u64> = nrows.iter().map(|r| key(r.0)).collect();
+        let mut rows: Vec<(String, String)> = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        for (pi, pj) in lcs(&ok, &nk)
+            .into_iter()
+            .chain(std::iter::once((orows.len(), nrows.len())))
+        {
+            for r in &orows[i..pi] {
+                if !r.0.trim().is_empty() {
+                    rows.push((self.del_row(r.0), String::new()));
+                }
+            }
+            for r in &nrows[j..pj] {
+                rows.push((
+                    format!("\\DIFmathaddbegin {}\\DIFmathaddend ", r.0),
+                    r.1.to_owned(),
+                ));
+            }
+            if pi < orows.len() {
+                rows.push((nrows[pj].0.to_owned(), nrows[pj].1.to_owned()));
+            }
+            i = pi + 1;
+            j = pj + 1;
+        }
+        self.push(&self.new[n.start..nb.0]);
+        let last = rows.len().saturating_sub(1);
+        for (k, (row, end)) in rows.iter().enumerate() {
+            self.push(row);
+            if k < last {
+                self.push(if end.is_empty() { "\\\\\n" } else { end });
+            }
+        }
+        self.push(&self.new[nb.1..n.end]);
+        let section = self.section.clone();
+        self.changes.push(RawChange {
+            old: (o.start, o.cend),
+            new: (n.start, n.cend),
+            out: (start, self.out.len()),
+            section,
+        });
+    }
+
+    /// A deleted row of a display: coloured, its labels, tags and number
+    /// gone, marked `(deleted)` where its number would be (eqnarray's:
+    /// unnumbered).
+    fn del_row(&self, row: &str) -> String {
+        let body = untag(&unlabel(row, |_| true));
+        let mark = if self.amsmath {
+            "\\tag*{\\DIFmathdeltag}"
+        } else {
+            "\\nonumber"
+        };
+        format!(
+            "\\DIFmathdelbegin {} {mark}\\DIFmathdelend ",
+            body.trim_end()
+        )
     }
 
     /// Display math, whole: an added one as it is, its body coloured
@@ -805,10 +996,29 @@ impl<'a> Em<'a> {
                     None => part.to_owned(),
                 };
                 self.push(&swap(open));
-                self.push(&format!("\\DIFmath{s}begin "));
-                self.push(&unlabel(&inner[..cut], |_| true));
-                self.push(&format!("\\DIFmath{s}end "));
-                self.push(&unlabel(&inner[cut..], |_| true));
+                if ROW_ENVS.contains(&env) && self.amsmath && !env.starts_with("eqnarray") {
+                    // (each row deleted, marked as one: `(deleted)` where
+                    // its number would be)
+                    let rows: Vec<String> = math_rows(inner)
+                        .into_iter()
+                        .filter(|r| !r.0.trim().is_empty())
+                        .map(|r| self.del_row(r.0))
+                        .collect();
+                    self.push(&rows.join("\\\\\n"));
+                } else {
+                    self.push(&format!("\\DIFmath{s}begin "));
+                    let tagged =
+                        self.amsmath && !open.starts_with("$$") && ams_tagged(env, star.as_deref());
+                    if tagged {
+                        self.push(&untag(&unlabel(&inner[..cut], |_| true)));
+                        self.push(&format!("{} ", untag(&unlabel(&inner[cut..], |_| true))));
+                        self.push("\\tag*{\\DIFmathdeltag}");
+                    } else {
+                        self.push(&unlabel(&inner[..cut], |_| true));
+                        self.push(&unlabel(&inner[cut..], |_| true));
+                    }
+                    self.push(&format!("\\DIFmath{s}end "));
+                }
                 self.push(&swap(close));
                 self.push(&src[t.cend..t.end]);
             }
@@ -921,6 +1131,22 @@ impl<'a> Em<'a> {
         text.starts_with('\\')
             && self.sigs.user(name)
             && self.sigs.cmd(name).is_some_and(|s| s.spec.contains('m'))
+    }
+
+    /// Whether references `o` and `n` (of one command) name a label the old
+    /// version had and the new one does not, and one the new version has
+    /// and the old one did not: the label renamed.
+    fn renamed(&self, o: &Tok, n: &Tok) -> bool {
+        let key = |t: &Tok, src: &'a str| {
+            let s = &src[t.start..t.cend];
+            let a = s.rfind('{')?;
+            s[a + 1..].strip_suffix('}').map(str::trim)
+        };
+        let (Some(a), Some(b)) = (key(o, self.old), key(n, self.new)) else {
+            return false;
+        };
+        let has = |src: &str, k: &str| src.contains(&format!("\\label{{{k}}}"));
+        has(self.old, a) && !has(self.new, a) && has(self.new, b) && !has(self.old, b)
     }
 
     /// Whether deleted text uses a command only the old preamble defines.
@@ -1040,6 +1266,10 @@ fn brace_end(b: &[u8], i: usize) -> usize {
 
 /// The control sequence at `i` (a backslash): its name and where it ends.
 fn cs_at(s: &str, i: usize) -> (&str, usize) {
+    // (not a backslash: no control sequence, the character passed)
+    if !s[i..].starts_with('\\') {
+        return ("", i + s[i..].chars().next().map_or(1, char::len_utf8));
+    }
     let b = s.as_bytes();
     let mut e = i + 1;
     if e < b.len() && b[e].is_ascii_alphabetic() {
@@ -1366,4 +1596,166 @@ fn alike(o: &Tok, n: &Tok) -> bool {
         return name(o) == name(n) || same * 3 >= oc.len().max(nc.len()) * 2;
     }
     true
+}
+
+/// A deleted float's opening, placed as near as it may be to where it
+/// was: here if it fits, else the top of a page (`[!htbp]`; a float across
+/// both columns `[!tp]`), whatever its own placement asked.
+fn near_placement(open: &str) -> String {
+    let Some(name) = env_name(open) else {
+        return open.to_owned();
+    };
+    let head = open.find('}').map_or(open.len(), |k| k + 1);
+    let place = if name.ends_with('*') {
+        "[!tp]"
+    } else {
+        "[!htbp]"
+    };
+    let rest = &open[head..];
+    let rest = match rest.strip_prefix('[') {
+        Some(r) if r.contains(']') => &r[r.find(']').map_or(0, |k| k + 1)..],
+        _ => rest,
+    };
+    format!("{}{place}{rest}", &open[..head])
+}
+
+/// The environments of rows, numbered one by one: diffed by rows.
+const ROW_ENVS: &[&str] = &[
+    "align",
+    "align*",
+    "gather",
+    "gather*",
+    "flalign",
+    "flalign*",
+    "alignat",
+    "alignat*",
+    "eqnarray",
+    "eqnarray*",
+];
+
+/// Whether a deleted display of `env` (unnumbered as `star`) takes
+/// amsmath's `\tag*`: one equation.
+fn ams_tagged(env: &str, star: Option<&str>) -> bool {
+    let e = star.unwrap_or(env);
+    e.is_empty() && env.is_empty() || matches!(e, "equation*" | "equation")
+}
+
+/// `text` without `\tag{…}`, `\tag*{…}`, `\notag` and `\nonumber`.
+fn untag(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            let (name, mut e) = cs_at(text, i);
+            match name {
+                "notag" | "nonumber" => {
+                    i = e;
+                    continue;
+                }
+                "tag" => {
+                    if b.get(e) == Some(&b'*') {
+                        e += 1;
+                    }
+                    while b.get(e) == Some(&b' ') {
+                        e += 1;
+                    }
+                    if b.get(e) == Some(&b'{') {
+                        e = brace_end(b, e);
+                    }
+                    i = e;
+                    continue;
+                }
+                _ => {
+                    out.push_str(&text[i..e]);
+                    i = e;
+                    continue;
+                }
+            }
+        }
+        let ch = text[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&text[i..i + ch]);
+        i += ch;
+    }
+    out
+}
+
+/// The rows of a display's body: each its text and the `\\` that ends it
+/// (with its star and its `[…]`; none for the last), split at the body's
+/// own level (not in a group or a nested environment; comments skipped).
+fn math_rows(body: &str) -> Vec<(&str, &str)> {
+    let b = body.as_bytes();
+    let (mut rows, mut from, mut depth, mut envs, mut i) = (Vec::new(), 0, 0i32, 0i32, 0);
+    while i < b.len() {
+        match b[i] {
+            b'%' => {
+                i = line_end(b, i);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            b'\\' => {
+                let (name, mut e) = cs_at(body, i);
+                match name {
+                    "begin" => envs += 1,
+                    "end" => envs -= 1,
+                    "\\" if depth == 0 && envs == 0 => {
+                        if b.get(e) == Some(&b'*') {
+                            e += 1;
+                        }
+                        let mut k = e;
+                        while b.get(k).is_some_and(|c| *c == b' ') {
+                            k += 1;
+                        }
+                        if b.get(k) == Some(&b'[')
+                            && let Some(c) = body[k..].find(']')
+                        {
+                            e = k + c + 1;
+                        }
+                        rows.push((&body[from..i], &body[i..e]));
+                        from = e;
+                    }
+                    _ => {}
+                }
+                i = e;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    rows.push((&body[from..], ""));
+    rows
+}
+
+/// The file an `\includegraphics` names (its last group), when it is a
+/// plain name.
+fn image_path(text: &str) -> Option<&str> {
+    if !is_image(text) {
+        return None;
+    }
+    let t = text.trim_end();
+    let open = t.rfind('{')?;
+    let p = t[open + 1..].strip_suffix('}')?.trim();
+    (!p.is_empty() && !p.contains(['\\', '{', '}', '#', '%'])).then_some(p)
+}
+
+/// A reference's command (`\ref`, `\eqref`, `\autoref`, `\pageref`,
+/// `\nameref`), hashed: references of one command pair, so that one whose
+/// label was renamed is not marked.
+fn ref_head(t: &Tok, text: &str) -> Option<u64> {
+    use std::hash::{DefaultHasher, Hasher};
+    if t.kind != Kind::Safe {
+        return None;
+    }
+    let s = &text[t.start..t.cend];
+    let (name, e) = cs_at(s, 0);
+    if !s.starts_with('\\') || !matches!(name, "ref" | "eqref" | "autoref" | "pageref" | "nameref")
+    {
+        return None;
+    }
+    let mut h = DefaultHasher::new();
+    "ref".hash(&mut h);
+    s[..e].hash(&mut h);
+    Some(h.finish())
 }

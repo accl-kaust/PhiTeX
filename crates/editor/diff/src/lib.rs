@@ -972,11 +972,18 @@ impl Baseline {
             (true, false) => ChangeKind::Del,
             _ => ChangeKind::Add,
         };
+        // (a change across two files, a deleted `\include` after an edited
+        // file's end: placed in the file it begins in, its text that
+        // file's part)
+        let old = locate(&self.flat, c.old);
+        let old_len = (old.end - old.start).min(c.old.1 - c.old.0);
+        let mut new_text = new_text;
+        new_text.truncate((new.end - new.start).min(new_text.len()));
         Change {
             kind,
-            old: locate(&self.flat, c.old),
+            old,
             new,
-            old_text: self.flat.text[c.old.0..c.old.1].to_owned(),
+            old_text: self.flat.text[c.old.0..c.old.0 + old_len].to_owned(),
             new_text,
             section,
             out,

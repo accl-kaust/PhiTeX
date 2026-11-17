@@ -10102,7 +10102,7 @@ var Panel = class {
       el.className = "menu diffset";
       return;
     }
-    look2 = { ...look2, add_color: safeColor(look2.add_color, "#0000ff"), del_color: safeColor(look2.del_color, "#ff0000") };
+    look2 = { ...look2, add_color: safeColor(look2.add_color, "#1347ae"), del_color: safeColor(look2.del_color, "#bb1b1b") };
     const MARKUP = [
       ["underline", "Underline"],
       ["ctraditional", "Color + font"],
@@ -10118,7 +10118,7 @@ var Panel = class {
     const bars2 = look2.markup in BASE2;
     const SUB = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
     const PAIRS = [
-      ["#0000ff", "#ff0000", "Blue / red"],
+      ["#1347ae", "#bb1b1b", "Blue / red"],
       ["#15803d", "#b91c1c", "Green / red"],
       ["#0072b2", "#d55e00", "Colorblind-safe"],
       ["#7e22ce", "#6b7280", "Purple / gray"]
@@ -12409,7 +12409,7 @@ function textLayer(lines3, w, h) {
 }
 
 // viewer/src/compare.ts
-var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#0000ff", del_color: "#ff0000" };
+var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#1347ae", del_color: "#bb1b1b" };
 var DiffControls = class {
   state = null;
   panel;

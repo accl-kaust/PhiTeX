@@ -390,6 +390,17 @@ fn units(m: Markup, a: &str, d: &str, colored: bool) -> Vec<String> {
             "\\phitexdifcpop\\endgroup".into(),
         ));
     }
+    // (a citation diffed by key: inside one citation where it is natbib's
+    // numbers, its brackets and separator; else as written beside it)
+    l.push("\\def\\phitexdifnatnumb{\\csname ifNAT@numbers\\endcsname 1\\else 0\\fi}".into());
+    l.push("\\def\\phitexdifnatnum{\\ifcsname NAT@open\\endcsname\\phitexdifnatnumb\\fi}".into());
+    l.push("\\protected\\long\\def\\phitexdifcite#1#2{\\ifnum0\\phitexdifnatnum=1 \\leavevmode\\csname NAT@open\\endcsname#2\\csname NAT@close\\endcsname\\else#1\\fi}".into());
+    l.push("\\protected\\def\\phitexdifcitesep{\\csname NAT@sep\\endcsname\\space}".into());
+    l.push("\\def\\phitexdifnat{\\ifcsname NAT@open\\endcsname 1\\fi}".into());
+    l.push("\\protected\\long\\def\\phitexdifcitep#1#2{\\ifnum0\\phitexdifnat=1 \\leavevmode\\csname NAT@open\\endcsname#2\\csname NAT@close\\endcsname\\else#1\\fi}".into());
+    l.push("\\providecommand{\\DIFcitep}{\\phitexdifcitep}".into());
+    l.push("\\providecommand{\\DIFcite}{\\phitexdifcite}".into());
+    l.push("\\providecommand{\\DIFcitesep}{\\phitexdifcitesep}".into());
     l.push("\\mathchardef\\phitexdiftbox=31007\\relax".into());
     l.push(
         "\\protected\\def\\phitexdiftabbegin{\\leavevmode\\setbox\\phitexdiftbox\\hbox\\bgroup}"
@@ -400,6 +411,12 @@ fn units(m: Markup, a: &str, d: &str, colored: bool) -> Vec<String> {
     l.push("\\providecommand{\\DIFtabularend}{\\phitexdiftabend}".into());
     l.push("\\protected\\def\\phitexdifchangesep{\\ifhmode\\hskip.2em\\relax\\fi}".into());
     l.push("\\providecommand{\\DIFchangesep}{\\phitexdifchangesep}".into());
+    // (a deleted image: as it was where its file is still there, by its
+    // name or with graphics' usual extensions; else its name, framed as
+    // the image would be)
+    l.push("\\protected\\def\\phitexdifoldimage#1#2{\\IfFileExists{#1}{#2}{\\IfFileExists{#1.pdf}{#2}{\\IfFileExists{#1.png}{#2}{\\IfFileExists{#1.jpg}{#2}{\\IfFileExists{#1.eps}{#2}{\\hbox{\\strut image \\detokenize{#1}}}}}}}}".into());
+    l.push("\\providecommand{\\DIFoldimage}{\\phitexdifoldimage}".into());
+    l.push(format!("\\providecommand{{\\DIFmathdeltag}}{{{{\\phitexdifcontent{{{d}}}\\textnormal{{(deleted)}}\\phitexdifcpop}}}}"));
     l.push("\\providecommand{\\DIFfloatnumber}[1]{\\edef\\phitexdifsavedcount{\\the\\value{\\csname @captype\\endcsname}}\\setcounter{\\csname @captype\\endcsname}{#1}}".into());
     l.push("\\providecommand{\\DIFfloatrestore}{\\setcounter{\\csname @captype\\endcsname}{\\phitexdifsavedcount}}".into());
     l

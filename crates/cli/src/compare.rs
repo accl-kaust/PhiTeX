@@ -110,8 +110,10 @@ impl Default for Look {
         Look {
             markup: "underline".into(),
             subtype: "safe".into(),
-            add_color: "#0000ff".into(),
-            del_color: "#ff0000".into(),
+            // (the viewer's default look's: calm, and light on its dark
+            // pages)
+            add_color: "#1347ae".into(),
+            del_color: "#bb1b1b".into(),
         }
     }
 }

@@ -13,8 +13,8 @@ import { byteOffset, charOffset } from "./edits.ts";
 import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink } from "./session.ts";
 import type { DiffBar, DiffBarActions, DiffLook } from "./panel.ts";
 
-/** latexdiff's own: UNDERLINE, SAFE, xcolor's blue and red. */
-export const LATEXDIFF_LOOK: DiffLook = { markup: "underline", subtype: "safe", add_color: "#0000ff", del_color: "#ff0000" };
+/** The default look: latexdiff's UNDERLINE and SAFE, in a calmer blue and red than xcolor's pure ones, dark enough that the dark pages (inverted) show them light. */
+export const LATEXDIFF_LOOK: DiffLook = { markup: "underline", subtype: "safe", add_color: "#1347ae", del_color: "#bb1b1b" };
 
 /**
  * A sink that paints only while `on()`: two sessions, one panel (the

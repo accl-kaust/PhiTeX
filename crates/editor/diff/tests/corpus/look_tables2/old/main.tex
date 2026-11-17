@@ -1,0 +1,92 @@
+\documentclass{article}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{siunitx}
+\usepackage{multirow}
+\begin{document}
+\section{Tables}
+Mapping a dataflow graph onto a coarse-grained array asks the compiler to place every operation and route every value in space and time, and the search grows with the fabric.
+
+\begin{table}[h]\centering\begin{tabularx}{\linewidth}{lX}\toprule Name & Description\\\midrule DRESC & An old framework with a long description of what it does\\ CGRA-ME & Unified\\\bottomrule\end{tabularx}\caption{X.}\end{table}
+\begin{table}[h]\centering\begin{tabular}{lS[table-format=2.2]}\toprule Kernel & {Time}\\\midrule FFT & 1.25\\ GEMM & 12.50\\\bottomrule\end{tabular}\caption{S.}\end{table}
+\begin{table}[h]\centering\begin{tabular}{lcr}\toprule a & b & c\\\bottomrule\end{tabular}\caption{Spec.}\end{table}
+\begin{table}[h]\centering\begin{tabular}{llr}\toprule \multirow{2}{*}{Group A} & x & 1\\ & y & 2\\\bottomrule\end{tabular}\caption{Multirow.}\end{table}
+Mapping a dataflow graph onto a coarse-grained array asks the compiler to place every operation and route every value in space and time, and the search grows with the fabric.
+
+\begin{longtable}{lrr}
+\caption{A long table.}\\
+\toprule Row & A & B \\\midrule\endhead
+  Row 1 & 3 & 7 \\
+  Row 2 & 6 & 14 \\
+  Row 3 & 9 & 21 \\
+  Row 4 & 12 & 28 \\
+  Row 5 & 15 & 35 \\
+  Row 6 & 18 & 42 \\
+  Row 7 & 21 & 49 \\
+  Row 8 & 24 & 56 \\
+  Row 9 & 27 & 63 \\
+  Row 10 & 30 & 70 \\
+  Row 11 & 33 & 77 \\
+  Row 12 & 36 & 84 \\
+  Row 13 & 39 & 91 \\
+  Row 14 & 42 & 98 \\
+  Row 15 & 45 & 105 \\
+  Row 16 & 48 & 112 \\
+  Row 17 & 51 & 119 \\
+  Row 18 & 54 & 126 \\
+  Row 19 & 57 & 133 \\
+  Row 20 & 60 & 140 \\
+  Row 21 & 63 & 147 \\
+  Row 22 & 66 & 154 \\
+  Row 23 & 69 & 161 \\
+  Row 24 & 72 & 168 \\
+  Row 25 & 75 & 175 \\
+  Row 26 & 78 & 182 \\
+  Row 27 & 81 & 189 \\
+  Row 28 & 84 & 196 \\
+  Row 29 & 87 & 203 \\
+  Row 30 & 90 & 210 \\
+  Row 31 & 93 & 217 \\
+  Row 32 & 96 & 224 \\
+  Row 33 & 99 & 231 \\
+  Row 34 & 102 & 238 \\
+  Row 35 & 105 & 245 \\
+  Row 36 & 108 & 252 \\
+  Row 37 & 111 & 259 \\
+  Row 38 & 114 & 266 \\
+  Row 39 & 117 & 273 \\
+  Row 40 & 120 & 280 \\
+  Row 41 & 123 & 287 \\
+  Row 42 & 126 & 294 \\
+  Row 43 & 129 & 301 \\
+  Row 44 & 132 & 308 \\
+  Row 45 & 135 & 315 \\
+  Row 46 & 138 & 322 \\
+  Row 47 & 141 & 329 \\
+  Row 48 & 144 & 336 \\
+  Row 49 & 147 & 343 \\
+  Row 50 & 150 & 350 \\
+  Row 51 & 153 & 357 \\
+  Row 52 & 156 & 364 \\
+  Row 53 & 159 & 371 \\
+  Row 54 & 162 & 378 \\
+  Row 55 & 165 & 385 \\
+  Row 56 & 168 & 392 \\
+  Row 57 & 171 & 399 \\
+  Row 58 & 174 & 406 \\
+  Row 59 & 177 & 413 \\
+  Row 60 & 180 & 420 \\
+  Row 61 & 183 & 427 \\
+  Row 62 & 186 & 434 \\
+  Row 63 & 189 & 441 \\
+  Row 64 & 192 & 448 \\
+  Row 65 & 195 & 455 \\
+  Row 66 & 198 & 462 \\
+  Row 67 & 201 & 469 \\
+  Row 68 & 204 & 476 \\
+  Row 69 & 207 & 483 \\
+\bottomrule
+\end{longtable}
+Mapping a dataflow graph onto a coarse-grained array asks the compiler to place every operation and route every value in space and time, and the search grows with the fabric.
+\end{document}

@@ -6947,15 +6947,24 @@ fn compare_markup_typesets_cleanly() {
         // (what a command only the old preamble defines typesets cannot be
         // shown: `macros`' \oldmacro)
         let unshown: &[&str] = if name == "macros" { &["old"] } else { &[] };
+        // (what the markup writes itself: a deleted equation's `(deleted)`
+        // where its number would be; a deleted image whose file is gone,
+        // `image NAME`; and what it leaves out: a deleted item of a
+        // numbered list takes no label, the new version's keep theirs)
+        let own: &[&str] = match name.as_str() {
+            "look_images" => &["deleted", "image", "old"],
+            "look_lists" => &["deleted", "b"],
+            _ => &["deleted"],
+        };
         for w in old.words.keys().chain(new.words.keys()) {
             let (o, n, d) = (count(old, w), count(new, w), count(diff, w));
-            if d < o.max(n) && !unshown.contains(&w.as_str()) {
+            if d < o.max(n) && !unshown.contains(&w.as_str()) && !own.contains(&w.as_str()) {
                 bad.push(format!("{name}: {w:?} {d} times, old {o}, new {n}"));
             }
         }
         for (w, &d) in &diff.words {
             let (o, n) = (count(old, w), count(new, w));
-            if d > o + n {
+            if d > o + n && !own.contains(&w.as_str()) {
                 bad.push(format!("{name}: {w:?} {d} times, old {o}, new {n}"));
             }
         }
