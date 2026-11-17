@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   AGE, AUTHOR_COLORS, Model, OVERFLOW, SINCE, UNCOMMITTED, ageStep, agoWords, authorColors, bibEntries, bibFiles, bibItems, byteIndex, floats,
-  historyBlame, imageNames, lineOf, lineStarts, lookOf, mapPage, parsePorcelain, printedLines, type BlameCommit, type BlameData,
+  historyBlame, imageNames, lineOf, lineStarts, lookOf, mapPage, matchLines, parsePorcelain, printedLines, type BlameCommit, type BlameData,
 } from "../src/blame.ts";
 import type { Glyph } from "../src/sync.ts";
 
@@ -200,4 +200,10 @@ test("ages in words", () => {
   assert.equal(agoWords(NOW - 3 * 3600, NOW), "3 hours ago");
   assert.equal(agoWords(NOW - 9 * DAY, NOW), "9 days ago");
   assert.equal(agoWords(NOW - 20, NOW), "just now");
+});
+
+test("the editor's lines matched in the history's: those it lacks are not committed", () => {
+  const m = matchLines(["a", "b", "c", "d"], ["a", "x", "b", "d", "e"]);
+  assert.deepEqual([...m].sort((p, q) => p[0] - q[0]), [[0, 0], [2, 1], [3, 3]]);
+  assert.deepEqual([...matchLines([], ["a"])], []);
 });

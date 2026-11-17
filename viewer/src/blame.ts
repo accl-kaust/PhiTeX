@@ -574,6 +574,33 @@ export function historyBlame(parts: HistoryPart[], first: BlameCommit, commitOf:
   return { text, commits, lines };
 }
 
+/**
+ * The lines of `b` matched in `a` (a line of `b` → its line in `a`): the
+ * common start and end, and between them a longest common subsequence
+ * where it is small enough to work out (else none matched there). Overleaf's
+ * history is behind the editor by the edits not flushed yet: the editor's
+ * lines that the history's last version lacks are not committed.
+ */
+export function matchLines(a: string[], b: string[]): Map<number, number> {
+  const out = new Map<number, number>();
+  let s = 0;
+  while (s < a.length && s < b.length && a[s] === b[s]) out.set(s, s), s++;
+  let ea = a.length, eb = b.length;
+  while (ea > s && eb > s && a[ea - 1] === b[eb - 1]) out.set(--eb, --ea);
+  const n = ea - s, m = eb - s;
+  if (!n || !m || n * m > 4_000_000) return out;
+  // (the LCS table from the end: L[i][j] the longest of a[s+i..] and b[s+j..])
+  const L = new Uint32Array((n + 1) * (m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--) L[i * (m + 1) + j] = a[s + i] === b[s + j] ? L[(i + 1) * (m + 1) + j + 1] + 1 : Math.max(L[(i + 1) * (m + 1) + j], L[i * (m + 1) + j + 1]);
+  for (let i = 0, j = 0; i < n && j < m; ) {
+    if (a[s + i] === b[s + j]) out.set(s + j++, s + i++);
+    else if (L[(i + 1) * (m + 1) + j] >= L[i * (m + 1) + j + 1]) i++;
+    else j++;
+  }
+  return out;
+}
+
 function newerOf(cs: BlameCommit[], a: number, b: number): number {
   return cs[b].time > cs[a].time ? b : a;
 }
@@ -693,10 +720,18 @@ export class Blame {
     });
   }
 
+  private toggled: ((on: boolean) => void)[] = [];
+
+  /** `cb(on)` whenever blame is shown or hidden (a host's own toggle: Overleaf's toolbar). */
+  onToggle(cb: (on: boolean) => void): void {
+    this.toggled.push(cb);
+  }
+
   /** Blame shown or not (the bar's toggle). */
   toggle(on = !this.on): void {
     this.on = on;
     this.p.pressed(on);
+    for (const f of this.toggled) f(on);
     if (!on) {
       this.pinned = this.hover = null;
       this.card.hidden = true;
