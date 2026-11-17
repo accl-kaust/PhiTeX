@@ -4185,7 +4185,7 @@ function loop(frame) {
   let raf = 0, last = t0, on = true;
   const tick = (now) => {
     if (!on) return;
-    frame(now - t0, Math.min(50, now - last));
+    frame(Math.max(0, now - t0), Math.max(0, Math.min(50, now - last)));
     last = now;
     raf = requestAnimationFrame(tick);
   };
@@ -5007,7 +5007,7 @@ function plane(box, dark) {
     return w;
   };
   const frame = (now) => {
-    const dt = Math.min(50, now - last);
+    const dt = Math.max(0, Math.min(50, now - last));
     last = now;
     if (out >= 0 && from2) {
       const t = now - out, SWING = 260, a = ease(t / SWING);

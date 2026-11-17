@@ -87,7 +87,8 @@ export function loop(frame: (t: number, dt: number) => void) {
   let raf = 0, last = t0, on = true;
   const tick = (now: number) => {
     if (!on) return;
-    frame(now - t0, Math.min(50, now - last));
+    // (a frame's time is when the frame began, which may be before t0 was read: never back in time)
+    frame(Math.max(0, now - t0), Math.max(0, Math.min(50, now - last)));
     last = now;
     raf = requestAnimationFrame(tick);
   };
