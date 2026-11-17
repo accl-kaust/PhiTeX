@@ -5,6 +5,10 @@
 use std::time::Duration;
 
 /// Where the document stands after a step.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "a step's facts, each its own, read once"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct After {
     /// A graph's save is under way (its next slice to run).
