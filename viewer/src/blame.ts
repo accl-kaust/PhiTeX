@@ -943,7 +943,12 @@ export class Blame {
     const r = slot.getBoundingClientRect();
     const { w, h } = this.p.pageSize();
     const x = ((e.clientX - r.left) / r.width) * w, y = ((e.clientY - r.top) / r.height) * h;
-    const s = (this.segs.get(k) ?? []).find((s) => x >= Math.min(s.bx - 4, s.x0) && x <= s.x1 && y >= s.y0 && y <= s.y1);
+    // (a line anywhere across its column: from its bar to the column's right edge, the
+    // rightmost of the column's lines, wherever its own glyphs end)
+    const segs = this.segs.get(k) ?? [];
+    const right = new Map<number, number>();
+    for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
+    const s = segs.find((s) => x >= Math.min(s.bx - 4, s.x0) && x <= (right.get(s.bx) ?? s.x1) && y >= s.y0 && y <= s.y1);
     return s ? { k, s } : null;
   }
 

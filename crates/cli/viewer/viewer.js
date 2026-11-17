@@ -7128,13 +7128,21 @@ var Model = class {
   }
 };
 function printedLines(gs) {
-  const base = (g) => Math.round(g.y * 2);
-  const order = [...gs].sort((a, b) => base(a) - base(b) || a.x - b.x);
+  const rows = [];
+  for (const g of [...gs].sort((a, b) => a.y - b.y)) {
+    const r = rows.at(-1);
+    if (r && g.y - r[0].y < 1) r.push(g);
+    else rows.push([g]);
+  }
   const out = [];
-  for (const g of order) {
-    const l = out.at(-1);
-    if (l && base(l[0]) === base(g) && g.x - l.at(-1).x < 18) l.push(g);
-    else out.push([g]);
+  for (const r of rows) {
+    r.sort((a, b) => a.x - b.x);
+    let l = [];
+    for (const g of r) {
+      if (l.length && g.x - l.at(-1).x >= 18) out.push(l), l = [];
+      l.push(g);
+    }
+    out.push(l);
   }
   return out;
 }
@@ -7143,7 +7151,7 @@ function columnStarts(x0s) {
   const groups = [];
   for (const x of xs) {
     const g = groups.at(-1);
-    if (g && x - g[0] < 12) g.push(x);
+    if (g && x - g[0] < 40) g.push(x);
     else groups.push([x]);
   }
   return groups.filter((g) => g.length >= 3).map((g) => g[0]);
@@ -7151,6 +7159,7 @@ function columnStarts(x0s) {
 function mapPage(gs, m, size2) {
   const raw = [];
   for (const line of printedLines(gs)) {
+    if (line.length <= 4 && line.every((g) => g.synth)) continue;
     let c, file = "", l0 = 0, l1 = 0;
     const runs = [];
     line.forEach((g, i) => {
@@ -7245,10 +7254,10 @@ var BLAME_CSS = `
 .blamebar .x { all: unset; cursor: pointer; padding: 0 6px; color: var(--ph-fg2); border-radius: var(--ph-radius); }
 .blamebar .x:hover { background: var(--ph-hover); color: var(--ph-fg); }
 .slot .bl { position: absolute; pointer-events: none; }
-.slot .bl.bar { border-radius: 1px; width: 3px; }
-.slot .bl.bar.on { width: 4px; }
-.slot .bl.tint { border-radius: 1px; }
-.slot .bl.hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
+.slot .bl-bar { border-radius: 1px; width: 3px; }
+.slot .bl-bar.bl-on { width: 4px; }
+.slot .bl-tint { border-radius: 1px; }
+.slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
 .blcard { position: fixed; z-index: 30; width: min(320px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 8px; box-shadow: 0 6px 24px rgb(20 24 33 / 22%); padding: 9px 12px 9px 16px; font-size: 13px; line-height: 1.35; }
 .blcard[hidden] { display: none; }
 .blcard .strip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; border-radius: 8px 0 0 8px; }
@@ -7259,7 +7268,7 @@ var BLAME_CSS = `
 .blcard .acts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
 .blcard .acts button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); font-size: 12.5px; }
 .blcard .acts button:hover, .blcard .acts button:focus-visible { text-decoration: underline; }
-@media (prefers-reduced-motion: no-preference) { .slot .bl.tint { transition: opacity .12s; } }
+@media (prefers-reduced-motion: no-preference) { .slot .bl-tint { transition: opacity .12s; } }
 `;
 var HATCH_SWATCH = "repeating-linear-gradient(45deg,#9AA0A6 0 1.5px,transparent 1.5px 4px)";
 var Blame = class {
@@ -7304,10 +7313,16 @@ var Blame = class {
       this.draw();
     });
   }
+  toggled = [];
+  /** `cb(on)` whenever blame is shown or hidden (a host's own toggle: Overleaf's toolbar). */
+  onToggle(cb) {
+    this.toggled.push(cb);
+  }
   /** Blame shown or not (the bar's toggle). */
   toggle(on = !this.on) {
     this.on = on;
     this.p.pressed(on);
+    for (const f of this.toggled) f(on);
     if (!on) {
       this.pinned = this.hover = null;
       this.card.hidden = true;
@@ -7414,13 +7429,13 @@ var Blame = class {
             const l = this.look(c);
             if (!l) continue;
             const t = document.createElement("div");
-            t.className = `bl tint${l.hatch ? " hatch" : ""}`;
+            t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
             Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b2 - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
             frag.append(t);
           }
         }
         const b = document.createElement("div");
-        b.className = `bl bar${lk.hatch ? " hatch" : ""}${lit ? " on" : ""}`;
+        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${lit ? " bl-on" : ""}`;
         Object.assign(b.style, { left: pct(s.bx, w), top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color });
         frag.append(b);
       }
@@ -7486,7 +7501,10 @@ var Blame = class {
     const r = slot.getBoundingClientRect();
     const { w, h } = this.p.pageSize();
     const x = (e.clientX - r.left) / r.width * w, y = (e.clientY - r.top) / r.height * h;
-    const s = (this.segs.get(k) ?? []).find((s2) => x >= Math.min(s2.bx - 4, s2.x0) && x <= s2.x1 && y >= s2.y0 && y <= s2.y1);
+    const segs = this.segs.get(k) ?? [];
+    const right = /* @__PURE__ */ new Map();
+    for (const s2 of segs) right.set(s2.bx, Math.max(right.get(s2.bx) ?? 0, s2.x1));
+    const s = segs.find((s2) => x >= Math.min(s2.bx - 4, s2.x0) && x <= (right.get(s2.bx) ?? s2.x1) && y >= s2.y0 && y <= s2.y1);
     return s ? { k, s } : null;
   }
   move(e) {
