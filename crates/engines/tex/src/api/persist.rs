@@ -553,6 +553,10 @@ impl Build {
     /// its document files, every few of the engine's nodes and entries
     /// ([`phitex_defuse::Engine::export_more`]) and between pieces of
     /// [`SAVE_PIECE`] bytes; each call writes something, whatever it says.
+    ///
+    /// # Panics
+    ///
+    /// Never: the engine's export is begun before its part.
     #[must_use]
     pub fn save_more(&self, s: &mut Save, pause: &dyn Fn() -> bool) -> Option<(Vec<u8>, f64, f64)> {
         loop {

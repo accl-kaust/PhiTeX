@@ -215,7 +215,18 @@ struct ValueTable<'a> {
     at: FxHashMap<ValueId, u32>,
     out: Vec<u8>,
     n: u32,
+    /// The values being written, parts first ([`ValueTable::put_until`]:
+    /// kept across a pause, one value's DAG written over several slices).
+    stack: Vec<(ValueId, bool)>,
+    /// Where an item is probed for the values it names, in order
+    /// ([`Engine::export_slice`]'s nodes): `put` notes each not yet
+    /// written here, writes nothing, and answers 0.
+    probe: Option<Vec<ValueId>>,
 }
+
+/// How many values [`ValueTable::put_until`] writes between two asks of its
+/// `pause`.
+const PUT_PAUSE_EVERY: u32 = 256;
 
 impl ValueTable<'_> {
     fn parts(&self, y: ValueId) -> Vec<ValueId> {
@@ -236,16 +247,46 @@ impl ValueTable<'_> {
         if let Some(&i) = self.at.get(&x) {
             return u64::from(i);
         }
-        let mut stack: Vec<(ValueId, bool)> = vec![(x, false)];
-        while let Some((y, done)) = stack.pop() {
+        if let Some(p) = &mut self.probe {
+            p.push(x);
+            return 0;
+        }
+        debug_assert!(self.stack.is_empty(), "a put under way: put_until first");
+        self.stack.push((x, false));
+        self.drive(&|| false);
+        u64::from(self.at[&x])
+    }
+
+    /// `x` written if new, its parts first, `pause` asked every
+    /// [`PUT_PAUSE_EVERY`] values: whether it is written (false: paused,
+    /// the rest kept; called again with the same `x`, it goes on). A value
+    /// whose parts are many (a format's bindings, a file's text) is written
+    /// over several slices of a save, not in one. Called first for every
+    /// value an item names, in the order the item names them, the item's
+    /// own puts then number nothing new: the same numbers as one pass.
+    fn put_until(&mut self, x: ValueId, pause: &dyn Fn() -> bool) -> bool {
+        if self.at.contains_key(&x) {
+            return true;
+        }
+        if self.stack.is_empty() {
+            self.stack.push((x, false));
+        }
+        self.drive(pause) && self.at.contains_key(&x)
+    }
+
+    /// The values on the stack written, parts first: whether all are
+    /// (false: `pause` said so).
+    fn drive(&mut self, pause: &dyn Fn() -> bool) -> bool {
+        let mut written = 0u32;
+        while let Some((y, done)) = self.stack.pop() {
             if self.at.contains_key(&y) {
                 continue;
             }
             if !done {
-                stack.push((y, true));
+                self.stack.push((y, true));
                 for e in self.parts(y).into_iter().rev() {
                     if !self.at.contains_key(&e) {
-                        stack.push((e, false));
+                        self.stack.push((e, false));
                     }
                 }
                 continue;
@@ -307,8 +348,12 @@ impl ValueTable<'_> {
             }
             self.at.insert(y, self.n);
             self.n += 1;
+            written += 1;
+            if written.is_multiple_of(PUT_PAUSE_EVERY) && !self.stack.is_empty() && pause() {
+                return false;
+            }
         }
-        u64::from(self.at[&x])
+        true
     }
 
     fn opt(&mut self, x: Option<ValueId>) -> u64 {
@@ -743,6 +788,10 @@ pub struct Export {
     at: FxHashMap<ValueId, u32>,
     vals: Vec<u8>,
     n: u32,
+    stack: Vec<(ValueId, bool)>,
+    /// The node whose values are being written first, and those values.
+    taken_node: Option<usize>,
+    named: Vec<ValueId>,
     meta: Vec<u8>,
     line: Vec<u8>,
     nodes: Vec<u8>,
@@ -808,6 +857,9 @@ impl Engine {
             at: FxHashMap::default(),
             vals: Vec::new(),
             n: 0,
+            stack: Vec::new(),
+            taken_node: None,
+            named: Vec::new(),
             meta: Vec::new(),
             line: Vec::new(),
             nodes: Vec::new(),
@@ -829,11 +881,14 @@ impl Engine {
             at: std::mem::take(&mut x.at),
             out: std::mem::take(&mut x.vals),
             n: x.n,
+            stack: std::mem::take(&mut x.stack),
+            probe: None,
         };
         let r = self.export_slice(x, &mut t, pause);
         x.at = t.at;
         x.vals = t.out;
         x.n = t.n;
+        x.stack = t.stack;
         r
     }
 
@@ -857,6 +912,15 @@ impl Engine {
                 x.taken = Taken::None;
                 continue;
             }};
+        }
+        // (the values an item names written first, over as many slices as
+        // they take, the item itself after: `ValueTable::put_until`)
+        macro_rules! pre {
+            ($($v:expr),*) => {
+                $(if !t.put_until($v, pause) {
+                    return None;
+                })*
+            };
         }
         let ids = |meta: &mut Vec<u8>, xs: Vec<NodeId>| {
             put(meta, xs.len() as u64);
@@ -910,6 +974,7 @@ impl Engine {
                         unreachable!("the member paths taken")
                     };
                     while let Some(&((f, p, v, q), r)) = mp.get(x.i) {
+                        pre!(f.0, v);
                         put(&mut x.meta, t.put(f.0));
                         put(&mut x.meta, u64::from(p.0));
                         put(&mut x.meta, t.put(v));
@@ -929,6 +994,7 @@ impl Engine {
                         unreachable!("the shapes taken")
                     };
                     while let Some(&((op, f), c)) = sh.get(x.i) {
+                        pre!(f.0);
                         put(&mut x.meta, u64::from(op.0));
                         put(&mut x.meta, t.put(f.0));
                         put(&mut x.meta, zig(c));
@@ -946,6 +1012,7 @@ impl Engine {
                         unreachable!("the fields taken")
                     };
                     while let Some(&f) = se.get(x.i) {
+                        pre!(f.0);
                         put(&mut x.meta, t.put(f.0));
                         tick!();
                     }
@@ -970,6 +1037,7 @@ impl Engine {
                         unreachable!("the settled taken")
                     };
                     while let Some(s) = st.get(x.i) {
+                        pre!(s.output);
                         put(&mut x.meta, s.node.raw());
                         put(&mut x.meta, s.version);
                         put(&mut x.meta, t.put(s.output));
@@ -987,6 +1055,10 @@ impl Engine {
                         unreachable!("the finals taken")
                     };
                     while let Some(&(f, p, dirty, pending)) = finals.get(x.i) {
+                        pre!(f.0);
+                        if let Some(v) = p.and_then(|p| p.value) {
+                            pre!(v);
+                        }
                         let meta = &mut x.meta;
                         put(meta, t.put(f.0));
                         meta.push(u8::from(p.is_some()) | (u8::from(dirty) << 1) | (u8::from(pending) << 2));
@@ -1013,6 +1085,10 @@ impl Engine {
                         unreachable!("the environment taken")
                     };
                     while let Some(&(f, v, provided)) = es.get(x.i) {
+                        pre!(f.0);
+                        if let Some(v) = v {
+                            pre!(v);
+                        }
                         put(&mut x.meta, t.put(f.0));
                         put(&mut x.meta, t.opt(v));
                         x.meta.push(u8::from(provided));
@@ -1038,6 +1114,7 @@ impl Engine {
                 }
                 Part::Roots => {
                     while let Some(&r) = x.roots.get(x.i) {
+                        pre!(r);
                         put(&mut x.meta, t.put(r));
                         tick!();
                     }
@@ -1092,7 +1169,20 @@ impl Engine {
                         unreachable!("the nodes counted")
                     };
                     while x.i < n {
+                        // (the values the node names, probed, then written
+                        // first: one of them may be large, a page's)
+                        if x.taken_node != Some(x.i) {
+                            t.probe = Some(Vec::new());
+                            let (mut a, mut b) = (Vec::new(), Vec::new());
+                            self.export_node(x.i, &mut a, &mut b, t);
+                            x.named = t.probe.take().unwrap_or_default();
+                            x.taken_node = Some(x.i);
+                        }
+                        for &v in &x.named {
+                            pre!(v);
+                        }
                         self.export_node(x.i, &mut x.nodes, &mut x.recs, t);
+                        x.named.clear();
                         tick!();
                     }
                     // (every value numbered: the numbers go, the table's
