@@ -5,9 +5,27 @@ body:
   - type: markdown
     attributes:
       value: |
-        Run the command again with `--report` and attach the `.phitex-report.txt` it writes
-        beside your output. If phitex itself failed, it also printed the path of a failure
-        report in its cache's `reports/` folder: attach that too.
+        Thank you for reporting this. You can open this issue, or email flinner@nand.sh if you
+        prefer: either way, include the debug info below. In Overleaf, **Report this** (next to
+        **Copy debug info**) drafts either one with the debug info already in it, for you to read
+        first. Nothing is sent until you send it.
+
+        **The debug info** tells us your version, browser or system, where PhiTeX got to and
+        what failed. It holds no text of your project and no file names but the main file's.
+
+        - **Overleaf (PhiTeX Instant):** click the status text in the PDF toolbar, beside the
+          ⚡ Instant switch (it says what PhiTeX is doing, such as "Reading the project" or
+          "Built · 35 ms"), then **Copy debug info**. The diagnostics button there opens the
+          same while nothing has been built. If neither shows, click the PhiTeX Instant button
+          in the browser's toolbar (under the puzzle piece) and **Copy debug info**: it works
+          whatever state the tab is in.
+        - **VS Code:** in the PhiTeX preview, click the status at its top left, then
+          **Copy debug info**.
+        - **The web demo:** click the status at the top left of the preview, then
+          **Copy debug info**.
+        - **The command line:** run the command again with `--report` and attach the
+          `.phitex-report.txt` it writes beside your output. If phitex itself failed, it also
+          printed the path of a failure report in its cache's `reports/` folder: attach that too.
   - type: textarea
     id: what
     attributes:
@@ -19,7 +37,7 @@ body:
     id: report
     attributes:
       label: The report
-      description: Attach the .phitex-report.txt file (and the failure report, if any).
+      description: Paste the debug info (Overleaf, VS Code, the web), or attach the .phitex-report.txt file (and the failure report, if any) from the command line.
     validations:
       required: true
   - type: textarea

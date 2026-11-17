@@ -1125,6 +1125,12 @@ export class PreviewSession {
   }
 
   /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
+  /** Page `k`'s glyphs (its glyph origins, kept by the page's hash): Blame's, an overlay. */
+  pageGlyphs(k: number): Promise<Glyph[]> {
+    const have = this.cached(k);
+    return have ? Promise.resolve(have) : this.glyphsOf(k);
+  }
+
   private cached(k: number): Glyph[] | undefined {
     return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
   }

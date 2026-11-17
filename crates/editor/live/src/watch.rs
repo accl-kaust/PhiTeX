@@ -107,7 +107,7 @@ impl Edits {
             Ask::Painted(us) => return Applied::Painted(us),
             Ask::Rebuild => return Applied::Rebuild,
             // (the owner's, which holds the last build: never here)
-            Ask::WritePdf { .. } | Ask::Shot { .. } | Ask::Compare { .. } => {
+            Ask::WritePdf { .. } | Ask::Shot { .. } | Ask::Blame { .. } | Ask::Compare { .. } => {
                 return Applied::Nothing;
             }
             Ask::Transcript => {

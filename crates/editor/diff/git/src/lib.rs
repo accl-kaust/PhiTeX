@@ -11,6 +11,8 @@
 //!   followed by the flattening that reads them).
 //! - [`Repo::refs`] and [`Repo::log`]: what a baseline picker lists, the
 //!   commits in topological order with their parents and refs (a graph's).
+//! - [`Repo::blame`] and [`Repo::last_change`]: who last changed each
+//!   line of a file, or a whole file (a figure's image): the viewer's Blame.
 //! - [`Snapshot::moved`]: whether the revision a snapshot was taken by
 //!   names another commit now (a branch that moved; a hash never does).
 //!
@@ -22,6 +24,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub use gix::ObjectId;
+
+mod blame;
+pub use blame::{Blame, BlameCommit};
 
 /// The revision that names the index: `staged` against the working tree
 /// is what `git diff` shows; `HEAD` against `staged` what `git diff

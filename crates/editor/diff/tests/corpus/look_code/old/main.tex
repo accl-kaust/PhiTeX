@@ -1,0 +1,25 @@
+\documentclass{article}
+\usepackage[ruled,linesnumbered]{algorithm2e}
+\usepackage{listings}
+\begin{document}
+\section{Code}
+Mapping a dataflow graph onto a coarse-grained array asks the compiler to place every operation and route every value in space and time, and the search grows with the fabric.
+\begin{algorithm}[h]
+\caption{Map}\label{alg:m}
+\KwIn{a graph $G$}
+\ForEach{node $v$}{place $v$\;
+route its edges\;}
+\Return{the mapping}\;
+\end{algorithm}
+\begin{lstlisting}[language=C]
+int place(int v) {
+  return v * 2;
+}
+\end{lstlisting}
+Mapping a dataflow graph onto a coarse-grained array asks the compiler to place every operation and route every value in space and time, and the search grows with the fabric.
+\begin{verbatim}
+make all
+make test
+\end{verbatim}
+Mapping a dataflow graph onto a coarse-grained array asks the compiler to place every operation and route every value in space and time, and the search grows with the fabric.
+\end{document}

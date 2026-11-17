@@ -108,14 +108,14 @@ jobs:
       # (the watch's own viewer in headless Chrome against this binary: what
       # a person clicks, each test a bug a user reported; it ran nowhere
       # before and drifted from the product)
-      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs)
+      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs, blame.test.mjs)
         if: ${{ !cancelled() }}
         env:
           PHITEX_BIN: ${{ github.workspace }}/bin/phitex
           CHROMIUM: google-chrome
           # (the runner has no TeX Live: TeX's files from Shelf)
           PHITEX_BROWSER_SHELF: "1"
-        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs
+        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs phitex/viewer/browser/blame.test.mjs
   browsers:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -192,6 +192,19 @@ jobs:
           # (the dashboard's folders, on the mock's dashboard: the recent projects at the
           # top level, a search, a folder opened, a drag into a folder, a settings change)
           node tools/dev/mock-run.mjs test/scenarios/dashboard.json
+          # (Blame from the project's history: the toggle beside Compare, its bars by age,
+          # author and since, the edits not in the history hatched, the card on hover)
+          node tools/dev/mock-run.mjs test/scenarios/blame.json
+      # (Firefox: its content scripts fetch as the page by content.fetch, whose
+      # objects are the page's; a project opened, Compare with a past version and a
+      # figure replaced, through that path. Chromium has no content.fetch, so the
+      # mock-run scenarios above never take it: 1.0.3 opened no project in Firefox)
+      - name: Overleaf in Firefox (the extension's Firefox package on the mock)
+        working-directory: fe
+        run: |
+          firefox --version
+          MINTED_WHEELS=target/minted tools/build/package.sh
+          node tools/dev/fx-run.mjs test/scenarios/fx.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe

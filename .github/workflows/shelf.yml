@@ -96,41 +96,50 @@ jobs:
           name: shelf-site
       - run: mkdir site && tar -C site -xf site.tar
       - uses: cloudflare/wrangler-action@v3
+        id: deploy
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: "4.149.0"
           command: pages deploy site/public --project-name shelf-phitex-v1 --branch main
+      # (the checks read this deployment at its own address, wrangler's
+      # deployment-url: it serves exactly what was uploaded from the
+      # moment the deploy returns. v1.shelf.phitex.org takes the new
+      # deployment a little later, edge by edge, so a read of it just
+      # after the deploy may mix the two: run 44030802064's pack table,
+      # named by the new release.json, was a 404 there and is served
+      # now. The custom domain serves the same deployment once it has
+      # it, through the same CDN)
       - name: served
+        env:
+          SITE: ${{ steps.deploy.outputs.deployment-url }}
         run: |
           r=${{ needs.release.outputs.release }}
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            got=$(curl -fsS https://v1.shelf.phitex.org/tl2026/release.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["release"])') && [ "$got" = "$r" ] && break
-            sleep 30
-          done
-          [ "$got" = "$r" ] || { echo "v1.shelf.phitex.org serves $got, not $r"; exit 1; }
-          echo "v1.shelf.phitex.org serves $r"
+          [ -n "$SITE" ] || { echo "wrangler gave no deployment-url"; exit 1; }
+          got=$(curl -fsS "$SITE/tl2026/release.json" | python3 -c 'import json,sys;print(json.load(sys.stdin)["release"])')
+          [ "$got" = "$r" ] || { echo "the deployment ($SITE) serves $got, not $r"; exit 1; }
+          echo "the deployment ($SITE) serves $r"
       - name: served formats
         if: inputs.formats_commit != ''
         env:
+          SITE: ${{ steps.deploy.outputs.deployment-url }}
           WANT: ${{ needs.release.outputs.formats }}
         run: |
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            miss=$(curl -fsS https://v1.shelf.phitex.org/tl2026/release.json | python3 -c 'import json,os,sys;h=json.load(sys.stdin).get("formats") or {};print(" ".join(f for f in os.environ["WANT"].split() if f not in h))') && [ -z "$miss" ] && break
-            sleep 30
-          done
-          [ -z "$miss" ] || { echo "v1.shelf.phitex.org does not serve the formats $miss"; exit 1; }
-          echo "v1.shelf.phitex.org serves the formats $WANT"
+          miss=$(curl -fsS "$SITE/tl2026/release.json" | python3 -c 'import json,os,sys;h=json.load(sys.stdin).get("formats") or {};print(" ".join(f for f in os.environ["WANT"].split() if f not in h))')
+          [ -z "$miss" ] || { echo "the deployment ($SITE) does not serve the formats $miss"; exit 1; }
+          echo "the deployment ($SITE) serves the formats $WANT"
       # (as a client takes them, through the CDN: release.json's pack
       # table holds every pack it names a format, and each pack served
       # is what that table says: the v1.0 clean deploy's table, rewritten
       # under its cached name, lacked them, and every client refused the
       # formats while the origin was right)
       - name: formats as a client takes them
+        env:
+          SITE: ${{ steps.deploy.outputs.deployment-url }}
         run: |
           python3 - <<'PY'
-          import gzip, hashlib, json, sys, urllib.request
-          base = "https://v1.shelf.phitex.org/tl2026/"
+          import gzip, hashlib, json, os, sys, urllib.request
+          base = os.environ["SITE"].rstrip("/") + "/tl2026/"
           get = lambda p: urllib.request.urlopen(urllib.request.Request(base + p, headers={"User-Agent": "phitex-shelf-check"}), timeout=300).read()
           doc = json.loads(get("release.json"))
           table = {l.split("\t")[0]: l.split("\t")[1:] for l in gzip.decompress(get(doc["pack_table"])).decode().splitlines() if l}

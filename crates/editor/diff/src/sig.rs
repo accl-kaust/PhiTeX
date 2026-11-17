@@ -92,6 +92,10 @@ pub struct Signatures {
     /// Commands defined by the old preamble and not the new one: a deleted
     /// use of one would not compile, so it is commented out.
     old_only: HashSet<String>,
+    /// Commands a preamble learnt defines (the document's own macros, the
+    /// last preamble's read): a deleted use of one is shown, as the old
+    /// version typeset it.
+    user: HashSet<String>,
 }
 
 /// latexdiff's `SAFECMD` list, as names (its patterns are in
@@ -410,13 +414,17 @@ const TEXT: &[(&str, &str, bool)] = &[
     ("textsubscript", "m", false),
     ("textcircled", "m", false),
     ("uline", "m", false),
+    // (cell commands: their text marked inside them, the cell kept)
+    ("multicolumn", "mmm", false),
+    ("multirow", "omomom", false),
+    ("multirowcell", "moom", false),
+    ("makecell", "om", false),
 ];
 
 /// Latexdiff's `CONTEXT1CMD` and `CONTEXT2CMD`.
 const CONTEXT: &[(&str, &str, Class)] = &[
     ("caption", "som", Class::Context1),
     ("subcaption", "som", Class::Context1),
-    ("multicolumn", "mmm", Class::Context1),
     ("title", "om", Class::Context2),
     ("author", "om", Class::Context2),
     ("date", "m", Class::Context2),
@@ -479,7 +487,7 @@ const UNSAFE_ARGS: &[(&str, &str)] = &[
     ("color", "om"),
     ("footnotemark", "o"),
     ("cline", "m"),
-    ("cmidrule", "om"),
+    ("cmidrule", "orm"),
     ("addlinespace", "o"),
     ("setlength", "mm"),
     ("addtolength", "mm"),
@@ -531,6 +539,11 @@ const ENVS: &[(&str, &str, EnvKind)] = &[
     ("table*", "o", EnvKind::Float),
     ("plate", "o", EnvKind::Float),
     ("plate*", "o", EnvKind::Float),
+    ("algorithm", "o", EnvKind::Float),
+    ("algorithm*", "o", EnvKind::Float),
+    ("listing", "o", EnvKind::Float),
+    ("sidewaystable", "o", EnvKind::Float),
+    ("sidewaysfigure", "o", EnvKind::Float),
     ("picture", "", EnvKind::Picture),
     ("tikzpicture", "o", EnvKind::Picture),
     ("pgfpicture", "", EnvKind::Picture),
@@ -852,7 +865,14 @@ impl Signatures {
                 _ => {}
             }
         }
+        self.user.clone_from(&learned.commands);
         learned
+    }
+
+    /// Whether command `name` is one the last preamble learnt defines.
+    #[must_use]
+    pub fn user(&self, name: &str) -> bool {
+        self.user.contains(name)
     }
 
     /// A macro body's class: safe if every command in it is safe.

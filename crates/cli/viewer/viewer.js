@@ -1239,8 +1239,8 @@ var Viewer = class _Viewer {
     const key = _Viewer.citeKey(mid);
     if (this.citesAsking.has(key)) return;
     this.citesAsking.add(key);
-    const group = this.citeGroup(at.k, at.link);
-    const answers = await Promise.all(group.map((l) => this.host.cites(at.k, (l[0] + l[2]) / 2, (l[1] + l[3]) / 2).catch(() => null)));
+    const group2 = this.citeGroup(at.k, at.link);
+    const answers = await Promise.all(group2.map((l) => this.host.cites(at.k, (l[0] + l[2]) / 2, (l[1] + l[3]) / 2).catch(() => null)));
     const seen = /* @__PURE__ */ new Set();
     const said2 = answers.flatMap((a) => a ?? []).filter((c) => !seen.has(c.key) && (seen.add(c.key), true));
     this.citesAsking.delete(key);
@@ -1280,8 +1280,8 @@ var Viewer = class _Viewer {
     const links = this.slots[k]?.img?.links ?? [];
     if (!span || !isCite(link)) return [link];
     const mid = (link[1] + link[3]) / 2;
-    const group = links.filter((l) => isCite(l) && l[1] <= mid && mid <= l[3] && (l[0] + l[2]) / 2 >= span[0] && (l[0] + l[2]) / 2 <= span[1]);
-    return group.length ? group.sort((a, b) => a[0] - b[0]) : [link];
+    const group2 = links.filter((l) => isCite(l) && l[1] <= mid && mid <= l[3] && (l[0] + l[2]) / 2 >= span[0] && (l[0] + l[2]) / 2 <= span[1]);
+    return group2.length ? group2.sort((a, b) => a[0] - b[0]) : [link];
   }
   /** The brackets round a citation's link, as page points from left to right ([x0, x1]), or null (none). */
   bracketSpan(k, link) {
@@ -1366,8 +1366,8 @@ var Viewer = class _Viewer {
     const own = this.entryAt(link[4], link[5] ?? 0);
     if (!own) return null;
     const near = link[4];
-    const group = this.linkText(k, link);
-    const inner = /^[[(](.*)[\])]$/.exec(group)?.[1] ?? "";
+    const group2 = this.linkText(k, link);
+    const inner = /^[[(](.*)[\])]$/.exec(group2)?.[1] ?? "";
     if (/^[\d,;\s–-]+$/.test(inner)) {
       const labels = [];
       for (const part3 of inner.split(/[,;]/)) {
@@ -1386,7 +1386,7 @@ var Viewer = class _Viewer {
     const s = this.slots[k];
     const img = s?.img;
     const list = [];
-    if (img?.links && group.length > 3) {
+    if (img?.links && group2.length > 3) {
       const line = img.links.filter((l) => Math.abs((l[1] + l[3]) / 2 - (link[1] + link[3]) / 2) < 3 && Math.abs(l[0] - link[0]) < 200 && typeof l[4] === "number");
       for (const l of line.sort((a, b) => a[0] - b[0])) {
         const e = this.entryAt(l[4], l[5] ?? 0);
@@ -2260,7 +2260,7 @@ var Viewer = class _Viewer {
   }
   paint(s) {
     if (!s.img) return;
-    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv, .bl")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
@@ -6891,6 +6891,692 @@ var Review = class {
   }
 };
 
+// viewer/src/blame.ts
+var UNCOMMITTED = "#9AA0A6";
+var AGE = [
+  { name: "Under a day", days: 1, bar: ["#5B2A86", "#C7A6F0"], tint: 0.22 },
+  { name: "Under a week", days: 7, bar: ["#7B4FAE", "#AE8AD8"], tint: 0.16 },
+  { name: "Under a month", days: 31, bar: ["#A07CC9", "#8E6CB8"], tint: 0.1 },
+  { name: "Under 6 months", days: 183, bar: ["#C9B5E2", "#6B5390"], tint: 0.05 },
+  { name: "Older", days: Infinity, bar: null, tint: 0 }
+];
+var AUTHOR_COLORS = ["#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#0072B2", "#D55E00"];
+var OVERFLOW = "#8A8F98";
+var SINCE = ["#5B2A86", "#C7A6F0"];
+function ageStep(days) {
+  return AGE.findIndex((a) => days < a.days);
+}
+function fnv(s) {
+  let h = 2166136261;
+  for (const b of new TextEncoder().encode(s)) h = Math.imul(h ^ b, 16777619) >>> 0;
+  return h;
+}
+function authorColors(keys) {
+  const out = /* @__PURE__ */ new Map();
+  const taken = /* @__PURE__ */ new Set();
+  for (const k of [...new Set(keys)].sort()) {
+    let i = fnv(k) % AUTHOR_COLORS.length;
+    let n = 0;
+    while (taken.has(i) && n < AUTHOR_COLORS.length) i = (i + 1) % AUTHOR_COLORS.length, n++;
+    if (n === AUTHOR_COLORS.length) out.set(k, OVERFLOW);
+    else taken.add(i), out.set(k, AUTHOR_COLORS[i]);
+  }
+  return out;
+}
+var authorKey = (c) => (c.email || c.author).trim().toLowerCase();
+function byteIndex(text) {
+  const out = new Uint32Array(text.length + 1);
+  let b = 0;
+  for (let i = 0; i < text.length; i++) {
+    out[i] = b;
+    const c = text.charCodeAt(i);
+    if (c < 128) b += 1;
+    else if (c < 2048) b += 2;
+    else if (c >= 55296 && c < 56320 && i + 1 < text.length) out[++i] = b, b += 4;
+    else b += 3;
+  }
+  out[text.length] = b;
+  return out;
+}
+function lineStarts(text) {
+  const out = [0];
+  let b = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    b += c < 128 ? 1 : c < 2048 ? 2 : c >= 55296 && c < 56320 ? (i++, 4) : 3;
+    if (c === 10) out.push(b);
+  }
+  return out;
+}
+function lineOf(starts, at) {
+  let lo = 0, hi = starts.length;
+  while (hi - lo > 1) {
+    const m = lo + hi >> 1;
+    if (starts[m] <= at) lo = m;
+    else hi = m;
+  }
+  return lo;
+}
+function group(text, i) {
+  let d = 0;
+  for (let j = i; j < text.length; j++) {
+    const c = text[j];
+    if (c === "\\") j++;
+    else if (c === "%") while (j < text.length && text[j] !== "\n") j++;
+    else if (c === "{") d++;
+    else if (c === "}" && --d === 0) return j + 1;
+  }
+  return -1;
+}
+function floats(file, text) {
+  const out = [];
+  const bytes = byteIndex(text);
+  const begin = /\\begin\s*\{(figure\*?|table\*?|wrapfigure|wraptable|SCfigure|SCtable|subfigure)\}/g;
+  for (let m; m = begin.exec(text); ) {
+    const end = text.indexOf(`\\end{${m[1]}}`, m.index);
+    if (end < 0) continue;
+    const body = text.slice(m.index, end);
+    const images = [], inputs = [];
+    for (const g of body.matchAll(/\\includegraphics\*?\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g)) images.push(g[1].trim());
+    for (const g of body.matchAll(/\\(?:input|include|includesvg|includestandalone)\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g)) inputs.push(g[1].trim());
+    let caption = null;
+    const c = /\\caption\*?\s*(?:\[[^\]]*\]\s*)?\{/.exec(body);
+    if (c) {
+      const open = m.index + c.index + c[0].length - 1;
+      const close = group(text, open);
+      if (close > 0) caption = [bytes[m.index + c.index], bytes[close]];
+    }
+    out.push({ file, from: bytes[m.index], to: bytes[end + `\\end{${m[1]}}`.length], caption, images, inputs });
+    begin.lastIndex = end;
+  }
+  return out;
+}
+function imageNames(name, paths = []) {
+  const exts = /\.[A-Za-z0-9]{2,5}$/.test(name) ? [""] : [".pdf", ".png", ".jpg", ".jpeg", ".eps"];
+  const dirs = [...paths, ""];
+  return dirs.flatMap((d) => exts.map((e) => `${d}${name}${e}`));
+}
+function inputNames(name) {
+  return /\.[A-Za-z0-9]{1,5}$/.test(name) ? [name] : [`${name}.tex`, name];
+}
+function graphicsPaths(text) {
+  const m = /\\graphicspath\s*\{((?:\s*\{[^}]*\})*)\s*\}/.exec(text);
+  return m ? [...m[1].matchAll(/\{([^}]*)\}/g)].map((g) => g[1]).filter(Boolean) : [];
+}
+function bibFiles(text) {
+  const out = [];
+  for (const m of text.matchAll(/\\bibliography\s*\{([^}]+)\}/g)) for (const n of m[1].split(",")) out.push(/\.bib$/.test(n.trim()) ? n.trim() : `${n.trim()}.bib`);
+  for (const m of text.matchAll(/\\addbibresource\s*(?:\[[^\]]*\]\s*)?\{([^}]+)\}/g)) out.push(m[1].trim());
+  return out.filter((n) => n && n !== ".bib");
+}
+function bibItems(text) {
+  const bytes = byteIndex(text);
+  return [...text.matchAll(/\\bibitem\s*(?:\[(?:[^\]{}]|\{[^}]*\})*\]\s*)?\{([^}]+)\}/g)].map((m) => [bytes[m.index], m[1].trim()]);
+}
+function bibEntries(text) {
+  const out = /* @__PURE__ */ new Map();
+  const at = [...text.matchAll(/^[ \t]*@\s*(\w+)\s*[{(]\s*([^,\s]+)\s*,/gm)];
+  const lineAt3 = (i) => text.slice(0, i).split("\n").length - 1;
+  at.forEach((m, j) => {
+    if (/^(comment|string|preamble)$/i.test(m[1])) return;
+    const next = j + 1 < at.length ? at[j + 1].index : text.length;
+    const body = text.slice(m.index, next).replace(/\s+$/, "");
+    out.set(m[2], [lineAt3(m.index), lineAt3(m.index + body.length)]);
+  });
+  return out;
+}
+var Model = class {
+  commits = [];
+  refs = [];
+  now = Date.now() / 1e3;
+  files = /* @__PURE__ */ new Map();
+  floats = [];
+  byId = /* @__PURE__ */ new Map();
+  bib = /* @__PURE__ */ new Map();
+  bbls = /* @__PURE__ */ new Map();
+  /** `d` taken in: its commits merged with those already here by id. */
+  add(d) {
+    const map = d.commits.map((c) => {
+      let k = this.byId.get(c.id);
+      if (k === void 0) k = this.commits.push(c) - 1, this.byId.set(c.id, k);
+      return k;
+    });
+    const re = (i) => i === void 0 ? void 0 : i < 0 ? -1 : map[i] ?? -1;
+    if (d.now) this.now = d.now;
+    if (d.refs) this.refs = d.refs;
+    for (const [name, f] of Object.entries(d.files)) {
+      const g = { ...f, lines: f.lines?.map((l) => re(l)), last: re(f.last) };
+      if (f.text !== void 0) g.starts = lineStarts(f.text);
+      this.files.set(name, g);
+      if (f.text !== void 0 && /\.tex$|\.ltx$/i.test(name)) this.floats.push(...floats(name, f.text));
+      if (f.text !== void 0 && /\.bbl$/i.test(name)) this.bbls.set(name, bibItems(f.text));
+      if (f.text !== void 0 && /\.bib$/i.test(name)) for (const [key, lines3] of bibEntries(f.text)) this.bib.set(key, { file: name, lines: lines3 });
+    }
+  }
+  /** The files a page's glyphs need besides their own: the floats' images and inputs, the .bib files, as names to try. */
+  wanted() {
+    const texts = [...this.files.values()].map((f) => f.text ?? "");
+    const paths = texts.flatMap(graphicsPaths);
+    const out = /* @__PURE__ */ new Set();
+    for (const f of this.floats) {
+      for (const i of f.images) imageNames(i, paths).forEach((n) => out.add(n));
+      for (const i of f.inputs) inputNames(i).forEach((n) => out.add(n));
+    }
+    for (const t of texts) bibFiles(t).forEach((n) => out.add(n));
+    for (const n of this.files.keys()) out.delete(n);
+    return [...out];
+  }
+  time(c) {
+    return c < 0 ? Infinity : this.commits[c]?.time ?? -Infinity;
+  }
+  /** The newer of two commits (-1, not committed, newest of all). */
+  newer(a, b) {
+    return a === void 0 || this.time(b) > this.time(a) ? b : a;
+  }
+  /** The newest commit of `file`'s lines [a, b] (from 0); undefined: none blamed. */
+  newest(file, a, b) {
+    const ls = this.files.get(file)?.lines;
+    if (!ls) return void 0;
+    let best;
+    for (let i = a; i <= b && i < ls.length; i++) best = this.newer(best, ls[i]);
+    return best;
+  }
+  /** Glyph `g`'s commit, file and line (from 0): its source line's; a .bbl's, its .bib entry's newest. */
+  of(g) {
+    if (!g.file) return null;
+    const bbl = this.bbls.get(g.file);
+    if (bbl) {
+      let key;
+      for (const [at, k] of bbl) if (at <= g.start) key = k;
+      const e = key ? this.bib.get(key) : void 0;
+      const c = e ? this.newest(e.file, e.lines[0], e.lines[1]) : void 0;
+      return e && c !== void 0 ? { c, file: e.file, line: e.lines[0], last: e.lines[1] } : null;
+    }
+    const f = this.files.get(g.file);
+    if (!f?.lines || !f.starts) return null;
+    const line = lineOf(f.starts, g.start);
+    return { c: f.lines[line] ?? -1, file: g.file, line, last: line };
+  }
+  /** The commit a float's picture is blamed on: its images' last changes, its inputs' lines, else the float's own lines but its caption's. */
+  floatCommit(fl) {
+    const texts = [...this.files.values()].map((f3) => f3.text ?? "");
+    const paths = texts.flatMap(graphicsPaths);
+    let best, src = "";
+    for (const i of fl.images)
+      for (const n of imageNames(i, paths)) {
+        const f3 = this.files.get(n);
+        if (!f3 || f3.error) continue;
+        const c = f3.last ?? (f3.lines ? this.newest(n, 0, f3.lines.length - 1) : void 0);
+        if (c !== void 0 && (best === void 0 || this.newer(best, c) === c)) best = c, src = n;
+        break;
+      }
+    for (const i of fl.inputs)
+      for (const n of inputNames(i)) {
+        const f3 = this.files.get(n);
+        if (!f3?.lines) continue;
+        const c = this.newest(n, 0, f3.lines.length - 1);
+        if (c !== void 0 && (best === void 0 || this.newer(best, c) === c)) best = c, src = n;
+        break;
+      }
+    if (best !== void 0) return { c: best, src };
+    const f = this.files.get(fl.file);
+    if (!f?.lines || !f.starts) return null;
+    const a = lineOf(f.starts, fl.from), b = lineOf(f.starts, Math.max(fl.from, fl.to - 1));
+    const [ca, cb] = fl.caption ? [lineOf(f.starts, fl.caption[0]), lineOf(f.starts, Math.max(fl.caption[0], fl.caption[1] - 1))] : [-1, -1];
+    for (let l = a; l <= b; l++) if (l < ca || l > cb) best = this.newer(best, f.lines[l] ?? -1);
+    return best === void 0 ? null : { c: best, src: `${fl.file}:${a + 1}\u2013${b + 1}` };
+  }
+};
+function printedLines(gs) {
+  const rows = [];
+  for (const g of [...gs].sort((a, b) => a.y - b.y)) {
+    const r = rows.at(-1);
+    if (r && g.y - r[0].y < 1) r.push(g);
+    else rows.push([g]);
+  }
+  const out = [];
+  for (const r of rows) {
+    r.sort((a, b) => a.x - b.x);
+    let l = [];
+    for (const g of r) {
+      if (l.length && g.x - l.at(-1).x >= 18) out.push(l), l = [];
+      l.push(g);
+    }
+    out.push(l);
+  }
+  return out;
+}
+function columnStarts(x0s) {
+  const xs = [...x0s].sort((a, b) => a - b);
+  const groups = [];
+  for (const x of xs) {
+    const g = groups.at(-1);
+    if (g && x - g[0] < 40) g.push(x);
+    else groups.push([x]);
+  }
+  return groups.filter((g) => g.length >= 3).map((g) => g[0]);
+}
+function mapPage(gs, m, size2) {
+  const raw = [];
+  for (const line of printedLines(gs)) {
+    if (line.length <= 4 && line.every((g) => g.synth)) continue;
+    let c, file = "", l0 = 0, l1 = 0;
+    const runs = [];
+    line.forEach((g, i) => {
+      const at = m.of(g);
+      const next = line[i + 1];
+      const w = next && next.x > g.x && next.x - g.x < 15 ? next.x - g.x : 5;
+      if (!at) return;
+      c = m.newer(c, at.c);
+      if (!file) file = at.file, l0 = at.line, l1 = at.last;
+      else if (file === at.file) l0 = Math.min(l0, at.line), l1 = Math.max(l1, at.last);
+      const r = runs.at(-1);
+      if (r && r[2] === at.c && g.x - r[1] < 6) r[1] = g.x + w;
+      else runs.push([g.x, g.x + w, at.c]);
+    });
+    if (c === void 0) continue;
+    const x0 = line[0].x, last = line.at(-1);
+    raw.push({ x0, x1: last.x + 5, y0: line[0].y - 8, y1: line[0].y + 3, bx: 0, c, file, l0, l1, runs, para: 0, glyphs: line, srcs: line.filter((g) => g.file).map((g) => ({ file: g.file, start: g.start })) });
+  }
+  const cols = columnStarts(raw.map((s) => s.x0));
+  const colOf = (x) => cols.filter((c) => c <= x + 1).at(-1) ?? x;
+  for (const s of raw) s.bx = colOf(s.x0) - 7;
+  const textTop = Math.min(...raw.filter((s) => s.y0 > size2.h * 0.07).map((s) => s.y0), Infinity);
+  const gone2 = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const fl of m.floats) {
+    const inFloat = (s) => s.srcs.some((g) => g.file === fl.file && g.start >= fl.from && g.start < fl.to || fl.inputs.some((i) => inputNames(i).includes(g.file)));
+    const capOf = (s) => !!fl.caption && s.srcs.some((g) => g.file === fl.file && g.start >= fl.caption[0] && g.start < fl.caption[1]);
+    const caps = raw.filter(capOf);
+    if (!caps.length) continue;
+    const bx = caps[0].bx;
+    const capTop = Math.min(...caps.map((s) => s.y0));
+    const picture = raw.filter((s) => s.bx === bx && inFloat(s) && !capOf(s) && s.y1 <= capTop + 0.5);
+    const above = raw.filter((s) => s.bx === bx && !inFloat(s) && s.y1 <= Math.min(capTop, ...picture.map((p) => p.y0)) + 0.5);
+    const top = Math.min(above.length ? Math.max(...above.map((s) => s.y1)) + 3 : textTop, ...picture.map((p) => p.y0));
+    const bottom = capTop - 2;
+    if (!(bottom - top >= 8)) continue;
+    const blamed = m.floatCommit(fl);
+    if (!blamed) continue;
+    picture.forEach((p) => gone2.add(p));
+    const x1 = Math.max(...caps.map((s) => s.x1));
+    out.push({ x0: bx + 7, x1, y0: top, y1: bottom, bx, c: blamed.c, file: blamed.src, l0: 0, l1: 0, runs: [], fig: blamed.src, para: 0 });
+  }
+  for (const s of raw) if (!gone2.has(s)) out.push({ x0: s.x0, x1: s.x1, y0: s.y0, y1: s.y1, bx: s.bx, c: s.c, file: s.file, l0: s.l0, l1: s.l1, runs: s.runs, para: 0, ...s.fig ? { fig: s.fig } : {} });
+  out.sort((a, b) => a.bx - b.bx || a.y0 - b.y0);
+  let para = 0;
+  out.forEach((s, i) => {
+    const p = out[i - 1];
+    if (!p || p.bx !== s.bx || p.c !== s.c || s.y0 - p.y1 > 9) para++;
+    s.para = para;
+  });
+  return out;
+}
+function agoWords(t, now) {
+  const s = Math.max(0, now - t);
+  const units = [[31536e3, "year"], [2592e3, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [n, u] of units)
+    if (s >= n) {
+      const k = Math.floor(s / n);
+      return `${k} ${u}${k === 1 ? "" : "s"} ago`;
+    }
+  return "just now";
+}
+function lookOf2(m, c, mode, dark, since, colors) {
+  if (c < 0) return { color: UNCOMMITTED, tint: 0.12, hatch: true };
+  const x = m.commits[c];
+  if (!x) return null;
+  if (mode === "age") {
+    const a = AGE[ageStep((m.now - x.time) / 86400)];
+    return a?.bar ? { color: a.bar[dark ? 1 : 0], tint: a.tint } : null;
+  }
+  if (mode === "author") return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
+  return x.time > since ? { color: SINCE[dark ? 1 : 0], tint: 0.18 } : null;
+}
+var BLAME_CSS = `
+.blamebar { display: none; flex: none; align-items: center; gap: 6px 14px; padding: 4px 8px 4px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); font-size: 12.5px; }
+.blamebar.on { display: flex; }
+.blamebar .grp { display: inline-flex; align-items: center; gap: 6px; }
+.blamebar .lbl { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ph-fg2); }
+.blamebar .seg { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); overflow: hidden; }
+.blamebar .seg button { all: unset; cursor: pointer; padding: 2px 9px; color: var(--ph-fg); }
+.blamebar .seg button + button { border-left: 1px solid var(--ph-border); }
+.blamebar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.blamebar .seg button:focus-visible, .blamebar select:focus-visible, .blamebar .x:focus-visible { outline: 2px solid var(--ph-accent); outline-offset: 1px; }
+.blamebar select { font: inherit; padding: 1px 4px; border-radius: var(--ph-radius); border: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); max-width: 260px; }
+.blamebar .legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.blamebar .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.blamebar .lg small { color: var(--ph-fg2); font-variant-numeric: tabular-nums; font-size: inherit; }
+.blamebar .sw { width: 18px; height: 11px; border-radius: 2px; position: relative; overflow: hidden; border: 1px solid var(--ph-border); }
+.blamebar .sw i { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.blamebar .say { color: var(--ph-fg2); }
+.blamebar .grow { flex: 1; }
+.blamebar .x { all: unset; cursor: pointer; padding: 0 6px; color: var(--ph-fg2); border-radius: var(--ph-radius); }
+.blamebar .x:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.slot .bl { position: absolute; pointer-events: none; }
+.slot .bl-bar { border-radius: 1px; width: 3px; }
+.slot .bl-bar.bl-on { width: 4px; }
+.slot .bl-tint { border-radius: 1px; }
+.slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
+.blcard { position: fixed; z-index: 30; width: min(320px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 8px; box-shadow: 0 6px 24px rgb(20 24 33 / 22%); padding: 9px 12px 9px 16px; font-size: 13px; line-height: 1.35; }
+.blcard[hidden] { display: none; }
+.blcard .strip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; border-radius: 8px 0 0 8px; }
+.blcard .sub { font-weight: 600; }
+.blcard .meta { color: var(--ph-fg2); margin-top: 3px; }
+.blcard code, .blcard .src { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 11.5px; }
+.blcard .src { color: var(--ph-fg2); margin-top: 6px; overflow-wrap: anywhere; }
+.blcard .acts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
+.blcard .acts button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); font-size: 12.5px; }
+.blcard .acts button:hover, .blcard .acts button:focus-visible { text-decoration: underline; }
+@media (prefers-reduced-motion: no-preference) { .slot .bl-tint { transition: opacity .12s; } }
+`;
+var HATCH_SWATCH = "repeating-linear-gradient(45deg,#9AA0A6 0 1.5px,transparent 1.5px 4px)";
+var Blame = class {
+  p;
+  host;
+  on = false;
+  mode = "age";
+  tint = "hover";
+  /** Changed since: seconds since the epoch, and the choice's value in the list. */
+  since = null;
+  m = null;
+  error = "";
+  busy = false;
+  segs = /* @__PURE__ */ new Map();
+  colors = /* @__PURE__ */ new Map();
+  hover = null;
+  pinned = null;
+  card;
+  turn = 0;
+  again;
+  constructor(p, host2) {
+    this.p = p;
+    this.host = host2;
+    this.card = document.createElement("div");
+    this.card.className = "blcard";
+    this.card.hidden = true;
+    this.card.setAttribute("role", "dialog");
+    this.card.setAttribute("aria-label", "Commit");
+    (p.stage.closest(".win") ?? p.root).append(this.card);
+    p.stage.addEventListener("pointermove", (e) => this.move(e));
+    const gone2 = (e, to) => !this.pinned && !(e.relatedTarget instanceof Node && to.contains(e.relatedTarget)) && this.over(null);
+    p.stage.addEventListener("pointerleave", (e) => gone2(e, this.card));
+    this.card.addEventListener("pointerleave", (e) => gone2(e, p.stage));
+    p.stage.addEventListener("click", (e) => this.click(e));
+    this.card.addEventListener("click", (e) => this.act(e));
+    p.root.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && (this.pinned || this.hover)) this.pinned = null, this.over(null), e.stopPropagation();
+    }, { capture: true });
+    p.bar.addEventListener("click", (e) => this.barClick(e));
+    p.bar.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t.id !== "bl-since") return;
+      this.since = { t: Number(t.value.split(":")[0]), v: t.value };
+      this.draw();
+    });
+  }
+  toggled = [];
+  /** `cb(on)` whenever blame is shown or hidden (a host's own toggle: Overleaf's toolbar). */
+  onToggle(cb) {
+    this.toggled.push(cb);
+  }
+  /** Blame shown or not (the bar's toggle). */
+  toggle(on = !this.on) {
+    this.on = on;
+    this.p.pressed(on);
+    for (const f of this.toggled) f(on);
+    if (!on) {
+      this.pinned = this.hover = null;
+      this.card.hidden = true;
+      this.clear();
+      this.p.bar.className = "blamebar";
+      this.p.bar.replaceChildren();
+      return;
+    }
+    this.p.bar.className = "blamebar on";
+    void this.load();
+  }
+  /** The pages changed (a build, new origins): blamed again, a moment after the last change. */
+  refresh() {
+    if (!this.on) return;
+    clearTimeout(this.again);
+    this.again = setTimeout(() => void this.load(), 300);
+  }
+  /** The pages drawn again (a new look: dark pages). */
+  redraw() {
+    if (this.on) this.draw();
+  }
+  pages() {
+    return this.p.stage.querySelectorAll(".slot").length;
+  }
+  async load() {
+    const turn = ++this.turn;
+    this.busy = true;
+    this.bar();
+    try {
+      const n = this.pages();
+      const glyphs3 = [];
+      for (let k = 0; k < n; k++) glyphs3.push(await this.host.glyphs(k));
+      if (turn !== this.turn) return;
+      const files = /* @__PURE__ */ new Set();
+      for (const gs of glyphs3) for (const g of gs) if (g.file) files.add(g.file);
+      const m = new Model();
+      const d = await this.host.blame([...files]);
+      if (turn !== this.turn) return;
+      if (typeof d === "string") throw new Error(d);
+      m.add(d);
+      const more = m.wanted();
+      if (more.length) {
+        const d2 = await this.host.blame(more);
+        if (turn !== this.turn) return;
+        if (typeof d2 !== "string") m.add(d2);
+      }
+      this.m = m;
+      this.error = "";
+      this.colors = authorColors(m.commits.map(authorKey));
+      if (this.host.color) for (const c of m.commits) {
+        const h = this.host.color(c);
+        if (h) this.colors.set(authorKey(c), h);
+      }
+      const size2 = this.p.pageSize();
+      this.segs.clear();
+      glyphs3.forEach((gs, k) => this.segs.set(k, mapPage(gs, m, size2)));
+      if (!this.since) this.since = this.sinceChoices()[0] ?? null;
+    } catch (e) {
+      if (turn !== this.turn) return;
+      this.m = null;
+      this.error = e.message || String(e);
+    }
+    this.busy = false;
+    this.draw();
+  }
+  /** "Changed since" choices: the tags (newest first), then a day, a week, a month and three months ago, then the commits shown. */
+  sinceChoices() {
+    const m = this.m;
+    if (!m) return [];
+    const out = [];
+    for (const r of [...m.refs].filter((r2) => r2.kind === "tag").sort((a, b) => b.time - a.time)) out.push({ t: r.time, v: `${r.time}:tag:${r.name}`, label: `${r.name} \xB7 ${agoWords(r.time, m.now)}` });
+    for (const [d, w] of [[1, "yesterday"], [7, "a week ago"], [30, "a month ago"], [91, "three months ago"]]) out.push({ t: m.now - d * 86400, v: `${m.now - d * 86400}:days:${d}`, label: w });
+    const word = this.host.words?.commit ?? "commit";
+    for (const c of [...m.commits].sort((a, b) => b.time - a.time).slice(0, 12)) out.push({ t: c.time, v: `${c.time}:c:${c.id}`, label: `${word} ${c.short} \xB7 ${c.subject.slice(0, 40)}` });
+    return out;
+  }
+  look(c) {
+    return this.m ? lookOf2(this.m, c, this.mode, this.p.dark(), this.since?.t ?? Infinity, this.colors) : null;
+  }
+  clear() {
+    for (const e of this.p.stage.querySelectorAll(".slot .bl")) e.remove();
+  }
+  /** The bars and tints on every page, and the bar's legend. */
+  draw() {
+    this.clear();
+    this.bar();
+    if (!this.on || !this.m) return;
+    const { w, h } = this.p.pageSize();
+    const dark = this.p.dark();
+    const focus = this.pinned ?? this.hover;
+    const pct = (v, of) => `${v / of * 100}%`;
+    for (const [k, segs] of this.segs) {
+      const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
+      if (!slot) continue;
+      const frag = document.createDocumentFragment();
+      for (const s of segs) {
+        const lk = this.look(s.c);
+        if (!lk) continue;
+        const lit = !!focus && focus.k === k && focus.s.para === s.para;
+        const tinted = this.tint === "all" || this.tint === "hover" && lit;
+        if (tinted) {
+          const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
+          for (const [a, b2, c] of runs) {
+            const l = this.look(c);
+            if (!l) continue;
+            const t = document.createElement("div");
+            t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
+            Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b2 - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
+            frag.append(t);
+          }
+        }
+        const b = document.createElement("div");
+        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${lit ? " bl-on" : ""}`;
+        Object.assign(b.style, { left: pct(s.bx, w), top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color });
+        frag.append(b);
+      }
+      slot.append(frag);
+    }
+  }
+  /** The row under the bar: Colour by, Since (its choice), Word tint, the legend. */
+  bar() {
+    if (!this.on) return;
+    const seg = (id, cur, opts) => html`<span class="seg" role="group" id="${id}">${opts.map(([v, t]) => html`<button type="button" data-v="${v}" aria-pressed="${String(cur === v)}">${t}</button>`)}</span>`;
+    const choices = this.sinceChoices();
+    const since = this.mode === "since" ? html`<span class="grp"><span class="lbl">Since</span><select id="bl-since" aria-label="Changed since">${choices.map((c) => html`<option value="${c.v}" selected="${c.v === this.since?.v}">${c.label}</option>`)}</select></span>` : "";
+    const say = this.busy ? html`<span class="say">Reading the history…</span>` : this.error ? html`<span class="say">${this.error}</span>` : this.legend();
+    this.p.bar.replaceChildren(
+      html`<span class="grp"><span class="lbl">Colour by</span>${seg("bl-mode", this.mode, [["age", "Age"], ["author", "Author"], ["since", "Since\u2026"]])}</span>${since}<span class="grp"><span class="lbl">Word tint</span>${seg("bl-tint", this.tint, [["off", "Off"], ["hover", "Paragraph under pointer"], ["all", "All"]])}</span>${say}<span class="grow"></span><button type="button" class="x" data-a="close" title="Hide blame" aria-label="Hide blame">✕</button>`
+    );
+  }
+  /** The legend: each colour's meaning and how many printed lines have it. */
+  legend() {
+    const m = this.m;
+    if (!m) return html``;
+    const all = [...this.segs.values()].flat();
+    const dark = this.p.dark();
+    const row = (color, name, n, hatch = false) => html`<span class="lg"><span class="sw" style="${hatch ? `background:${HATCH_SWATCH}` : `background:${color}${dark ? "33" : "26"}`}"><i style="${`background:${hatch ? UNCOMMITTED : color}`}"></i></span><span>${name}</span><small>${n}</small></span>`;
+    const unc = all.filter((s) => s.c < 0).length;
+    const lines3 = (f) => all.filter((s) => s.c >= 0 && f(m.commits[s.c])).length;
+    let rows = [];
+    if (this.mode === "age") {
+      rows = [row("", "Not committed", unc, true), ...AGE.map((a, i) => row(a.bar ? a.bar[dark ? 1 : 0] : "transparent", a.name, lines3((c) => ageStep((m.now - c.time) / 86400) === i)))];
+    } else if (this.mode === "author") {
+      const who = /* @__PURE__ */ new Map();
+      for (const s of all) {
+        if (s.c < 0) continue;
+        const c = m.commits[s.c];
+        const k = authorKey(c);
+        const e = who.get(k) ?? { name: c.author || c.email, n: 0 };
+        e.n++;
+        who.set(k, e);
+      }
+      rows = [...[...who].sort((a, b) => b[1].n - a[1].n).map(([k, e]) => row(this.colors.get(k) ?? OVERFLOW, e.name, e.n)), row("", "Not committed", unc, true)];
+    } else {
+      const t = this.since?.t ?? Infinity;
+      rows = [row(SINCE[dark ? 1 : 0], "Changed since then", lines3((c) => c.time > t)), row("", "Not committed", unc, true)];
+    }
+    return html`<span class="legend" aria-label="Legend">${rows}</span>`;
+  }
+  barClick(e) {
+    const t = e.target;
+    const b = t.closest("button");
+    if (!b) return;
+    if (b.dataset.a === "close") return this.toggle(false);
+    const g = b.closest(".seg")?.id;
+    if (g === "bl-mode") this.mode = b.dataset.v;
+    else if (g === "bl-tint") this.tint = b.dataset.v;
+    else return;
+    this.draw();
+  }
+  /** The printed line (or picture) under a pointer, by its page's slot. */
+  at(e) {
+    const slot = e.target.closest?.(".slot");
+    if (!slot) return null;
+    const k = Number(slot.dataset.k);
+    const r = slot.getBoundingClientRect();
+    const { w, h } = this.p.pageSize();
+    const x = (e.clientX - r.left) / r.width * w, y = (e.clientY - r.top) / r.height * h;
+    const segs = this.segs.get(k) ?? [];
+    const right = /* @__PURE__ */ new Map();
+    for (const s2 of segs) right.set(s2.bx, Math.max(right.get(s2.bx) ?? 0, s2.x1));
+    const s = segs.find((s2) => x >= Math.min(s2.bx - 4, s2.x0) && x <= (right.get(s2.bx) ?? s2.x1) && y >= s2.y0 && y <= s2.y1);
+    return s ? { k, s } : null;
+  }
+  move(e) {
+    if (!this.on || this.pinned) return;
+    const a = this.at(e);
+    if (a?.s === this.hover?.s) return;
+    this.over(a, e);
+  }
+  over(a, e) {
+    const was = this.hover;
+    this.hover = a;
+    if (!a) this.card.hidden = true;
+    else if (e) this.show(a, e);
+    if (was?.s.para !== a?.s.para || was?.k !== a?.k) this.draw();
+  }
+  click(e) {
+    if (!this.on) return;
+    if (e.target.closest(".blcard")) return;
+    const a = this.at(e);
+    if (!a) {
+      if (this.pinned) this.pinned = null, this.over(null);
+      return;
+    }
+    this.pinned = a;
+    this.hover = a;
+    this.show(a, e);
+    this.draw();
+  }
+  /** The card for line `a`, near the pointer. */
+  show(a, e) {
+    const m = this.m;
+    if (!m) return;
+    const c = a.s.c >= 0 ? m.commits[a.s.c] : null;
+    const lk = this.look(a.s.c) ?? { color: UNCOMMITTED, tint: 0 };
+    const src = a.s.fig ? `${a.s.fig}` : `${a.s.file}:${a.s.l0 + 1}${a.s.l1 > a.s.l0 ? `\u2013${a.s.l1 + 1}` : ""}`;
+    const hashes = this.host.words?.hashes !== false;
+    const word = this.host.words?.commit ?? "commit";
+    this.card.replaceChildren(
+      html`<span class="strip" style="${`background:${lk.hatch ? HATCH_SWATCH : lk.color}`}"></span><div class="sub">${c ? c.subject || "(no subject)" : "Not committed yet"}</div><div class="meta">${c ? html`${hashes ? html`<code>${c.short}</code> · ` : ""}${c.author || c.email} · ${agoWords(c.time, m.now)}` : "Your changes since the last " + word}</div><div class="src">${src}</div><div class="acts">${this.host.compare ? html`<button type="button" data-a="cmp">${c ? `Compare with before this ${word}` : `Compare with the last ${word}`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`
+    );
+    this.card.hidden = false;
+    const W2 = this.card.offsetWidth || 320, H2 = this.card.offsetHeight || 120;
+    const box = this.p.stage.getBoundingClientRect();
+    const x = Math.max(box.left + 6, Math.min(box.right - W2 - 6, e.clientX + 14));
+    const y = e.clientY + H2 + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H2 - 12) : e.clientY + 16;
+    this.card.style.left = `${x}px`;
+    this.card.style.top = `${y}px`;
+    const at = this.card.getBoundingClientRect();
+    if (Math.abs(at.left - x) > 0.5 || Math.abs(at.top - y) > 0.5) {
+      this.card.style.left = `${2 * x - at.left}px`;
+      this.card.style.top = `${2 * y - at.top}px`;
+    }
+  }
+  act(e) {
+    e.stopPropagation();
+    const a = e.target.closest("button")?.dataset.a;
+    const cur = this.pinned ?? this.hover;
+    const m = this.m;
+    if (!a || !cur || !m) return;
+    const c = cur.s.c >= 0 ? m.commits[cur.s.c] : null;
+    if (a === "cmp") return this.host.compare?.(c);
+    if (a === "src") return this.host.goto(cur.s.fig && !cur.s.fig.includes(":") ? cur.s.fig : cur.s.file.replace(/:.*$/, ""), cur.s.fig ? 1 : cur.s.l0 + 1);
+    if (a === "copy" && c)
+      void navigator.clipboard?.writeText(c.id).then(
+        () => this.p.msg(`Copied ${c.short}`),
+        () => this.p.msg(`Hash: ${c.id}`)
+      );
+  }
+};
+
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
@@ -6951,6 +7637,7 @@ var PATHS2 = {
   more_horiz: "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
   search: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
   compare: "M9.01 14H2v2h7.01v3L13 15l-3.99-4v3zm5.98-1v-3H22V8h-7.01V5L11 9l3.99 4z",
+  history: "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
   copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
@@ -7110,7 +7797,7 @@ var Panel = class {
     this.root = host2.attachShadow({ mode: "open" });
     const item2 = (id, name, label, sub = "", cls = "") => html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame ? BLAME_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -7121,6 +7808,7 @@ var Panel = class {
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
     <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
+    <button type="button" class="ib wide" id="b-blame" title="Blame: who last changed each line, from the history" aria-label="Blame" aria-pressed="false" hidden><span class="icon">history</span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
@@ -7145,6 +7833,7 @@ var Panel = class {
       ${item2("x-review", "rate_review", "Notes and changes", "m")}
       ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item2("x-compare", "compare", "Compare\u2026", "", "narrow")}
+      ${item2("x-blame", "history", "Blame", "", "narrow")}
       <hr>
       ${item2("x-settings", "tips", "Settings\u2026")}
       ${item2("x-tips", "tips", "What's new")}
@@ -7154,6 +7843,7 @@ var Panel = class {
     <div class="tip" id="tip" role="dialog" aria-live="polite" hidden></div>
   </div>
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
+  <div class="blamebar" id="blamebar" role="toolbar" aria-label="Blame"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
@@ -7189,6 +7879,7 @@ var Panel = class {
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#x-review, #b-review", !!opts.review);
+    offer("#x-blame, #b-blame", !!opts.blame);
     offer("#b-find, #x-find", !!ev.onFind);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -7310,6 +8001,16 @@ var Panel = class {
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : void 0
     });
     this.extras(opts);
+    if (opts.blame) {
+      const b = this.$("#b-blame");
+      const bl = this.blame = new Blame(
+        { root: this.root, stage: this.$("#stage"), bar: this.$("#blamebar"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), pressed: (on) => b.setAttribute("aria-pressed", String(on)) },
+        opts.blame
+      );
+      b.onclick = this.$("#x-blame").onclick = () => (this.menu(null), bl.toggle());
+      let dark = this.sheetDark();
+      new MutationObserver(() => dark !== this.sheetDark() && (dark = this.sheetDark(), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+    }
     if (opts.review) {
       const rv = this.review = new Review(
         { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), scrollMarks: (m) => (this.noteMarks = m, this.drawScrollMarks()), laidOut: () => requestAnimationFrame(() => (this.stageSize = null, this.redraw())) },
@@ -7363,6 +8064,8 @@ var Panel = class {
   menus = [];
   /** Notes and changes (opts.review). */
   review;
+  /** Blame over the pages (opts.blame): its toggle is the bar's, or the host's (Overleaf's toolbar). */
+  blame;
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   menu(m) {
     for (const [b, el] of this.menus) {
@@ -7777,6 +8480,7 @@ var Panel = class {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
     this.review?.refresh();
+    this.blame?.refresh();
   }
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
   culpritHit(e) {
@@ -9398,7 +10102,7 @@ var Panel = class {
       el.className = "menu diffset";
       return;
     }
-    look2 = { ...look2, add_color: safeColor(look2.add_color, "#0000ff"), del_color: safeColor(look2.del_color, "#ff0000") };
+    look2 = { ...look2, add_color: safeColor(look2.add_color, "#1347ae"), del_color: safeColor(look2.del_color, "#bb1b1b") };
     const MARKUP = [
       ["underline", "Underline"],
       ["ctraditional", "Color + font"],
@@ -9414,7 +10118,7 @@ var Panel = class {
     const bars2 = look2.markup in BASE2;
     const SUB = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
     const PAIRS = [
-      ["#0000ff", "#ff0000", "Blue / red"],
+      ["#1347ae", "#bb1b1b", "Blue / red"],
       ["#15803d", "#b91c1c", "Green / red"],
       ["#0072b2", "#d55e00", "Colorblind-safe"],
       ["#7e22ce", "#6b7280", "Purple / gray"]
@@ -10804,6 +11508,11 @@ var PreviewSession = class {
     }
   }
   /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
+  /** Page `k`'s glyphs (its glyph origins, kept by the page's hash): Blame's, an overlay. */
+  pageGlyphs(k) {
+    const have = this.cached(k);
+    return have ? Promise.resolve(have) : this.glyphsOf(k);
+  }
   cached(k) {
     return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
   }
@@ -11700,7 +12409,7 @@ function textLayer(lines3, w, h) {
 }
 
 // viewer/src/compare.ts
-var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#0000ff", del_color: "#ff0000" };
+var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#1347ae", del_color: "#bb1b1b" };
 var DiffControls = class {
   state = null;
   panel;
@@ -12343,6 +13052,15 @@ var review = {
     void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
   }
 };
+var blame = {
+  async blame(files) {
+    const r = await sock.request({ op: "blame", files });
+    return r.ok ? r.json : r.error ?? "no history here";
+  },
+  glyphs: (k) => session.pageGlyphs(k),
+  goto: (file, line) => source(file, line),
+  compare: (c) => void controls.start({ from: c ? `${c.id}^` : "HEAD", to: null }, c ? `Before ${c.short}` : "The last commit", c ? c.subject : "against your changes")
+};
 var panel = new Panel(
   {
     onPage: () => {
@@ -12420,6 +13138,7 @@ var panel = new Panel(
     host: "watch",
     outline: true,
     review,
+    blame,
     keys: true,
     header: true,
     footer: false,

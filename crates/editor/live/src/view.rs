@@ -71,6 +71,11 @@ pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
 /// given ([`Viewer::on_review`]).
 pub type ReviewFn = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 
+/// The host's blame of the project's files named (the `blame` op, the
+/// viewer's Blame: `{commits, files, refs, now}`, docs/spec-editor-protocol.md
+/// §10) ([`Viewer::on_blame`]).
+pub type BlameFn = Box<dyn Fn(&[String]) -> Result<Value, String> + Send>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -201,6 +206,13 @@ pub enum Ask {
         at: Vec<(String, usize, usize)>,
         pages: Vec<usize>,
         label: Option<String>,
+    },
+    /// `phitex session blame`: the glyph origins of pages `pages` (from 0;
+    /// none: every page) of the last build, read by the session's owner,
+    /// which blames them and says when, by `id`.
+    Blame {
+        id: u64,
+        pages: Vec<usize>,
     },
     /// `phitex session compare` (and `png --compare`): the files as they
     /// are diffed against version `rev` (a git revision, or the path of an
@@ -349,6 +361,9 @@ pub struct Viewer {
     review: Mutex<Option<Arc<ReviewFn>>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
+    /// The project's files blamed (the `blame` op: the viewer's Blame, an
+    /// overlay on the pages): the host's history ([`BlameFn`]).
+    blame: Mutex<Option<BlameFn>>,
     /// Shows a source place (file, line, column from 1, and the place as
     /// `FILE:LINE:COL`): the host's editor.
     goto: Mutex<Option<Box<dyn Fn(&str, usize, usize, &str) + Send>>>,
@@ -480,6 +495,7 @@ impl Default for Viewer {
             info: Mutex::new(None),
             review: Mutex::new(None),
             log: Mutex::new(None),
+            blame: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
             read: Mutex::new(None),
@@ -877,6 +893,11 @@ impl Viewer {
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
         *lock(&self.log) = Some(log);
+    }
+
+    /// The `blame` op answered by `blame` ([`BlameFn`]).
+    pub fn on_blame(&self, blame: BlameFn) {
+        *lock(&self.blame) = Some(blame);
     }
 
     /// A diff's build begins: its state (its changes, known before it is
@@ -1600,6 +1621,23 @@ impl Viewer {
                 let limit = req.get("limit").and_then(index).unwrap_or(100);
                 match lock(&s.log).as_ref().map(|f| f(skip, limit)) {
                     Some(Ok(commits)) => ok(json!({"commits": commits})),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no history here"),
+                }
+            }
+            // (the files' blame, the viewer's overlay: no build, no new pages)
+            "blame" => {
+                let files: Vec<String> = req
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|f| f.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match lock(&s.blame).as_ref().map(|f| f(&files)) {
+                    Some(Ok(v)) => ok(v),
                     Some(Err(e)) => fail(&e),
                     None => fail("no history here"),
                 }
