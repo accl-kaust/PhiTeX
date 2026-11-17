@@ -427,13 +427,17 @@ export function printedLines(gs: Glyph[]): Glyph[][] {
   return out;
 }
 
-/** The left edges of a page's columns: the starts of three or more lines, 12 pt apart or more. */
+/**
+ * The left edges of a page's columns: the starts of three or more lines,
+ * 40 pt apart or more (a paragraph's indent, a list's, are in their
+ * column: its bars in one line).
+ */
 export function columnStarts(x0s: number[]): number[] {
   const xs = [...x0s].sort((a, b) => a - b);
   const groups: number[][] = [];
   for (const x of xs) {
     const g = groups.at(-1);
-    if (g && x - g[0] < 12) g.push(x);
+    if (g && x - g[0] < 40) g.push(x);
     else groups.push([x]);
   }
   return groups.filter((g) => g.length >= 3).map((g) => g[0]);
@@ -444,6 +448,8 @@ export function mapPage(gs: Glyph[], m: Model, size: { w: number; h: number }): 
   type Raw = Seg & { glyphs: Glyph[]; srcs: { file: string; start: number }[] };
   const raw: Raw[] = [];
   for (const line of printedLines(gs)) {
+    // (a number a macro set alone, a page's, a section's or an equation's: no line of text to blame)
+    if (line.length <= 4 && line.every((g) => g.synth)) continue;
     let c: number | undefined, file = "", l0 = 0, l1 = 0;
     const runs: [number, number, number][] = [];
     line.forEach((g, i) => {
