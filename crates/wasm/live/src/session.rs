@@ -714,24 +714,20 @@ fn save_slice(
             )]}));
             return false;
         }
-        match doc.session().graph_save_start() {
-            Ok(save) => {
-                idle.saving = Some(Saving {
-                    save,
-                    slices: 0,
-                    work: std::time::Duration::ZERO,
-                    longest: std::time::Duration::ZERO,
-                });
-                // (begun: `saved` or `given_up` follows)
-                event(&json!({"event": "graph", "saving": true}));
-            }
-            Err(_) => {
-                // (nothing to save: the graph as loaded, or the build not quiet)
-                idle.saved = true;
-                event(&json!({"event": "graph", "notes": doc.session().graph_notes()}));
-                return false;
-            }
-        }
+        let Ok(save) = doc.session().graph_save_start() else {
+            // (nothing to save: the graph as loaded, or the build not quiet)
+            idle.saved = true;
+            event(&json!({"event": "graph", "notes": doc.session().graph_notes()}));
+            return false;
+        };
+        idle.saving = Some(Saving {
+            save,
+            slices: 0,
+            work: std::time::Duration::ZERO,
+            longest: std::time::Duration::ZERO,
+        });
+        // (begun: `saved` or `given_up` follows)
+        event(&json!({"event": "graph", "saving": true}));
     }
     let asked = || {
         let s = lock(&wake.state);
