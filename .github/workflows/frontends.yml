@@ -223,6 +223,13 @@ jobs:
         if: ${{ !cancelled() }}
         working-directory: fe
         run: node build/vscode/dist/graph.mjs
+      # (Firefox's single-threaded core saving the graph in slices: an edit typed during a save
+      # taken within one slice, each save begun at once after its build, the last one whole and
+      # loaded with no node run, a change made while closed saved at once)
+      - name: the single-threaded core's graph save (core1.wasm, in slices)
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node test/harness/core1-save.ts
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

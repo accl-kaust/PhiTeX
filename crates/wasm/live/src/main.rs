@@ -95,6 +95,9 @@ static GLOBAL: mem::Counted = mem::Counted;
     )
 )]
 mod shell;
+// (natively too under test: its answers tested with the workspace's)
+#[cfg(any(target_arch = "wasm32", test))]
+mod step;
 #[cfg(target_arch = "wasm32")]
 mod store;
 // (the document, the session thread and what the exports call: safe code)

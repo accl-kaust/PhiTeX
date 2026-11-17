@@ -1629,6 +1629,25 @@ pub fn end_threads() {
     phitex_defuse::end_threads();
 }
 
+/// The threads a build on `threads` threads runs on, started now, ahead
+/// of their first use: the client's pool of that many workers
+/// ([`Coarse`]'s) and the engine's crew ([`phitex_defuse::start_threads`]).
+/// For a host whose threads are slow to start (the wasm core's: each a
+/// worker of the host's, the module instantiated in it), which starts
+/// them as it starts, off a document's open: a graph's load or a build
+/// then finds them at rest. A no-op where there are no threads, at one
+/// thread, and once [`end_threads`] has been called.
+pub fn start_threads(threads: usize) {
+    if threads <= 1 || !threads_possible() {
+        return;
+    }
+    #[cfg(feature = "rayon")]
+    {
+        let _ = pool(threads);
+    }
+    phitex_defuse::start_threads(threads);
+}
+
 /// The persistent pool of `threads` workers (an operation's fan-out runs
 /// on threads of its own, [`Inner`]); none once [`end_threads`] has been
 /// called.

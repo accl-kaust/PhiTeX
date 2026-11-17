@@ -148,3 +148,8 @@ pub extern "C" fn ph_grow(pages: usize) -> usize {
 pub extern "C" fn ph_seal() {
     SEALED.store(true, Ordering::Release);
 }
+
+/// Whether the size is kept ([`ph_seal`]): threads may start.
+pub(crate) fn sealed() -> bool {
+    SEALED.load(Ordering::Acquire)
+}

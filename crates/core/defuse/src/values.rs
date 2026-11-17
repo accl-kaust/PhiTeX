@@ -1454,17 +1454,56 @@ pub fn hash_words(seed: u64, words: &[u64]) -> u64 {
 /// length, so that a text and the same text with NULs after it differ.
 #[inline]
 pub fn hash_bytes(seed: u64, b: &[u8]) -> u64 {
-    let mut h = seed ^ FP2;
-    let (words, r) = b.as_chunks::<8>();
-    for w in words {
-        h = fp_step(h, u64::from_le_bytes(*w));
+    let mut h = HashBytes::new(seed);
+    h.end(b)
+}
+
+/// [`hash_bytes`] taken a piece at a time (a save made in slices, between
+/// which its host runs): [`HashBytes::more`] with whole words (a length a
+/// multiple of 8), then [`HashBytes::end`] with the rest. The same
+/// fingerprint as [`hash_bytes`] of the pieces joined.
+#[derive(Debug, Clone, Copy)]
+pub struct HashBytes {
+    h: u64,
+    len: u64,
+}
+
+impl HashBytes {
+    #[must_use]
+    pub fn new(seed: u64) -> HashBytes {
+        HashBytes { h: seed ^ FP2, len: 0 }
     }
-    if !r.is_empty() {
-        let mut x = [0u8; 8];
-        x[..r.len()].copy_from_slice(r);
-        h = fp_step(h, u64::from_le_bytes(x));
+
+    /// `b`'s words taken. `b`'s length is a multiple of 8.
+    ///
+    /// # Panics
+    ///
+    /// Where it is not.
+    #[inline]
+    pub fn more(&mut self, b: &[u8]) {
+        let (words, r) = b.as_chunks::<8>();
+        assert!(r.is_empty(), "whole words before the end");
+        for w in words {
+            self.h = fp_step(self.h, u64::from_le_bytes(*w));
+        }
+        self.len += b.len() as u64;
     }
-    fp_finish(h ^ (b.len() as u64))
+
+    /// The fingerprint, `b` the last of the bytes (any length).
+    #[must_use]
+    #[inline]
+    pub fn end(&mut self, b: &[u8]) -> u64 {
+        let (words, r) = b.as_chunks::<8>();
+        for w in words {
+            self.h = fp_step(self.h, u64::from_le_bytes(*w));
+        }
+        if !r.is_empty() {
+            let mut x = [0u8; 8];
+            x[..r.len()].copy_from_slice(r);
+            self.h = fp_step(self.h, u64::from_le_bytes(x));
+        }
+        fp_finish(self.h ^ (self.len + b.len() as u64))
+    }
 }
 
 #[cfg(test)]

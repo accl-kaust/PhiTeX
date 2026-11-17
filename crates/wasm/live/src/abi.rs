@@ -220,6 +220,12 @@ pub extern "C" fn ph_step() -> i32 {
     session::step_once()
 }
 
+/// [`session::start_threads`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_threads(n: usize) -> i32 {
+    session::host_turn(|| session::start_threads(n))
+}
+
 /// [`session::close`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_close() {

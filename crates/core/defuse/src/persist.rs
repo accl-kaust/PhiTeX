@@ -35,7 +35,7 @@ use crate::node::{Anchor, DefRec, NO_VALUE, Node, ReadKind, ReadRec, RunRecord, 
 use crate::order::{Pos, SegId};
 use crate::read::Reaching;
 use crate::segment::Segment;
-use crate::values::{Field, FxHashMap, Value, ValueId, Values, hash_bytes};
+use crate::values::{Field, FxHashMap, HashBytes, Value, ValueId, Values, hash_bytes};
 
 const MAGIC: &[u8; 8] = b"PXGRAPH\x01";
 /// The encoding's version: any change of the bytes' layout bumps it.
@@ -215,7 +215,18 @@ struct ValueTable<'a> {
     at: FxHashMap<ValueId, u32>,
     out: Vec<u8>,
     n: u32,
+    /// The values being written, parts first ([`ValueTable::put_until`]:
+    /// kept across a pause, one value's DAG written over several slices).
+    stack: Vec<(ValueId, bool)>,
+    /// Where an item is probed for the values it names, in order
+    /// ([`Engine::export_slice`]'s nodes): `put` notes each not yet
+    /// written here, writes nothing, and answers 0.
+    probe: Option<Vec<ValueId>>,
 }
+
+/// How many values [`ValueTable::put_until`] writes between two asks of its
+/// `pause`.
+const PUT_PAUSE_EVERY: u32 = 256;
 
 impl ValueTable<'_> {
     fn parts(&self, y: ValueId) -> Vec<ValueId> {
@@ -236,16 +247,46 @@ impl ValueTable<'_> {
         if let Some(&i) = self.at.get(&x) {
             return u64::from(i);
         }
-        let mut stack: Vec<(ValueId, bool)> = vec![(x, false)];
-        while let Some((y, done)) = stack.pop() {
+        if let Some(p) = &mut self.probe {
+            p.push(x);
+            return 0;
+        }
+        debug_assert!(self.stack.is_empty(), "a put under way: put_until first");
+        self.stack.push((x, false));
+        self.drive(&|| false);
+        u64::from(self.at[&x])
+    }
+
+    /// `x` written if new, its parts first, `pause` asked every
+    /// [`PUT_PAUSE_EVERY`] values: whether it is written (false: paused,
+    /// the rest kept; called again with the same `x`, it goes on). A value
+    /// whose parts are many (a format's bindings, a file's text) is written
+    /// over several slices of a save, not in one. Called first for every
+    /// value an item names, in the order the item names them, the item's
+    /// own puts then number nothing new: the same numbers as one pass.
+    fn put_until(&mut self, x: ValueId, pause: &dyn Fn() -> bool) -> bool {
+        if self.at.contains_key(&x) {
+            return true;
+        }
+        if self.stack.is_empty() {
+            self.stack.push((x, false));
+        }
+        self.drive(pause) && self.at.contains_key(&x)
+    }
+
+    /// The values on the stack written, parts first: whether all are
+    /// (false: `pause` said so).
+    fn drive(&mut self, pause: &dyn Fn() -> bool) -> bool {
+        let mut written = 0u32;
+        while let Some((y, done)) = self.stack.pop() {
             if self.at.contains_key(&y) {
                 continue;
             }
             if !done {
-                stack.push((y, true));
+                self.stack.push((y, true));
                 for e in self.parts(y).into_iter().rev() {
                     if !self.at.contains_key(&e) {
-                        stack.push((e, false));
+                        self.stack.push((e, false));
                     }
                 }
                 continue;
@@ -307,8 +348,12 @@ impl ValueTable<'_> {
             }
             self.at.insert(y, self.n);
             self.n += 1;
+            written += 1;
+            if written.is_multiple_of(PUT_PAUSE_EVERY) && !self.stack.is_empty() && pause() {
+                return false;
+            }
         }
-        u64::from(self.at[&x])
+        true
     }
 
     fn opt(&mut self, x: Option<ValueId>) -> u64 {
@@ -675,9 +720,96 @@ struct Decoded {
     nodes: Vec<Option<DNode>>,
 }
 
-/// How many nodes [`Engine::export_until`] encodes between two asks of
-/// its `stop` (a node's records: some microseconds to encode).
-const STOP_EVERY: usize = 32;
+/// How many items (a node and its records, an entry of a table)
+/// [`Engine::export_more`] encodes between two asks of its `pause` (a
+/// node's records: some microseconds to encode).
+const PAUSE_EVERY: u32 = 16;
+
+/// The bytes [`Engine::export_more`] hashes or copies between two asks
+/// of its `pause` (whole words: [`HashBytes::more`]).
+const PIECE: usize = 256 << 10;
+
+/// Where an export under way stands ([`Export`]): the part it writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// The operations' names, the projections, the paths' count.
+    Head,
+    Paths,
+    MemberPaths,
+    Shapes,
+    SettleExact,
+    /// The nodes marked and the movers.
+    Marks,
+    Settled,
+    Finals,
+    Env,
+    /// The engine's counters and the roots' count.
+    Scalars,
+    Roots,
+    Units,
+    Segs,
+    Nodes,
+    /// Chunk k hashed.
+    Hash(usize),
+    /// The header written.
+    Header,
+    /// Chunk k copied after it.
+    Copy(usize),
+    Done,
+}
+
+/// A table's entries taken as the part that writes them begins: an
+/// export in slices writes what it took, whatever its host did between
+/// them.
+enum Taken {
+    None,
+    MemberPaths(Vec<((Field, PathId, ValueId, PathId), PathId)>),
+    Shapes(Vec<((OpId, Field), i64)>),
+    Fields(Vec<Field>),
+    Settled(Vec<crate::api::Settled>),
+    Finals(Vec<(Field, Option<Reaching>, bool, bool)>),
+    Env(Vec<(Field, Option<ValueId>, bool)>, u64),
+    Segs(Vec<SegId>),
+    Count(usize),
+}
+
+/// An export under way ([`Engine::export_start`]), made a slice at a time
+/// by [`Engine::export_more`]: what is written so far and where it
+/// stands. Dropped before its end, nothing of it is left.
+pub struct Export {
+    roots: Vec<ValueId>,
+    part: Part,
+    /// The next item of `part` (an index, or a byte offset).
+    i: usize,
+    ticks: u32,
+    taken: Taken,
+    /// The value table ([`ValueTable`]): the numbers given, the values
+    /// chunk, the count.
+    at: FxHashMap<ValueId, u32>,
+    vals: Vec<u8>,
+    n: u32,
+    stack: Vec<(ValueId, bool)>,
+    /// The node whose values are being written first, and those values.
+    taken_node: Option<usize>,
+    named: Vec<ValueId>,
+    meta: Vec<u8>,
+    line: Vec<u8>,
+    nodes: Vec<u8>,
+    recs: Vec<u8>,
+    hashing: HashBytes,
+    /// Each chunk's length and hash, once hashed.
+    sums: [(usize, u64); 5],
+    out: Vec<u8>,
+}
+
+impl Export {
+    /// Whether the export has written everything ([`Engine::export_more`]
+    /// gave its bytes).
+    #[must_use]
+    pub fn done(&self) -> bool {
+        self.part == Part::Done
+    }
+}
 
 impl Engine {
     /// The engine as a quiet point leaves it, as bytes
@@ -695,69 +827,100 @@ impl Engine {
     }
 
     /// [`Engine::export`], given up once `stop` says so (asked between
-    /// nodes, every [`STOP_EVERY`]): none then. A host that saves the
-    /// graph while nothing is asked (the wasm core, at idle) stops it for
-    /// the next edit, which then waits for no save.
+    /// nodes and entries, every [`PAUSE_EVERY`], and between pieces of
+    /// the bytes): none then. A host that saves the graph while nothing
+    /// is asked (the wasm core, at idle) stops it for the next edit, which
+    /// then waits for no save.
     #[must_use]
     pub fn export_until(&self, roots: &[ValueId], stop: &dyn Fn() -> bool) -> Option<Vec<u8>> {
         if stop() {
             return None;
         }
+        // (one slice, to its end unless `stop` says so: then given up)
+        self.export_more(&mut self.export_start(roots), stop)
+    }
+
+    /// An export of the engine ([`Engine::export`]) to be made in slices
+    /// ([`Engine::export_more`]), between which the caller may do other
+    /// work, as long as nothing changes the engine: no evaluation, no
+    /// edit, no collection. (The wasm core without threads saves a slice
+    /// a step, its host's requests answered between them; any edit drops
+    /// the export.) The same bytes as [`Engine::export`] at the end.
+    #[must_use]
+    pub fn export_start(&self, roots: &[ValueId]) -> Export {
+        Export {
+            roots: roots.to_vec(),
+            part: Part::Head,
+            i: 0,
+            ticks: 0,
+            taken: Taken::None,
+            at: FxHashMap::default(),
+            vals: Vec::new(),
+            n: 0,
+            stack: Vec::new(),
+            taken_node: None,
+            named: Vec::new(),
+            meta: Vec::new(),
+            line: Vec::new(),
+            nodes: Vec::new(),
+            recs: Vec::new(),
+            hashing: HashBytes::new(HASH_SEED),
+            sums: [(0, 0); 5],
+            out: Vec::new(),
+        }
+    }
+
+    /// More of export `x` ([`Engine::export_start`]): its bytes once it
+    /// is whole, else none (`pause` said so, asked every [`PAUSE_EVERY`]
+    /// items and between pieces of [`PIECE`] bytes; call again to go
+    /// on). Each call writes something, whatever `pause` says.
+    #[must_use]
+    pub fn export_more(&self, x: &mut Export, pause: &dyn Fn() -> bool) -> Option<Vec<u8>> {
         let mut t = ValueTable {
             v: &self.values,
-            at: FxHashMap::default(),
-            out: Vec::new(),
-            n: 0,
+            at: std::mem::take(&mut x.at),
+            out: std::mem::take(&mut x.vals),
+            n: x.n,
+            stack: std::mem::take(&mut x.stack),
+            probe: None,
         };
-        // (meta)
-        let mut meta: Vec<u8> = Vec::new();
-        put(&mut meta, self.ops.len() as u64);
-        for i in 0..self.ops.len() {
-            let name = self.ops.get(i).map_or("", |o| o.name());
-            put(&mut meta, name.len() as u64);
-            meta.extend_from_slice(name.as_bytes());
-        }
-        put(&mut meta, self.projections.len() as u64);
-        let n_paths = self.paths.steps.len();
-        put(&mut meta, n_paths as u64);
-        for i in PROJ_PATHS.min(n_paths)..n_paths {
-            match self.paths.steps.get(i) {
-                None => meta.push(0),
-                Some(ss) => {
-                    meta.push(1);
-                    put(&mut meta, ss.len() as u64);
-                    for s in ss.iter() {
-                        put_step(&mut meta, &mut t, s);
-                    }
+        let r = self.export_slice(x, &mut t, pause);
+        x.at = t.at;
+        x.vals = t.out;
+        x.n = t.n;
+        x.stack = t.stack;
+        r
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn export_slice(&self, x: &mut Export, t: &mut ValueTable<'_>, pause: &dyn Fn() -> bool) -> Option<Vec<u8>> {
+        // (an item written: `pause` asked every PAUSE_EVERY)
+        macro_rules! tick {
+            () => {
+                x.i += 1;
+                x.ticks = x.ticks.wrapping_add(1);
+                if x.ticks % PAUSE_EVERY == 0 && pause() {
+                    return None;
                 }
-            }
+            };
         }
-        {
-            let mp = self.member_paths.read();
-            put(&mut meta, mp.len() as u64);
-            for (&(f, p, x, q), &r) in mp.iter() {
-                put(&mut meta, t.put(f.0));
-                put(&mut meta, u64::from(p.0));
-                put(&mut meta, t.put(x));
-                put(&mut meta, u64::from(q.0));
-                put(&mut meta, u64::from(r.0));
-            }
+        // (the part done: the next begins)
+        macro_rules! next {
+            ($p:expr) => {{
+                x.part = $p;
+                x.i = 0;
+                x.taken = Taken::None;
+                continue;
+            }};
         }
-        {
-            let sh = self.shapes.read();
-            put(&mut meta, sh.len() as u64);
-            for (&(op, f), &c) in sh.iter() {
-                put(&mut meta, u64::from(op.0));
-                put(&mut meta, t.put(f.0));
-                put(&mut meta, zig(c));
-            }
-        }
-        {
-            let se = self.settle_exact.read();
-            put(&mut meta, se.len() as u64);
-            for f in se.iter() {
-                put(&mut meta, t.put(f.0));
-            }
+        // (the values an item names written first, over as many slices as
+        // they take, the item itself after: `ValueTable::put_until`)
+        macro_rules! pre {
+            ($($v:expr),*) => {
+                $(if !t.put_until($v, pause) {
+                    return None;
+                })*
+            };
         }
         let ids = |meta: &mut Vec<u8>, xs: Vec<NodeId>| {
             put(meta, xs.len() as u64);
@@ -765,196 +928,425 @@ impl Engine {
                 put(meta, x.raw());
             }
         };
-        let mut marked: Vec<NodeId> = self.marked.read().iter().copied().collect();
-        marked.sort_unstable();
-        ids(&mut meta, marked);
-        let mut movers: Vec<NodeId> = self.movers.lock().iter().copied().collect();
-        movers.sort_unstable();
-        ids(&mut meta, movers);
-        {
-            let st = self.settled.lock();
-            put(&mut meta, st.len() as u64);
-            for x in st.iter() {
-                put(&mut meta, x.node.raw());
-                put(&mut meta, x.version);
-                put(&mut meta, t.put(x.output));
+        loop {
+            match x.part {
+                Part::Head => {
+                    let meta = &mut x.meta;
+                    put(meta, self.ops.len() as u64);
+                    for i in 0..self.ops.len() {
+                        let name = self.ops.get(i).map_or("", |o| o.name());
+                        put(meta, name.len() as u64);
+                        meta.extend_from_slice(name.as_bytes());
+                    }
+                    put(meta, self.projections.len() as u64);
+                    let n_paths = self.paths.steps.len();
+                    put(meta, n_paths as u64);
+                    x.part = Part::Paths;
+                    x.i = PROJ_PATHS.min(n_paths);
+                    x.taken = Taken::Count(n_paths);
+                }
+                Part::Paths => {
+                    let Taken::Count(n_paths) = x.taken else {
+                        unreachable!("the paths counted")
+                    };
+                    while x.i < n_paths {
+                        match self.paths.steps.get(x.i) {
+                            None => x.meta.push(0),
+                            Some(ss) => {
+                                x.meta.push(1);
+                                put(&mut x.meta, ss.len() as u64);
+                                for s in ss.iter() {
+                                    put_step(&mut x.meta, t, s);
+                                }
+                            }
+                        }
+                        tick!();
+                    }
+                    next!(Part::MemberPaths);
+                }
+                Part::MemberPaths => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let mp: Vec<_> = self.member_paths.read().iter().map(|(&k, &r)| (k, r)).collect();
+                        put(&mut x.meta, mp.len() as u64);
+                        x.taken = Taken::MemberPaths(mp);
+                    }
+                    let Taken::MemberPaths(mp) = &x.taken else {
+                        unreachable!("the member paths taken")
+                    };
+                    while let Some(&((f, p, v, q), r)) = mp.get(x.i) {
+                        pre!(f.0, v);
+                        put(&mut x.meta, t.put(f.0));
+                        put(&mut x.meta, u64::from(p.0));
+                        put(&mut x.meta, t.put(v));
+                        put(&mut x.meta, u64::from(q.0));
+                        put(&mut x.meta, u64::from(r.0));
+                        tick!();
+                    }
+                    next!(Part::Shapes);
+                }
+                Part::Shapes => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let sh: Vec<_> = self.shapes.read().iter().map(|(&k, &c)| (k, c)).collect();
+                        put(&mut x.meta, sh.len() as u64);
+                        x.taken = Taken::Shapes(sh);
+                    }
+                    let Taken::Shapes(sh) = &x.taken else {
+                        unreachable!("the shapes taken")
+                    };
+                    while let Some(&((op, f), c)) = sh.get(x.i) {
+                        pre!(f.0);
+                        put(&mut x.meta, u64::from(op.0));
+                        put(&mut x.meta, t.put(f.0));
+                        put(&mut x.meta, zig(c));
+                        tick!();
+                    }
+                    next!(Part::SettleExact);
+                }
+                Part::SettleExact => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let se: Vec<Field> = self.settle_exact.read().iter().copied().collect();
+                        put(&mut x.meta, se.len() as u64);
+                        x.taken = Taken::Fields(se);
+                    }
+                    let Taken::Fields(se) = &x.taken else {
+                        unreachable!("the fields taken")
+                    };
+                    while let Some(&f) = se.get(x.i) {
+                        pre!(f.0);
+                        put(&mut x.meta, t.put(f.0));
+                        tick!();
+                    }
+                    next!(Part::Marks);
+                }
+                Part::Marks => {
+                    let mut marked: Vec<NodeId> = self.marked.read().iter().copied().collect();
+                    marked.sort_unstable();
+                    ids(&mut x.meta, marked);
+                    let mut movers: Vec<NodeId> = self.movers.lock().iter().copied().collect();
+                    movers.sort_unstable();
+                    ids(&mut x.meta, movers);
+                    next!(Part::Settled);
+                }
+                Part::Settled => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let st: Vec<crate::api::Settled> = self.settled.lock().clone();
+                        put(&mut x.meta, st.len() as u64);
+                        x.taken = Taken::Settled(st);
+                    }
+                    let Taken::Settled(st) = &x.taken else {
+                        unreachable!("the settled taken")
+                    };
+                    while let Some(s) = st.get(x.i) {
+                        pre!(s.output);
+                        put(&mut x.meta, s.node.raw());
+                        put(&mut x.meta, s.version);
+                        put(&mut x.meta, t.put(s.output));
+                        tick!();
+                    }
+                    next!(Part::Finals);
+                }
+                Part::Finals => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let finals = self.ranges.finals_state();
+                        put(&mut x.meta, finals.len() as u64);
+                        x.taken = Taken::Finals(finals);
+                    }
+                    let Taken::Finals(finals) = &x.taken else {
+                        unreachable!("the finals taken")
+                    };
+                    while let Some(&(f, p, dirty, pending)) = finals.get(x.i) {
+                        pre!(f.0);
+                        if let Some(v) = p.and_then(|p| p.value) {
+                            pre!(v);
+                        }
+                        let meta = &mut x.meta;
+                        put(meta, t.put(f.0));
+                        meta.push(u8::from(p.is_some()) | (u8::from(dirty) << 1) | (u8::from(pending) << 2));
+                        if let Some(p) = p {
+                            put(meta, t.opt(p.value));
+                            put(meta, p.by.map_or(0, |b| b.raw() + 1));
+                            meta.push(u8::from(p.provisional));
+                        }
+                        tick!();
+                    }
+                    next!(Part::Env);
+                }
+                Part::Env => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let env = self.env.values.read();
+                        let provided = self.env.provided.read();
+                        // (the provider's answer, or the client's setting)
+                        let es: Vec<_> = env.iter().map(|(&f, &v)| (f, v, provided.contains(&f))).collect();
+                        let changes = self.env.changes.load(Ordering::Acquire);
+                        put(&mut x.meta, es.len() as u64);
+                        x.taken = Taken::Env(es, changes);
+                    }
+                    let Taken::Env(es, changes) = &x.taken else {
+                        unreachable!("the environment taken")
+                    };
+                    while let Some(&(f, v, provided)) = es.get(x.i) {
+                        pre!(f.0);
+                        if let Some(v) = v {
+                            pre!(v);
+                        }
+                        put(&mut x.meta, t.put(f.0));
+                        put(&mut x.meta, t.opt(v));
+                        x.meta.push(u8::from(provided));
+                        tick!();
+                    }
+                    put(&mut x.meta, *changes);
+                    next!(Part::Scalars);
+                }
+                Part::Scalars => {
+                    for v in [
+                        self.epoch.load(Ordering::Acquire),
+                        self.final_gen.load(Ordering::Acquire),
+                        self.quiets.load(Ordering::Acquire),
+                        self.version.load(Ordering::Acquire),
+                        self.window.load(Ordering::Acquire),
+                        self.window_released.load(Ordering::Acquire),
+                    ] {
+                        put(&mut x.meta, v);
+                    }
+                    x.meta.push(u8::from(self.has_finals.load(Ordering::Acquire)));
+                    put(&mut x.meta, x.roots.len() as u64);
+                    next!(Part::Roots);
+                }
+                Part::Roots => {
+                    while let Some(&r) = x.roots.get(x.i) {
+                        pre!(r);
+                        put(&mut x.meta, t.put(r));
+                        tick!();
+                    }
+                    next!(Part::Units);
+                }
+                // (the line: units, then segments in order)
+                Part::Units => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let n = self.units.len();
+                        put(&mut x.line, n as u64);
+                        x.taken = Taken::Count(n);
+                    }
+                    let Taken::Count(n) = x.taken else {
+                        unreachable!("the units counted")
+                    };
+                    while x.i < n {
+                        let u = self.units.get(x.i).expect("a unit made");
+                        put(&mut x.line, u.start.0);
+                        put(&mut x.line, u.end.0);
+                        put(&mut x.line, u.last.load(Ordering::Acquire));
+                        tick!();
+                    }
+                    next!(Part::Segs);
+                }
+                Part::Segs => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let segs = self.order.all();
+                        put(&mut x.line, segs.len() as u64);
+                        x.taken = Taken::Segs(segs);
+                    }
+                    let Taken::Segs(segs) = &x.taken else {
+                        unreachable!("the segments taken")
+                    };
+                    while let Some(&sid) = segs.get(x.i) {
+                        let s = self.seg(sid);
+                        let hi = s.inner.read().hi;
+                        put(&mut x.line, s.lo.0);
+                        put(&mut x.line, hi.0);
+                        put(&mut x.line, u64::from(s.unit.0));
+                        tick!();
+                    }
+                    next!(Part::Nodes);
+                }
+                // (the nodes, and their records)
+                Part::Nodes => {
+                    if x.i == 0 && matches!(x.taken, Taken::None) {
+                        let n = self.nodes.len();
+                        put(&mut x.nodes, n as u64);
+                        x.taken = Taken::Count(n);
+                    }
+                    let Taken::Count(n) = x.taken else {
+                        unreachable!("the nodes counted")
+                    };
+                    while x.i < n {
+                        // (the values the node names, probed, then written
+                        // first: one of them may be large, a page's)
+                        if x.taken_node != Some(x.i) {
+                            t.probe = Some(Vec::new());
+                            let (mut a, mut b) = (Vec::new(), Vec::new());
+                            self.export_node(x.i, &mut a, &mut b, t);
+                            x.named = t.probe.take().unwrap_or_default();
+                            x.taken_node = Some(x.i);
+                        }
+                        for &v in &x.named {
+                            pre!(v);
+                        }
+                        self.export_node(x.i, &mut x.nodes, &mut x.recs, t);
+                        x.named.clear();
+                        tick!();
+                    }
+                    // (every value numbered: the numbers go, the table's
+                    // memory given back before the bytes are put together)
+                    t.at = FxHashMap::default();
+                    next!(Part::Hash(0));
+                }
+                // (the bytes: header, table, chunks)
+                Part::Hash(k) => {
+                    let c: &[u8] = match k {
+                        0 => &t.out,
+                        1 => &x.meta,
+                        2 => &x.line,
+                        3 => &x.nodes,
+                        _ => &x.recs,
+                    };
+                    while c.len() - x.i > PIECE {
+                        x.hashing.more(&c[x.i..x.i + PIECE]);
+                        x.i += PIECE;
+                        if pause() {
+                            return None;
+                        }
+                    }
+                    x.sums[k] = (c.len(), x.hashing.end(&c[x.i..]));
+                    x.hashing = HashBytes::new(HASH_SEED);
+                    next!(if k + 1 < CHUNKS.len() {
+                        Part::Hash(k + 1)
+                    } else {
+                        Part::Header
+                    });
+                }
+                Part::Header => {
+                    let head_len = 8 + 4 + 4 + 8 + CHUNKS.len() * (4 + 8 + 8) + 8;
+                    let total = head_len + x.sums.iter().map(|s| s.0).sum::<usize>();
+                    let mut out = Vec::with_capacity(total);
+                    out.extend_from_slice(MAGIC);
+                    out.extend_from_slice(&VERSION.to_le_bytes());
+                    out.extend_from_slice(&(CHUNKS.len() as u32).to_le_bytes());
+                    out.extend_from_slice(&(total as u64).to_le_bytes());
+                    for (tag, (len, h)) in CHUNKS.iter().zip(x.sums) {
+                        out.extend_from_slice(&tag.to_le_bytes());
+                        out.extend_from_slice(&(len as u64).to_le_bytes());
+                        out.extend_from_slice(&h.to_le_bytes());
+                    }
+                    let h = hash_bytes(HASH_SEED, &out);
+                    out.extend_from_slice(&h.to_le_bytes());
+                    debug_assert_eq!(out.len(), head_len);
+                    x.out = out;
+                    next!(Part::Copy(0));
+                }
+                Part::Copy(k) => {
+                    let c: &mut Vec<u8> = match k {
+                        0 => &mut t.out,
+                        1 => &mut x.meta,
+                        2 => &mut x.line,
+                        3 => &mut x.nodes,
+                        _ => &mut x.recs,
+                    };
+                    while c.len() - x.i > PIECE {
+                        x.out.extend_from_slice(&c[x.i..x.i + PIECE]);
+                        x.i += PIECE;
+                        if pause() {
+                            return None;
+                        }
+                    }
+                    x.out.extend_from_slice(&c[x.i..]);
+                    // (copied: its memory given back)
+                    *c = Vec::new();
+                    if k + 1 < CHUNKS.len() {
+                        next!(Part::Copy(k + 1));
+                    }
+                    x.part = Part::Done;
+                    return Some(std::mem::take(&mut x.out));
+                }
+                Part::Done => return None,
             }
         }
-        let finals = self.ranges.finals_state();
-        put(&mut meta, finals.len() as u64);
-        for (f, p, dirty, pending) in finals {
-            put(&mut meta, t.put(f.0));
-            meta.push(u8::from(p.is_some()) | (u8::from(dirty) << 1) | (u8::from(pending) << 2));
-            if let Some(p) = p {
-                put(&mut meta, t.opt(p.value));
-                put(&mut meta, p.by.map_or(0, |b| b.raw() + 1));
-                meta.push(u8::from(p.provisional));
-            }
-        }
-        {
-            let env = self.env.values.read();
-            let provided = self.env.provided.read();
-            put(&mut meta, env.len() as u64);
-            for (f, x) in env.iter() {
-                put(&mut meta, t.put(f.0));
-                put(&mut meta, t.opt(*x));
-                // (the provider's answer, or the client's setting)
-                meta.push(u8::from(provided.contains(f)));
-            }
-            put(&mut meta, self.env.changes.load(Ordering::Acquire));
-        }
-        for x in [
-            self.epoch.load(Ordering::Acquire),
-            self.final_gen.load(Ordering::Acquire),
-            self.quiets.load(Ordering::Acquire),
-            self.version.load(Ordering::Acquire),
-            self.window.load(Ordering::Acquire),
-            self.window_released.load(Ordering::Acquire),
+    }
+
+    /// Node `i` and its records written.
+    fn export_node(&self, i: usize, nodes: &mut Vec<u8>, recs: &mut Vec<u8>, t: &mut ValueTable<'_>) {
+        let Some(n) = self.nodes.get(i) else {
+            nodes.push(EMPTY_SLOT);
+            return;
+        };
+        let state = n.state();
+        nodes.push(state as u8);
+        let ld = |a: &std::sync::atomic::AtomicBool| a.load(Ordering::Acquire);
+        let last = n.last.lock().clone();
+        let prior = n.prior.lock().clone();
+        let parked = *n.parked_on.lock();
+        let mut flags = 0u32;
+        for (on, bit) in [
+            (n.serial.load(Ordering::Acquire) > 0, NF_COMMITTED),
+            (ld(&n.claim_all), NF_CLAIM_ALL),
+            (ld(&n.follows), NF_FOLLOWS),
+            (ld(&n.settle_now), NF_SETTLE_NOW),
+            (ld(&n.refuted), NF_REFUTED),
+            (ld(&n.state_stale), NF_STATE_STALE),
+            (ld(&n.moves), NF_MOVES),
+            (ld(&n.front), NF_FRONT),
+            (ld(&n.run_chained), NF_RUN_CHAINED),
+            (last.is_some(), NF_LAST),
+            (prior.is_some(), NF_PRIOR),
+            (parked.is_some(), NF_PARKED),
+            (ld(&n.edited), NF_EDITED),
+            (ld(&n.moved), NF_MOVED),
+            (ld(&n.held_frontier), NF_HELD_FRONTIER),
         ] {
-            put(&mut meta, x);
+            if on {
+                flags |= bit;
+            }
         }
-        meta.push(u8::from(self.has_finals.load(Ordering::Acquire)));
-        put(&mut meta, roots.len() as u64);
-        for &x in roots {
-            put(&mut meta, t.put(x));
+        put(nodes, u64::from(flags));
+        put(nodes, u64::from(n.op().0));
+        put(nodes, u64::from(n.unit.0));
+        put(nodes, n.parent.map_or(0, |p| p.raw() + 1));
+        put(nodes, u64::from(n.depth));
+        put(nodes, n.pos_hint().0);
+        put(nodes, n.claimer.load(Ordering::Acquire));
+        put(nodes, n.claim_end.load(Ordering::Acquire));
+        put(nodes, n.anchor.load(Ordering::Acquire));
+        nodes.push(n.slot());
+        put(nodes, n.rank());
+        put(nodes, u64::from(n.effect.load(Ordering::Acquire)));
+        if let Some(f) = parked {
+            put(nodes, t.put(f.0));
         }
-        // (the line: units, then segments in order)
-        let mut line: Vec<u8> = Vec::new();
-        put(&mut line, self.units.len() as u64);
-        for i in 0..self.units.len() {
-            let u = self.units.get(i).expect("a unit made");
-            put(&mut line, u.start.0);
-            put(&mut line, u.end.0);
-            put(&mut line, u.last.load(Ordering::Acquire));
+        put(nodes, n.full_ns.load(Ordering::Acquire));
+        put(nodes, n.run_start.load(Ordering::Acquire));
+        let text = n.args();
+        if state == State::Gone {
+            put(nodes, 0);
+        } else {
+            put(nodes, text.len() as u64);
+            for &x in text.iter() {
+                put(nodes, t.put(x));
+            }
         }
-        let segs = self.order.all();
-        put(&mut line, segs.len() as u64);
-        for &sid in &segs {
-            let s = self.seg(sid);
-            let hi = s.inner.read().hi;
-            put(&mut line, s.lo.0);
-            put(&mut line, hi.0);
-            put(&mut line, u64::from(s.unit.0));
-        }
-        // (the nodes, and their records)
-        let mut nodes: Vec<u8> = Vec::new();
-        let mut recs: Vec<u8> = Vec::new();
-        put(&mut nodes, self.nodes.len() as u64);
-        for i in 0..self.nodes.len() {
-            if i % STOP_EVERY == 0 && stop() {
+        // (a relation's value as its segment holds it now, where the
+        // node's definitions are filed there)
+        let filed_now = |f: Field| -> Option<ValueId> {
+            if state != State::Clean {
                 return None;
             }
-            let Some(n) = self.nodes.get(i) else {
-                nodes.push(EMPTY_SLOT);
-                continue;
-            };
-            let state = n.state();
-            nodes.push(state as u8);
-            let ld = |a: &std::sync::atomic::AtomicBool| a.load(Ordering::Acquire);
-            let last = n.last.lock().clone();
-            let prior = n.prior.lock().clone();
-            let parked = *n.parked_on.lock();
-            let mut flags = 0u32;
-            for (on, bit) in [
-                (n.serial.load(Ordering::Acquire) > 0, NF_COMMITTED),
-                (ld(&n.claim_all), NF_CLAIM_ALL),
-                (ld(&n.follows), NF_FOLLOWS),
-                (ld(&n.settle_now), NF_SETTLE_NOW),
-                (ld(&n.refuted), NF_REFUTED),
-                (ld(&n.state_stale), NF_STATE_STALE),
-                (ld(&n.moves), NF_MOVES),
-                (ld(&n.front), NF_FRONT),
-                (ld(&n.run_chained), NF_RUN_CHAINED),
-                (last.is_some(), NF_LAST),
-                (prior.is_some(), NF_PRIOR),
-                (parked.is_some(), NF_PARKED),
-                (ld(&n.edited), NF_EDITED),
-                (ld(&n.moved), NF_MOVED),
-                (ld(&n.held_frontier), NF_HELD_FRONTIER),
-            ] {
-                if on {
-                    flags |= bit;
-                }
+            let s = self.seg(n.seg_hint());
+            let inner = s.inner.read();
+            let p = n.pos_hint();
+            if inner.nodes.get(&p) != Some(&n.id) {
+                return None;
             }
-            put(&mut nodes, u64::from(flags));
-            put(&mut nodes, u64::from(n.op().0));
-            put(&mut nodes, u64::from(n.unit.0));
-            put(&mut nodes, n.parent.map_or(0, |p| p.raw() + 1));
-            put(&mut nodes, u64::from(n.depth));
-            put(&mut nodes, n.pos_hint().0);
-            put(&mut nodes, n.claimer.load(Ordering::Acquire));
-            put(&mut nodes, n.claim_end.load(Ordering::Acquire));
-            put(&mut nodes, n.anchor.load(Ordering::Acquire));
-            nodes.push(n.slot());
-            put(&mut nodes, n.rank());
-            put(&mut nodes, u64::from(n.effect.load(Ordering::Acquire)));
-            if let Some(f) = parked {
-                put(&mut nodes, t.put(f.0));
-            }
-            put(&mut nodes, n.full_ns.load(Ordering::Acquire));
-            put(&mut nodes, n.run_start.load(Ordering::Acquire));
-            let text = n.args();
-            if state == State::Gone {
-                put(&mut nodes, 0);
-            } else {
-                put(&mut nodes, text.len() as u64);
-                for &x in text.iter() {
-                    put(&mut nodes, t.put(x));
-                }
-            }
-            // (a relation's value as its segment holds it now, where the
-            // node's definitions are filed there)
-            let filed_now = |f: Field| -> Option<ValueId> {
-                if state != State::Clean {
-                    return None;
-                }
-                let s = self.seg(n.seg_hint());
-                let inner = s.inner.read();
-                let p = n.pos_hint();
-                if inner.nodes.get(&p) != Some(&n.id) {
-                    return None;
-                }
-                inner
-                    .defs
-                    .get(&f)
-                    .and_then(|m| m.get(&p))
-                    .filter(|d| d.by == n.id && !d.multi)
-                    .map(|d| d.value)
-            };
-            if let Some(r) = &last {
-                encode_record(&mut recs, &mut t, r, n, Some(&filed_now));
-            }
-            if let Some(r) = &prior {
-                encode_record(&mut recs, &mut t, r, n, None);
-            }
+            inner
+                .defs
+                .get(&f)
+                .and_then(|m| m.get(&p))
+                .filter(|d| d.by == n.id && !d.multi)
+                .map(|d| d.value)
+        };
+        if let Some(r) = &last {
+            encode_record(recs, t, r, n, Some(&filed_now));
         }
-        // (the bytes: header, table, chunks)
-        let chunks: [(u32, &[u8]); 5] = [
-            (C_VALUES, &t.out),
-            (C_META, &meta),
-            (C_LINE, &line),
-            (C_NODES, &nodes),
-            (C_RECORDS, &recs),
-        ];
-        let head_len = 8 + 4 + 4 + 8 + chunks.len() * (4 + 8 + 8) + 8;
-        let total = head_len + chunks.iter().map(|c| c.1.len()).sum::<usize>();
-        let mut out = Vec::with_capacity(total);
-        out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&VERSION.to_le_bytes());
-        out.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(total as u64).to_le_bytes());
-        for (tag, b) in &chunks {
-            out.extend_from_slice(&tag.to_le_bytes());
-            out.extend_from_slice(&(b.len() as u64).to_le_bytes());
-            out.extend_from_slice(&hash_bytes(HASH_SEED, b).to_le_bytes());
+        if let Some(r) = &prior {
+            encode_record(recs, t, r, n, None);
         }
-        let h = hash_bytes(HASH_SEED, &out);
-        out.extend_from_slice(&h.to_le_bytes());
-        for (_, b) in &chunks {
-            out.extend_from_slice(b);
-        }
-        debug_assert_eq!(out.len(), total);
-        Some(out)
     }
 
     /// Reads a graph written by [`Engine::export`] into this engine, which

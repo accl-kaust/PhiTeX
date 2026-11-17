@@ -98,7 +98,7 @@ pub use api::{
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
 pub use lock::held as locks_held;
-pub use persist::{ImportError, ImportStats, Imported, ReadCheck};
+pub use persist::{Export, ImportError, ImportStats, Imported, ReadCheck};
 pub use persist_probe::PersistProbe;
 pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_value_plus};
 
@@ -118,6 +118,17 @@ pub const WORKER_STACK: usize = 16 << 20;
 pub fn end_threads() {
     crew::end();
 }
+
+/// The engine's kept threads made now, up to `n` in all, each at rest
+/// until a job comes (an evaluation on `n` threads runs on `n` of them):
+/// for a host whose threads are slow to start (a wasm core's, each a
+/// worker of the host's), which starts them ahead of the first
+/// evaluation. None where there are no threads, nor once [`end_threads`]
+/// has been called.
+pub fn start_threads(n: usize) {
+    crew::start(n);
+}
 pub use values::{
-    Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words,
+    Collected, Field, FxHashMap, FxHashSet, FxHasher, HashBytes, SeqNode, Value, ValueId, Values, hash_bytes,
+    hash_words,
 };

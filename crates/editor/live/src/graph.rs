@@ -405,6 +405,37 @@ pub struct Parts<'a> {
 /// build's bytes `build`, hashed by chunk.
 #[must_use]
 pub fn encode(key: &Key, prelude: &[u8; 32], manifest: &Manifest, build: &[u8]) -> Vec<u8> {
+    let mut e = encode_start(key, prelude, manifest, build.len());
+    encode_more(&mut e, build, &|| false).expect("an encoding nothing pauses")
+}
+
+/// The file being put together in slices ([`encode_start`],
+/// [`encode_more`]): its bytes so far, and the next of the build's bytes
+/// to copy, or of its chunks to hash.
+#[derive(Debug)]
+pub struct Encoding {
+    out: Vec<u8>,
+    /// Where the payload starts (after the head and its chunks' hashes),
+    /// and its length.
+    start: usize,
+    len: usize,
+    /// The build's bytes copied so far; then the chunks hashed.
+    copied: usize,
+    hashed: usize,
+}
+
+/// The bytes [`encode_more`] copies between two asks of its `pause`.
+const PIECE: usize = 256 << 10;
+
+/// [`encode`] begun: the head and the manifest written, room made for the
+/// build's `build_len` bytes, which [`encode_more`] copies and hashes.
+#[must_use]
+pub fn encode_start(
+    key: &Key,
+    prelude: &[u8; 32],
+    manifest: &Manifest,
+    build_len: usize,
+) -> Encoding {
     let mut e = Enc(Vec::new());
     e.n(key.len());
     for (k, v) in key {
@@ -447,7 +478,7 @@ pub fn encode(key: &Key, prelude: &[u8; 32], manifest: &Manifest, build: &[u8]) 
     // (one buffer, its head's hashes filled in last: the build's bytes
     // copied once, a graph of tens of MB never held three times over, in
     // the wasm core's fixed memory too)
-    let len = e.0.len() + build.len();
+    let len = e.0.len() + build_len;
     let chunks = len.div_ceil(CHUNK);
     let start = HEAD + 8 * chunks;
     let mut out = Vec::with_capacity(start + len);
@@ -458,14 +489,53 @@ pub fn encode(key: &Key, prelude: &[u8; 32], manifest: &Manifest, build: &[u8]) 
     out.extend_from_slice(&u32::try_from(chunks).unwrap_or(u32::MAX).to_le_bytes());
     out.resize(start, 0);
     out.extend_from_slice(&e.0);
-    drop(e);
-    out.extend_from_slice(build);
-    let (head, payload) = out.split_at_mut(start);
-    for (k, c) in payload.chunks(CHUNK).enumerate() {
+    Encoding {
+        out,
+        start,
+        len,
+        copied: 0,
+        hashed: 0,
+    }
+}
+
+/// More of encoding `e` ([`encode_start`]) of `build` (the bytes whose
+/// length it was begun with): the file once it is whole, else none
+/// (`pause` said so, asked between pieces of the copy and between the
+/// chunks hashed: call again to go on). Each call does something,
+/// whatever `pause` says.
+///
+/// # Panics
+///
+/// Where `build` is not as long as the encoding was begun for.
+#[must_use]
+pub fn encode_more(e: &mut Encoding, build: &[u8], pause: &dyn Fn() -> bool) -> Option<Vec<u8>> {
+    let len = e.len;
+    while e.copied < build.len() {
+        let n = PIECE.min(build.len() - e.copied);
+        e.out.extend_from_slice(&build[e.copied..e.copied + n]);
+        e.copied += n;
+        if pause() {
+            return None;
+        }
+    }
+    assert_eq!(
+        e.out.len() - e.start,
+        len,
+        "the build's bytes as long as begun for"
+    );
+    let chunks = len.div_ceil(CHUNK);
+    while e.hashed < chunks {
+        let k = e.hashed;
+        let (head, payload) = e.out.split_at_mut(e.start);
+        let c = &payload[k * CHUNK..((k + 1) * CHUNK).min(payload.len())];
         head[HEAD + 8 * k..HEAD + 8 * k + 8]
             .copy_from_slice(&crate::tex::words_hash(c).to_le_bytes());
+        e.hashed += 1;
+        if e.hashed < chunks && pause() {
+            return None;
+        }
     }
-    out
+    Some(std::mem::take(&mut e.out))
 }
 
 /// The file's parts, every chunk's hash checked before any is decoded.
