@@ -203,7 +203,7 @@ jobs:
         working-directory: fe
         run: |
           firefox --version
-          tools/build/package.sh
+          MINTED_WHEELS=target/minted tools/build/package.sh
           node tools/dev/fx-run.mjs test/scenarios/fx.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
