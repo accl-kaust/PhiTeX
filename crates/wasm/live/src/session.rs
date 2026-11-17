@@ -845,7 +845,8 @@ static STEPPED: Mutex<Option<(Document, Idle)>> = Mutex::new(None);
 /// nobody waits for is left: step again once the requests that came are
 /// answered (the pages asked after a build drawn before its origins are
 /// made); 3: nothing asked, and the build's graph is to be saved once
-/// nothing has been for [`GRAPH_IDLE`]: step again after that long (that
+/// nothing has been for [`GRAPH_IDLE`] (a save due now is a 1:
+/// [`crate::step::answer`]): step again after that long (that
 /// step begins its save, a slice a step, given up at the step that finds
 /// something asked);
 /// 0: nothing asked, or no document; with threads, always 0 (the session
@@ -909,21 +910,16 @@ pub(crate) fn step_once() -> i32 {
         return 0;
     }
     let asked = lock(&wake.state).0;
-    let later = doc.pending() && !asked;
-    let wait = idle.due && !asked && !doc.pending();
-    let saving = idle.saving.is_some();
+    let pending = doc.pending();
+    let after = crate::step::After {
+        saving: idle.saving.is_some(),
+        save_in: (idle.due && !asked && !pending).then(|| idle.left()),
+        later: pending && !asked,
+        asked,
+        was_save: save,
+    };
     *lock(&STEPPED) = Some((doc, idle));
-    if saving {
-        // (the save's next slice, or what was asked, the step after the host's turn)
-        1
-    } else if wait {
-        3
-    } else if later {
-        2
-    } else {
-        // (a save made, nothing asked meanwhile: nothing more to step)
-        i32::from(!save || asked)
-    }
+    crate::step::answer(after)
 }
 
 /// The open document closed: its session thread ends after the step it
