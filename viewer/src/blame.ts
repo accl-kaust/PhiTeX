@@ -725,7 +725,10 @@ export class Blame {
     // (in the panel's window, so the host's tokens (--ph-*) colour it)
     (p.stage.closest(".win") ?? p.root).append(this.card);
     p.stage.addEventListener("pointermove", (e) => this.move(e));
-    p.stage.addEventListener("pointerleave", () => !this.pinned && this.over(null));
+    // (the pointer on its way to the card's actions keeps it; leaving both, it goes)
+    const gone = (e: PointerEvent, to: HTMLElement) => !this.pinned && !(e.relatedTarget instanceof Node && to.contains(e.relatedTarget)) && this.over(null);
+    p.stage.addEventListener("pointerleave", (e) => gone(e, this.card));
+    this.card.addEventListener("pointerleave", (e) => gone(e, p.stage));
     p.stage.addEventListener("click", (e) => this.click(e));
     this.card.addEventListener("click", (e) => this.act(e));
     p.root.addEventListener("keydown", (e) => {

@@ -2231,8 +2231,8 @@ export class Viewer {
 
   private paint(s: Slot): void {
     if (!s.img) return;
-    // (a highlight outlives the page drawn under it: put back after)
-    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv")];
+    // (a highlight outlives the page drawn under it: put back after; Blame's bars too)
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv, .bl")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }

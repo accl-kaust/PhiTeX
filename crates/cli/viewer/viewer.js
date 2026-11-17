@@ -2260,7 +2260,7 @@ var Viewer = class _Viewer {
   }
   paint(s) {
     if (!s.img) return;
-    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv")];
+    const marks = [...s.el.querySelectorAll(".mark, .peer, .culprit, .rv, .bl")];
     this.draw(s);
     for (const m of marks) if (!m.isConnected) s.el.append(m);
   }
@@ -7299,7 +7299,9 @@ var Blame = class {
     this.card.setAttribute("aria-label", "Commit");
     (p.stage.closest(".win") ?? p.root).append(this.card);
     p.stage.addEventListener("pointermove", (e) => this.move(e));
-    p.stage.addEventListener("pointerleave", () => !this.pinned && this.over(null));
+    const gone2 = (e, to) => !this.pinned && !(e.relatedTarget instanceof Node && to.contains(e.relatedTarget)) && this.over(null);
+    p.stage.addEventListener("pointerleave", (e) => gone2(e, this.card));
+    this.card.addEventListener("pointerleave", (e) => gone2(e, p.stage));
     p.stage.addEventListener("click", (e) => this.click(e));
     this.card.addEventListener("click", (e) => this.act(e));
     p.root.addEventListener("keydown", (e) => {
