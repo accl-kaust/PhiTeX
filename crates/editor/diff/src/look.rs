@@ -72,20 +72,55 @@ const ULEM: &str = r"\mathchardef\phitexdifbox=31001\relax
 \def\phitexdifwaverule{\vrule width4bp height.2pt depth.2pt\relax}
 \def\phitexdifwave{\ifcsname XeTeXrevision\endcsname\hbox to4bp{\special{pdf:content q 0.4 w 0 0 m 1.333 2 2.667 -2 4 0 c S Q}\hss}\else\ifx\pdfliteral\phitexdifundefined\phitexdifwaverule\else\ifnum\pdfoutput>0 \hbox to4bp{\pdfliteral{q 0.4 w 0 0 m 1.333 2 2.667 -2 4 0 c S Q}\hss}\else\phitexdifwaverule\fi\fi\fi}
 \protected\def\phitexdifuwave{\leavevmode\bgroup\ifdim\phitexdifdepth=\maxdimen\phitexdifdepth3.5pt\relax\else\advance\phitexdifdepth2pt\relax\fi\phitexdifmarkover{\lower\phitexdifdepth\hbox{\phitexdifwave}}\phitexdifon}
+\protected\def\phitexdifuline{\leavevmode\bgroup\phitexdifULset}
 \protected\def\phitexdifsoutt{\leavevmode\bgroup\phitexdifdepth=-.55ex\relax\phitexdifULset}
 \protected\long\def\phitexdifsout#1{\ifmmode\ifx\text\phitexdifundefined\mbox{\phitexdifsoutt{$#1$}}\else\text{\phitexdifsoutt{$#1$}}\fi\else\phitexdifsoutt{#1}\fi}";
 
 /// The colours, by the engine's colour stack: `\phitexdifpush{R G B}`
 /// and `\phitexdifpop` around a run (pdfTeX writing a PDF: its stack, as
 /// LaTeX's colour makes it where it did; else the `color` specials, which
-/// XeTeX's PDF and the DVI drivers read); `\phitexdifmark{R G B}{text}`
-/// the text in the colour, in a group (out of math, a paragraph begun:
-/// no colour whatsit left in the vertical list).
+/// XeTeX's PDF and the DVI drivers read); `\phitexdifcontent{R G B}`
+/// the colour for the rest of the group, which must end where the
+/// coloured text does, LaTeX's `\\normalcolor` in it this colour too (a
+/// caption's, the caption package's: a deleted caption stays deleted) (LaTeX's `\color` where the
+/// document has it, so that its boxes, `\mbox`, a caption, keep it: else
+/// pushed, `\phitexdifcpop` popping it); `\phitexdifmark{R G B}{text}` the
+/// text in the colour, in a group (out of math, a paragraph begun: no
+/// colour whatsit left in the vertical list), its spaces able to stretch
+/// further than the text's (marked words are boxes, never hyphenated: a
+/// line of them can still be filled, not run into the margin).
 const COLOR: &str = r"\def\phitexdifstack{\ifcsname @pdfcolorstack\endcsname\csname @pdfcolorstack\endcsname\else0\fi}
 \def\phitexdifpdf{\ifcsname XeTeXrevision\endcsname\else\ifx\pdfcolorstack\phitexdifundefined\else\ifnum\pdfoutput>0 1\fi\fi\fi}
 \protected\def\phitexdifpush#1{\ifnum0\phitexdifpdf=1 \pdfcolorstack\phitexdifstack push{#1 rg #1 RG}\else\special{color push rgb #1}\fi}
 \protected\def\phitexdifpop{\ifnum0\phitexdifpdf=1 \pdfcolorstack\phitexdifstack pop\else\special{color pop}\fi}
-\protected\long\def\phitexdifmark#1#2{\ifmmode\else\leavevmode\fi{\phitexdifpush{#1}#2\phitexdifpop}}";
+\def\phitexdifcommas#1 #2 #3\relax{#1,#2,#3}
+\protected\def\phitexdifcontent#1{\edef\phitexdifx{#1}\ifdefined\color\edef\phitexdifx{\noexpand\color[rgb]{\expandafter\phitexdifcommas\phitexdifx\relax}}\phitexdifx\expandafter\let\csname default@color\expandafter\endcsname\csname current@color\endcsname\let\phitexdifcpop\relax\else\phitexdifpush{#1}\let\phitexdifcpop\phitexdifpop\fi}
+\protected\long\def\phitexdifmark#1#2{\ifmmode\else\leavevmode\fi{\ifmmode\else\spaceskip\fontdimen2\font plus2\fontdimen2\font minus\fontdimen4\font\relax\fi\phitexdifcontent{#1}#2\phitexdifcpop}}";
+
+/// Whole units in a frame (floats, verbatim, pictures, images): the
+/// unit's box framed, `\phitexdifframe{box}{R G B}{dashed}{rule}{sep}`
+/// setting `\phitexdiffbox` (the frame's baseline the unit's, `\phitexdiffd`
+/// below the frame's bottom), dashed for deleted, solid for added; a block
+/// (`\phitexdifblockbegin{R G B}{dashed}` … `\phitexdifblockend`) the
+/// column's width, its text set 8pt narrower and coloured; one in the line
+/// (`\phitexdifinlinebegin` …) an hbox. No argument holds the unit
+/// (verbatim reads its own catcodes); the boxes and dimensions are at fixed
+/// numbers, as the underlining's.
+const BLOCKS: &str = r"\mathchardef\phitexdifbbox=31004\relax
+\mathchardef\phitexdifibox=31005\relax
+\mathchardef\phitexdiffbox=31006\relax
+\dimendef\phitexdiffw=31004\relax
+\dimendef\phitexdiffh=31005\relax
+\dimendef\phitexdiffr=31006\relax
+\dimendef\phitexdiffs=31007\relax
+\dimendef\phitexdiffd=31008\relax
+\def\phitexdifside#1{\ifnum#1=1 \vbox to\phitexdiffh{\xleaders\vbox to4pt{\vss\hrule width\phitexdiffr height2pt\vss}\vfil}\else\vrule width\phitexdiffr height\phitexdiffh depth0pt\fi}
+\def\phitexdiftop#1{\ifnum#1=1 \hbox to\phitexdiffw{\xleaders\hbox to4pt{\hss\vrule width2pt height\phitexdiffr depth0pt\hss}\hfil}\else\hrule height\phitexdiffr depth0pt width\phitexdiffw\fi}
+\protected\def\phitexdifframe#1#2#3#4#5{\phitexdiffr#4\relax\phitexdiffs#5\relax\phitexdiffd\dp#1\advance\phitexdiffd\phitexdiffs\advance\phitexdiffd\phitexdiffr\setbox\phitexdiffbox\vbox{\kern\phitexdiffs\hbox{\kern\phitexdiffs\box#1\kern\phitexdiffs}\kern\phitexdiffs}\phitexdiffw\wd\phitexdiffbox\phitexdiffh\ht\phitexdiffbox\advance\phitexdiffh2\phitexdiffr\setbox\phitexdiffbox\hbox{\phitexdifpush{#2}\phitexdifside{#3}\vbox{\baselineskip-1000pt\lineskip0pt\lineskiplimit\maxdimen\phitexdiftop{#3}\box\phitexdiffbox\phitexdiftop{#3}}\phitexdifside{#3}\phitexdifpop}}
+\protected\def\phitexdifblockbegin#1#2{\par\begingroup\def\phitexdifbc{#1}\def\phitexdifbd{#2}\setbox\phitexdifbbox\vbox\bgroup\advance\hsize-8pt\relax\ifdefined\linewidth\advance\linewidth-8pt\relax\fi\ifdefined\columnwidth\advance\columnwidth-8pt\relax\fi\ifdefined\textwidth\advance\textwidth-8pt\relax\fi\begingroup\phitexdifcontent{#1}}
+\protected\def\phitexdifblockend{\par\phitexdifcpop\endgroup\egroup\phitexdifframe\phitexdifbbox\phitexdifbc\phitexdifbd{.6pt}{3.4pt}\box\phitexdiffbox\endgroup}
+\protected\def\phitexdifinlinebegin#1#2{\leavevmode\begingroup\def\phitexdifbc{#1}\def\phitexdifbd{#2}\setbox\phitexdifibox\hbox\bgroup\begingroup\phitexdifcontent{#1}}
+\protected\def\phitexdifinlineend{\phitexdifcpop\endgroup\egroup\phitexdifframe\phitexdifibox\phitexdifbc\phitexdifbd{.4pt}{1.5pt}\lower\phitexdiffd\box\phitexdiffbox\endgroup}";
 
 /// latexdiff's old font commands, as `\DeclareOldFontCommand` makes
 /// `\sf` and `\bf` (in math, the math alphabet), and a size out of math.
@@ -139,7 +174,7 @@ fn markup(m: Markup, add: &str, del: &str, a: &str, d: &str, driver: &str) -> Ve
             core(&mut l, true);
             l.push(def(
                 add,
-                format!("\\phitexdifmark{{{a}}}{{\\phitexdifuwave{{#1}}}}"),
+                format!("\\phitexdifmark{{{a}}}{{\\phitexdifuline{{#1}}}}"),
             ));
             l.push(def(
                 del,
@@ -214,7 +249,7 @@ fn markup(m: Markup, add: &str, del: &str, a: &str, d: &str, driver: &str) -> Ve
             l.push(def(
                 add,
                 format!(
-                    "\\protect\\cbstart\\phitexdifmark{{{a}}}{{\\phitexdifuwave{{#1}}}}\\protect\\cbend"
+                    "\\protect\\cbstart\\phitexdifmark{{{a}}}{{\\phitexdifuline{{#1}}}}\\protect\\cbend"
                 ),
             ));
             l.push(def(
@@ -307,6 +342,86 @@ fn subtype(s: Subtype, a: &str, d: &str, colored: bool) -> Vec<String> {
     }
 }
 
+/// The definitions of the whole units' markup (floats, alignments,
+/// pictures, verbatim, display math, images) for look `m`, colours `a` and
+/// `d` (black where the look colours nothing; a deleted unit's frame
+/// dashed, an added one's solid); `colored`: the colour definitions are
+/// there already.
+fn units(m: Markup, a: &str, d: &str, colored: bool) -> Vec<String> {
+    let mut l: Vec<String> = Vec::new();
+    if !colored {
+        l.extend(COLOR.lines().map(str::to_owned));
+    }
+    l.extend(BLOCKS.lines().map(str::to_owned));
+    let (a, d) = if m.colored() {
+        (a, d)
+    } else {
+        ("0 0 0", "0 0 0")
+    };
+    let cmd = |name: &str, body: String| format!("\\providecommand{{\\{name}}}{{{body}}}");
+    for (s, c, dash) in [("add", a, 0), ("del", d, 1)] {
+        l.push(cmd(
+            &format!("DIFblock{s}begin"),
+            format!("\\phitexdifblockbegin{{{c}}}{{{dash}}}"),
+        ));
+        l.push(cmd(
+            &format!("DIFblock{s}end"),
+            "\\phitexdifblockend".into(),
+        ));
+        l.push(cmd(
+            &format!("DIFinline{s}begin"),
+            format!("\\phitexdifinlinebegin{{{c}}}{{{dash}}}"),
+        ));
+        l.push(cmd(
+            &format!("DIFinline{s}end"),
+            "\\phitexdifinlineend".into(),
+        ));
+        l.push(cmd(
+            &format!("DIFmath{s}begin"),
+            format!("\\phitexdifpush{{{c}}}"),
+        ));
+        l.push(cmd(&format!("DIFmath{s}end"), "\\phitexdifpop".into()));
+        l.push(cmd(
+            &format!("DIFcolor{s}begin"),
+            format!("\\begingroup\\phitexdifcontent{{{c}}}"),
+        ));
+        l.push(cmd(
+            &format!("DIFcolor{s}end"),
+            "\\phitexdifcpop\\endgroup".into(),
+        ));
+    }
+    // (a citation diffed by key: inside one citation where it is natbib's
+    // numbers, its brackets and separator; else as written beside it)
+    l.push("\\def\\phitexdifnatnumb{\\csname ifNAT@numbers\\endcsname 1\\else 0\\fi}".into());
+    l.push("\\def\\phitexdifnatnum{\\ifcsname NAT@open\\endcsname\\phitexdifnatnumb\\fi}".into());
+    l.push("\\protected\\long\\def\\phitexdifcite#1#2{\\ifnum0\\phitexdifnatnum=1 \\leavevmode\\csname NAT@open\\endcsname#2\\csname NAT@close\\endcsname\\else#1\\fi}".into());
+    l.push("\\protected\\def\\phitexdifcitesep{\\csname NAT@sep\\endcsname\\space}".into());
+    l.push("\\def\\phitexdifnat{\\ifcsname NAT@open\\endcsname 1\\fi}".into());
+    l.push("\\protected\\long\\def\\phitexdifcitep#1#2{\\ifnum0\\phitexdifnat=1 \\leavevmode\\csname NAT@open\\endcsname#2\\csname NAT@close\\endcsname\\else#1\\fi}".into());
+    l.push("\\providecommand{\\DIFcitep}{\\phitexdifcitep}".into());
+    l.push("\\providecommand{\\DIFcite}{\\phitexdifcite}".into());
+    l.push("\\providecommand{\\DIFcitesep}{\\phitexdifcitesep}".into());
+    l.push("\\mathchardef\\phitexdiftbox=31007\\relax".into());
+    l.push(
+        "\\protected\\def\\phitexdiftabbegin{\\leavevmode\\setbox\\phitexdiftbox\\hbox\\bgroup}"
+            .into(),
+    );
+    l.push("\\protected\\def\\phitexdiftabend{\\egroup\\ifdim\\wd\\phitexdiftbox>\\linewidth\\ifdefined\\resizebox\\resizebox{\\linewidth}{!}{\\box\\phitexdiftbox}\\else\\box\\phitexdiftbox\\fi\\else\\box\\phitexdiftbox\\fi}".into());
+    l.push("\\providecommand{\\DIFtabularbegin}{\\phitexdiftabbegin}".into());
+    l.push("\\providecommand{\\DIFtabularend}{\\phitexdiftabend}".into());
+    l.push("\\protected\\def\\phitexdifchangesep{\\ifhmode\\hskip.2em\\relax\\fi}".into());
+    l.push("\\providecommand{\\DIFchangesep}{\\phitexdifchangesep}".into());
+    // (a deleted image: as it was where its file is still there, by its
+    // name or with graphics' usual extensions; else its name, framed as
+    // the image would be)
+    l.push("\\protected\\def\\phitexdifoldimage#1#2{\\IfFileExists{#1}{#2}{\\IfFileExists{#1.pdf}{#2}{\\IfFileExists{#1.png}{#2}{\\IfFileExists{#1.jpg}{#2}{\\IfFileExists{#1.eps}{#2}{\\hbox{\\strut image \\detokenize{#1}}}}}}}}".into());
+    l.push("\\providecommand{\\DIFoldimage}{\\phitexdifoldimage}".into());
+    l.push(format!("\\providecommand{{\\DIFmathdeltag}}{{{{\\phitexdifcontent{{{d}}}\\textnormal{{(deleted)}}\\phitexdifcpop}}}}"));
+    l.push("\\providecommand{\\DIFfloatnumber}[1]{\\edef\\phitexdifsavedcount{\\the\\value{\\csname @captype\\endcsname}}\\setcounter{\\csname @captype\\endcsname}{#1}}".into());
+    l.push("\\providecommand{\\DIFfloatrestore}{\\setcounter{\\csname @captype\\endcsname}{\\phitexdifsavedcount}}".into());
+    l
+}
+
 /// The markup's lines for `opts` and a new preamble `preamble` (as
 /// latexdiff's, each set under its `%DIF … PREAMBLE` line), in two: the
 /// packages to load (at the preamble's end), and the rest, its
@@ -341,11 +456,12 @@ fn parts(opts: &Options, preamble: &str) -> (Vec<String>, Vec<String>) {
         );
     }
     lines.extend(types);
-    let colored = lines
+    let mut colored = lines
         .iter()
         .any(|l| l.starts_with("\\protected\\def\\phitexdifpush"));
     lines.push(format!("%DIF {} PREAMBLE", opts.subtype.name()));
     lines.extend(subtype(opts.subtype, &a, &d, colored));
+    colored = colored || opts.subtype == Subtype::Color;
     if opts.subtype.identical_floats() {
         lines.push("%DIF IDENTICAL PREAMBLE".into());
         lines.extend(IDENTICAL.lines().map(str::to_owned));
@@ -364,6 +480,8 @@ fn parts(opts: &Options, preamble: &str) -> (Vec<String>, Vec<String>) {
         }
         lines.extend(FLOATSAFE.lines().map(str::to_owned));
     }
+    lines.push("%DIF UNITS PREAMBLE".into());
+    lines.extend(units(m, &a, &d, colored));
     if hyperref {
         lines.push("%DIF HYPERREF PREAMBLE".into());
         lines.extend(HYPERREF.lines().map(str::to_owned));
@@ -552,7 +670,7 @@ mod tests {
             assert!(!p.contains(bad), "{bad} in {p}");
         }
         assert!(p.contains(
-            "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0 1}{\\phitexdifuwave{#1}}} %DIF PREAMBLE\n"
+            "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0 1}{\\phitexdifuline{#1}}} %DIF PREAMBLE\n"
         ));
         // (no XeTeX primitive named: `phitex build` of the marked-up text
         // would take it for a XeTeX document)

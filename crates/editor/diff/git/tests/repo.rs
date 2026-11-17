@@ -237,11 +237,11 @@ fn diff_against_a_commit() {
     let old = repo.snapshot("v1").unwrap();
     let d = diff(&old, &Dir(paper), "main.tex", &Options::default()).unwrap();
     assert!(
-        d.tex.contains("A file \\DIFdelbegin \\DIFdel{only }"),
+        d.tex.contains("A file \\DIFdelbegin \\DIFdel{only} "),
         "{}",
         d.tex
     );
-    assert!(d.tex.contains("\\DIFadd{second }"), "{}", d.tex);
+    assert!(d.tex.contains("\\DIFadd{second} "), "{}", d.tex);
     // (no blank line where `\input` was)
     assert!(
         d.tex.contains("working tree}\\DIFaddend .\nA file"),

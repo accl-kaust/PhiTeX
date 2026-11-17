@@ -153,6 +153,28 @@ impl Markup {
         )
     }
 
+    /// Whether it shows deleted text (not: change bars only, added text
+    /// alone, bold).
+    #[must_use]
+    pub fn shows_deleted(self) -> bool {
+        !matches!(self, Markup::Changebar | Markup::Invisible | Markup::Bold)
+    }
+
+    /// Whether it colours changes (the blocks', math's and pictures'
+    /// colours: else they are black, told apart by their frames).
+    #[must_use]
+    pub fn colored(self) -> bool {
+        matches!(
+            self,
+            Markup::Underline
+                | Markup::Ctraditional
+                | Markup::Cfont
+                | Markup::Cchangebar
+                | Markup::Cfontchbar
+                | Markup::Culinechbar
+        )
+    }
+
     /// Whether it draws change bars (changebar).
     #[must_use]
     pub fn bars(self) -> bool {
@@ -846,6 +868,7 @@ impl Baseline {
         let new_toks = read(&new.text, nb);
         let amsmath = loads(preamble, &["amsmath", "mathtools"]);
         let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
+        em.show_del = self.opts.markup.shows_deleted();
         let (h, head) = self.head(new, nb);
         em.out.push_str(&h);
         em.body(&old_toks, &new_toks, ob.end, nb.end);
@@ -949,11 +972,18 @@ impl Baseline {
             (true, false) => ChangeKind::Del,
             _ => ChangeKind::Add,
         };
+        // (a change across two files, a deleted `\include` after an edited
+        // file's end: placed in the file it begins in, its text that
+        // file's part)
+        let old = locate(&self.flat, c.old);
+        let old_len = (old.end - old.start).min(c.old.1 - c.old.0);
+        let mut new_text = new_text;
+        new_text.truncate((new.end - new.start).min(new_text.len()));
         Change {
             kind,
-            old: locate(&self.flat, c.old),
+            old,
             new,
-            old_text: self.flat.text[c.old.0..c.old.1].to_owned(),
+            old_text: self.flat.text[c.old.0..c.old.0 + old_len].to_owned(),
             new_text,
             section,
             out,
@@ -1014,13 +1044,13 @@ mod tests {
         diff(&o, &n, "main.tex", &Options::default()).unwrap()
     }
 
-    fn body(d: &DiffOut) -> &str {
+    fn body(d: &DiffOut) -> String {
         // (the body after the markup's definitions, and the line end
         // after `\begin{document}`)
         let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF\n\n";
         let s = d.tex.find(end).unwrap() + end.len();
         let e = d.tex.rfind("\\end{document}").unwrap();
-        &d.tex[s..e]
+        d.tex[s..e].to_owned()
     }
 
     /// The diff's text back to the user's files (the viewer's follow,
@@ -1064,7 +1094,7 @@ mod tests {
         let d = run("Hello world.\n", "Hello brave world.\n");
         assert_eq!(
             body(&d),
-            "Hello \\DIFaddbegin \\DIFadd{brave }\\DIFaddend world.\n"
+            "Hello \\DIFaddbegin \\DIFadd{brave} \\DIFaddend world.\n"
         );
         assert_eq!(d.changes.len(), 1);
         let c = &d.changes[0];
@@ -1079,7 +1109,7 @@ mod tests {
         let d = run("\\section{Intro}\nText.\n", "\\section{Overview}\nText.\n");
         assert_eq!(
             body(&d),
-            "\\section{\\DIFdelbegin \\DIFdel{Intro}\\DIFdelend \\DIFaddbegin \\DIFadd{Overview}\\DIFaddend }\nText.\n"
+            "\\section{\\DIFdelbegin \\DIFdel{Intro}\\DIFdelend \\DIFchangesep \\DIFaddbegin \\DIFadd{Overview}\\DIFaddend }\nText.\n"
         );
         assert_eq!(d.changes[0].section.as_deref(), Some("Overview"));
     }
@@ -1090,13 +1120,15 @@ mod tests {
             "See\n\\begin{equation}\nx = y^2 \\label{e}\n\\end{equation}\ndone.\n",
             "See\n\\begin{equation}\nx = y^3 \\label{e}\n\\end{equation}\ndone.\n",
         );
+        // (math whole, never cut by markup: the old one unnumbered, its
+        // label dropped, coloured; the new one as it is, coloured)
         let b = body(&d);
         assert!(
-            b.contains("\\begin{displaymath}\\DIFdel{\nx = y^2 }%DIFDELCMD < \\label{e}"),
+            b.contains("\\begin{displaymath}\\DIFmathdelbegin \nx = y^2 \n\\DIFmathdelend \\end{displaymath}"),
             "{b}"
         );
         assert!(
-            b.contains("\\begin{equation}\\DIFadd{\nx = y^3 }\\label{e}"),
+            b.contains("\\begin{equation}\\DIFmathaddbegin \nx = y^3 \\label{e}\n\\DIFmathaddend \\end{equation}"),
             "{b}"
         );
     }
@@ -1135,7 +1167,7 @@ mod tests {
             d.tex
         );
         assert!(d.tex.contains(
-            "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0 1}{\\phitexdifuwave{#1}}} %DIF PREAMBLE\n"
+            "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0 1}{\\phitexdifuline{#1}}} %DIF PREAMBLE\n"
         ));
     }
 
@@ -1199,7 +1231,7 @@ mod tests {
         let p = dif_preamble(&o, "") + &dif_body(&o, "");
         assert!(
             p.contains(
-                "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0.502 0}{\\phitexdifuwave{#1}}}"
+                "\\providecommand{\\DIFadd}[1]{\\phitexdifmark{0 0.502 0}{\\phitexdifuline{#1}}}"
             ),
             "{p}"
         );
