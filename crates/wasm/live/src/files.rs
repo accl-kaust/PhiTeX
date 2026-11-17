@@ -51,14 +51,15 @@ pub trait Host: Send + Sync {
 /// What a pack's fetch is told (the session's progress: `Meter::fetch`).
 pub type FetchHook = Arc<dyn Fn(&Fetch<'_>) + Send + Sync>;
 
+/// A given file's content key, made at its first ask ([`Files::stamp`]).
+type ContentKey = Arc<OnceLock<Vec<u8>>>;
+
 #[derive(Default)]
 struct State {
     by_name: HashMap<String, Entry>,
     /// The host's files by the path it gave (the project's, as `./name`),
-    /// each with the number of its giving ([`Files::stamp`]).
-    by_given_path: HashMap<String, (u64, Arc<Vec<u8>>)>,
-    /// The files the host has given so far: each giving's number.
-    givings: u64,
+    /// each with its content's key, made at its first ask ([`Files::stamp`]).
+    by_given_path: HashMap<String, (ContentKey, Arc<Vec<u8>>)>,
     index: Option<Arc<Index>>,
     /// The extension's bundled texmf/: these names the host's, not Shelf's.
     bundled: HashSet<String>,
@@ -71,6 +72,8 @@ struct State {
     asked: HashSet<String>,
     /// The host's answers, waiting to be taken: the bytes as served, or why not.
     arrived: HashMap<String, Result<Vec<u8>, String>>,
+    /// The core ended ([`Files::end`]): the host answers nothing more.
+    ended: bool,
 }
 
 /// TEXINPUTS as the browser searches it: its elements, folders relative
@@ -160,6 +163,15 @@ impl Files {
         s.shelves.clear();
     }
 
+    /// The core ended (`ph_end`): the host hears no more asks, so none is
+    /// made and none waited for. A file not had is nowhere, a pack not had
+    /// could not be had, now and from now on: every thread waiting for one
+    /// goes on (and its build to its end), so the core's threads return.
+    pub fn end(&self) {
+        self.lock().ended = true;
+        self.answered.notify_all();
+    }
+
     /// Each pack's fetch told to `hook` from now on (the document opened).
     pub fn on_fetch(&self, hook: Option<FetchHook>) {
         *self.hook.lock().unwrap_or_else(PoisonError::into_inner) = hook;
@@ -224,21 +236,91 @@ impl Files {
         }
     }
 
-    /// A key of the file at `path` that changes when its bytes may have,
-    /// none read ([`phitex_live::host::Host::stamp`]: a Rebuild, `r` in
-    /// the watch, reads again only the files whose key moved): Shelf's,
-    /// the release's, the same for the session (as the CLI's `--shelf`);
-    /// the host's, the number of its last giving, a file given again (a
-    /// figure replaced in Overleaf) a new one; none: not here.
+    /// A key of the file at `path` that changes when its bytes do
+    /// ([`phitex_live::host::Host::stamp`]: a Rebuild, `r` in the watch,
+    /// reads again only the files whose key moved; a persisted graph's
+    /// load stages only those, `phitex_live::graph`): Shelf's, from the
+    /// release's index, nothing fetched (the file's own content sum, else
+    /// its pack's id, which names the pack's content), as the CLI's
+    /// `--shelf` keys it; the host's, its content's (SHA-256 and length,
+    /// made once a giving, at its first ask: off the host's thread), so a
+    /// later session's host giving the same bytes gives the same key, a
+    /// figure replaced in Overleaf another; none: not here.
     pub fn stamp(&self, path: &str) -> Option<Vec<u8>> {
-        if path.starts_with(shelf::TL) {
-            return self.read(path).is_some().then(|| b"shelf".to_vec());
+        if let Some(rel) = path.strip_prefix(shelf::TL) {
+            let ix = self.lock().index.clone()?;
+            return ix
+                .sum_of(rel)
+                .or_else(|| ix.pack_of(rel))
+                .map(|k| [b"shelf:".as_slice(), k.as_bytes()].concat());
         }
         let s = self.lock();
         let plain = path.strip_prefix("./").unwrap_or(path);
-        s.by_given_path
-            .get(plain)
-            .map(|(n, _)| n.to_le_bytes().to_vec())
+        let (key, b) = s.by_given_path.get(plain)?.clone();
+        drop(s);
+        Some(
+            key.get_or_init(|| {
+                let mut k = phitex_codecs::sha256::sha256(&b).to_vec();
+                k.extend_from_slice(&(b.len() as u64).to_le_bytes());
+                k
+            })
+            .clone(),
+        )
+    }
+
+    /// Where `name` (as a finder's key names it: [`phitex_tex::font_name`]'s
+    /// font side stripped) is found now, nothing fetched: the host's file
+    /// given under it (asked of the host when it has said nothing of it),
+    /// else Shelf's path from the release's index, along TEXINPUTS as
+    /// [`Files::locate`] looks
+    /// ([`phitex_live::host::Host::relocate`]: a loaded graph's inputs
+    /// checked; the CLI's `--shelf` answers the same from its index).
+    pub fn relocate(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<String> {
+        let search = self.lock().search.clone();
+        let searched =
+            !(name.starts_with('/') || name.starts_with("./") || name.starts_with("../"));
+        let Some(search) = search.filter(|_| searched) else {
+            return self.relocate_default(name, engine);
+        };
+        for e in &search.elements {
+            match e {
+                phitex_live::latexmkrc::Element::Default => {
+                    if let Some(p) = self.relocate_default(name, engine) {
+                        return Some(p);
+                    }
+                }
+                phitex_live::latexmkrc::Element::Dir { path, sub } => {
+                    for c in search.candidates(path, *sub, name) {
+                        let s = self.lock();
+                        if let Some((p, _)) = self.by_name(s, &c) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn relocate_default(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<String> {
+        let s = self.lock();
+        if let Some(Entry::Given(f)) = s.by_name.get(name) {
+            return f.as_ref().map(|(p, _)| p.clone());
+        }
+        let Some(ix) = s.index.clone() else {
+            return self.by_name(s, name).map(|(p, _)| p);
+        };
+        if Self::hosts(&s, &ix, name, engine) {
+            return self.by_name(s, name).map(|(p, _)| p);
+        }
+        drop(s);
+        let rel = ix.resolve(name, shelf::format_of(name), engine)?;
+        Some(format!("{}{rel}", shelf::TL))
+    }
+
+    /// Shelf's release, as the index names it (none: no index yet).
+    pub fn release(&self) -> Option<String> {
+        self.lock().index.as_ref().map(|ix| ix.release().to_owned())
     }
 
     /// Whether `name` is the host's (given, or bundled outside an engine's
@@ -379,6 +461,9 @@ impl Files {
     }
 
     fn by_name<'a>(&'a self, mut s: MutexGuard<'a, State>, name: &str) -> Option<Kept> {
+        if s.ended && !matches!(s.by_name.get(name), Some(Entry::Given(_))) {
+            return None;
+        }
         if !s.by_name.contains_key(name) {
             s.by_name.insert(name.to_owned(), Entry::Asked);
             if let Some(h) = self.host.get() {
@@ -395,6 +480,10 @@ impl Files {
             if !crate::THREADED {
                 // (no thread to answer later: not answered in the call, nowhere)
                 s.by_name.insert(name.to_owned(), Entry::Given(None));
+                return None;
+            }
+            // (the core ended while this waited: no answer comes)
+            if s.ended {
                 return None;
             }
             s = self.wait(s);
@@ -414,14 +503,35 @@ impl Files {
             s.by_given_path.remove(&p);
         }
         if let Some((p, b)) = &file {
-            s.givings += 1;
-            let n = s.givings;
-            s.by_given_path
-                .insert(p.strip_prefix("./").unwrap_or(p).to_owned(), (n, b.clone()));
+            s.by_given_path.insert(
+                p.strip_prefix("./").unwrap_or(p).to_owned(),
+                (ContentKey::default(), b.clone()),
+            );
         }
         s.by_name.insert(name.to_owned(), Entry::Given(file));
         drop(s);
         self.answered.notify_all();
+    }
+
+    /// The host takes back `name` (as it gave it, `ph_withdraw`: a file
+    /// deleted from the project): its answer dropped, given or absent,
+    /// and its path no longer the host's, so a Rebuild's stamp sees it
+    /// gone and the name is looked up as one never given: by Shelf's index
+    /// where there is one (a distribution's file the project's copy
+    /// shadowed is Shelf's again, `llncs.cls`), else asked of the host
+    /// again. Absent ([`Files::provide`] with none) is "nowhere", Shelf's
+    /// copy too.
+    pub fn withdraw(&self, name: &str) {
+        let name = name.strip_prefix("./").unwrap_or(name);
+        let mut s = self.lock();
+        // (asked and not answered yet: a thread waits for the answer)
+        if !matches!(s.by_name.get(name), Some(Entry::Given(_))) {
+            return;
+        }
+        if let Some(Entry::Given(Some((p, _)))) = s.by_name.remove(name) {
+            let p = p.strip_prefix("./").unwrap_or(&p).to_owned();
+            s.by_given_path.remove(&p);
+        }
     }
 
     /// `name` (as TeX names it), which the host said was nowhere, may be
@@ -465,10 +575,11 @@ impl PackSource for HostPacks {
     fn packs(&self, ids: &[&str]) -> Vec<Result<Vec<u8>, String>> {
         let f = &self.0;
         let mut s = f.lock();
+        // (none asked once the core has ended: nobody hears it)
         let new: Vec<&str> = ids
             .iter()
             .copied()
-            .filter(|id| !s.asked.contains(*id) && !s.arrived.contains_key(*id))
+            .filter(|id| !s.ended && !s.asked.contains(*id) && !s.arrived.contains_key(*id))
             .collect();
         for id in &new {
             s.asked.insert((*id).to_owned());
@@ -481,7 +592,7 @@ impl PackSource for HostPacks {
             }
         }
         s = f.lock();
-        while crate::THREADED && !ids.iter().all(|id| s.arrived.contains_key(*id)) {
+        while crate::THREADED && !s.ended && !ids.iter().all(|id| s.arrived.contains_key(*id)) {
             s = f.wait(s);
         }
         ids.iter()
@@ -499,11 +610,14 @@ impl PackSource for HostPacks {
 mod tests {
     use super::*;
 
-    /// A file the host gives keeps its stamp until it is given again (a
-    /// new one: a Rebuild reads it again) or given as absent (none: looked
-    /// up again, gone); one never given has none.
+    /// A file the host gives keeps its stamp until it is given again with
+    /// other bytes (a new one: a Rebuild reads it again) or given as
+    /// absent (none: looked up again, gone); one never given has none.
+    /// The stamp is the content's: given again with the same bytes, or
+    /// by another core (a later session, a persisted graph's load), the
+    /// same.
     #[test]
-    fn a_given_files_stamp_moves_only_when_it_is_given_again() {
+    fn a_given_files_stamp_moves_only_when_its_bytes_do() {
         let f = Files::default();
         assert_eq!(f.stamp("./a.png"), None);
         f.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
@@ -511,12 +625,61 @@ mod tests {
         let a = f.stamp("./a.png").expect("given");
         assert_eq!(f.stamp("a.png").as_ref(), Some(&a));
         let b = f.stamp("./b.tex");
+        f.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
+        assert_eq!(
+            f.stamp("./a.png").as_ref(),
+            Some(&a),
+            "the same bytes again"
+        );
+        let other = Files::default();
+        other.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
+        assert_eq!(other.stamp("./a.png").as_ref(), Some(&a), "another core's");
         f.provide("a.png", Some(("./a.png".to_owned(), b"two".to_vec())));
         assert_ne!(f.stamp("./a.png").as_ref(), Some(&a));
         assert_eq!(f.stamp("./b.tex"), b);
         f.provide("a.png", None);
         assert_eq!(f.stamp("./a.png"), None);
         assert_eq!(f.read("./a.png"), None);
+    }
+
+    /// A file the host gives shadows the distribution's of its name; given
+    /// as absent it is nowhere (Shelf's copy too); withdrawn
+    /// ([`Files::withdraw`]: deleted from the project) it is looked up as
+    /// one never given, the host asked again (no index here), its stamp
+    /// gone.
+    #[test]
+    fn a_withdrawn_file_is_looked_up_as_never_given() {
+        let host: &'static Now = Box::leak(Box::new(Now {
+            files: OnceLock::new(),
+            has: Mutex::new(vec!["llncs.cls".to_owned()]),
+        }));
+        let f = Arc::new(Files::default());
+        let _ = host.files.set(f.clone());
+        f.set_host(host);
+        f.provide(
+            "llncs.cls",
+            Some(("./llncs.cls".to_owned(), b"mine".to_vec())),
+        );
+        assert!(f.stamp("./llncs.cls").is_some());
+        assert_eq!(
+            f.read("./llncs.cls").as_deref().map(Vec::as_slice),
+            Some(&b"mine"[..])
+        );
+        f.provide("llncs.cls", None);
+        assert_eq!(f.locate("llncs.cls", "pdftex"), None, "absent: nowhere");
+        f.withdraw("./llncs.cls");
+        assert_eq!(f.stamp("./llncs.cls"), None);
+        // (asked of the host again: its own answer, `Now`'s copy)
+        assert_eq!(
+            f.locate("llncs.cls", "pdftex").as_deref(),
+            Some("./llncs.cls")
+        );
+        assert_eq!(
+            f.read("./llncs.cls").as_deref().map(Vec::as_slice),
+            Some(&b"x"[..])
+        );
+        // (a name never given, withdrawn: nothing to drop)
+        f.withdraw("other.sty");
     }
 
     /// A project's font file as kpathsea's `.` finds it: given, by its

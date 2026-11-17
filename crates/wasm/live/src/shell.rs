@@ -17,7 +17,7 @@
 //! the engine says plainly ([`ShellRan::why`]).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use phitex_tex::{ShellHook, ShellRan};
@@ -30,6 +30,8 @@ pub struct Hook {
     next: AtomicU32,
     answers: Mutex<HashMap<u32, Option<ShellRan>>>,
     answered: Condvar,
+    /// The core ended ([`Hook::end`]; set with `answers` held).
+    ended: AtomicBool,
 }
 
 impl Hook {
@@ -39,7 +41,17 @@ impl Hook {
             next: AtomicU32::new(1),
             answers: Mutex::default(),
             answered: Condvar::new(),
+            ended: AtomicBool::new(false),
         }
+    }
+
+    /// The core ended (`ph_end`): no command is posted from now on, and
+    /// every call waiting for the host's answer is taken for not run.
+    pub fn end(&self) {
+        let a = self.answers.lock().unwrap_or_else(PoisonError::into_inner);
+        self.ended.store(true, Ordering::SeqCst);
+        drop(a);
+        self.answered.notify_all();
     }
 
     /// The host's answer to call `id` (its frame; none if it is not one:
@@ -57,6 +69,9 @@ impl Hook {
 
 impl ShellHook for Hook {
     fn run(&self, command: &str, files: &[(String, Arc<[u8]>)]) -> ShellRan {
+        if self.ended.load(Ordering::SeqCst) {
+            return not_run("the engine has ended");
+        }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut frame = Vec::new();
         put(&mut frame, command.as_bytes());
@@ -76,6 +91,10 @@ impl ShellHook for Hook {
                 // (no thread to answer later: not answered in the call, not found)
                 a.remove(&id);
                 return not_run("the host did not answer within its call");
+            }
+            if self.ended.load(Ordering::SeqCst) {
+                a.remove(&id);
+                return not_run("the engine has ended");
             }
             a = self
                 .answered

@@ -48,6 +48,15 @@ pub(crate) struct Env {
     /// asker computes, those asking meanwhile wait for its answer
     /// (`read::env_value`).
     pub(crate) asking: Mx<FxHashMap<Field, Arc<std::sync::OnceLock<Option<ValueId>>>>>,
+    /// The changes of `values` that replaced a value so far, counted under
+    /// its write lock before it is let go: the threads' copies of the
+    /// values are of one count (`read::env_value`).
+    pub(crate) changes: AtomicU64,
+    /// The fields of `values` the provider answered (on a miss), not the
+    /// client's settings: what [`Engine::reask_provided`] asks again
+    /// (docs/spec-persisted-graph.md §3.3). Taken under `values`' lock,
+    /// after it.
+    pub(crate) provided: Lock<FxHashSet<Field>>,
 }
 
 pub(crate) struct Paths {
@@ -59,7 +68,7 @@ pub(crate) struct Paths {
 }
 
 /// Path ids below this are projections' (`PathId::of_proj`).
-const PROJ_PATHS: usize = 1024;
+pub(crate) const PROJ_PATHS: usize = 1024;
 /// Nodes `push_many` files in each segment it makes: room for as many again.
 const PUSH_RUN: usize = crate::order::SEG_CAP / 2;
 
@@ -110,6 +119,9 @@ pub struct Engine {
     pub(crate) env: Env,
     pub(crate) paths: Paths,
     pub(crate) projections: Table<Projection>,
+    /// A projection's answer where the field has no value
+    /// ([`Engine::register_projection_with_none`]); none: none.
+    pub(crate) proj_none: Lock<FxHashMap<ProjId, ValueId>>,
     /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
     append: std::sync::OnceLock<AppendFn>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
@@ -250,6 +262,9 @@ pub struct Engine {
     /// first-read wait on, and the window narrowed only by a node's second
     /// refutation by the layer.
     pub(crate) first_reads_on: AtomicBool,
+    /// The first-read wait on for this evaluation
+    /// ([`Engine::set_first_read_wait`], `Ctx::wait_for_first_definer`).
+    pub(crate) first_read_wait: AtomicBool,
     pub(crate) window_wave: AtomicBool,
     /// (`PHITEX_WINDOW_CHAINS=0`, a measure) a clean build's run again
     /// waits for its moving sources (`sched::hold_for`).
@@ -336,6 +351,21 @@ impl Engine {
         self.settle_marks[w].fetch_or(b, Ordering::Release);
     }
 
+    /// The first-read wait on or off for the evaluations to come
+    /// (`Ctx::wait_for_first_definer`, docs/spec-window.md, First reads):
+    /// on for a clean build's evaluation, the window on or not. Off
+    /// (`PHITEX_FIRST_READS=0`, a measure) the pieces made at once read
+    /// what the text before them defines before it commits, and each runs
+    /// again as many times as the scheduling let it start early: para400
+    /// at -j16 ran 1.0 to 1.67 runs a node by the machine's load (the
+    /// census, mc 87739), the rest of `\hsize=6in`'s readers thrown away.
+    pub fn set_first_read_wait(&self, on: bool) {
+        self.first_read_wait.store(
+            on && std::env::var("PHITEX_FIRST_READS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+    }
+
     /// The speculation window on or off for the evaluations to come
     /// (docs/spec-window.md): on, its width measured from its start.
     pub fn set_spec_window(&self, on: bool) {
@@ -418,6 +448,7 @@ impl Engine {
     /// ([`Engine::struct_gen`]).
     pub(crate) fn structure_changed(&self) {
         self.struct_gen.fetch_add(1, Ordering::SeqCst);
+        crate::obs::im_changed(crate::obs::IM_STRUCTURE);
     }
 
     pub(crate) fn scope_changed(&self) -> u64 {
@@ -479,6 +510,7 @@ impl Engine {
             window_missed: AtomicBool::new(false),
             window_released: AtomicU64::new(0),
             first_reads_on: AtomicBool::new(true),
+            first_read_wait: AtomicBool::new(false),
             window_wave: AtomicBool::new(false),
             window_chains: AtomicBool::new(true),
             window_aimd: AtomicBool::new(true),
@@ -509,9 +541,12 @@ impl Engine {
                 values: Lock::new(FxHashMap::default()),
                 provider: Lock::new(None),
                 asking: Mx::new(FxHashMap::default()),
+                changes: AtomicU64::new(0),
+                provided: Lock::new(FxHashSet::default()),
             },
             paths,
             projections,
+            proj_none: Lock::new(FxHashMap::default()),
             append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
             member_paths: Lock::new(FxHashMap::default()),
@@ -739,6 +774,23 @@ impl Engine {
                 (self.append.get().expect("an append relation needs the client's append"))(input, items, v)
             }
         }
+    }
+
+    /// [`Engine::register_projection`], with the projection's answer where
+    /// the field has no value at all: `none`, an immediate value (a small
+    /// int or a bool, never collected). Without it, no value projects to
+    /// none, and a reader through the projection is asked again when a
+    /// first definition comes whatever it projects to; with it, one whose
+    /// projection is `none` leaves it standing (a token's step class:
+    /// an undefined name's is a plain macro's, both stepped over alike).
+    pub fn register_projection_with_none(&self, p: Projection, none: ValueId) -> ProjId {
+        let id = self.register_projection(p);
+        self.proj_none.write().insert(id, none);
+        id
+    }
+
+    pub(crate) fn projection_of_none(&self, p: ProjId) -> Option<ValueId> {
+        self.proj_none.read().get(&p).copied()
     }
 
     pub fn register_projection(&self, p: Projection) -> ProjId {
@@ -1475,21 +1527,36 @@ impl Engine {
 
     pub fn set_environment(&self, env: impl IntoIterator<Item = (Field, ValueId)>) {
         let mut vals = self.env.values.write();
+        let mut provided = self.env.provided.write();
         for (f, x) in env {
             vals.insert(f, Some(x));
+            provided.remove(&f);
             self.bump(f);
         }
+        self.env.changes.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Changes environment values; readers of each changed field whose
     /// read reaches the environment are re-asked.
     pub fn update_environment(&self, changes: &[(Field, Option<ValueId>)]) {
+        self.change_environment(changes, false);
+    }
+
+    /// [`Engine::update_environment`]; `provided`: the new values are the
+    /// provider's answers, asked again ([`Engine::reask_provided`]), and
+    /// stay the provider's.
+    fn change_environment(&self, changes: &[(Field, Option<ValueId>)], provided: bool) {
         {
             let mut vals = self.env.values.write();
+            let mut prov = self.env.provided.write();
             for (f, x) in changes {
                 vals.insert(*f, *x);
+                if !provided {
+                    prov.remove(f);
+                }
                 self.bump(*f);
             }
+            self.env.changes.fetch_add(1, Ordering::AcqRel);
         }
         let mut st = CommitStats::default();
         for (f, _) in changes {
@@ -1536,6 +1603,68 @@ impl Engine {
             .iter()
             .filter_map(|(f, x)| x.map(|x| (*f, x)))
             .collect()
+    }
+
+    /// The provider's answers asked of it again (docs/spec-persisted-graph.md
+    /// §3.3, a loaded graph's environment): each field whose value the
+    /// provider gave ([`Env::provided`]), but those `skip` names (the
+    /// client keys them its own way), is asked of the provider anew. One
+    /// whose answer differs from the one held takes the new answer, and its
+    /// readers are re-asked as by [`Engine::update_environment`], the edit
+    /// path. The fields asked, and those that moved with their new answers.
+    pub fn reask_provided(&self, skip: &dyn Fn(Field) -> bool) -> (usize, Vec<(Field, Option<ValueId>)>) {
+        let mut asked: Vec<Field> = self.env.provided.read().iter().copied().filter(|&f| !skip(f)).collect();
+        asked.sort_unstable_by_key(|f| f.0.raw());
+        let moved: Vec<(Field, Option<ValueId>)> = {
+            let p = self.env.provider.read();
+            asked
+                .iter()
+                .filter_map(|&f| {
+                    // (no provider: nothing answers it now, as a build
+                    // without one would find)
+                    let now = p.as_ref().and_then(|p| p(self.values(), f)).flatten();
+                    let held = self.env.values.read().get(&f).copied().flatten();
+                    (now != held).then_some((f, now))
+                })
+                .collect()
+        };
+        if !moved.is_empty() {
+            self.change_environment(&moved, true);
+        }
+        (asked.len(), moved)
+    }
+
+    /// Those of `fields` whose value the provider gave asked of it again,
+    /// as [`Engine::reask_provided`] asks them all: one that moved takes
+    /// the new answer, its readers re-asked. How many moved.
+    pub fn reask_answers(&self, fields: &[Field]) -> usize {
+        let held: Vec<Field> = {
+            let prov = self.env.provided.read();
+            fields.iter().copied().filter(|f| prov.contains(f)).collect()
+        };
+        let moved: Vec<(Field, Option<ValueId>)> = held
+            .into_iter()
+            .filter_map(|f| {
+                let now = self.ask_provider(f);
+                let was = self.env.values.read().get(&f).copied().flatten();
+                (now != was).then_some((f, now))
+            })
+            .collect();
+        if !moved.is_empty() {
+            self.change_environment(&moved, true);
+        }
+        moved.len()
+    }
+
+    /// What the provider answers for field `f` now, asked of it, not of
+    /// the environment held (none: no answer, or no provider).
+    pub fn ask_provider(&self, f: Field) -> Option<ValueId> {
+        self.env
+            .provider
+            .read()
+            .as_ref()
+            .and_then(|p| p(self.values(), f))
+            .flatten()
     }
 
     /// Answers environment misses.
@@ -1753,6 +1882,7 @@ impl Engine {
             rep.waits += load(&w.waits);
             rep.stale_panics += load(&w.stale_panics);
             rep.stopped_stale += load(&w.stopped_stale);
+            rep.ticks += load(&w.ticks);
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.relative_resolved += load(&w.relative_resolved);
@@ -1811,6 +1941,12 @@ impl Engine {
             rep.run_times.append(&mut log.run_times);
         }
         rep.passes = rep.final_reruns + 1;
+        if crate::obs::rc_on() {
+            crate::obs::runcost_report(self);
+        }
+        if crate::obs::enabled() {
+            crate::obs::log_flush();
+        }
         rep.absorbed = workers
             .iter()
             .flat_map(|w| std::mem::take(&mut w.log.lock().absorbed))
@@ -2674,6 +2810,28 @@ impl Engine {
                     )),
                     _ => {}
                 }
+            }
+            // (a node placed after another stands after it: a placement's
+            // anchor is the node it was put after, `place_after`, and what
+            // moves the anchor moves what stands under it)
+            if !matches!(node.state(), State::Gone | State::Inert)
+                && let Some(a) = node.anchor()
+                && let Some(an) = self.placed_node(a)
+                && !matches!(an.state(), State::Gone | State::Inert)
+                && an.pos_hint() >= node.pos_hint()
+            {
+                out.push(format!(
+                    "node {} ({}, parent {:?}, slot {}) stands at {} before its anchor {} ({}, parent {:?}) at {}",
+                    n.raw(),
+                    self.op(node.op()).name(),
+                    node.parent.map(NodeId::raw),
+                    node.slot(),
+                    node.pos_hint().0,
+                    a.raw(),
+                    self.op(an.op()).name(),
+                    an.parent.map(NodeId::raw),
+                    an.pos_hint().0
+                ));
             }
             match node.state() {
                 State::Gone | State::Inert => continue,

@@ -18,10 +18,13 @@ use phitex_defuse::{
 use phitex_source::pass;
 
 use crate::hints::Defs;
+
+pub(crate) mod persist;
 use crate::incr::Incr;
 use crate::ops::{Dvi, Exec, Files, Mark, Put, Shared};
 use crate::run::{Ops, slice_args, slice_args_in_file};
 use crate::val::{field_name, int_of, list_of, str_of};
+pub use persist::{EnvReask, LoadStats, Save};
 
 /// Finds a file by the name TeX asks for: the name to print and the
 /// bytes. The key is TeX's own lookup (`\\input`, `\\openin`,
@@ -37,6 +40,20 @@ pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 /// `tex` format, so `\\input CJK.enc` reads TEXINPUTS's `CJK.enc`, not an
 /// encoding of ENCFONTS's: two lookups, two keys.
 pub const FONT_KEY: &str = "\u{1}font:";
+
+/// The environment's field of a file's modification time (seconds),
+/// by its path: `fdate:<path>` (`\pdffilemoddate`'s, [`Graph::provide`]).
+pub(crate) const FILE_DATE: &str = "fdate:";
+
+/// The modification time (seconds since the epoch) of the file at
+/// `path` on this machine's disk; none where it has none.
+fn file_date(path: &str) -> Option<i64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+}
 
 /// pdfTeX's banner as its terminal's first line begins: `\pdftexbanner`
 /// without kpathsea's version.
@@ -905,7 +922,8 @@ impl Applied {
 }
 
 /// Edits the nodes `nodes_now` (each with its key) to the slices `new`:
-/// the slices both share at the start and the end stay, those between
+/// the slices both share at the start and the end stay, and those
+/// between that are the same on both sides ([`middle_matches`]); the rest
 /// are replaced, removed or inserted (their arguments `args_of`'s).
 /// The document's text and a document file's are edited so alike, the
 /// file's pieces under each node that placed them ([`Build::stage_file`]).
@@ -941,27 +959,66 @@ fn apply_slices(
     }
     let (a, b) = common_ends(old, new, &same);
     let (old_mid, new_mid) = (old.len() - a - b, new.len() - a - b);
-    let common = old_mid.min(new_mid);
     crate::timeline::lap("engine: the slice-key diff");
-    for k in common..old_mid {
+    // (between the ends: the slices the same on both sides kept too, as
+    // the ends are, each edit between them its own: an edit in two places
+    // (a diff's marked-up text, a search and replace) runs its two places,
+    // not every slice between them)
+    let kept = middle_matches(
+        old_mid,
+        new_mid,
+        &|i| old[a + i].0,
+        &|j| new[a + j].0,
+        &|i, j| same(a + i, a + j),
+    );
+    // (each new slice of the middle: an old node kept, an old node given
+    // its text, or a new node; the old nodes neither, removed)
+    let mut plan: Vec<Option<(usize, bool)>> = vec![None; new_mid];
+    let mut gone: Vec<usize> = Vec::new();
+    let (mut oi, mut nj) = (0usize, 0usize);
+    for &(ki, kj) in kept.iter().chain(std::iter::once(&(old_mid, new_mid))) {
+        let (dels, ins) = (ki - oi, kj - nj);
+        for k in 0..dels.min(ins) {
+            plan[nj + k] = Some((oi + k, true));
+        }
+        gone.extend(oi + dels.min(ins)..ki);
+        oi = ki + 1;
+        nj = kj + 1;
+        if kj < new_mid {
+            plan[kj] = Some((ki, false));
+        }
+    }
+    for &k in &gone {
         match at {
             Placing::Top(_) => eng.remove(old[a + k].1),
             Placing::Placed => eng.remove_placed(old[a + k].1),
         }
     }
+    let (mut replaced, mut inserted) = (0usize, 0usize);
     let mut nodes: Vec<(u64, NodeId, Src)> = Vec::with_capacity(new.len());
     for i in 0..new.len() {
         let n = if i < a || i >= a + new_mid {
             let oi = if i < a { i } else { i - new_mid + old_mid };
             old[oi].1
-        } else if i - a < common {
-            let n = old[i].1;
-            let args = args_of(eng, i);
-            eng.replace(n, exec, args);
+        } else if let Some((k, give)) = plan[i - a] {
+            let n = old[a + k].1;
+            if give {
+                let args = args_of(eng, i);
+                eng.replace(n, exec, args);
+                replaced += 1;
+            }
             n
         } else {
             let args = args_of(eng, i);
-            let next = old.get(a + old_mid).map(|x| x.1);
+            inserted += 1;
+            // (the node after it: the next one of the middle kept or given
+            // its text, else the end's first)
+            let next = plan[i - a + 1..]
+                .iter()
+                .flatten()
+                .map(|&(k, _)| old[a + k].1)
+                .next()
+                .or_else(|| old.get(a + old_mid).map(|x| x.1));
             match (at, nodes.last()) {
                 (Placing::Top(_), Some(&(_, p, _))) => eng.insert_after(p, exec, args),
                 (Placing::Top(end), None) => eng.insert_before(next.unwrap_or(end), exec, args),
@@ -974,12 +1031,90 @@ fn apply_slices(
     *nodes_now = nodes;
     crate::timeline::lap("engine: replace/insert/remove, the node list made");
     Some(Applied {
-        prefix: a,
+        prefix: a + kept.len(),
         suffix: b,
-        replaced: common,
-        removed: old_mid - common,
-        inserted: new_mid - common,
+        replaced,
+        removed: gone.len(),
+        inserted,
     })
+}
+
+/// The slices of an edit's middle (`om` old, `nm` new, keys `ko` and `kn`)
+/// that are the same on both sides (`same`), in order, as pairs (old,
+/// new): those whose key is in each side once, the longest run of them in
+/// order (patience), then their equal neighbours. Linear but for a sort:
+/// no quadratic diff of a large middle.
+fn middle_matches(
+    om: usize,
+    nm: usize,
+    ko: &dyn Fn(usize) -> u64,
+    kn: &dyn Fn(usize) -> u64,
+    same: &dyn Fn(usize, usize) -> bool,
+) -> Vec<(usize, usize)> {
+    if om == 0 || nm == 0 {
+        return Vec::new();
+    }
+    // (each key's count and place on each side)
+    let mut seen: phitex_defuse::FxHashMap<u64, (u32, usize, u32, usize)> =
+        phitex_defuse::FxHashMap::default();
+    for i in 0..om {
+        let e = seen.entry(ko(i)).or_insert((0, i, 0, 0));
+        e.0 += 1;
+        e.1 = i;
+    }
+    for j in 0..nm {
+        if let Some(e) = seen.get_mut(&kn(j)) {
+            e.2 += 1;
+            e.3 = j;
+        }
+    }
+    let mut pairs: Vec<(usize, usize)> = seen
+        .values()
+        .filter(|e| e.0 == 1 && e.2 == 1 && same(e.1, e.3))
+        .map(|e| (e.1, e.3))
+        .collect();
+    pairs.sort_unstable_by_key(|p| p.1);
+    // (the longest run increasing in the old place: patience sorting)
+    let mut tails: Vec<usize> = Vec::new();
+    let mut back: Vec<Option<usize>> = vec![None; pairs.len()];
+    for (k, &(i, _)) in pairs.iter().enumerate() {
+        let at = tails.partition_point(|&t| pairs[t].0 < i);
+        back[k] = at.checked_sub(1).map(|p| tails[p]);
+        if at == tails.len() {
+            tails.push(k);
+        } else {
+            tails[at] = k;
+        }
+    }
+    let mut chain = Vec::with_capacity(tails.len());
+    let mut k = tails.last().copied();
+    while let Some(x) = k {
+        chain.push(pairs[x]);
+        k = back[x];
+    }
+    chain.reverse();
+    // (their equal neighbours, between one and the next)
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(chain.len());
+    let (mut lo_i, mut lo_j) = (0usize, 0usize);
+    for (c, &(i, j)) in chain.iter().enumerate() {
+        let (mut bi, mut bj) = (i, j);
+        while bi > lo_i && bj > lo_j && same(bi - 1, bj - 1) {
+            bi -= 1;
+            bj -= 1;
+        }
+        out.extend((0..i - bi).map(|d| (bi + d, bj + d)));
+        out.push((i, j));
+        let (hi_i, hi_j) = chain.get(c + 1).map_or((om, nm), |&(x, y)| (x, y));
+        let (mut fi, mut fj) = (i + 1, j + 1);
+        while fi < hi_i && fj < hi_j && same(fi, fj) {
+            out.push((fi, fj));
+            fi += 1;
+            fj += 1;
+        }
+        lo_i = fi;
+        lo_j = fj;
+    }
+    out
 }
 
 /// Edits the document's nodes `nodes`, cut from `old_text`, to the text
@@ -1968,6 +2103,9 @@ pub struct Stats {
     /// Waits on a node whose declared set was pending.
     pub pending_sets: u64,
     pub stops: u64,
+    /// The runs' periodic checks (`phitex_defuse::Report::ticks`), summed
+    /// over the build's evaluations.
+    pub ticks: u64,
     /// Attempts that resumed a stopped run at its blocked read, and that
     /// started over though one was kept (a read changed).
     pub resumed: u64,
@@ -2854,16 +2992,23 @@ impl Stats {
         for (n, c) in &r.rerun_causes {
             let op = eng.node_info(*n).map_or("?", |i| i.op);
             let (kind, f) = cause_parts(c);
-            let mut why = f.map_or_else(
-                || kind.to_owned(),
-                |f| format!("{kind} {}", field_name(v, f)),
-            );
+            let mut why = match c {
+                // (whose output: a picture child's, a finisher's, ...)
+                phitex_defuse::Cause::Output { of } => {
+                    format!("{kind} {}", eng.node_info(*of).map_or("?", |i| i.op))
+                }
+                _ => f.map_or_else(
+                    || kind.to_owned(),
+                    |f| format!("{kind} {}", field_name(v, f)),
+                ),
+            };
             if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
                 why = format!("{why} #r{}", self.rounds);
             }
             self.reruns.push((n.raw(), op, why));
         }
         self.stood.extend(r.stood.iter().map(|n| n.raw()));
+        self.ticks += r.ticks;
         if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
             let log = std::mem::take(&mut *crate::ops::RUN_LOG.locked());
             let round = self.rounds;
@@ -3014,6 +3159,13 @@ struct Graph {
     reads: Vec<(String, u64)>,
     /// The finder's answers since the last evaluation began.
     queries: Vec<(String, bool)>,
+    /// The finder's answers to the files staged since the last evaluation
+    /// ([`Build::stage_file`]): the next one's first [`Graph::queries`].
+    /// Dropped with the others when it began, a name staged was never
+    /// among [`Build::reads`]: a file found first by a Rebuild's staging
+    /// stayed "not found" in the session's inputs, and its removal was no
+    /// change (a deleted `\\input` file kept on the page).
+    staged_queries: Vec<(String, bool)>,
     /// The names a tool's search was asked for (`tfile:` fields: a
     /// `.bib`, a `.bst`, an `.ist`), and whether found: a watch rebuilds
     /// when one of them changes ([`Build::tool_reads`]).
@@ -3127,7 +3279,7 @@ impl DocFile {
                 node_args(v, &self.text, Some(&self.incr), n, loads, Some(name))
             });
             let s = n.start();
-            now.entry(a[0].raw())
+            now.entry(v.stable_raw(a[0]))
                 .and_modify(|k| *k = None)
                 .or_insert(Some(lines_before(&starts, len, s)));
         }
@@ -3140,9 +3292,53 @@ impl DocFile {
 /// The lines given for the text of a piece of a cut file
 /// ([`DocFile::dlines`]).
 fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
+    // (observe, `PHITEX_DLINE_ENV`: each answer, by file)
+    if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+        for d in docs.locked().values() {
+            let d = d.locked();
+            if let Some(k) = d.dlines.get(&n) {
+                eprintln!(
+                    "dline-env: {n} in {} = {k} (of {} pieces)",
+                    d.path,
+                    d.dlines.len()
+                );
+            }
+        }
+    }
     docs.locked()
         .values()
         .find_map(|d| d.locked().dlines.get(&n).copied())
+}
+
+/// The lines before the pieces runs cut of the rest of a file they read
+/// the first lines of themselves ([`rest_lines`]), by the value of their
+/// frames, given as `dline:<frames>` as a cut file's pieces' are
+/// ([`DocFile::dlines`]): those lines, read by the run with numbers of
+/// their own, are in no fold of the lines the nodes before a piece began.
+/// (Keyed by the frames' value, kept alive by a collection, `crate::collect`.)
+pub(crate) type RestLines = Arc<std::sync::Mutex<FxHashMap<ValueId, i64>>>;
+
+/// The lines before the piece whose frames' value is `n`, where a run
+/// cut it of a file's rest ([`RestLines`]).
+fn rest_line(v: &Values, rest: &RestLines, n: u64) -> Option<i64> {
+    rest.locked()
+        .iter()
+        .find_map(|(f, &k)| (v.stable_raw(*f) == n).then_some(k))
+}
+
+/// [`RestLines`] for the pieces `(frames, byte)` cut of the rest of
+/// `text`: the lines of the text before each.
+pub(crate) fn rest_lines(rest: &RestLines, text: &str, pieces: &[(ValueId, usize)]) {
+    let starts = line_starts(text);
+    let mut m = rest.locked();
+    for &(n, s) in pieces {
+        let k = *m
+            .entry(n)
+            .or_insert_with(|| lines_before(&starts, text.len(), s));
+        if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+            eprintln!("rest-lines: {} at byte {s} = {k}", n.raw());
+        }
+    }
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -3398,11 +3594,17 @@ impl Graph {
         }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
+        let shell = eng.register(Arc::new(crate::shell::ShellChild(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
         let outer_proj = eng.register_projection(Arc::new(crate::val::outer_projection));
-        let step_proj = eng.register_projection(Arc::new(crate::val::step_projection));
+        // (an undefined name steps as a plain macro does: class 0, so its
+        // first definition, a macro's, asks no stepping reader again)
+        let step_proj = eng.register_projection_with_none(
+            Arc::new(crate::val::step_projection),
+            eng.values().int(0),
+        );
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let mean_class_proj = eng.register_projection(Arc::new(crate::val::mean_class_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
@@ -3427,6 +3629,7 @@ impl Graph {
             xdvpage,
             readback,
             pic,
+            shell,
             tool_opts: Arc::default(),
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
@@ -3435,6 +3638,7 @@ impl Graph {
             rec_ran: Arc::default(),
             pkg_loads: Arc::new(std::sync::RwLock::new(None)),
             docs: Arc::default(),
+            rest_lines: Arc::default(),
             syms: Arc::default(),
             out_ok: Arc::new(Mutex::new(None)),
             fin_defs: Arc::default(),
@@ -3498,6 +3702,7 @@ impl Graph {
             files: Vec::new(),
             reads: Vec::new(),
             queries: Vec::new(),
+            staged_queries: Vec::new(),
             tool_reads: Vec::new(),
             absent: Vec::new(),
             written: Vec::new(),
@@ -3601,6 +3806,21 @@ impl Graph {
         }
     }
 
+    /// Whether the provider's answer for field `name` is made of something
+    /// besides the format and this code ([`Graph::provide`]): the files
+    /// (`file:`, `dfile:`, `fsize:`, a tool's `tfile:`, a file's time
+    /// [`FILE_DATE`]) and the lines a cut file's pieces are given
+    /// (`dline:`). Every other answer (the
+    /// format's bindings, a box register's default, a field the format
+    /// does not bind) is the format's and the code's, keyed by them: a
+    /// loaded graph asks again only these ([`Build::reask_environment`]).
+    /// Every kind the provider answers is listed here.
+    pub(crate) fn outside_answer(name: &str) -> bool {
+        ["file:", "dfile:", "fsize:", "tfile:", "dline:", FILE_DATE]
+            .iter()
+            .any(|p| name.starts_with(p))
+    }
+
     /// Installs the environment provider: a run reading a file the
     /// environment does not hold gets it from the finder in place, as
     /// [`Graph::supply`] would have supplied it, instead of stopping;
@@ -3625,6 +3845,7 @@ impl Graph {
         let cut_log = Arc::clone(&self.provided);
         let (reg, defs) = (Arc::clone(&self.ops.hints), Arc::clone(&self.ops.defs));
         let docs = Arc::clone(&self.ops.docs);
+        let rest = Arc::clone(&self.ops.rest_lines);
         let finder_u = Arc::clone(&finder);
         let finder_t = Arc::clone(&finder);
         let tools = self.tool_finder.clone();
@@ -3685,9 +3906,16 @@ impl Graph {
                     val
                 }));
             }
+            // (a file's time by its path, `\\pdffilemoddate`'s, [`FILE_DATE`]:
+            // its modification time in seconds, none where no disk here has
+            // it)
+            if let Some(path) = field.strip_prefix(FILE_DATE) {
+                return Some(file_date(path).map(|t| v.int(t)));
+            }
             // (the lines before a piece of a cut file, [`DocFile::dlines`])
             if let Some(n) = field.strip_prefix("dline:") {
-                let k = doc_file_line(&docs, n.parse().ok()?);
+                let n = n.parse().ok()?;
+                let k = doc_file_line(&docs, n).or_else(|| rest_line(v, &rest, n));
                 return Some(k.map(|k| v.int(k)));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the
@@ -6708,6 +6936,12 @@ pub struct Diagnostic {
 /// ([`Build::diagnostics`]).
 type DiagsKept = ((u64, usize), Vec<Diagnostic>);
 
+/// A build's number among the process's ([`Build::settled_key`]).
+fn next_serial() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A document built on the graph, kept for edits.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Build {
@@ -7042,10 +7276,7 @@ impl Build {
             diag_memo: Mutex::default(),
             diags_last: Mutex::default(),
             settles: 0,
-            serial: {
-                static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            },
+            serial: next_serial(),
             loads_ran: false,
             staged: false,
             evaluated: false,
@@ -7320,7 +7551,7 @@ impl Build {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.g.watch.clone());
         crate::timeline::lap("engine: the nodes' offsets (progress)");
         let mut stats = Stats::default();
-        self.g.queries.clear();
+        self.g.queries = std::mem::take(&mut self.g.staged_queries);
         self.g.ops.pkg_log.locked().clear();
         self.g.ops.rec_ran.locked().clear();
         let loads = self.g.loads.clone();
@@ -7355,6 +7586,9 @@ impl Build {
         self.g
             .eng
             .set_spec_window(self.opts.spec_window && self.settles == 1);
+        // (the first-read wait: the clean build's evaluation alone, the
+        // window on or not, docs/spec-window.md, First reads)
+        self.g.eng.set_first_read_wait(self.settles == 1);
         self.g.ops.spec_window.store(
             self.opts.spec_window && self.settles == 1,
             std::sync::atomic::Ordering::Release,
@@ -7394,6 +7628,14 @@ impl Build {
         self.dump_claims();
         self.dump_readers();
         crate::timeline::lap("engine: the edit's phases noted");
+        // (the pages streamed that do not stand as told withdrawn, before
+        // the build is in: `Progress::withdraw_gone`)
+        if streaming {
+            self.g
+                .watch
+                .progress
+                .withdraw_gone(|n| self.g.eng.is_live(NodeId::from_raw(n)));
+        }
         self.tell_settled_pages();
         crate::timeline::lap("engine: the pages settled told");
         // (a debug or observe build stops on a defect of the settled
@@ -7414,6 +7656,17 @@ impl Build {
     #[must_use]
     pub fn edit_sender(&self) -> EditSender {
         self.edits.clone()
+    }
+
+    /// How many symbols of the deferred counters this build's engine has
+    /// numbered, of each kind (`crate::defer::SymTable`): the register
+    /// symbols and the derived names. A symbol's control sequence name is
+    /// its kind's and its number's, so the names the process holds for
+    /// them are those below the most any engine numbered.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn symbols_numbered(&self) -> (u32, u32) {
+        self.g.ops.syms.counts()
     }
 
     /// The version of the text the last result is for ([`EditSender`];
@@ -7516,6 +7769,9 @@ impl Build {
             )),
             None => (self.opts.finder)(name),
         };
+        self.g
+            .staged_queries
+            .push((name.to_owned(), found.is_some()));
         // (the same bytes at the same path, or still no file: no field, no
         // record and no node changes, a cut file's included. `r` in a
         // watch stages every file the build read, and an editor may save
@@ -7523,6 +7779,23 @@ impl Build {
         // dropped and the nodes whose loads list it ran again, its value
         // made anew first, Grail's `r` 7 s)
         let unchanged = self.restage_unchanged(name, held, f_absent, cut, found.as_ref());
+        // (its time, where a run asked it (`\\pdffilemoddate`, [`FILE_DATE`]),
+        // asked again at its path then and now: a file touched, its bytes
+        // the same, moves it alone)
+        {
+            let v = self.g.eng.values();
+            let mut dates: Vec<Field> = old
+                .first()
+                .map(|&p| str_of(v, p))
+                .into_iter()
+                .chain(found.as_ref().map(|(p, _)| p.clone()))
+                .map(|p| v.field(&format!("{FILE_DATE}{p}")))
+                .collect();
+            dates.dedup();
+            if self.g.eng.reask_answers(&dates) > 0 {
+                self.staged = true;
+            }
+        }
         // (`PHITEX_STAGE_TRACE`, observe: each file staged, what the build
         // held of it and whether it changed)
         if crate::exec::obs_flag!("PHITEX_STAGE_TRACE") {
@@ -7743,22 +8016,18 @@ impl Build {
 
     /// File `name` staged where a tool's search found it in the project
     /// (`tfile:<search>:<name>`, a `.bib` BibTeX or biber read, a `.bst`,
-    /// an `.ist`): its new text there (`text`, else the finder's), or gone,
-    /// or come where the search had found none (its first element is the
-    /// current directory, `./`). A tool's files are not `file:` fields, so
+    /// an `.ist`): its new text there (`text`, an editor's), or come where
+    /// the search had found none (its first element is the current
+    /// directory, `./`); no text, as the searches find it now
+    /// ([`Build::reask_tool_file`]). A tool's files are not `file:` fields, so
     /// a database edited during a watch was read as it was at the first
     /// build. Whether one changed.
     fn stage_tool_file(&mut self, name: &str, text: Option<&[u8]>) -> bool {
+        let Some(b) = text else {
+            return self.reask_tool_file(name);
+        };
         let v = self.g.eng.values();
         let mut changed = false;
-        let mut now: Option<Option<Vec<u8>>> = None;
-        let mut read = |b: &Self| -> Option<Vec<u8>> {
-            now.get_or_insert_with(|| match text {
-                Some(t) => Some(t.to_vec()),
-                None => (b.opts.finder)(name).map(|(_, b)| b),
-            })
-            .clone()
-        };
         for search in ToolSearch::ALL {
             let f = crate::tools::support_field(v, search, name);
             if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
@@ -7770,30 +8039,22 @@ impl Build {
                 if path.trim_start_matches("./") != name {
                     continue;
                 }
-                if let Some(b) = read(self) {
-                    // (the same text: compared in place, no value made)
-                    let same = match list_of(v, self.g.files[k].1)[..] {
-                        [_, t] => v.with_str(t, |s| latin1_is(s, &b)) == Some(true),
-                        _ => false,
-                    };
-                    if same {
-                        continue;
-                    }
-                    let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
-                    if self.g.files[k].1 != x {
-                        self.g.files[k].1 = x;
-                        changed = true;
-                    }
-                } else {
-                    self.g.files.remove(k);
-                    self.g.absent.push(f);
+                // (the same text: compared in place, no value made)
+                let same = match list_of(v, self.g.files[k].1)[..] {
+                    [_, t] => v.with_str(t, |s| latin1_is(s, b)) == Some(true),
+                    _ => false,
+                };
+                if same {
+                    continue;
+                }
+                let x = v.list(vec![v.str(&path), v.str(&latin1(b))]);
+                if self.g.files[k].1 != x {
+                    self.g.files[k].1 = x;
                     changed = true;
                 }
-            } else if self.g.absent.contains(&f)
-                && let Some(b) = read(self)
-            {
+            } else if self.g.absent.contains(&f) {
                 self.g.absent.retain(|g| *g != f);
-                let x = v.list(vec![v.str(&format!("./{name}")), v.str(&latin1(&b))]);
+                let x = v.list(vec![v.str(&format!("./{name}")), v.str(&latin1(b))]);
                 self.g.files.push((f, x));
                 changed = true;
             }
@@ -7817,12 +8078,67 @@ impl Build {
             if str_of(v, p).trim_start_matches("./") != plain {
                 continue;
             }
-            // (gone: the search's answer stands until a build asks again)
-            let Some(b) = read(self) else { continue };
-            if v.with_str(t, |s| latin1_is(s, &b)) == Some(true) {
+            if v.with_str(t, |s| latin1_is(s, b)) == Some(true) {
                 continue;
             }
-            self.g.files[k].1 = v.list(vec![p, v.str(&latin1(&b))]);
+            self.g.files[k].1 = v.list(vec![p, v.str(&latin1(b))]);
+            changed = true;
+        }
+        changed
+    }
+
+    /// [`Build::stage_tool_file`] of a file as it is now (no text given):
+    /// every tool's search that asked for `name`, or found its file at
+    /// `name`, asked of the provider again (the client's search for tools,
+    /// [`Options::tool_finder`]), as a loaded build's are
+    /// ([`Build::reask_environment`]); one whose answer moved, came or
+    /// went taken. Read at the path it had, a file removed kept the old
+    /// answer ("the search's answer stands"), and one found nowhere was
+    /// looked for with TeX's finder, not the tool's search: a `.bst` of
+    /// the project's removed was not the distribution's again, a `.bib`
+    /// removed stayed in the bibliography. Whether one changed.
+    fn reask_tool_file(&mut self, name: &str) -> bool {
+        let plain = name.trim_start_matches("./");
+        let hits: Vec<(Field, Option<ValueId>)> = {
+            let v = self.g.eng.values();
+            let asked = |f: Field| {
+                v.with_str(f.0, |n| {
+                    n.strip_prefix("tfile:")
+                        .and_then(|r| r.split_once(':'))
+                        .is_some_and(|(_, a)| a.trim_start_matches("./") == plain)
+                }) == Some(true)
+            };
+            let tool = |f: Field| v.with_str(f.0, |n| n.starts_with("tfile:")) == Some(true);
+            let at = |x: ValueId| match list_of(v, x)[..] {
+                [p, _] => v.with_str(p, |s| s.trim_start_matches("./") == plain) == Some(true),
+                _ => false,
+            };
+            self.g
+                .files
+                .iter()
+                .filter(|&&(f, x)| tool(f) && (asked(f) || at(x)))
+                .map(|&(f, x)| (f, Some(x)))
+                .chain(
+                    self.g
+                        .absent
+                        .iter()
+                        .filter(|&&f| tool(f) && asked(f))
+                        .map(|&f| (f, None)),
+                )
+                .collect()
+        };
+        let mut changed = false;
+        for (f, held) in hits {
+            let now = self.g.eng.ask_provider(f);
+            if now == held {
+                continue;
+            }
+            self.g.files.retain(|&(h, _)| h != f);
+            self.g.absent.retain(|&h| h != f);
+            match now {
+                Some(x) => self.g.files.push((f, x)),
+                None => self.g.absent.push(f),
+            }
             changed = true;
         }
         changed
@@ -8275,6 +8591,13 @@ impl Build {
         self.g.queries.clone()
     }
 
+    /// The values the build's store holds (the format's, the runs'): a
+    /// saved graph's size is about 50 bytes each ([`Build::save`]).
+    #[must_use]
+    pub fn values_held(&self) -> usize {
+        self.g.eng.values().len()
+    }
+
     /// The prelude's key: its text and every file it read.
     #[must_use]
     pub fn prelude_key(&self) -> [u8; 32] {
@@ -8607,6 +8930,95 @@ impl Build {
             .map(|(n, _)| n.raw())
             .collect();
         stats.pkg_on_critical = loads.iter().filter(|n| on.contains(&n.raw())).count() as u64;
+    }
+
+    /// (observe) The persisted graph's probe (docs/spec-persisted-graph.md
+    /// §9): the engine's state encoded and decoded, the client's values
+    /// with it, and the build's own tables counted. Call between
+    /// evaluations; the client's caches of ids are dropped as a
+    /// collection drops them (`crate::collect`), nothing else changes.
+    #[must_use]
+    pub fn persist_probe(&self) -> (String, Vec<u8>) {
+        let eng = &self.g.eng;
+        let p = eng.persist_probe(Some(&mut |keep: &mut dyn FnMut(ValueId)| {
+            eng.client_roots(keep);
+        }));
+        let line = format!(
+            "{}; build: text {} B, text nodes {}, dlines {}, files read {}, pdf {} B; {}",
+            p.line(),
+            self.text.len(),
+            self.nodes.len(),
+            self.dlines.len(),
+            self.files_read().len(),
+            self.output_bytes().len(),
+            self.persist_round_trip(),
+        );
+        (line, p.bytes)
+    }
+
+    /// (observe) The engine's half of the persisted graph, measured
+    /// (docs/spec-persisted-graph.md §11, step 1): the engine exported
+    /// with the client's roots (`Engine::export`), imported into a fresh
+    /// graph's engine (`Engine::import`; the client's tables are step 2's
+    /// and are not moved), every read of the import checked
+    /// (`Engine::verify_reads`), and an evaluation of it with nothing
+    /// changed, its runs. Nothing of this build changes.
+    fn persist_round_trip(&self) -> String {
+        let eng = &self.g.eng;
+        let mut roots = Vec::new();
+        eng.client_roots(&mut |x| roots.push(x));
+        let t0 = std::time::Instant::now();
+        let bytes = eng.export(&roots);
+        let export_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let fresh = Graph::new(None, None, None, None);
+        let t1 = std::time::Instant::now();
+        let got = fresh.eng.import(&bytes);
+        let import_ms = t1.elapsed().as_secs_f64() * 1e3;
+        #[allow(clippy::cast_precision_loss, reason = "a duration in ms, printed")]
+        let ms = |n: u64| n as f64 / 1e6;
+        match got {
+            Err(e) => format!(
+                "persist-rt: export {export_ms:.1} ms {} B; import refused: {e}",
+                bytes.len()
+            ),
+            Ok(got) => {
+                let s = &got.stats;
+                let t2 = std::time::Instant::now();
+                let rc = fresh.eng.verify_reads();
+                let verify_ms = t2.elapsed().as_secs_f64() * 1e3;
+                let orig = eng.verify_reads();
+                let threads = self.g.threads.max(1);
+                let runs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    fresh.eng.evaluate(threads).map(|r| r.runs)
+                }));
+                format!(
+                    "persist-rt: export {export_ms:.1} ms {} B ({} roots); import {import_ms:.1} ms [check {:.1} values {:.1} ({}) decode {:.1} install {:.1} products {:.1} reads {:.1}] nodes {} records {} reads {} not-holding {}; verify {verify_ms:.1} ms: {} reads in {} nodes, failed {} (the build's own: {} reads, failed {}); evaluation after: {}",
+                    bytes.len(),
+                    roots.len(),
+                    ms(s.check_ns),
+                    ms(s.values_ns),
+                    s.values,
+                    ms(s.decode_ns),
+                    ms(s.install_ns),
+                    ms(s.products_ns),
+                    ms(s.reads_ns),
+                    s.nodes,
+                    s.records,
+                    s.reads,
+                    s.not_holding,
+                    rc.reads,
+                    rc.nodes,
+                    rc.failed,
+                    orig.reads,
+                    orig.failed,
+                    match runs {
+                        Ok(Ok(k)) => format!("{k} runs"),
+                        Ok(Err(e)) => format!("error {e:?}"),
+                        Err(_) => "panicked".to_owned(),
+                    }
+                )
+            }
+        }
     }
 
     /// The files the document's runs opened for reading, with a hash of
@@ -9035,6 +9447,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
+                    .or_else(|| rest_line(v, &self.g.ops.rest_lines, n))
             },
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
@@ -9138,6 +9551,7 @@ impl Build {
                     .get(&n)
                     .copied()
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
+                    .or_else(|| rest_line(v, &self.g.ops.rest_lines, n))
             },
             &crate::log::TermParts {
                 head,
@@ -9539,7 +9953,7 @@ impl Build {
                 let shift = match whose {
                     Some(o) => doc_shifts
                         .values()
-                        .find(|(fs, _)| fs.raw() == o)
+                        .find(|(fs, _)| v.stable_raw(*fs) == o)
                         .map_or(0, |&(_, d)| d),
                     None => piece_shift(&self.g.eng, &doc_shifts, node),
                 };
@@ -10725,6 +11139,30 @@ fn job_env(
         base
     };
     let v = g.eng.values();
+    let sets = job_sets(v, &base, opts);
+    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
+        // (the check reads the format's bindings too: all of them made)
+        g.start_env.extend(
+            env.bindings(v, made, 0..env.len())
+                .iter()
+                .chain(&sets)
+                .copied(),
+        );
+    }
+    // (spec-final §4.5: the job's bindings go with the environment, one
+    // push for all of them, made again only where an entry changed; the
+    // graph has one unit, so the unit's start and the environment are
+    // one place to read them)
+    let _ = unit;
+    g.job = by_field(sets);
+    let env = g.environment(opts.fixpoint);
+    g.push_env(env);
+}
+
+/// The job's bindings (its name, program, date, shell escape, TCX), as
+/// the options give them over the format's (`base`): [`job_env`]'s, and
+/// a loaded build's made again ([`Build::reask_environment`]).
+fn job_sets(v: &Values, base: &EnvBase, opts: &Options) -> Vec<(Field, ValueId)> {
     let mut sets = vec![
         (v.field("jobname"), v.str(&opts.jobname)),
         (v.field(PROGRAM), v.str(&opts.program)),
@@ -10758,24 +11196,10 @@ fn job_env(
         for (k, x) in date_params(t) {
             sets.push((v.field(k), v.int(x)));
         }
+        // (the date whole, for XeTeX's PDF, `crate::xdvpdf::file`)
+        sets.push((v.field(crate::xdvpdf::EPOCH), v.int(t)));
     }
-    if crate::exec::obs_flag!("PHITEX_RECORD_CHECK") {
-        // (the check reads the format's bindings too: all of them made)
-        g.start_env.extend(
-            env.bindings(v, made, 0..env.len())
-                .iter()
-                .chain(&sets)
-                .copied(),
-        );
-    }
-    // (spec-final §4.5: the job's bindings go with the environment, one
-    // push for all of them, made again only where an entry changed; the
-    // graph has one unit, so the unit's start and the environment are
-    // one place to read them)
-    let _ = unit;
-    g.job = by_field(sets);
-    let env = g.environment(opts.fixpoint);
-    g.push_env(env);
+    sets
 }
 
 /// `base` with `over` over it, both by field with each field once: by

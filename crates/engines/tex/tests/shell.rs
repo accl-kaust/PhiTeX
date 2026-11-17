@@ -14,13 +14,22 @@ use std::sync::{Arc, Mutex};
 
 use phitex_tex::{Options, ShellHook, ShellRan};
 
+/// The jobs of the evaluation `sleep` waits to see finished before it
+/// returns.
+const SLEEP_JOBS: u64 = 300;
+/// How long `sleep` waits for them: a build held by the command finishes
+/// none, and this ends the wait so the test can say so (no measure: an
+/// unloaded build finishes them in under 2 s).
+const SLEEP_HELD: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The fake commands (`fakecmd WHAT ARGS`, quoted as restricted mode
 /// quotes them):
 /// - `up IN OUT`: `OUT` is `\gdef\made{TEXT}` with `IN`'s text in capitals;
 ///   reads `IN`;
 /// - `hl IN OUT`: as minted's `highlight`: `OUT` (a cache file) from
 ///   `IN`'s text in brackets, `IN` removed; reads `IN`;
-/// - `sleep`: 2 s, noting the jobs the build finished meanwhile;
+/// - `sleep`: until the evaluation has finished [`SLEEP_JOBS`] jobs (at
+///   most [`SLEEP_HELD`]), noting how many it had when it returned;
 /// - `gone`: not run, the host says why (status 127, nothing written);
 ///   any other: status 127, no why (a command that ran and failed).
 #[derive(Default)]
@@ -28,8 +37,18 @@ struct Fake {
     /// Each call: the command and the texts of the files it read.
     calls: Mutex<Vec<String>>,
     progress: Mutex<Option<Arc<phitex_tex::Progress>>>,
-    /// The jobs finished while `sleep` slept.
-    during: Mutex<Vec<u64>>,
+    /// The jobs the evaluation had finished as each `sleep` returned.
+    done_at: Mutex<Vec<u64>>,
+    /// `gate` waits until a run has handed an `up` command to a child
+    /// (`ShellHook::handed`); `None`: it returns at once.
+    gate: Option<Gate>,
+}
+
+/// The commands handed to children so far, and the gate's wake.
+#[derive(Default)]
+struct Gate {
+    handed: Mutex<Vec<String>>,
+    cv: std::sync::Condvar,
 }
 
 impl Fake {
@@ -103,14 +122,36 @@ impl ShellHook for Fake {
             },
             "sleep" => {
                 let p = self.progress.lock().unwrap().clone();
-                let before = p.as_ref().map_or(0, |p| p.done());
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let after = p.as_ref().map_or(0, |p| p.done());
-                self.during
-                    .lock()
-                    .unwrap()
-                    .push(after.saturating_sub(before));
+                let done = || p.as_ref().map_or(0, |p| p.done());
+                let held = std::time::Instant::now() + SLEEP_HELD;
+                while done() < SLEEP_JOBS && std::time::Instant::now() < held {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                if done() < SLEEP_JOBS {
+                    eprintln!("sleep: held, {} jobs finished after {SLEEP_HELD:?}", done());
+                }
+                self.done_at.lock().unwrap().push(done());
                 ShellRan {
+                    read: Some(Vec::new()),
+                    ..ShellRan::default()
+                }
+            }
+            // (held until a run after it has handed its command to a
+            // child: so that run met it with the text before it not
+            // settled. Status 99 where none came in a minute)
+            "gate" => {
+                let status = self.gate.as_ref().map_or(0, |g| {
+                    let h = g.handed.lock().unwrap();
+                    let (h, t) =
+                        g.cv.wait_timeout_while(h, std::time::Duration::from_secs(60), |h| {
+                            !h.iter().any(|c| c.contains("'up'"))
+                        })
+                        .unwrap();
+                    drop(h);
+                    if t.timed_out() { 99 << 8 } else { 0 }
+                });
+                ShellRan {
+                    status,
                     read: Some(Vec::new()),
                     ..ShellRan::default()
                 }
@@ -125,6 +166,13 @@ impl ShellHook for Fake {
                 status: 127 << 8,
                 ..ShellRan::default()
             },
+        }
+    }
+
+    fn handed(&self, command: &str) {
+        if let Some(g) = &self.gate {
+            g.handed.lock().unwrap().push(command.to_owned());
+            g.cv.notify_all();
         }
     }
 }
@@ -497,8 +545,18 @@ fn a_command_not_allowed_is_not_run() {
     assert!(fake.distinct().is_empty());
 }
 
-/// A command that takes 2 s holds nothing the other workers need: the
-/// 300 paragraphs after it are run meanwhile, at -j8.
+/// A slow command holds nothing the other workers need: the 300
+/// paragraphs after it are run before it returns, at -j8. The command
+/// (`sleep`) returns once the evaluation has finished [`SLEEP_JOBS`] jobs:
+/// an order, not a time; a command that held the workers would see them
+/// never finish, and returns after [`SLEEP_HELD`] to say so. It had slept
+/// 2 s and counted the jobs finished from its start, on a loaded machine
+/// (8 copies on 16 CPUs) 192 to 291 of them, the build going on all the
+/// while (wall 2.2 s, as unloaded): the count measured the machine's
+/// speed, and when the command's child ran: handed to a child at the
+/// paragraph's run, it runs once the text before it has settled, by then
+/// (mc 87762, 177 ms in) most of the text after it had run too, 162 jobs
+/// left to do beside it.
 #[test]
 fn the_evaluation_goes_on_while_a_command_runs() {
     let (src, _) = common::plain_paragraphs(300, false);
@@ -517,15 +575,15 @@ fn the_evaluation_goes_on_while_a_command_runs() {
     let t = std::time::Instant::now();
     let b = common::build(opts, Some(&common::plain()), &src);
     let wall = t.elapsed();
-    let during = fake.during.lock().unwrap().clone();
+    let done_at = fake.done_at.lock().unwrap().clone();
     eprintln!(
-        "sleep: wall {wall:?}, jobs finished while the command ran {during:?}, {} pages",
+        "sleep: wall {wall:?}, jobs finished as the command returned {done_at:?}, {} pages",
         b.pages().len()
     );
-    assert!(!during.is_empty(), "the command never ran");
+    assert!(!done_at.is_empty(), "the command never ran");
     assert!(
-        during.iter().any(|&n| n >= 300),
-        "jobs finished while it slept: {during:?}"
+        done_at.iter().any(|&n| n >= SLEEP_JOBS),
+        "jobs finished as it returned: {done_at:?} (it returns at {SLEEP_JOBS}, or after {SLEEP_HELD:?} with fewer)"
     );
 }
 
@@ -688,4 +746,64 @@ Between them.
             "{n}: the run of the command ran again: {reran:?}"
         );
     }
+}
+
+/// A command met while the text before it has not settled is handed to a
+/// child that calls it once that text settles, and the run goes on without
+/// its result: the paragraph after the command reads, on that guess, that
+/// the command wrote nothing, and once the child has called it, reads what
+/// it wrote. The gate (the first paragraph's command, held until the
+/// second paragraph has handed its command over) makes that order at -j8
+/// in every build. The output is -j1's, and each command is called once.
+#[test]
+fn a_command_met_before_the_text_settles_runs_once_and_its_output_is_read() {
+    let doc = format!(
+        r"\def\made{{none}}
+\immediate\write18{{fakecmd gate}}
+First paragraph.
+\par
+\immediate\openout3=ina.txt \immediate\write3{{alpha}}\immediate\closeout3
+\immediate\write18{{fakecmd up ina.txt outa.tex}}
+\openin1=outa.tex \ifeof1 \else\closein1 \input outa.tex \fi
+Second paragraph: \made.
+{SHOW}
+\bye
+"
+    );
+    let one = common::build(
+        options("handed", Some(Arc::new(Fake::default())), 1),
+        Some(&common::plain()),
+        &doc,
+    );
+    let (dvi1, log1) = one.output();
+    assert_eq!(got(&log1), ["ALPHA"], "-j1: {log1}");
+    let fake = Arc::new(Fake {
+        gate: Some(Gate::default()),
+        ..Fake::default()
+    });
+    let b = common::build(
+        options("handed", Some(fake.clone()), 8),
+        Some(&common::plain()),
+        &doc,
+    );
+    let (dvi, log) = b.output();
+    assert_eq!(got(&log), ["ALPHA"], "-j8: {log}");
+    let handed = fake.gate.as_ref().unwrap().handed.lock().unwrap().clone();
+    assert!(
+        handed
+            .iter()
+            .any(|c| c == "fakecmd 'up' 'ina.txt' 'outa.tex'"),
+        "-j8: {handed:?}"
+    );
+    let calls = fake.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "-j8: each command called once: {calls:?}");
+    assert!(
+        common::runs_of(&b, "shell") >= 1,
+        "-j8: the command's child ran"
+    );
+    assert_eq!(
+        common::first_difference(&dvi, &dvi1),
+        None,
+        "-j8 against -j1"
+    );
 }

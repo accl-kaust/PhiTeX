@@ -996,3 +996,56 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
         assert_eq!(b.output().0, want, "-j{threads}: reverted equals cold");
     }
 }
+
+/// A name a macro's argument holds, undefined where the run scans it, while
+/// some macro is `\outer` (so the scan reads each token's step class): its
+/// first definition by a paragraph before, a plain macro's, asks that run
+/// nothing, as an edit that defines nothing does (TeX steps over an
+/// undefined name and a plain macro alike, §336, §392). Read in full
+/// there, pgf's `\pgfpositionnodelaterpath`, first defined by a picture
+/// before, asked every later picture again (Grail at -j8).
+#[test]
+fn a_first_definition_of_a_stepped_name_asks_the_scan_nothing() {
+    let doc = |first: &str| {
+        format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\
+             \\outer\\def\\never{{}}\\def\\m#1.{{}}\n\
+             {first}First.\\par\n\n\
+             Second \\m\\later.\\par\n\n\
+             \\end\n"
+        )
+    };
+    for threads in [1, 4] {
+        let runs = |edit: &str| {
+            let dir = common::scratch(&format!("defer-stepped-first-{threads}"));
+            let opts = Options {
+                threads: Some(threads),
+                ..common::options("./d.tex", "d", "", &dir)
+            };
+            let mut b = common::build(opts, None, &doc(""));
+            common::rebuild(&mut b, &doc(edit));
+            let n = common::runs_of(&b, "exec") + common::runs_of(&b, "resume");
+            let dir = common::scratch(&format!("defer-stepped-first-cold-{threads}"));
+            let cold = common::build(
+                Options {
+                    threads: Some(threads),
+                    ..common::options("./d.tex", "d", "", &dir)
+                },
+                None,
+                &doc(edit),
+            );
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {edit:?}: the edit against a cold build"
+            );
+            n
+        };
+        let control = runs("\\gdef\\other{x}");
+        let first = runs("\\gdef\\later{x}");
+        assert_eq!(
+            first, control,
+            "-j{threads}: the scan ran again for the first definition"
+        );
+    }
+}

@@ -6,6 +6,7 @@
 #
 # editors: the Linux x86_64 binary the calling run built (input `binary`,
 # its artifact; built here when none is given), its viewer in it:
+#   the watch's viewer in headless Chrome (viewer/browser/watch.test.mjs);
 #   Emacs (editors/emacs/phitex.el) and Neovim 0.11 (editors/nvim/phitex.lua),
 #   headless: the cursor in an \input child builds the main file, the
 #   child's error is its diagnostic, inverse and forward search through
@@ -26,7 +27,15 @@
 #   socket announces it changes the PDF (test/scenarios/ci-figure.json);
 #   the demo (demo.phitex.org's build, build/web, served here): a sample's
 #   first page from its PDF, typed words on it, no error (apps/web/test/check.mjs);
-#   VS Code's built-in wasm engine (apps/vscode/test/smoke.ts).
+#   VS Code's built-in wasm engine (apps/vscode/test/smoke.ts), and its
+#   following of the disk (apps/vscode/test/disk.ts: an image saved over,
+#   an \input file, the main file and a .bib edited outside the editor, a
+#   file made then removed, an editor's buffer over the disk's; each build's
+#   pages a clean build's of the folder as it is then); the persisted graph
+#   in each (apps/vscode/test/graph.ts, apps/web/test/graph.mjs,
+#   test/scenarios/ci-graph.json: an open of a document whose graph is
+#   kept builds nothing, a change made while closed is built; in VS Code's
+#   Node host each open's PDF a clean build's, byte for byte).
 # Not covered (a manual step before a tag, docs/ci.md): overleaf.com itself
 # (its live DOM and login, the main file it names), the VS Code UI.
 #
@@ -80,9 +89,10 @@ jobs:
           cargo build --release --locked -p phitex-cli
           mkdir ../bin && cp target/release/phitex ../bin/
       - run: bin/phitex --version
+      # (imagemagick: the browser suite's figures test draws its PNG and JPEG with it)
       - name: Emacs, Neovim 0.11, Node
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox minisign
+          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox minisign imagemagick
           curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.4/nvim-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@v4
@@ -95,6 +105,17 @@ jobs:
         env:
           PHITEX_INSTALL_LIVE: "1"
         run: fe/test/editors/install-check.sh
+      # (the watch's own viewer in headless Chrome against this binary: what
+      # a person clicks, each test a bug a user reported; it ran nowhere
+      # before and drifted from the product)
+      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs)
+        if: ${{ !cancelled() }}
+        env:
+          PHITEX_BIN: ${{ github.workspace }}/bin/phitex
+          CHROMIUM: google-chrome
+          # (the runner has no TeX Live: TeX's files from Shelf)
+          PHITEX_BROWSER_SHELF: "1"
+        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs
   browsers:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -163,16 +184,52 @@ jobs:
           node tools/dev/mock-run.mjs test/scenarios/ci-tabs.json
           # (Overleaf's own main document, its Menu's, followed: the socket's join and change)
           node tools/dev/mock-run.mjs test/scenarios/ci-rootdoc.json
+          # (the persisted graph: none kept first (the scenarios above kept theirs
+          # under the same mock project), the first build's saved at once, a reload
+          # loads it and builds nothing, a change made on the server while the tab
+          # was away built after it and saved)
+          node tools/dev/mock-run.mjs test/scenarios/ci-graph.json
+          # (the dashboard's folders, on the mock's dashboard: the recent projects at the
+          # top level, a search, a folder opened, a drag into a folder, a settings change)
+          node tools/dev/mock-run.mjs test/scenarios/dashboard.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe
         env:
           PHITEX_CHROME: /usr/bin/google-chrome
         run: node apps/web/test/check.mjs
+      - name: the demo's persisted graph (a reload builds nothing; a change made away is built)
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        env:
+          PHITEX_CHROME: /usr/bin/google-chrome
+        run: node apps/web/test/graph.mjs
       - name: VS Code's built-in wasm engine
         if: ${{ !cancelled() }}
         working-directory: fe
         run: node build/vscode/dist/smoke.mjs test/scenarios/ci main.tex
+      # (built by tools/build/build-vscode.sh above, beside smoke.mjs)
+      - name: VS Code's built-in wasm engine and the disk
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node build/vscode/dist/disk.mjs
+      # (a core's end leaves no worker, and the process exits by itself: #46)
+      - name: VS Code's built-in wasm engine ended
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node build/vscode/dist/end.mjs
+      # (the persisted graph: each open on a core of its own, its PDF a clean build's byte for byte)
+      - name: VS Code's built-in wasm engine and its persisted graph
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node build/vscode/dist/graph.mjs
+      # (Firefox's single-threaded core saving the graph in slices: an edit typed during a save
+      # taken within one slice, each save begun at once after its build, the last one whole and
+      # loaded with no node run, a change made while closed saved at once)
+      - name: the single-threaded core's graph save (core1.wasm, in slices)
+        if: ${{ !cancelled() }}
+        working-directory: fe
+        run: node test/harness/core1-save.ts
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

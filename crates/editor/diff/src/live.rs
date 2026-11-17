@@ -30,6 +30,7 @@ use crate::myers::patience as lcs;
 use crate::tok::{self, Kind, SECTIONS, Tok};
 use crate::{
     Baseline, Body, Change, ChangeKind, DiffOut, Flat, Loc, Signatures, find_body, loads, map_runs,
+    split,
 };
 use phitex_source::{SyntaxKind, Tree};
 use std::fmt::Write as _;
@@ -64,8 +65,9 @@ struct Side {
     body: Body,
     sigs: Signatures,
     amsmath: bool,
-    /// The output before the body.
+    /// The output before the body, and its runs that are the new text's.
     head: String,
+    head_spans: [(usize, usize, usize); 2],
     old: Old,
     /// The new body's CST, and each paragraph's length and hash.
     tree: Tree,
@@ -128,6 +130,9 @@ struct Run {
     /// The runs of `out` that are the new text as it is (`Em::spans`,
     /// from the run's text's start).
     spans: Vec<(usize, usize, usize)>,
+    /// The added tokens' places in the markup (`Em::adds`, from the
+    /// run's text's start).
+    adds: Vec<(usize, usize, Option<&'static str>)>,
 }
 
 struct RunChange {
@@ -205,7 +210,7 @@ impl Side {
         let preamble = &new.text[..body.begin];
         let sigs = base.signatures(preamble);
         let amsmath = loads(preamble, &["amsmath", "mathtools"]);
-        let head = base.head(new, body);
+        let (head, head_spans) = base.head(new, body);
         let toks = base.old_tokens(&sigs);
         let chunks = emit::chunks(&toks);
         let keys = chunks
@@ -220,6 +225,7 @@ impl Side {
             sigs,
             amsmath,
             head,
+            head_spans,
             old: Old { toks, chunks, keys },
             tree,
             phash,
@@ -615,6 +621,7 @@ impl Side {
             section,
             changes,
             spans: em.spans,
+            adds: em.adds,
         }
     }
 
@@ -630,6 +637,7 @@ impl Side {
         let mut c = 0;
         // (the runs of `tex` that are the new text as it is, for the map)
         let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+        let mut adds: Vec<(usize, usize, Option<&'static str>)> = Vec::new();
         let put = |tex: &mut String, s: &str, nl: &mut bool| -> bool {
             if s.is_empty() {
                 return false;
@@ -664,6 +672,7 @@ impl Side {
                         nl = run.nl;
                     }
                     spans.extend(run.spans.iter().map(|&(o, l, f)| (at + o, l, pos + f)));
+                    adds.extend(run.adds.iter().map(|&(n, o, c)| (pos + n, at + o, c)));
                     for rc in &run.changes {
                         let r = &rc.raw;
                         let new = (pos + r.new.0, pos + r.new.1);
@@ -695,11 +704,14 @@ impl Side {
         if nl {
             tex.push('\n');
         }
+        let flat_spans: Vec<_> = self.head_spans.iter().chain(&spans).copied().collect();
+        let split = split(&tex, &self.flat, &flat_spans, &adds);
         DiffOut {
             tex,
             changes,
             files: self.flat.files.clone(),
             map: map_runs(&spans, &self.flat),
+            split,
         }
     }
 }

@@ -60,6 +60,12 @@ def main():
     # (GATE_EDIT_STDERR: the watch's stderr kept there, its timelines
     # with PHITEX_TEX_TIME)
     err = open(os.environ["GATE_EDIT_STDERR"], "w") if os.environ.get("GATE_EDIT_STDERR") else subprocess.DEVNULL
+    # (the document as given, before the watch writes anything: the cold
+    # build's directory is this with the final text, so it holds the
+    # document's own files, a figure's .pdf too, and none the watch made)
+    given = d.rstrip("/") + "-given"
+    shutil.rmtree(given, ignore_errors=True)
+    shutil.copytree(d, given)
     p = subprocess.Popen([binary, "watch", "--no-view", "--json", *flags, "-j", j, main_], cwd=d,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err)
 
@@ -105,11 +111,13 @@ def main():
     res["history_md5"] = md5(pdf)
     # the cold build of the final text, in a directory of its own
     cold = d.rstrip("/") + "-cold"
+    # (the given directory with the final text: deleting the history's
+    # outputs by their extensions took the document's figures with them,
+    # acmart's sampleteaser.pdf, and the cold build failed on its
+    # \includegraphics, a difference of the harness's making)
     shutil.rmtree(cold, ignore_errors=True)
-    shutil.copytree(d, cold)
-    for f in os.listdir(cold):
-        if f.endswith((".pdf", ".aux", ".toc", ".log", ".out", ".idx", ".ind", ".ilg")):
-            os.remove(os.path.join(cold, f))
+    shutil.copytree(given, cold)
+    shutil.copy2(path, os.path.join(cold, main_))
     subprocess.run([binary, "build", *flags, "-j", j, main_], cwd=cold,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
     res["cold_md5"] = md5(os.path.join(cold, os.path.splitext(main_)[0] + ".pdf"))

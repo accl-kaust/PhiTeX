@@ -68,7 +68,7 @@ impl Session {
             (text, tree, format_tree)
         });
         let text = text?;
-        let (store, out) = Self::store_and_out(&job, note);
+        let (store, out) = Self::store_and_out(&job, None, note);
         let host = Arc::new(Machine {
             tree,
             format_tree,
@@ -96,7 +96,7 @@ impl Session {
         if job.engine.xetex() {
             crate::shelf::font_index(&files)?;
         }
-        let (store, out) = Self::store_and_out(&job, note);
+        let (store, out) = Self::store_and_out(&job, None, note);
         let host = Arc::new(crate::shelf::ShelfHost::new(files, &job.inputs));
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
@@ -106,7 +106,11 @@ impl Session {
     }
 
     /// The cache as the session's store, and its outputs' directory.
-    fn store_and_out(job: &Job, note: &mut dyn FnMut(&str)) -> (Option<Arc<dyn Store>>, Arc<Out>) {
+    fn store_and_out(
+        job: &Job,
+        outputs: Option<&str>,
+        note: &mut dyn FnMut(&str),
+    ) -> (Option<Arc<dyn Store>>, Arc<Out>) {
         let cache = Cache::open(job.cache_limit).ok();
         phitex_tex::timeline::lap("session: the cache opened");
         if let Some(c) = &cache
@@ -118,11 +122,12 @@ impl Session {
         // beside the document's own session: records of its own, which
         // name its own files)
         let stem = job.path.file_stem().map(|s| s.to_string_lossy());
-        let other = (stem.as_deref() != Some(job.jobname.as_str())).then(|| job.jobname.clone());
+        let named = outputs.unwrap_or(&job.jobname);
+        let other = (stem.as_deref() != Some(named)).then(|| named.to_owned());
         let store = cache.map(|cache| {
             Arc::new(Kept {
+                dir: cache.doc_dir(&job.path),
                 cache,
-                doc: job.path.clone(),
                 job: other,
             }) as Arc<dyn Store>
         });
@@ -133,13 +138,58 @@ impl Session {
             updates: Mutex::new(None),
             writing: Mutex::new(()),
             synctex: Mutex::new(None),
+            keep_same: std::sync::atomic::AtomicBool::new(false),
+            rename: outputs.map(|o| (job.jobname.clone(), o.to_owned())),
         });
         (store, out)
     }
 
-    /// Where the session's TeX files come from.
-    pub fn files(&self) -> tex::Files {
-        self.files
+    /// A session of the same job beside this one, its outputs written as
+    /// `outputs` (`JOB-diff`: each output name that begins with the job's
+    /// name with `outputs` instead), its records its own: started from this
+    /// session's build where there is one ([`phitex_live::session::Session::fork`],
+    /// its first build an edit), else a session whose first build is a
+    /// clean build. A line for `-v`: how it began.
+    pub fn beside(&self, outputs: &str, status: Arc<Status>) -> (Session, String) {
+        let job = self.live.job.clone();
+        let (store, out) = Self::store_and_out(&job, Some(outputs), &mut |_| {});
+        // (`PHITEX_COMPARE_FORK=0`: a clean build, as before the fork, to
+        // measure against)
+        let fork = if std::env::var_os("PHITEX_COMPARE_FORK").is_some_and(|v| v == "0") {
+            Err("PHITEX_COMPARE_FORK=0".to_owned())
+        } else {
+            self.live
+                .fork(job.clone(), store.clone(), out.clone(), status.clone())
+        };
+        match fork {
+            Ok((live, note)) => (
+                Session {
+                    live,
+                    out,
+                    files: self.files,
+                },
+                note,
+            ),
+            Err(e) => {
+                let mut live = phitex_live::session::Session::new(
+                    job,
+                    Arc::from(""),
+                    self.live.host().clone(),
+                    store,
+                    out.clone(),
+                    status,
+                );
+                live.keep_graphs(false);
+                (
+                    Session {
+                        live,
+                        out,
+                        files: self.files,
+                    },
+                    format!("fork: not started from the document's build: {e}"),
+                )
+            }
+        }
     }
 
     /// The PDF file written as update sections (a watch's, but with
@@ -214,6 +264,13 @@ impl Host for Machine {
 
     fn canonical(&self, path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// TeX Live's trees, by their folders: its files are keyed by their
+    /// stat keys each.
+    fn release(&self) -> String {
+        let dirs = self.distribution.get_or_init(|| self.tree.distribution());
+        format!("TeX Live {dirs:?}")
     }
 
     /// Under one of TeX Live's trees, or the cache's fonts: as found (no
@@ -338,8 +395,11 @@ impl Host for Machine {
 /// package loads' records, the document's files under its own directory.
 struct Kept {
     cache: Cache,
-    /// The main file, whose directory in the cache is the document's.
-    doc: PathBuf,
+    /// The document's directory in the cache, by its main file's
+    /// canonical path when the session began (a save after this process
+    /// has said it is done, `phitex build`'s worker, is not moved by what
+    /// the document's folder is meanwhile).
+    dir: PathBuf,
     /// The job's name where it is not the main file's (none: the main
     /// file's): the document's records are its job's (the files its job
     /// writes and reads back are named by it), each kept apart.
@@ -350,7 +410,7 @@ impl Kept {
     fn path(&self, key: Key<'_>) -> PathBuf {
         match key {
             Key::Doc(f) => {
-                let dir = self.cache.doc_dir(&self.doc);
+                let dir = &self.dir;
                 match &self.job {
                     Some(j) => {
                         dir.join(format!("{f}-{:016x}", tex::Fnv::new().add(j.as_bytes()).0))
@@ -370,6 +430,31 @@ impl Store for Kept {
 
     fn put(&self, key: Key<'_>, bytes: &[u8]) {
         let _ = self.cache.put(&self.path(key), bytes, &[]);
+    }
+
+    fn put_durable(&self, key: Key<'_>, bytes: &[u8]) {
+        let _ = self.cache.put_synced(&self.path(key), bytes);
+    }
+
+    fn remove(&self, key: Key<'_>) {
+        let _ = std::fs::remove_file(self.path(key));
+    }
+
+    /// A lock file beside the record (`NAME.lock`), locked alone or
+    /// shared until the guard is dropped.
+    fn lock(&self, key: Key<'_>, write: bool) -> Option<Box<dyn std::any::Any + Send>> {
+        let p = self.path(key);
+        std::fs::create_dir_all(p.parent()?).ok()?;
+        let mut name = p.file_name()?.to_os_string();
+        name.push(".lock");
+        let f = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p.with_file_name(name))
+            .ok()?;
+        if write { f.lock() } else { f.lock_shared() }.ok()?;
+        Some(Box::new(f))
     }
 
     fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
@@ -396,6 +481,34 @@ struct Out {
     /// The SyncTeX file of the outputs written last, left for idle and
     /// not written yet: its name and how it is made.
     synctex: Mutex<Option<(String, phitex_live::host::SynctexMaker)>>,
+    /// A file the outputs hold already, with the same bytes, is left as
+    /// it is ([`Sink::keep_same`]): a build loaded from its graph.
+    keep_same: std::sync::atomic::AtomicBool,
+    /// The outputs written under another name than the job's (Compare's
+    /// marked-up document, `JOB-diff.pdf`, a job named as the document's
+    /// own, `JOB`, so that its build starts from the document's): each
+    /// name that begins with the first written with the second instead.
+    rename: Option<(String, String)>,
+}
+
+impl Out {
+    /// Where output `name` is written.
+    fn at(&self, name: &str) -> PathBuf {
+        match &self.rename {
+            Some((from, to)) if name.starts_with(from.as_str()) => {
+                self.dir.join(format!("{to}{}", &name[from.len()..]))
+            }
+            _ => self.dir.join(name),
+        }
+    }
+
+    /// Whether the file at `p`, not written by this process, holds
+    /// `bytes` already, where such files are kept ([`Sink::keep_same`]).
+    fn same_on_disk(&self, p: &Path, bytes: &[u8]) -> bool {
+        self.keep_same.load(std::sync::atomic::Ordering::Relaxed)
+            && std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() == bytes.len() as u64)
+            && std::fs::read(p).is_ok_and(|b| b == bytes)
+    }
 }
 
 impl Sink for Out {
@@ -414,10 +527,13 @@ impl Sink for Out {
     }
 
     fn put(&self, name: &str, bytes: &[u8], h: u64) -> Result<PathBuf, String> {
-        let p = self.dir.join(name);
+        let p = self.at(name);
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
-        // (bytes the last write wrote, still there: not written again)
-        if written.get(&p) != Some(&h) || !p.is_file() {
+        // (bytes the last write wrote, still there: not written again;
+        // nor bytes an earlier process wrote, where they are kept)
+        if (written.get(&p) != Some(&h) || !p.is_file())
+            && !(written.get(&p).is_none() && self.same_on_disk(&p, bytes))
+        {
             let tmp = p.with_file_name(format!(
                 ".{}.phitex-tmp",
                 p.file_name()
@@ -437,7 +553,7 @@ impl Sink for Out {
     fn put_main(&self, name: &str, b: &Arc<Vec<u8>>, h: u64) -> Result<PathBuf, String> {
         use std::io::{Seek, SeekFrom, Write};
         const B: usize = 1 << 16;
-        let p = self.dir.join(name);
+        let p = self.at(name);
         let p = p.as_path();
         let err = |e: std::io::Error| format!("can't write {}: {e}", p.display());
         let mut last = self
@@ -452,6 +568,11 @@ impl Sink for Out {
                 .insert(p.to_path_buf(), h);
             Ok(p.to_path_buf())
         };
+        // (the file an earlier process wrote, the same bytes: left as it
+        // is, where such files are kept)
+        if last.is_none() && self.same_on_disk(p, b) {
+            return done(&mut last);
+        }
         if let Some((lp, old)) = last.as_ref()
             && lp == p
             && std::fs::metadata(p).is_ok_and(|m| m.len() == old.len() as u64)
@@ -493,6 +614,11 @@ impl Sink for Out {
         done(&mut last)
     }
 
+    fn keep_same(&self) {
+        self.keep_same
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn updates(&self) -> bool {
         self.updates
             .lock()
@@ -506,7 +632,7 @@ impl Sink for Out {
     /// exact file written whole.
     fn put_update(&self, name: &str, l: &phitex_pdf::Layout) -> Result<PathBuf, String> {
         use std::io::Write;
-        let p = self.dir.join(name);
+        let p = self.at(name);
         let Some(u) = self
             .updates
             .lock()
@@ -551,12 +677,12 @@ impl Sink for Out {
     }
 
     fn write(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
-        let p = self.dir.join(name);
+        let p = self.at(name);
         std::fs::write(&p, bytes).map_err(|e| format!("can't write {}: {e}", p.display()))
     }
 
     fn dir_of(&self, name: &str) -> Result<(), String> {
-        match self.dir.join(name).parent() {
+        match self.at(name).parent() {
             Some(d) => {
                 std::fs::create_dir_all(d).map_err(|e| format!("can't make {}: {e}", d.display()))
             }
@@ -565,15 +691,15 @@ impl Sink for Out {
     }
 
     fn remove(&self, name: &str) {
-        let _ = std::fs::remove_file(self.dir.join(name));
+        let _ = std::fs::remove_file(self.at(name));
     }
 
     fn get(&self, name: &str) -> Option<Vec<u8>> {
-        std::fs::read(self.dir.join(name)).ok()
+        std::fs::read(self.at(name)).ok()
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(name)
+        self.at(name)
     }
 
     fn here(&self) -> PathBuf {

@@ -163,9 +163,10 @@ none.
    characters (`fi` is `f i`, `--` is `- -`, ` `` ` is `` ` ` ``).
    Words split where the next glyph is on another baseline (`v`) or
    starts more than a fifth of an em after the last one ends (`h + w`).
-   A word ending in a glyph that is `-` alone at a line end is joined
-   to the next line's first word (a hyphenation; the `-` is synthesized, as the old
-   core's break hyphen was).
+   A word ending in a glyph whose last character is `-` after another
+   character (pdfTeX's `-` alone, a XeTeX native word's last) at a line
+   end is joined to the next line's first word (a hyphenation; the `-`
+   is synthesized, as the old core's break hyphen was).
 2. **Source text.** A node's text scanned as TeX reads a document:
    control words and symbols (`\emph`, `\'`), comments (and the
    canonical text's comment marks), braces, `$`, `&`, `#`, `^`, `_`
@@ -195,14 +196,39 @@ none.
    one next to the rest wins. The page's start and end are not
    anchored (no common prefix or suffix taken, a skip there free): the
    page before may hold the first copy of a repeated sentence. Then,
-   character by character (LCS), the gaps between matched words and
-   the characters left between two matched ones of one node
-   (`footnote*` against `footnote\footnote*`). Last, the page's
-   unmatched runs of three words or more aligned again against every
-   cluster, each pass repeated while it matches runs (a footnote's
-   words come after the text that follows its mark: one pass's
-   in-order alignment takes the longer run, the next the footnote's):
-   floats, footnotes, captions, a title.
+   character by character (LCS), the gaps between matched words. Then
+   the page's unmatched runs of three words or more aligned again
+   against every cluster, each pass repeated while it matches runs (a
+   footnote's words come after the text that follows its mark: one
+   pass's in-order alignment takes the longer run, the next the
+   footnote's): floats, footnotes, captions, a title. A later pass
+   takes a source word over from a page word the first matched alone
+   (that word then unmatched), never from one matched in a run, so no
+   two glyphs get one byte. Then the words next to a later pass's
+   matches, both ways, matched to the source words next to theirs where
+   they are alike (below: `pit` of a TikZ node's `{pit};`); the words
+   left that the document has once (four letters or more) and the page
+   once matched to their occurrence (a node's text, too short for a run
+   of three), and the words next to them; a word the first pass matched
+   alone, out of the sources' order of the matched words on both sides
+   of it, unmatched (a subfigure's `(b)` matched to a TikZ node's name).
+   Last, the characters left between two matched ones of one node
+   (`footnote*` against `footnote\footnote*`).
+
+   A character match is kept only where the words it joins are
+   *alike*: the page's words that the LCS joins to the same source
+   words, against those source words whole, have every letter and digit
+   of the sources' matched and more than half of the page's (a math
+   font's prime, `0` at its code, is a digit no source types), or, where
+   the sources have none, every character of both; or the page's word
+   is the start (before its hyphen) or the end of the source word, a
+   word split at a page's or a column's end. Else the gap is left, its
+   glyphs synthesized (5.): an LCS matches any letters, and a caption's
+   `Figure 1:` (which no source types) took the `i`, `g` of a label and
+   the `ure` of `\end{subfigure}`, a TikZ node's text the letters of the
+   paragraph before it, `Table` the `able` of `\begin{table}` (issue
+   #47). A glyph is left unplaced rather than placed on another text's
+   letters.
 5. **What the unmatched get.** A glyph between two matched glyphs of
    the same node on its baseline is *synthesized*: its range is the
    source between them, narrowed to the first control sequence there

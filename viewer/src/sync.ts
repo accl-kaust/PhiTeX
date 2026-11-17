@@ -83,23 +83,191 @@ function widths(all: Glyph[]): Map<Glyph, number> {
   return next;
 }
 
-/** Glyphs as boxes to highlight, a box a run on one baseline: [x, y top, w, h] in points. */
-export function boxes(gs: Glyph[], all: Glyph[]): [number, number, number, number][] {
-  const next = widths(all);
-  const lines = new Map<number, [number, number]>();
-  for (const g of gs) {
-    const k = Math.round(g.y * 2) / 2;
-    const r = lines.get(k), e = g.x + (next.get(g) ?? 5);
-    lines.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
+/**
+ * A page's printed lines, by its glyph list: each glyph's line, a number
+ * (glyphs in the page's order, the order they were set). A line is a run of
+ * glyphs on one baseline going right; a sub- or superscript is a run of its
+ * own, and the line it left goes on after it. Two columns' lines on one
+ * baseline are never one line: the left column's is set whole before the
+ * right's, so they are runs apart, and a jump right wider than any space
+ * (a column's gap) starts a line too. Worked out once a page.
+ */
+const linesOf = new WeakMap<Glyph[], Map<Glyph, number>>();
+export function lines(all: Glyph[]): Map<Glyph, number> {
+  let out = linesOf.get(all);
+  if (out) return out;
+  out = new Map<Glyph, number>();
+  // (the runs met last, the line each goes on: a script's return to its base)
+  const recent: { id: number; y: number; x: number }[] = [];
+  let cur: { id: number; y: number; x: number } | null = null, next = 0;
+  const goesOn = (r: { y: number; x: number }, g: Glyph) => Math.abs(g.y - r.y) < 0.5 && g.x >= r.x - 6 && g.x - r.x < LINE_GAP;
+  for (const g of all) {
+    if (!cur || !goesOn(cur, g)) {
+      if (cur) recent.unshift(cur), recent.length > 4 && recent.pop();
+      const back = recent.find((r) => goesOn(r, g));
+      if (back) recent.splice(recent.indexOf(back), 1);
+      cur = back ?? { id: next++, y: g.y, x: g.x };
+    }
+    cur.x = Math.max(cur.x, g.x);
+    out.set(g, cur.id);
   }
-  return [...lines].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
+  linesOf.set(all, out);
+  return out;
 }
 
-/** Of `hits`, those on the printed line of the glyph nearest byte `at` (a long source line spans many). */
-export function lineAt(hits: Glyph[], at: number): Glyph[] {
+/** The widest jump right a line's glyphs make (points): a stretched space is less, a column's gap more. */
+const LINE_GAP = 40;
+
+/**
+ * Glyphs as boxes to highlight, a box a printed line (`lines`: never across
+ * two columns), in the order their lines were set: [x, y top, w, h] in points.
+ */
+export function boxes(gs: Glyph[], all: Glyph[]): [number, number, number, number][] {
+  return lineBoxes(gs, all).boxes;
+}
+
+/** `boxes`, and each box's printed line (`lines`' number). */
+export function lineBoxes(gs: Glyph[], all: Glyph[]): { boxes: [number, number, number, number][]; ids: number[] } {
+  const next = widths(all), line = lines(all);
+  const out = new Map<number, [number, number, number]>();
+  for (const g of gs) {
+    const k = line.get(g) ?? -1 - out.size;
+    const r = out.get(k), e = g.x + (next.get(g) ?? 5);
+    out.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e), r[2]] : [g.x, e, Math.round(g.y * 2) / 2]);
+  }
+  return { boxes: [...out.values()].map(([a, b, y]) => [a - 1, y - 8, b - a + 2, 11]), ids: [...out.keys()] };
+}
+
+/** Of `hits` (glyphs of page `all`), those on the printed line (`lines`) of the glyph nearest byte `at` (a long source line spans many, and two columns). */
+export function lineAt(hits: Glyph[], at: number, all: Glyph[]): Glyph[] {
   let best: Glyph | null = null;
   for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
-  return best ? hits.filter((g) => Math.abs(g.y - best!.y) < 0.5) : [];
+  if (!best) return [];
+  const line = lines(all), id = line.get(best);
+  return hits.filter((g) => line.get(g) === id);
+}
+
+/**
+ * The glyph of `all` a character of the text layer at (x, y) is (its left
+ * edge `x`, `edge` "left"; its right, "right"; y its baseline): on that
+ * baseline, the one whose origin is that edge, else the one it is in. Two
+ * columns share baselines: the column is the one the edge is in. Null: none
+ * on that baseline.
+ */
+export function glyphAt(all: Glyph[], x: number, y: number, edge: "left" | "right"): number | null {
+  let best = -1, d = Infinity;
+  for (let i = 0; i < all.length; i++) {
+    const g = all[i];
+    if (Math.abs(g.y - y) >= 1) continue;
+    // (a right edge: the last glyph that starts before it; a left: the one starting nearest it, at or before it first)
+    const e = edge === "right" ? (g.x < x - 0.1 ? x - g.x : Infinity) : g.x <= x + 0.5 ? x - g.x : 2 * (g.x - x) + 1;
+    if (e < d) (d = e), (best = i);
+  }
+  return best < 0 ? null : best;
+}
+
+/**
+ * Text selected on the pages, by page `k`: its boxes ([x, y top, w, h], PDF
+ * points from the page's top left); on its first character's page, `from`,
+ * that character's left edge on its baseline [x, y]; on its last's, `to`,
+ * that one's right edge (the text layer's: viewer.ts selectionEnds).
+ */
+export interface PageSel {
+  k: number;
+  rects: [number, number, number, number][];
+  from?: [number, number];
+  to?: [number, number];
+}
+
+/** A place in the pages' glyphs, in the order they were set: page `k`, glyph `i` of its list. */
+export interface At {
+  k: number;
+  i: number;
+}
+
+/**
+ * The source of the glyphs from `a` to `b` (inclusive) in the pages' order
+ * (`pages(k)`: page k's glyphs): the file most of them came from, from its
+ * first glyph's start to its last's end (bytes); where that is backwards (a
+ * float's text first), from the least start to the greatest end. Null: none
+ * of them came from a file.
+ */
+export function sourceBetween(pages: (k: number) => Glyph[], a: At, b: At): { file: string; start: number; end: number; n: number } | null {
+  if (b.k < a.k || (b.k === a.k && b.i < a.i)) [a, b] = [b, a];
+  const by = new Map<string, { first: Glyph; last: Glyph; lo: number; hi: number; n: number }>();
+  for (let k = a.k; k <= b.k; k++) {
+    const all = pages(k);
+    for (let i = k === a.k ? a.i : 0; i <= (k === b.k ? b.i : all.length - 1); i++) {
+      const g = all[i];
+      if (!g?.file || g.synth) continue;
+      const r = by.get(g.file);
+      if (r) (r.last = g), (r.lo = Math.min(r.lo, g.start)), (r.hi = Math.max(r.hi, g.end)), r.n++;
+      else by.set(g.file, { first: g, last: g, lo: g.start, hi: g.end, n: 1 });
+    }
+  }
+  const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
+  if (!best) return null;
+  const [file, r] = best;
+  return r.last.end > r.first.start ? { file, start: r.first.start, end: r.last.end, n: r.n } : { file, start: r.lo, end: r.hi, n: r.n };
+}
+
+/**
+ * Where a span [start, end) of `file` chosen on the pages (a note's) is
+ * drawn: every glyph from its first to its last in the pages' order, as a
+ * selection between them is, not every glyph from its bytes (a float, a
+ * footnote's text, a paragraph's lines in another column are bytes of a
+ * span and not of the text selected). Its first: the glyph at byte
+ * `start` (on page `page` where it is set there too), else the one from
+ * the span with the least start; its last: the first glyph after that at
+ * byte `end - 1`, else the one from the span with the greatest end. The
+ * glyphs by page, in order (`i`: the first's place in its page's); []
+ * where none of the span is set.
+ */
+export function extent(pages: Glyph[][], file: string, start: number, end: number, page?: number): { k: number; gs: Glyph[]; i: number }[] {
+  end = Math.max(end, start + 1);
+  const mine = (g: Glyph) => g.file === file && !g.synth;
+  const order = page !== undefined && page < pages.length ? [page, ...pages.keys()] : [...pages.keys()];
+  let a: At | null = null;
+  for (const k of order) {
+    const i = pages[k].findIndex((g) => mine(g) && g.start <= start && g.end > start);
+    if (i >= 0) {
+      a = { k, i };
+      break;
+    }
+  }
+  const inSpan = (g: Glyph) => mine(g) && g.start < end && g.end > start;
+  if (!a) {
+    let lo = Infinity;
+    for (let k = 0; k < pages.length; k++)
+      for (let i = 0; i < pages[k].length; i++) {
+        const g = pages[k][i];
+        if (inSpan(g) && g.start < lo) (lo = g.start), (a = { k, i });
+      }
+  }
+  if (!a) return [];
+  const from: At = a;
+  // (its last: the first at byte end - 1 from there on; else the greatest end from there on)
+  let b: At | null = null, far: At = from, farEnd = -Infinity;
+  for (let k = from.k; k < pages.length && !b; k++) {
+    const gs = pages[k];
+    for (let i = k === from.k ? from.i : 0; i < gs.length; i++) {
+      const g = gs[i];
+      if (!inSpan(g)) continue;
+      if (g.end >= end) {
+        b = { k, i };
+        break;
+      }
+      if (g.end > farEnd) (farEnd = g.end), (far = { k, i });
+    }
+  }
+  b ??= far;
+  const out: { k: number; gs: Glyph[]; i: number }[] = [];
+  for (let k = from.k; k <= b.k; k++) {
+    const i = k === from.k ? from.i : 0;
+    const gs = pages[k].slice(i, k === b.k ? b.i + 1 : undefined);
+    if (gs.length) out.push({ k, gs, i });
+  }
+  return out;
 }
 
 /**

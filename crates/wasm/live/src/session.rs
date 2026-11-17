@@ -191,6 +191,15 @@ pub(crate) fn provide(name: &str, file: Option<(String, Vec<u8>)>) {
     files().provide(name, file);
 }
 
+/// The host takes back the file it gave as `name` (deleted from the
+/// project): looked up from now on as if never given, by the default
+/// search (Shelf's, where the project's copy shadowed one), the host
+/// asked again where there is no index ([`Files::withdraw`]). A Rebuild,
+/// or the viewer's `changed` of the name, then builds without it.
+pub(crate) fn withdraw(name: &str) {
+    files().withdraw(name);
+}
+
 /// The host's answer to `fetch`: Shelf's pack `id` gunzipped (natively, by
 /// the host, off this module), or `ok` 0 (it could not be had).
 pub(crate) fn pack(id: &str, data: Option<&[u8]>) {
@@ -246,6 +255,10 @@ pub(crate) fn set_index(tsv: &[u8], release: &[u8], table: &[u8], bundled: &str)
 /// document open before is closed.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn open(req: &[u8]) -> i32 {
+    // (the core ended: no session thread again)
+    if ENDED.load(std::sync::atomic::Ordering::SeqCst) {
+        return 2;
+    }
     // (a step under way, in the host's turn: the open waits for its end)
     if STEPPING.load(std::sync::atomic::Ordering::Relaxed) {
         *lock(&OUTPUT) = b"a build is under way: open again once ph_step returns".to_vec();
@@ -276,8 +289,12 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         }
     };
     let shell = req["shell"].as_bool().unwrap_or(false);
+    // (the persisted graph: the host keeps it, `ph_graph_give` before the
+    // open, `ph_graph` once told it is saved; off unless the host says)
+    let graph = req["graph"].as_bool().unwrap_or(false);
     tell_panics();
     close();
+    let generation = new_open(graph);
     spawn_workers();
     // (the main file is the project's too: what the editor's edits apply
     // to before it has a buffer, and a double-click's source)
@@ -306,6 +323,7 @@ pub(crate) fn open(req: &[u8]) -> i32 {
     );
     // (as the watch's: no log laid out after each build)
     session.watching = true;
+    session.keep_graphs(graph);
     // (Shelf's fetches, the build's progress: the loading card's packages, $/progress, a
     // pack that could not be had said)
     let meter = session.status().meter().clone();
@@ -361,14 +379,14 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         // the heap)
         let started = std::thread::Builder::new()
             .stack_size(STACK)
-            .spawn(move || run(doc, &w, &o));
+            .spawn(move || run(doc, &w, &o, generation));
         if started.is_err() {
             return 2;
         }
     } else {
         // (no threads: kept for the host to step, the cold build its first step)
         wake.set(false);
-        *lock(&STEPPED) = Some(doc);
+        *lock(&STEPPED) = Some((doc, Idle::new(generation)));
     }
     *lock(&OPEN) = Some(Open {
         viewer,
@@ -528,15 +546,34 @@ fn job(main: &str, engine: phitex_live::tex::Engine, ini: bool, threads: Option<
 /// The session thread: the document stepped whenever something is asked,
 /// its events to the host, until it is closed. (The records a build
 /// changed are stored as it settles, by the document: nothing is left
-/// for a quiet moment.)
-fn run(mut doc: Document, wake: &Wake, output: &Output) {
+/// for a quiet moment.) The persisted graph is saved after the first
+/// build, then once nothing has been asked for [`GRAPH_IDLE`] after a
+/// build ([`save_slice`], [`Idle::left`]).
+fn run(mut doc: Document, wake: &Wake, output: &Output, generation: u64) {
+    let mut idle = Idle::new(generation);
     loop {
-        step(&mut doc, output);
+        step(&mut doc, output, &mut idle);
         let mut s = lock(&wake.state);
         // (work nobody waits for, the build's origins: the next step's,
         // unless something was asked first)
         while !s.0 && !s.1 && !doc.pending() {
-            s = wake.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
+            if !idle.due {
+                s = wake.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
+                continue;
+            }
+            let left = idle.left();
+            if !left.is_zero() {
+                s = wake
+                    .cv
+                    .wait_timeout(s, left)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                continue;
+            }
+            drop(s);
+            // (to its end, unless something is asked meanwhile: given up)
+            while save_slice(&doc, wake, &mut idle, None) {}
+            s = lock(&wake.state);
         }
         if s.1 {
             return;
@@ -545,33 +582,271 @@ fn run(mut doc: Document, wake: &Wake, output: &Output) {
     }
 }
 
+/// How long nothing is asked after a build before its graph is saved
+/// again ([`save_slice`]; the first build's is saved at once): a long
+/// pause in the work, not every pause in the typing. A save costs the
+/// core's memory and a second or so of a thread (Grail: 1.2 s, 61 MB),
+/// and an edit that comes meanwhile gives it up, so it is kept rare.
+const GRAPH_IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The persisted graph's save, as the session thread (or, without
+/// threads, the host's steps) keeps it: due after a build that left one
+/// to save, since when.
+struct Idle {
+    /// The open this session is (`new_open`): a save made after another
+    /// open is dropped, never given as the new document's.
+    generation: u64,
+    due: bool,
+    since: std::time::Instant,
+    /// The last graph's size: the room a save asks for first.
+    last_bytes: usize,
+    /// A save of this open's ended (saved, or nothing to save): the next
+    /// waits [`GRAPH_IDLE`]; before it, the first build's is saved at once.
+    saved: bool,
+    /// The save under way, without threads: a slice a step ([`save_slice`]).
+    saving: Option<Saving>,
+}
+
+/// A save under way ([`save_slice`]): the session's, and its slices' count,
+/// summed time and longest.
+struct Saving {
+    save: phitex_live::session::GraphSave,
+    slices: u32,
+    work: std::time::Duration,
+    longest: std::time::Duration,
+}
+
+impl Idle {
+    fn new(generation: u64) -> Idle {
+        Idle {
+            generation,
+            due: false,
+            since: std::time::Instant::now(),
+            last_bytes: 0,
+            saved: false,
+            saving: None,
+        }
+    }
+
+    /// How long until the due save: none after the first build, else
+    /// what is left of [`GRAPH_IDLE`] since the last thing asked.
+    fn left(&self) -> std::time::Duration {
+        if self.saved {
+            GRAPH_IDLE.saturating_sub(self.since.elapsed())
+        } else {
+            std::time::Duration::ZERO
+        }
+    }
+}
+
+/// The opens so far; the graph saved for the last one, until the host
+/// takes it (`ph_graph`), with the open it is of.
+static GRAPHS: Mutex<(u64, Option<Vec<u8>>, bool)> = Mutex::new((0, None, false));
+
+/// A document opens (`graph`: its graph kept): its number. Whatever an
+/// earlier one saved and the host did not take is dropped, and graphs
+/// are given to the host from now on only if `graph`.
+fn new_open(graph: bool) -> u64 {
+    let mut g = lock(&GRAPHS);
+    g.0 += 1;
+    g.1 = None;
+    g.2 = graph;
+    if !graph {
+        kept().give_graph(None);
+    }
+    g.0
+}
+
+/// The graph the host saved for the document about to open (`ph_graph_give`;
+/// empty: none): its first build loads it where its keys hold
+/// (`phitex_live::graph`), else builds clean.
+pub(crate) fn graph_give(bytes: &[u8]) {
+    kept().give_graph((!bytes.is_empty()).then(|| bytes.to_vec()));
+}
+
+/// The graph saved last (told by the event `{"event": "graph", "saved": N}`),
+/// handed to the host in the answer's bytes: 1, or 0 (none since).
+pub(crate) fn graph_take() -> i32 {
+    match lock(&GRAPHS).1.take() {
+        Some(b) => {
+            *lock(&OUTPUT) = b;
+            1
+        }
+        None => 0,
+    }
+}
+
+/// How long a slice of a save runs without threads ([`save_slice`]): the
+/// host's turn comes after it, so an edit typed meanwhile waits at most
+/// about this long (and the item or piece of bytes under way when it is
+/// up: [`phitex_live::session::Session::graph_save_more`]).
+const SAVE_SLICE: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// A slice of the build's persisted graph's save (docs/spec-persisted-graph.md,
+/// the wasm core): at idle, given up for anything asked meanwhile (the
+/// next edit waits for no save: nothing stored), and begun only where the
+/// memory has room for it ([`crate::heap::room_for`]: a save never takes
+/// what the document needs). With threads (`slice` none) the save runs to
+/// its end in one slice on the session thread; without, a slice runs
+/// `slice` long, a step of the host's ([`step_once`]), and the host takes
+/// what is asked between two. Once whole, the bytes kept for the host,
+/// which is told (`{"event": "graph", "saved": N, ...}`) and takes them
+/// (`ph_graph`). Whether the save is still under way (call again).
+fn save_slice(
+    doc: &Document,
+    wake: &Wake,
+    idle: &mut Idle,
+    slice: Option<std::time::Duration>,
+) -> bool {
+    let t0 = std::time::Instant::now();
+    if idle.saving.is_none() {
+        idle.due = false;
+        // (a save's peak: the engine's bytes and the file's, each about the
+        // graph's size, the vectors' growth beside: three times the last
+        // graph's, or the session's guess)
+        let guess = doc.session().graph_bytes_guess().unwrap_or(0);
+        let want = idle.last_bytes.max(guess).saturating_mul(3);
+        if !crate::heap::room_for(want) {
+            idle.saved = true;
+            event(&json!({"event": "graph", "notes": [format!(
+                "graph: not saved: no room for {} MB in the engine's memory",
+                want >> 20
+            )]}));
+            return false;
+        }
+        let Ok(save) = doc.session().graph_save_start() else {
+            // (nothing to save: the graph as loaded, or the build not quiet)
+            idle.saved = true;
+            event(&json!({"event": "graph", "notes": doc.session().graph_notes()}));
+            return false;
+        };
+        idle.saving = Some(Saving {
+            save,
+            slices: 0,
+            work: std::time::Duration::ZERO,
+            longest: std::time::Duration::ZERO,
+        });
+        // (begun: `saved` or `given_up` follows)
+        event(&json!({"event": "graph", "saving": true}));
+    }
+    let asked = || {
+        let s = lock(&wake.state);
+        s.0 || s.1
+    };
+    let pause = || asked() || slice.is_some_and(|d| t0.elapsed() >= d);
+    let sv = idle.saving.as_mut().expect("a save under way");
+    let saved = doc.session().graph_save_more(&mut sv.save, &pause);
+    let took = t0.elapsed();
+    sv.slices += 1;
+    sv.work += took;
+    sv.longest = sv.longest.max(took);
+    if saved.is_none() {
+        if !asked() {
+            return true;
+        }
+        // (an edit came: saved after its build, at the next pause)
+        give_up(doc, idle);
+        return false;
+    }
+    let sv = idle.saving.take().expect("a save under way");
+    idle.saved = true;
+    let notes = doc.session().graph_notes();
+    let Some(bytes) = store::Kept::take_graph() else {
+        event(&json!({"event": "graph", "notes": notes}));
+        return false;
+    };
+    idle.last_bytes = bytes.len();
+    let n = bytes.len();
+    let mut g = lock(&GRAPHS);
+    if g.0 != idle.generation || !g.2 {
+        return false;
+    }
+    g.1 = Some(bytes);
+    drop(g);
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    event(&json!({
+        "event": "graph",
+        "saved": n,
+        "ms": ms(sv.work),
+        "slices": sv.slices,
+        "slice_ms": ms(sv.longest),
+        "notes": notes,
+    }));
+    false
+}
+
+/// The save under way given up (something asked: a build comes): nothing
+/// stored, the next save due at the next pause. Told to the host
+/// (`{"event": "graph", "given_up": true, ...}`: its slices, their time
+/// and the longest), which keeps nothing for it.
+fn give_up(doc: &Document, idle: &mut Idle) {
+    if let Some(sv) = idle.saving.take() {
+        let _ = doc.session().graph_save_given_up(sv.save);
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        event(&json!({
+            "event": "graph",
+            "given_up": true,
+            "ms": ms(sv.work),
+            "slices": sv.slices,
+            "slice_ms": ms(sv.longest),
+            "notes": doc.session().graph_notes(),
+        }));
+    }
+    idle.due = true;
+    idle.since = std::time::Instant::now();
+}
+
 /// One step of the document (phitex-live's `Document::step`): what was
-/// asked taken, built if anything changed, its events to the host.
-fn step(doc: &mut Document, output: &Output) {
+/// asked taken, built if anything changed, its events to the host; a
+/// build's graph due for a save at the next pause, and what became of
+/// the graph the session loaded (its first build's) told.
+fn step(doc: &mut Document, output: &Output, idle: &mut Idle) {
     let events = doc.step();
-    if events
+    let built = events
         .iter()
-        .any(|e| e["event"] == "build" || e["event"] == "failed")
-    {
+        .any(|e| e["event"] == "build" || e["event"] == "failed");
+    if built {
         *lock(output) = doc.output();
+    }
+    // (the graph's news first, then the build's: a host that has what it
+    // waits for at the build's event knows by then whether it was loaded)
+    if built && lock(&GRAPHS).2 {
+        idle.due = true;
+        let notes = doc.session().graph_notes();
+        let dropped = kept().graph_dropped();
+        if !notes.is_empty() || dropped {
+            let loaded = notes.iter().any(|n| n.starts_with("graph: loaded"));
+            event(&json!({"event": "graph", "notes": notes, "loaded": loaded, "dropped": dropped}));
+        }
     }
     for e in &events {
         event(e);
     }
+    // (anything that came: the pause starts again)
+    if built || !events.is_empty() {
+        idle.since = std::time::Instant::now();
+    }
 }
 
-/// The open document, without threads: stepped by the host (`ph_step`).
-static STEPPED: Mutex<Option<Document>> = Mutex::new(None);
+/// The open document, without threads: stepped by the host (`ph_step`),
+/// with its graph's save.
+static STEPPED: Mutex<Option<(Document, Idle)>> = Mutex::new(None);
 
 /// Without threads (wasm32-wasip1), the host's turn of the session thread:
 /// the open document stepped once if something was asked since (its first
 /// step the cold build) or work nobody waits for is left (the build's
 /// origins, a step of their own after the build's), its events told.
-/// 1: stepped, step again soon (until 0); 2: stepped, and only work
+/// 1: stepped, step again soon (until 0; a save under way: its next
+/// slice, [`SAVE_SLICE`] long, the host's requests answered first); 2: stepped, and only work
 /// nobody waits for is left: step again once the requests that came are
 /// answered (the pages asked after a build drawn before its origins are
-/// made); 0: nothing asked, or no document; with threads, always 0 (the
-/// session thread steps it).
+/// made); 3: nothing asked, and the build's graph is to be saved once
+/// nothing has been for [`GRAPH_IDLE`] (a save due now is a 1:
+/// [`crate::step::answer`]): step again after that long (that
+/// step begins its save, a slice a step, given up at the step that finds
+/// something asked);
+/// 0: nothing asked, or no document; with threads, always 0 (the session
+/// thread steps it).
 pub(crate) fn step_once() -> i32 {
     use std::sync::atomic::Ordering::Relaxed;
     // (asked in the host's turn of a step under way: nothing taken, the
@@ -585,22 +860,44 @@ pub(crate) fn step_once() -> i32 {
     else {
         return 0;
     };
-    let pending = lock(&STEPPED).as_ref().is_some_and(Document::pending);
-    {
+    let (pending, due, saving) = lock(&STEPPED)
+        .as_ref()
+        .map_or((false, None, false), |(d, i)| {
+            (d.pending(), i.due.then(|| i.left()), i.saving.is_some())
+        });
+    let save = {
         let mut s = lock(&wake.state);
-        if s.1 || (!s.0 && !pending) {
+        if s.1 {
             return 0;
         }
-        s.0 = false;
-    }
+        if !s.0 && !pending {
+            match due {
+                _ if saving => true,
+                None => return 0,
+                Some(left) if !left.is_zero() => return 3,
+                Some(_) => true,
+            }
+        } else {
+            s.0 = false;
+            false
+        }
+    };
     // (taken out while it runs: an ask the host answers in its call may lock the rest)
-    let Some(mut doc) = lock(&STEPPED).take() else {
+    let Some((mut doc, mut idle)) = lock(&STEPPED).take() else {
         return 0;
     };
     STEPPING.store(true, Relaxed);
     LAST.with(|l| l.set(Some(std::time::Instant::now())));
     ON_STEP.set(true);
-    step(&mut doc, &output);
+    if save {
+        save_slice(&doc, &wake, &mut idle, Some(SAVE_SLICE));
+    } else {
+        // (an edit, or the build's work after it: the save under way given up)
+        if idle.saving.is_some() {
+            give_up(&doc, &mut idle);
+        }
+        step(&mut doc, &output, &mut idle);
+    }
     ON_STEP.set(false);
     STEPPING.store(false, Relaxed);
     // (closed in a turn of the host's while it ran: dropped)
@@ -608,9 +905,17 @@ pub(crate) fn step_once() -> i32 {
     if closed {
         return 0;
     }
-    let later = doc.pending() && !lock(&wake.state).0;
-    *lock(&STEPPED) = Some(doc);
-    if later { 2 } else { 1 }
+    let asked = lock(&wake.state).0;
+    let pending = doc.pending();
+    let after = crate::step::After {
+        saving: idle.saving.is_some(),
+        save_in: (idle.due && !asked && !pending).then(|| idle.left()),
+        later: pending && !asked,
+        asked,
+        was_save: save,
+    };
+    *lock(&STEPPED) = Some((doc, idle));
+    crate::step::answer(after)
 }
 
 /// The open document closed: its session thread ends after the step it
@@ -620,6 +925,29 @@ pub(crate) fn close() {
         o.wake.set(true);
     }
     lock(&STEPPED).take();
+}
+
+/// The core ended ([`end`]): no document opens again.
+static ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The core ends, for good: every thread of its own returns from
+/// `wasi_thread_start`, so the host's workers leave (a host joins them;
+/// a Node host then exits by itself). The open document closed (its
+/// session thread returns after the step it is in); every ask waiting for
+/// the host (a file, a pack, the store's bytes, a `\write18` command)
+/// answered as not had, and none made from now on, nor anything put in
+/// the store; the engine's threads kept between builds (the defuse crew,
+/// the client's pools) told to end, each returning at once if at rest,
+/// else once its job is done. A build under way runs to its end on what
+/// it has, then its threads return too. Thread 0's own: it waits for
+/// nothing.
+pub(crate) fn end() {
+    ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+    close();
+    files().end();
+    kept().end();
+    shell_hook().end();
+    phitex_tex::end_threads();
 }
 
 /// A viewer's request (JSON, `{"id","op",...}`), answered: the reply
@@ -734,6 +1062,31 @@ pub(crate) fn frame(req: &[u8]) -> i32 {
 /// Every thread's stack: a native process's main thread's (wasm has no
 /// guard page: an overflow would write over the heap unseen).
 const STACK: usize = 8 << 20;
+
+/// The engine's threads for documents opened on `n` threads (the open's
+/// `threads`), started now, before the first open (`ph_threads`, once the
+/// memory is sealed): the client's pool and the engine's kept threads
+/// ([`phitex_tex::start_threads`]), each a worker the host starts, the
+/// module instantiated in it. Started at the first build or graph load
+/// they cost it their start (a fresh core's load of amsldoc's graph:
+/// about 0.5 s of its 1.5); started with the core, they are at rest by
+/// then. Made on a thread of their own: thread 0 never waits, and the
+/// workers start as the host's event loop turns. 0: begun; 1: not (no
+/// threads, one thread, the core ended, or its memory not sealed yet).
+pub(crate) fn start_threads(n: usize) -> i32 {
+    if !THREADED
+        || n <= 1
+        || ENDED.load(std::sync::atomic::Ordering::SeqCst)
+        || !crate::heap::sealed()
+    {
+        return 1;
+    }
+    spawn_workers();
+    let started = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(move || phitex_tex::start_threads(n));
+    i32::from(started.is_err())
+}
 
 /// The engine's workers are std's threads, which wasi-threads starts as
 /// the host's workers (set before the first build; a reactor runs no

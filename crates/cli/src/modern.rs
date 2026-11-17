@@ -733,6 +733,10 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
+    /// Whether the build keeps the document's graph in the cache and
+    /// starts from the one saved (docs/spec-persisted-graph.md):
+    /// `PHITEX_GRAPH` if set, else `graph` (on by default).
+    pub graph: bool,
     /// The engine's threads (`threads` in the user's file; none or 0: the default, one
     /// thread), under `-j`.
     pub threads: Option<usize>,
@@ -749,6 +753,11 @@ pub struct Target {
     /// those they `do`. A watch resolves its target again when one
     /// changes.
     pub config_files: Vec<PathBuf>,
+    /// The main file's length and modification time before it was first
+    /// read, and where it is (absolute): a watch reads the file before its
+    /// watcher runs, and a write that ends in between is told by no event,
+    /// so the watch compares them once it does.
+    pub main_read: Option<((u64, std::time::SystemTime), PathBuf)>,
 }
 
 impl Target {
@@ -941,11 +950,22 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .map_err(|e| format!("can't read {f}: {e}"))
     };
+    // (the main file's length and time as it was before it was read: a
+    // watch compares them once its watcher runs, `Target::main_read`)
+    let read_at = |f: &str| {
+        let p = [PathBuf::from(f), PathBuf::from(format!("{f}.tex"))]
+            .into_iter()
+            .find(|p| p.is_file())
+            .and_then(|p| std::path::absolute(p).ok())?;
+        Some((stamp(&p)?, p))
+    };
+    let mut main_read = read_at(&file);
     let mut text = read(&file, false)?;
     let (mut program, root_comment) = config::magic_comments(&text);
     if let Some(r) = root_comment {
         let dir = Path::new(&file).parent().unwrap_or(Path::new(""));
         file = dir.join(r).to_string_lossy().into_owned();
+        main_read = read_at(&file);
         text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
     }
@@ -1090,12 +1110,21 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
+        graph: phitex_live::graph::env().unwrap_or(cfg.graph.unwrap_or(true)),
         threads: cfg.threads.filter(|&n| n > 0),
         files,
         warnings: [cfg.warnings, rc_warnings].concat(),
         inputs,
         config_files,
+        main_read,
     })
+}
+
+/// A file's length and modification time (none: not there), as a watch
+/// compares them ([`Target::main_read`]).
+pub fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok()?))
 }
 
 fn copy_dir(c: &config::CopyPdf, cwd: &Path, base: &Path) -> Option<PathBuf> {
@@ -1319,6 +1348,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
             return crate::EXIT_INTERNAL;
         }
     };
+    s.keep_graphs(t.graph);
     // (a package that could not be had, `--shelf`: said)
     {
         let ui = std::sync::Mutex::new(ui.clone());
@@ -1357,6 +1387,36 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     // (the records the build changed, stored once it is done)
     s.flush_records();
     phitex_tex::timeline::lap("cli: the records stored");
+    // (the persisted graph's load, or why not)
+    graph_notes(&s, o, ui);
+    // (observe, docs/spec-persisted-graph.md §9: an edit with nothing
+    // changed in this process, then the persisted graph's probe; the
+    // bytes to the file the variable names)
+    if let Some(dest) = std::env::var_os("PHITEX_PERSIST_PROBE") {
+        for k in 0..3 {
+            let t0 = std::time::Instant::now();
+            let r2 = s.build();
+            let wall = t0.elapsed();
+            let runs: u64 = s.runs_by_op().iter().map(|(_, n)| *n).sum();
+            eprintln!(
+                "persist-probe: in-process edit with nothing changed #{k}: {:.2} ms, runs {runs}, pages {}",
+                wall.as_secs_f64() * 1e3,
+                r2.pages()
+            );
+        }
+        if let Some((line, bytes)) = s.persist_probe() {
+            eprintln!("{line}");
+            if dest != "1" {
+                let t0 = std::time::Instant::now();
+                let _ = std::fs::write(&dest, &bytes);
+                eprintln!(
+                    "persist-probe: written {} B in {:.2} ms",
+                    bytes.len(),
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        }
+    }
     cache_summary(t, ui);
     phitex_tex::timeline::lap("cli: the cache's summary");
     if let Some(full) = o.report {
@@ -1388,12 +1448,100 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     } else {
         i32::from(!r.out.errors.is_empty())
     };
+    // (the persisted graph, `PHITEX_GRAPH`, docs/spec-persisted-graph.md
+    // step 3: saved after everything is said; a worker of `build_detached`
+    // tells the process waiting for it first, holding the file so that
+    // the next load waits for the save)
+    if let Some(done) = std::env::var_os(GRAPH_DONE) {
+        let held = s.lock_graph();
+        done_with(Path::new(&done), code);
+        let _ = s.save_graph_locked();
+        drop(held);
+    } else {
+        let _ = s.save_graph();
+        phitex_tex::timeline::lap("cli: the graph saved");
+        graph_notes(&s, o, ui);
+    }
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
     std::mem::forget(s);
     std::mem::forget(r);
     phitex_tex::timeline::end("cold build");
     code
+}
+
+/// The variable a worker of [`build_detached`] is given: the file it
+/// writes its exit status to once its outputs are written and its
+/// report said.
+const GRAPH_DONE: &str = "PHITEX_GRAPH_DONE";
+
+/// `phitex build` keeping its graph (`PHITEX_GRAPH=1`,
+/// docs/spec-persisted-graph.md §6: the save off the build's wall): the
+/// build in a worker, this program again with the same arguments and
+/// [`GRAPH_DONE`] (its terminal this one's), which saves the graph after
+/// it has told its exit status; this process exits with that status at
+/// once. None: no worker could be started (the build runs here).
+fn build_detached() -> Option<i32> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let done = std::env::temp_dir().join(format!("phitex-graph-{}-{nanos:x}", std::process::id()));
+    let mut cmd = std::process::Command::new(std::env::current_exe().ok()?);
+    // (from where this one started: its target resolved, this process
+    // is in the build's folder, and the arguments name files from there)
+    if let Some(d) = STARTED_IN.get() {
+        cmd.current_dir(d);
+    }
+    let mut child = cmd
+        .args(std::env::args_os().skip(1))
+        .env(GRAPH_DONE, &done)
+        .spawn()
+        .ok()?;
+    let code = loop {
+        if let Ok(t) = std::fs::read_to_string(&done)
+            && let Ok(c) = t.trim().parse::<i32>()
+        {
+            break c;
+        }
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                // (its word written as it ended)
+                if let Some(c) = std::fs::read_to_string(&done)
+                    .ok()
+                    .and_then(|t| t.trim().parse::<i32>().ok())
+                {
+                    break c;
+                }
+                break st.code().unwrap_or(crate::EXIT_INTERNAL);
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            Err(_) => break crate::EXIT_INTERNAL,
+        }
+    };
+    let _ = std::fs::remove_file(&done);
+    Some(code)
+}
+
+/// A worker's word to [`build_detached`]: its exit status, written whole.
+fn done_with(done: &Path, code: i32) {
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let tmp = done.with_extension("tmp");
+    if std::fs::write(&tmp, code.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, done);
+    }
+}
+
+/// The persisted graph's lines since last told (loaded, or why not;
+/// saved): with `-v`, and as `graph` events.
+pub fn graph_notes(s: &Session, o: &Options, ui: &Ui) {
+    for n in s.graph_notes() {
+        if o.verbose.max(ui.verbose) > 0 {
+            ui.line(&ui.st.dim(&format!("  {n}")));
+        }
+        ui.event(&json!({"event": "graph", "message": n}));
+    }
 }
 
 /// The files a build of job `job` writes (`clean`).
@@ -1786,6 +1934,16 @@ pub fn main(args: &[String]) -> ! {
         ui.error(&e);
         std::process::exit(crate::EXIT_USAGE);
     });
+    // (a build keeping its graph runs in a worker, which says all a
+    // build says, the target's warnings first: this process nothing)
+    if command == Command::Build
+        && t.graph
+        && !phitex_live::graph::sync()
+        && std::env::var_os(GRAPH_DONE).is_none()
+        && let Some(code) = build_detached()
+    {
+        std::process::exit(code);
+    }
     for w in &t.warnings {
         ui.warning(w);
     }

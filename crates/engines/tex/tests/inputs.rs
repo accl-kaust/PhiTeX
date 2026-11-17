@@ -264,3 +264,52 @@ fn input_edit_inside_a_character() {
         panic!("edit differs from cold: {d}");
     }
 }
+
+/// `\pdffilemoddate` of a file is a read the run records (the
+/// environment's `fdate:<path>`): the file touched, its bytes the same,
+/// and staged again, the date the log shows is its new one. Read from the
+/// disk by the run, it was no read of the build's: a watch, or a graph
+/// loaded in a later process (docs/spec-persisted-graph.md §3.3), kept
+/// the old date where a clean build shows the new.
+#[test]
+fn a_touched_files_date_is_read_again() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("inputs-fdate");
+    let _ = std::fs::create_dir_all(&dir);
+    let f = dir.join("dated.tex");
+    std::fs::write(&f, "\\relax\n").unwrap();
+    let at = |secs: u64| {
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .and_then(|h| {
+                h.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            })
+            .expect("the file's time set");
+    };
+    // (2001-09-09 and 2004-01-10, UTC)
+    at(1_000_000_000);
+    let src = "\\immediate\\write16{[\\pdffilemoddate{dated.tex}]}\\input dated \\bye\n";
+    // (the file at its whole path: the test finder's `./dated.tex` is
+    // the folder's, and this process's working folder is another)
+    let opts = {
+        let inner = common::finder(&dir);
+        let whole = f.display().to_string();
+        let finder: phitex_tex::Finder = std::sync::Arc::new(move |key: &str| {
+            if key == "dated.tex" || key == "dated" {
+                return Some((whole.clone(), std::fs::read(&whole).ok()?));
+            }
+            inner(key)
+        });
+        phitex_tex::Options {
+            finder,
+            ..common::options("./dated-doc.tex", "dated-doc", "", &dir)
+        }
+    };
+    let mut b = common::build(opts, Some(&common::plain()), src);
+    let log = b.output().1;
+    assert!(log.contains("[D:20010909"), "{log}");
+    at(1_073_700_000);
+    b.edit_file("dated.tex", None);
+    let log = b.output().1;
+    assert!(log.contains("[D:20040110"), "the date read again: {log}");
+}

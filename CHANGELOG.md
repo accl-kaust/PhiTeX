@@ -8,6 +8,37 @@ run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.0 name
 milestones, not versions.
 
+## 1.0.3 (2026-11-17)
+
+Opening a paper again is now nearly instant, everywhere PhiTeX runs :)
+
+- **Reopening is fast.** PhiTeX remembers what it built, so the next
+  time you open a document it starts from there instead of from scratch:
+  often well under a second, where it used to take several. This works in
+  `phitex build` and `phitex watch`, and in the built-in engine of VS
+  Code, the web demo and Overleaf. Don't want it? `phitex config graph
+  off`.
+- **Compare starts from your build.** Comparing with a past version
+  (latexdiff) no longer typesets everything from scratch or loads the
+  packages again; it starts from the document you already have.
+- **VS Code follows your files on disk.** Replace a figure or edit your
+  `.bib` outside the editor and the preview catches up on its own.
+- **Citation cards link the DOI.** Click it to open the paper, even when
+  the line broke in the middle of it.
+- **The contents panel shows printed page numbers,** like iv in a preface
+  or A-3 in an appendix.
+- **Double-click and selection land on the right text** in floats on
+  later pages.
+- **Overleaf: your recent projects come first** in the folder view.
+- **Fixed:** with several threads (`-j8`), an edit to the `.bib` could
+  now and then put the bibliography's page in the wrong place, and a few
+  rare races could misplace a float or leave a build hanging; a page an
+  edit took away could stay on screen; Compare in Firefox; a figure saved
+  over that kept showing its old picture; and smaller things in the
+  preview.
+
+Thanks for writing in, it all helps!
+
 ## 1.0.2 (2026-11-15)
 
 A big one :) Lots of speed, and a nicer preview to read your paper in!

@@ -42,6 +42,10 @@ pub(crate) struct Node {
     pub(crate) op: AtomicU32,
     pub(crate) text: Lock<Arc<[ValueId]>>,
     pub(crate) parent: Option<NodeId>,
+    /// Its parent's depth plus one; 0 for a node with no parent. An
+    /// ancestor sits that many steps above it, found without a walk
+    /// to the line's top (`read::SiblingParents`).
+    pub(crate) depth: u32,
     /// Its segment and label, written under the owning segment's write
     /// lock (a relabel, a split), read under its read lock. A lock-free read
     /// (`pos_hint`) is good enough to find the segment to lock.
@@ -73,6 +77,25 @@ pub(crate) struct Node {
     /// What the last commit left, diffed against by the next; a record
     /// filed before any run (`provisional`) holds predictions only.
     pub(crate) last: Mx<Option<Arc<RunRecord>>>,
+    /// The record its last commit replaced, where that one placed, claimed
+    /// and parked nothing ([`RunRecord::may_stand_again`]): a run woken
+    /// for a read that moved finds it standing again where every read of
+    /// it gives what it gave (`Ctx::last_run_stands`), a value that moved
+    /// and moved back (a citation's first pass and its last, the font the
+    /// pass between loaded first).
+    pub(crate) prior: Mx<Option<Arc<RunRecord>>>,
+    /// The fields its predictions were filed for at its placement, and
+    /// their relations (`commit::file_predicted`), not walked yet: the
+    /// walk its placer owes the readers after it (`settle_predictions`),
+    /// whatever the node's own run did meanwhile. A run that commits
+    /// before that walk confirms the predictions, changes nothing and
+    /// walks nothing, and a walk that looked for a provisional record
+    /// found it run and went nowhere: floats2col at -j16, a page's
+    /// finisher placed with its `\@currlist` predicted empty ran and
+    /// committed between its placement and its placer's walk, and the
+    /// float's append after it kept the list its definer before it gave,
+    /// "Float(s) lost" (#40).
+    pub(crate) owed: Mx<Vec<(Field, Option<Rel>)>>,
     /// Who woke it last and why: the realised chain.
     pub(crate) woke: Mx<Option<Wake>>,
     /// A re-ask that came while it ran (`sched::mark_stale` leaves a
@@ -140,6 +163,11 @@ pub(crate) struct Node {
     /// it by the commit that releases them; a commit that finds it unset
     /// takes no lock (`sched::release_waiting`).
     pub(crate) awaited: AtomicBool,
+    /// A run gave its worker to this node (`Ctx::yield_to_prefix`) and
+    /// waits in `Shared::yielders` under its id: queued again once this
+    /// node is taken to run (`sched::release_yielders`), not only at its
+    /// commit. Set under that lock by the run that yields.
+    pub(crate) yielded_to: AtomicBool,
     /// The node whose claim took it (raw id + 1; 0: none), set and
     /// cleared under its segment's write lock (`commit::apply_claim`): a
     /// claim passes over a sibling another claimer holds, and gives back
@@ -202,6 +230,12 @@ pub(crate) struct Node {
     /// wave than the reader's read (`sched::same_wave`).
     pub(crate) run_start: AtomicU64,
     pub(crate) run_began: AtomicU64,
+    /// (`PHITEX_RUNCOST`, profile) Its last finished run's cost: operation
+    /// and `[cpu ns, cycles, instructions, cache refs, cache misses, lock
+    /// wait ns, reads, wall ns, runs]`, summed over the kept runs at the
+    /// evaluation's end (`obs::runcost_report`).
+    #[cfg(feature = "profile")]
+    pub(crate) cost: crate::lock::Mx<Option<(&'static str, [u64; 9])>>,
     /// The run its last commit made, and its run under way, were asked
     /// for by another node's commit in their wave (a re-ask, a
     /// placement), not by an edit: a link of a chain of re-asks, whose
@@ -355,6 +389,7 @@ impl Node {
         op: OpId,
         args: Vec<ValueId>,
         parent: Option<NodeId>,
+        depth: u32,
         seg: SegId,
         pos: Pos,
     ) -> Node {
@@ -362,6 +397,7 @@ impl Node {
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             awaited: AtomicBool::new(false),
+            yielded_to: AtomicBool::new(false),
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
@@ -375,6 +411,8 @@ impl Node {
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
+            #[cfg(feature = "profile")]
+            cost: crate::lock::Mx::new(None),
             run_chained: AtomicBool::new(false),
             chain_began: AtomicBool::new(false),
             layer_refuted: AtomicU32::new(0),
@@ -408,6 +446,7 @@ impl Node {
             op: AtomicU32::new(op.0),
             text: Lock::new(args.into()),
             parent,
+            depth,
             seg: AtomicU32::new(seg.0),
             pos: AtomicU64::new(pos.0),
             state: AtomicU8::new(State::Dirty as u8),
@@ -419,6 +458,8 @@ impl Node {
             parked_on: Mx::new(None),
             serial: AtomicU32::new(0),
             last: Mx::new(None),
+            prior: Mx::new(None),
+            owed: Mx::new(Vec::new()),
             woke: Mx::new(None),
             stale_wake: Mx::new(None),
             filed_floor: AtomicU32::new(0),
@@ -459,13 +500,33 @@ impl Node {
     }
 
     pub(crate) fn cas_state(&self, from: State, to: State) -> bool {
-        self.state
+        let ok = self
+            .state
             .compare_exchange(from as u8, to as u8, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if ok && matches!(to, State::Gone | State::Inert | State::RunningInert) {
+            self.im_gone(to);
+        }
+        ok
     }
 
     pub(crate) fn set_state(&self, s: State) {
         self.state.store(s as u8, Ordering::Release);
+        if matches!(s, State::Gone | State::Inert | State::RunningInert) {
+            self.im_gone(s);
+        }
+    }
+
+    /// (`PHITEX_INTERMED_LOG`) The node left the line or was taken by a
+    /// claim: its runs are not kept.
+    fn im_gone(&self, s: State) {
+        if crate::obs::im_on() {
+            elog!(
+                "img\t{}\t{}\t{s:?}",
+                crate::sched::log_clock(std::time::Instant::now()),
+                self.id.raw()
+            );
+        }
     }
 
     /// The node whose claim holds it.
@@ -645,9 +706,48 @@ pub(crate) struct RunRecord {
     pub(crate) scope_gen: u64,
     /// The same for the relocations counted (`Engine::moves_gen`).
     pub(crate) moves_gen: u64,
+    /// The operation and arguments its run began with; None for a
+    /// prediction. A run is a function of its text and its reads: a
+    /// record stands for a run of the same text alone
+    /// ([`RunRecord::made_from`]).
+    pub(crate) text: Option<(OpId, Arc<[ValueId]>)>,
+    /// Its run told the client something outside the engine
+    /// (`Ctx::told_outside`): taken again for a later run, it would tell
+    /// nothing.
+    pub(crate) told: bool,
 }
 
 impl RunRecord {
+    /// Whether its run began with `text`: one made before an edit of the
+    /// node (`Engine::replace`) is not the run of its text now, whatever
+    /// its reads give.
+    pub(crate) fn made_from(&self, text: &(OpId, Arc<[ValueId]>)) -> bool {
+        self.text
+            .as_ref()
+            .is_some_and(|(op, args)| *op == text.0 && (Arc::ptr_eq(args, &text.1) || **args == *text.1))
+    }
+
+    /// Whether this record, replaced by a later commit, may be taken as a
+    /// run's again (`Node::prior`): it placed, claimed, parked, waited for
+    /// and told the client nothing, and every read of it is of a field,
+    /// an environment value or a fold (no placement's output, sibling,
+    /// hole or next contribution, which name the structure it stood in).
+    pub(crate) fn may_stand_again(&self) -> bool {
+        !self.provisional
+            && !self.told
+            && self.state.is_none()
+            && self.placed.is_empty()
+            && self.claim == 0
+            && !self.claim_all
+            && self.waits.is_empty()
+            && self.reads.iter().all(|rd| {
+                !matches!(
+                    rd.kind(),
+                    ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Next { .. } | ReadKind::Hole
+                )
+            })
+    }
+
     /// Whether its read `rd` still gives what it gave: unchecked where
     /// nothing of its field changed since it read (a read at a place
     /// that stands, its field's change count as it was, no scope moved),
@@ -739,6 +839,8 @@ impl RunRecord {
             waits: Box::default(),
             scope_gen: 0,
             moves_gen: 0,
+            text: None,
+            told: false,
         }
     }
 }
@@ -998,4 +1100,9 @@ pub(crate) struct Product {
     /// `Ctx::last_run_stands`: the last run's record, every read of which
     /// still holds; nothing ran ([`crate::commit::commit_stood`]).
     pub(crate) stood: Option<Arc<RunRecord>>,
+    /// The operation and arguments the run began with: what its record
+    /// was made from (`RunRecord::text`).
+    pub(crate) text: (OpId, Arc<[ValueId]>),
+    /// `Ctx::told_outside`.
+    pub(crate) told: bool,
 }

@@ -59,6 +59,13 @@ pub trait ShellHook: Send + Sync {
     /// Runs `command` (quoted by the engine) in a working directory
     /// holding exactly `files` (name relative to it, bytes).
     fn run(&self, command: &str, files: &[(String, Arc<[u8]>)]) -> ShellRan;
+
+    /// A run met `command` (quoted) before the job's text before it had
+    /// settled and went on without its result: the command is called
+    /// (`run`) once that text settles, on the view TeX's order has
+    /// there. A note only (a host may show the command as queued; a test
+    /// orders its threads by it); the default does nothing.
+    fn handed(&self, _command: &str) {}
 }
 
 /// TeX Live 2026's `shell_escape_commands` (texmf.cnf): what restricted
@@ -608,11 +615,15 @@ impl Run<'_, '_> {
                     // inb.txt` called on an inb.txt opened and closed with
                     // its line not yet written). A view the memo answers
                     // calls nothing: answered at once)
-                    self.cx.wait_settled()?;
-                    let Some(m) = call(self.ops, cmd, &files) else {
-                        return Ok(None);
-                    };
-                    m
+                    if let Some(m) = self.shell_child(cmd, &files) {
+                        m
+                    } else {
+                        self.cx.wait_settled()?;
+                        let Some(m) = call(self.ops, cmd, &files) else {
+                            return Ok(None);
+                        };
+                        m
+                    }
                 }
             }
         };
@@ -642,6 +653,75 @@ impl Run<'_, '_> {
             self.contribute(OUTS, v.seq_unit(v.list(vec![name, x])));
         }
         Ok(Some(made))
+    }
+
+    /// [`Run::shell_call`]'s call where the prefix before this run has not
+    /// settled: handed to a child ([`ShellChild`], arguments the command
+    /// and the view, `[cmd, [[name, text]…]]`) that waits for the settled
+    /// prefix and calls the host there, while this run goes on, on the
+    /// child's output if it has run, else on the guess that the command
+    /// made nothing yet (`ValueId::UNIT`). A child's output that is not
+    /// what the run went on re-asks the run (`commit::reask_parent`), and
+    /// the run again takes it. Stopped here instead (`Ctx::wait_settled`)
+    /// the run was a hole until every node before it settled, and the
+    /// text after it that reads on waited with it: Grail's
+    /// `\mintinline` paragraphs held `\input{evaluation}` and its
+    /// pictures behind every picture before them (n11, -j8, 3.9 s of
+    /// 11.6). The host is still called only on the settled view, by the
+    /// child, and once a view (the memo): a run whose view moved places
+    /// another child, and the one it no longer places is gone before
+    /// its prefix settles. `None`: the call is made here, as before
+    /// (one thread; a run that is no document piece; the prefix settled
+    /// already, where a child would only add a run of mine).
+    fn shell_child(&mut self, cmd: &str, files: &[(String, String)]) -> Option<Arc<Made>> {
+        let v = self.v;
+        let op = self.cx.op();
+        if !self.cx.has_other_threads()
+            || !((op == self.ops.exec || op == self.ops.resume) && self.doc)
+            || self.interp.is_some()
+            || self.rec_load
+            || self.pic_child.is_some()
+        {
+            return None;
+        }
+        let args = vec![
+            v.str(cmd),
+            v.list(
+                files
+                    .iter()
+                    .map(|(n, t)| v.list(vec![v.str(n), v.str(t)]))
+                    .collect(),
+            ),
+        ];
+        if !self.cx.placed_before_ran(self.ops.shell, &args) && self.cx.settled_here() {
+            return None;
+        }
+        let i = self.cx.child_once(self.ops.shell, args);
+        let ran = self.cx.placed_output_peek(i).is_some();
+        let x = self.cx.placed_output_or(i, ValueId::UNIT);
+        if !ran
+            && let Some(h) = self
+                .ops
+                .tool_opts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .shell_hook
+                .clone()
+        {
+            h.handed(&host_str(cmd));
+        }
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "shell: node {} hands {cmd:?} to a child: {}",
+                self.cx.node().raw(),
+                if ran {
+                    "its output"
+                } else {
+                    "nothing made yet"
+                }
+            );
+        }
+        Some(Arc::new(made_of(v, x)))
     }
 
     /// A piped input's text (`\\input|cmd`, `\\openin`'s, web2c's
@@ -685,6 +765,127 @@ impl Run<'_, '_> {
             return Ok(None);
         };
         Ok(Some(made.stdout.clone()))
+    }
+}
+
+/// A [`Made`] as a child's output (`[status, [[name, text]…], [name…],
+/// stdout, why]`).
+/// A call that made nothing and said nothing is the guess itself
+/// (`ValueId::UNIT`): its placer, gone on as if nothing was made, stands.
+fn made_value_of(v: &Values, m: &Made) -> ValueId {
+    if m.status == 0
+        && m.wrote.is_empty()
+        && m.removed.is_empty()
+        && m.stdout.is_empty()
+        && m.why.is_empty()
+    {
+        return ValueId::UNIT;
+    }
+    v.list(vec![
+        v.int(i64::from(m.status)),
+        v.list(
+            m.wrote
+                .iter()
+                .map(|(n, t)| v.list(vec![v.str(n), v.str(t)]))
+                .collect(),
+        ),
+        v.list(m.removed.iter().map(|n| v.str(n)).collect()),
+        v.str(&m.stdout),
+        v.str(&m.why),
+    ])
+}
+
+/// [`made_value_of`] read back; `ValueId::UNIT` (no output yet): nothing
+/// made, status 0.
+fn made_of(v: &Values, x: ValueId) -> Made {
+    let xs = list_of(v, x);
+    let s = |i: usize| xs.get(i).map(|&y| str_of(v, y)).unwrap_or_default();
+    Made {
+        status: xs
+            .first()
+            .and_then(|&y| v.as_int(y))
+            .and_then(|n| i32::try_from(n).ok())
+            .unwrap_or(0),
+        wrote: xs
+            .get(1)
+            .map(|&w| {
+                list_of(v, w)
+                    .into_iter()
+                    .map(|p| {
+                        let p = list_of(v, p);
+                        let g = |i: usize| p.get(i).map(|&y| str_of(v, y)).unwrap_or_default();
+                        (g(0), g(1))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        removed: xs
+            .get(2)
+            .map(|&r| list_of(v, r).into_iter().map(|n| str_of(v, n)).collect())
+            .unwrap_or_default(),
+        stdout: s(3),
+        why: s(4),
+    }
+}
+
+/// A `\write18` handed to a child by a run whose prefix had not settled
+/// ([`Run::shell_child`]): arguments `[cmd, [[name, text]…]]`, the command
+/// and the files it is handed as that run saw them. It waits for every
+/// node before it to settle (its placer among them: so the view in its
+/// arguments is TeX's own), then calls the host (memoised, [`call`]); its
+/// output is what the call made. It defines and contributes nothing: its
+/// placer makes the call's results its own where the command stands.
+pub(crate) struct ShellChild(pub crate::ops::Shared);
+
+impl phitex_defuse::Operation for ShellChild {
+    fn name(&self) -> &'static str {
+        "shell"
+    }
+    fn alike(&self) -> bool {
+        false
+    }
+    fn may_define(&self, _: &[ValueId], _: &Values) -> phitex_defuse::MayDefine {
+        phitex_defuse::MayDefine::Nothing
+    }
+    fn contributes(&self, _: &[ValueId], _: &Values, _: phitex_defuse::Field) -> bool {
+        false
+    }
+    fn run(&self, cx: &mut phitex_defuse::Ctx<'_>) -> Result<ValueId, phitex_defuse::Stop> {
+        let v = cx.values();
+        let args = cx.args().to_vec();
+        let cmd = args.first().map(|&c| str_of(v, c)).unwrap_or_default();
+        let files: Vec<(String, String)> = args
+            .get(1)
+            .map(|&l| {
+                list_of(v, l)
+                    .into_iter()
+                    .map(|p| {
+                        let p = list_of(v, p);
+                        let g = |i: usize| p.get(i).map(|&y| str_of(v, y)).unwrap_or_default();
+                        (g(0), g(1))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        cx.wait_settled()?;
+        let o = crate::ops::ops(&self.0);
+        let made = call(o, &cmd, &files).unwrap_or_else(|| {
+            Arc::new(Made {
+                status: 0,
+                wrote: Vec::new(),
+                removed: Vec::new(),
+                stdout: String::new(),
+                why: String::new(),
+            })
+        });
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "shell: child {} called {cmd:?}: status {}",
+                cx.node().raw(),
+                made.status
+            );
+        }
+        Ok(made_value_of(v, &made))
     }
 }
 

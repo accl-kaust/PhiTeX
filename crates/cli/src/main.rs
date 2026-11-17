@@ -51,6 +51,7 @@ mod session;
 mod session_cmd;
 mod shelf;
 mod shell;
+mod shot;
 mod star;
 mod tex;
 mod tools;

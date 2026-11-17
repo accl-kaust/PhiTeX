@@ -232,6 +232,10 @@ class Pages implements CoreTransport {
     this.sock = sock;
     sock.onEvent((e) => {
       if ((e.event as string) === "stats") return void statsIn(e as unknown as Stats);
+      // (a diff's state in: its pages may be new, the `settled` after it; a
+      // change gone to at once, as it comes, finds its words in them, not in
+      // the text asked while it was typeset)
+      if ((e.event as string) === "diff") return void (this.texts = null);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e as Settled;
@@ -360,6 +364,7 @@ const review: ReviewHost = {
     sock.onOpened(() => void sock.request({ op: "review_state" }).then((r) => r.ok && r.json && cb(r.json as ReviewState)));
   },
   boxes: (file, start, end) => session.boxesOf(file, start, end),
+  extent: (file, start, end, page) => session.extentOf(file, start, end, page),
   source: (sel) => session.sourceOf(sel),
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),
@@ -548,7 +553,7 @@ const session = new PreviewSession(host, pages, panel, {
 /** Two versions: `from` a revision, `to` another (null: the files as they are). */
 type Pair = { from: string; to: string | null };
 /** The watch's diff state (the `diff` op's answer, the `diff` event's). */
-type DiffState = { shown?: boolean; base?: string; to?: string; label?: string; changes?: unknown[]; look?: Partial<DiffLook> };
+type DiffState = { shown?: boolean; base?: string; to?: string; label?: string; changes?: unknown[]; look?: Partial<DiffLook>; built?: boolean };
 
 let diffState: DiffState = {};
 let diffWait: ((d: DiffState) => void) | undefined;
@@ -565,6 +570,8 @@ sock.onEvent((e: any) => {
   if (n === undefined) return;
   if (diffWait) (diffWait(diffState), (diffWait = undefined));
   else counted?.(n);
+  // (a change gone to while the diff was typeset: there now, placed)
+  if (diffState.built && wanted !== undefined) void gotoChange(wanted);
 });
 const ask = async (op: object) => {
   const r = await sock.request(op);
@@ -578,6 +585,10 @@ const save = (name: string) => {
   a.click();
 };
 
+/** The changes gone to (the last one's answer alone is shown), and the one to go to once the diff is built. */
+let goes = 0;
+let wanted: number | undefined;
+
 /** A change's first words as the page shows them: its source without commands, braces and math marks. */
 const words = (src: string) =>
   src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
@@ -588,10 +599,21 @@ const words = (src: string) =>
  * a deletion hidden) found by its words alone, the first match.
  */
 const gotoChange = async (k: number) => {
+  const go = ++goes;
+  wanted = undefined;
   const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number; y?: number } | undefined;
   if (!c) return;
+  // (the diff still being typeset: its changes known, their places not yet,
+  // its pages not all there; gone to when they are, the diff event that
+  // says it is built)
+  if (typeof c.page !== "number" && diffState.built === false) {
+    wanted = k;
+    return void panel.msg(`Change ${k}: the diff is being typeset, its page shown once it is`, false, true);
+  }
   const q = words(c.new_text || "") || words(c.old_text || "");
   const hits = q ? await pages.find(q) : [];
+  // (another change gone to meanwhile: that one shown, not this one after it)
+  if (go !== goes) return;
   if (typeof c.page === "number") {
     const y = c.y ?? 0;
     const near = hits
@@ -620,7 +642,7 @@ const runner: DiffRunner<Pair> = {
   download: (what) => save(`diff.${what}`),
   look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
   restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => (panel.diffMarks([]), void ask({ op: "diff_stop" })),
+  stop: () => ((wanted = undefined), panel.diffMarks([]), void ask({ op: "diff_stop" })),
 };
 const controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));

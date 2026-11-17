@@ -119,6 +119,9 @@ pub(crate) struct Ops {
     /// A picture of a figure's run as a child node of its own
     /// (`crate::pic`).
     pub pic: OpId,
+    /// A `\write18` a run hands to a child that calls it on the settled
+    /// prefix (`crate::shell::ShellChild`).
+    pub shell: OpId,
     /// The tools' settings ([`crate::Options::bibtex`]).
     pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).
@@ -149,6 +152,9 @@ pub(crate) struct Ops {
     /// The document files the client cut (`api::DocFile`): a run reaching
     /// one places its slices as its pieces ([`Run::doc_file_regions`]).
     pub docs: crate::api::DocFiles,
+    /// The lines before the pieces runs cut of a file's rest
+    /// (`api::RestLines`).
+    pub rest_lines: crate::api::RestLines,
     /// The deferred counters' symbols, by number (`crate::defer::SymTable`).
     pub syms: std::sync::Arc<crate::defer::SymTable>,
     /// The client's `\openout` name check ([`crate::Options::out_name_ok`]).
@@ -564,7 +570,7 @@ pub(crate) fn max_char_end(xetex: bool) -> i64 {
 }
 
 /// Where `\inputlineno` reads (`line`, §304: the innermost file's).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum FileLine {
     /// The line's number is known here.
     Known(i64),
@@ -726,6 +732,13 @@ pub(crate) struct Run<'c, 'a> {
     /// Macro expansions so far: told the engine every 4096 as its work
     /// (`Ctx::tick`), as the commands are.
     pub exps: u64,
+    /// Tokens the macro calls with arguments wrote since the last tick
+    /// that counted them ([`Run::macro_call`]): an expansion whose
+    /// arguments grow as it recurses (acmart's `\\Sectionformat` let to
+    /// itself on a state that moved, `{\\ACM@sect@format{...}}` one token
+    /// longer a level) copies tokens by the million in a few thousand
+    /// calls and commands, which the engine's bound by work never saw.
+    pub tok_work: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
     /// Set while the command loop fetches its next token
@@ -914,6 +927,14 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::append_def`]). The run's first other touch of the location
     /// reads that value and makes the definition ([`Run::append_force`]).
     pub appending: Vec<(Loc, Vec<Tok>)>,
+    /// A `\\csname` whose name the run had not touched, its §372 look-up
+    /// put off ([`Run::csname_force`]): the location and the token. The
+    /// command after it dispatched alone may assign it globally, which
+    /// leaves the same binding whatever the look-up found, and drops it
+    /// unread (`\\global\\let\\csname pgf@sys@id@keylist@…\\endcsname`);
+    /// any other touch of the location, or the end of that command,
+    /// makes the look-up then.
+    pub csname_defer: Option<(Loc, Tok)>,
     /// The classes this run read guarded by a list's names
     /// ([`Run::class_lookup`] with a member): by location and list field,
     /// for its later guarded lookups of the same list only.
@@ -1381,6 +1402,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mode_zero: false,
             cmds: 0,
             exps: 0,
+            tok_work: 0,
             command_call: false,
             cmd_fetch: false,
             skel: None,
@@ -1438,6 +1460,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_hit: None,
             rb: None,
             appending: Vec::new(),
+            csname_defer: None,
             class_member: crate::FxHashMap::default(),
             appending_vals: Vec::new(),
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
@@ -1655,6 +1678,16 @@ impl<'c, 'a> Run<'c, 'a> {
             self.cur.tok,
             lists.join(" | ")
         );
+        if crate::exec::obs_flag!("PHITEX_LOAD_TRACE_BT") {
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let fns: Vec<&str> = bt
+                .lines()
+                .filter(|l| l.contains("phitex_tex::") && !l.contains("load_trace"))
+                .map(str::trim)
+                .take(12)
+                .collect();
+            eprintln!("load-trace-bt: {}", fns.join(" <- "));
+        }
     }
 
     /// Integer register `loc` holds an alias definition's value (a
@@ -1983,6 +2016,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
+        if self.csname_defer.is_some_and(|d| d.0 == loc) {
+            self.csname_force()?;
+            if self.st.load_state(loc) != 0 {
+                return Ok(());
+            }
+        }
         if !self.appending_vals.is_empty() {
             self.vals_force(loc)?;
             if self.st.load_state(loc) != 0 {
@@ -2323,6 +2362,15 @@ impl<'c, 'a> Run<'c, 'a> {
             if global || self.innermost_group().is_none() {
                 self.appending.retain(|x| x.0 != loc);
             } else if let Err(h) = self.append_force(loc) {
+                self.raise(h);
+            }
+        }
+        // (a `\\csname` look-up put off: a global binding replaces what
+        // it would have made, unread; a local one is made on it)
+        if self.csname_defer.is_some_and(|d| d.0 == loc) {
+            if global {
+                self.csname_defer = None;
+            } else if let Err(h) = self.csname_force() {
                 self.raise(h);
             }
         }
@@ -4115,6 +4163,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// pending append made ([`Run::append_force`]), a read-back key
     /// defined ([`Run::rb_check`]).
     fn touch(&mut self, loc: Loc) -> R<()> {
+        if self.csname_defer.is_some_and(|d| d.0 == loc) {
+            self.csname_force()?;
+        }
         if !self.appending.is_empty() {
             self.append_force(loc)?;
         }
@@ -5859,6 +5910,11 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        // (a `\\csname` look-up put off, its name met where its meaning is
+        // read: made first, [`Run::csname_defer`])
+        if !self.bare && self.csname_defer.is_some_and(|d| d.1 == tok) {
+            self.csname_force()?;
+        }
         self.set_cur_cs_rest(tok)
     }
 
@@ -6114,8 +6170,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// conditional branch, or fetched only to be stored or matched, needs,
     /// read through the engine's step projection
     /// ([`crate::val::step_projection`]) where the run has not bound it
-    /// itself: a redefinition within the class leaves this run standing.
-    /// `None` where it is this run's own, or not defined (read in full).
+    /// itself: a redefinition within the class leaves this run standing,
+    /// and so does a first definition in class 0 of a name undefined
+    /// where the run read it (the projection's answer for no value, as
+    /// TeX's `undefined_cs` is stepped over: pgf's
+    /// `\pgfpositionnodelaterpath`, a macro argument in every picture,
+    /// first defined by the picture before, asked each picture again
+    /// once that one had run, Grail at -j8). `None` where it is this
+    /// run's own (read in full).
     #[inline(never)]
     fn step_lookup(&mut self, tok: Tok) -> R<Option<i64>> {
         let Some(l) = self.mean_loc(tok) else {
@@ -6187,7 +6249,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether `l` is a finisher's field given where the routine reads
     /// it ([`crate::state::State::lazy`]): the run's own, read in full.
-    fn lazy_pre(&self, l: Loc) -> bool {
+    pub(crate) fn lazy_pre(&self, l: Loc) -> bool {
         self.st.lazy(l).is_some() || self.fin_scope_closer.is_some()
     }
 
@@ -6676,6 +6738,19 @@ impl<'c, 'a> Run<'c, 'a> {
     /// for its fragments' hints), each slice with its hint.
     fn doc_file_regions(&self, f: &FileRest) -> Vec<Vec<ValueId>> {
         let v = self.v;
+        // (observe, `PHITEX_DLINE_ENV`: how a file's rest is cut)
+        if crate::exec::obs_flag!("PHITEX_DLINE_ENV") {
+            eprintln!(
+                "doc-file-regions: node {} {} lazy {} cut {:?} units {} off {} line {}",
+                self.cx.node().raw(),
+                v.render(f.name),
+                f.lazy(),
+                f.cut.map(|k| v.render(k)),
+                f.units.is_some(),
+                f.off,
+                f.line
+            );
+        }
         // (a file the job writes, not read here: one piece per unit, its
         // arguments the unit's field (its text's hash) alone, as a
         // document slice's are its text; the piece reads its unit; its
@@ -6749,6 +6824,20 @@ impl<'c, 'a> Run<'c, 'a> {
             args.push(v.str(rec.as_deref().unwrap_or(&*own)));
             out.push(args);
         }
+        // (a file whose first lines this run read itself: its rest's
+        // pieces given their lines in the file as the client's pieces of a
+        // cut file are, `api::rest_lines`; folded, the
+        // lines before them this run read, numbered as a file's, were
+        // missed. Grail's appendix at -j1, its first paragraph read on
+        // into from the file before it: every line two short)
+        let pieces: Vec<(ValueId, usize)> = t
+            .slices
+            .iter()
+            .filter(|&&(_, e)| e > f.off)
+            .zip(&out)
+            .map(|(&(s, _), a)| (a[0], s.max(f.off)))
+            .collect();
+        crate::api::rest_lines(&self.ops.rest_lines, &text, &pieces);
         out
     }
 
@@ -6849,6 +6938,9 @@ impl<'c, 'a> Run<'c, 'a> {
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {
+                    // (a `\\csname` look-up put off, the command after it
+                    // not this run's: made, [`Run::csname_defer`])
+                    self.csname_force()?;
                     if self.can_leave_scope() {
                         self.leave_scope()?;
                     } else if crate::boxscope::on() && self.can_leave_lists() {
@@ -6880,9 +6972,11 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.command()?;
                 self.mark.active = false;
                 if self.claim_rest || self.closed_scope() {
+                    self.csname_force()?;
                     return self.end_at_close();
                 }
             }
+            self.csname_force()?;
             // (a picture child's text ran to its end, `crate::pic`)
             if self.pic_child.is_some() {
                 return Ok(());
@@ -7124,6 +7218,29 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a command node's, empty too: what its text declares,
         // `Exec::static_contribs`)
         if !self.doc_lines.is_empty() || self.cx.op() == self.ops.exec {
+            // (observe, `PHITEX_DOCLINES_TRACE`: the lines a run began, by
+            // file, with its text's start)
+            if crate::exec::obs_flag!("PHITEX_DOCLINES_TRACE") {
+                let v = self.v;
+                let by: Vec<String> = self
+                    .doc_lines
+                    .iter()
+                    .map(|(n, k)| format!("{}:{k}", v.render(*n)))
+                    .collect();
+                let text: String = self
+                    .text_arg()
+                    .map(|x| v.render(x))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(80)
+                    .collect();
+                eprintln!(
+                    "doclines: node {} op {:?} pulled {} began {by:?} text {text}",
+                    self.cx.node().raw(),
+                    self.cx.op(),
+                    self.pulled
+                );
+            }
             let m = lines_value(self.v, &self.doc_lines);
             let f = self
                 .ops
@@ -7340,6 +7457,7 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         // (a finisher's pages leave as their shapes, `pages`: their
         // writers read the lines, `crate::pdfout::PdfPage`)
+        self.mark_fire_points();
         let pages_f = self.v.field("pages");
         self.left_memo = None;
         for (f, x) in std::mem::take(&mut self.contribs) {
@@ -8174,10 +8292,13 @@ pub(crate) fn dline_field(v: &Values, n: u64) -> Field {
 /// top-level node's its own; a piece of a cut file's, its text's frames: a
 /// reader that runs again makes the node anew, and a file two nodes read
 /// has the same lines under both (the client gives them,
-/// `DocFile::dlines`; a sequence's id never is a node's).
+/// `DocFile::dlines`; a sequence's id never is a node's). The frames by
+/// their id as every store holding them at their place has it
+/// (`Values::stable_raw`): the lines a graph loaded holds
+/// (`crate::api::Build::load`) are given under the fields its runs read.
 pub(crate) fn lines_owner(v: &Values, node: u64, args: &[ValueId]) -> u64 {
     match args {
-        [frames, top, ..] if int_of(v, *top) != 3 => frames.raw(),
+        [frames, top, ..] if int_of(v, *top) != 3 => v.stable_raw(*frames),
         _ => node,
     }
 }

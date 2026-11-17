@@ -460,6 +460,75 @@ pub(crate) const LINE_MARK: char = '\u{10FFFC}';
 pub(crate) const HREPORT: &str = "hreport";
 pub(crate) const VREPORT: &str = "vreport";
 
+/// Log events' kinds that print nothing, by which the log puts a page's
+/// routine where TeX ran it ([`order_fires`]). [`FIRE_AT`]: a piece's run
+/// went on past one of its page-builder candidates and logged more after
+/// it (`node:candidate`, `Run::mark_fire_points`). [`FIRE`] ...
+/// [`FIRE_END`]: a finisher's events, its page's fire named as the
+/// piece's mark names it.
+pub(crate) const FIRE_AT: &str = "fireat";
+pub(crate) const FIRE: &str = "fire";
+pub(crate) const FIRE_END: &str = "fireend";
+
+/// The events in TeX's order: a finisher's (between [`FIRE`] and
+/// [`FIRE_END`]) where the run of the piece its page fired in passed that
+/// candidate ([`FIRE_AT`]), before what that run logged after it, as
+/// §994's `build_page` ran the routine there; the marks dropped. A
+/// piece's run goes on past a candidate where its cut is not taken
+/// (`cut_min`, a span of its own), and where its cuts are depends on
+/// the order the runs took (a resume begins where its piece was cut),
+/// not on the text: the page's finisher, placed after the whole piece,
+/// had its `[21]` after what the piece logged past the fire, at -j8 and
+/// not at -j1 (lie-hasse: 420 lines of contour's messages before it).
+pub(crate) fn order_fires(v: &Values, evs: Vec<ValueId>) -> Vec<ValueId> {
+    let (at, fire, end) = (v.str(FIRE_AT), v.str(FIRE), v.str(FIRE_END));
+    let kind = |x: ValueId| list_of(v, x).first().copied();
+    let key = |x: ValueId| list_of(v, x).get(1).copied();
+    if !evs
+        .iter()
+        .any(|&x| matches!(kind(x), Some(k) if k == at || k == fire))
+    {
+        return evs;
+    }
+    // (the events, each slot a piece's mark that finishers' events go to)
+    let mut out: Vec<Result<ValueId, usize>> = Vec::with_capacity(evs.len());
+    let mut slots: Vec<Vec<ValueId>> = Vec::new();
+    let mut slot_of: phitex_defuse::FxHashMap<ValueId, usize> = phitex_defuse::FxHashMap::default();
+    let mut group: Option<(Option<usize>, Vec<ValueId>)> = None;
+    for x in evs {
+        let k = kind(x);
+        if k == Some(fire) {
+            group = Some((key(x).and_then(|n| slot_of.get(&n).copied()), Vec::new()));
+        } else if k == Some(end) {
+            if let Some((s, g)) = group.take() {
+                match s {
+                    Some(s) => slots[s].extend(g),
+                    None => out.extend(g.into_iter().map(Ok)),
+                }
+            }
+        } else if let Some((_, g)) = &mut group {
+            g.push(x);
+        } else if k == Some(at) {
+            if let Some(n) = key(x) {
+                slot_of.insert(n, slots.len());
+            }
+            out.push(Err(slots.len()));
+            slots.push(Vec::new());
+        } else {
+            out.push(Ok(x));
+        }
+    }
+    if let Some((_, g)) = group {
+        out.extend(g.into_iter().map(Ok));
+    }
+    out.into_iter()
+        .flat_map(|e| match e {
+            Ok(x) => vec![x],
+            Err(s) => std::mem::take(&mut slots[s]),
+        })
+        .collect()
+}
+
 /// A log event's kind: the PDF driver's fatal error (xdvipdfmx's
 /// `ERROR`, `xdvipdfmx:fatal: ...`), its line the event's text: XeTeX
 /// made no PDF file (`crate::xdvpdf`).
@@ -584,7 +653,7 @@ pub(crate) fn terminal(
     log.print(name, -1);
     let mut page = 0i64;
     let mut spotless = true;
-    for x in events.map(|e| v.seq_to_vec(e)).unwrap_or_default() {
+    for x in order_fires(v, events.map(|e| v.seq_to_vec(e)).unwrap_or_default()) {
         let (kind, text, nl, _) = event_parts(v, x, name, dline);
         let online = kind.ends_with(ONLINE);
         let bare = kind.trim_end_matches(ONLINE);
@@ -635,7 +704,7 @@ impl LayoutMemo {
         events: Option<ValueId>,
         dline: &dyn Fn(u64) -> Option<i64>,
     ) -> Option<Fatal> {
-        let evs = events.map(|e| v.seq_to_vec(e)).unwrap_or_default();
+        let evs = order_fires(v, events.map(|e| v.seq_to_vec(e)).unwrap_or_default());
         let mut same = if self.name == name {
             self.events
                 .iter()

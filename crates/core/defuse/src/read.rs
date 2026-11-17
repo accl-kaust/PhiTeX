@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
+use crate::values::{Field, FxHashMap, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -55,8 +55,39 @@ fn env_reaching(eng: &Engine, f: Field) -> Reaching {
 /// The environment's value of `f`: the client's settings, then its
 /// provider once, cached.
 pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
-    if let Some(x) = eng.env.values.read().get(&f) {
-        return *x;
+    let inst = eng.values().instance();
+    // (this thread's copy first, of the count now: no lock, no line
+    // written that another thread reads. Every environment read of every
+    // worker took the map's read lock, its count bouncing between cores)
+    let g = eng.env.changes.load(Ordering::Acquire);
+    if let Some(x) = ENV.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&f).copied()).flatten()) {
+        return x;
+    }
+    let x = env_value_shared(eng, f);
+    x.1
+}
+
+/// [`env_value`] from the shared map (and its provider on a miss), kept
+/// in this thread's copy with the count it was read at: (count, value).
+fn env_value_shared(eng: &Engine, f: Field) -> (u64, Option<ValueId>) {
+    let inst = eng.values().instance();
+    let keep = |g: u64, x: Option<ValueId>| {
+        ENV.with_borrow_mut(|c| {
+            if c.0 != inst || c.1 != g {
+                *c = (inst, g, FxHashMap::default());
+            }
+            c.2.insert(f, x);
+        });
+        (g, x)
+    };
+    {
+        let vals = eng.env.values.read();
+        // (stable under the read lock: a replacement counts under the
+        // write lock)
+        let g = eng.env.changes.load(Ordering::Acquire);
+        if let Some(x) = vals.get(&f) {
+            return keep(g, *x);
+        }
     }
     // (asked once: a miss being answered is waited for, not answered
     // again beside it. A clean build's first paragraphs, one a worker, all
@@ -75,11 +106,24 @@ pub(crate) fn env_value(eng: &Engine, f: Field) -> Option<ValueId> {
             .as_ref()
             .and_then(|p| p(eng.values(), f))
             .flatten();
-        eng.env.values.write().entry(f).or_insert(x);
+        // (the provider's answer: asked again on a load,
+        // `Engine::reask_provided`)
+        let mut vals = eng.env.values.write();
+        if let std::collections::hash_map::Entry::Vacant(e) = vals.entry(f) {
+            e.insert(x);
+            eng.env.provided.write().insert(f);
+        }
         x
     });
     eng.env.asking.lock().remove(&f);
-    x
+    // (what the map holds now, with its count: the answer, or a value set
+    // meanwhile)
+    let vals = eng.env.values.read();
+    let g = eng.env.changes.load(Ordering::Acquire);
+    match vals.get(&f) {
+        Some(&y) => keep(g, y),
+        None => (g, x),
+    }
 }
 
 /// The last definition of `f` in the last indexed segment before the one
@@ -138,7 +182,22 @@ pub(crate) enum Met {
     Contributors(Field, Pos, Pos, u64),
 }
 
+/// A thread's copy of the environment's values: (values instance, count,
+/// values).
+type EnvCopy = (u64, u64, FxHashMap<Field, Option<ValueId>>);
+/// A thread's copies of scope chains: (values instance, scope count, by
+/// segment).
+type ChainsCopy = (u64, u64, FxHashMap<SegId, Arc<[u64]>>);
+
 thread_local! {
+    /// This thread's copy of the environment's values: (values instance,
+    /// `Env::changes` when read, the values read) ([`env_value`]).
+    static ENV: std::cell::RefCell<EnvCopy> =
+        std::cell::RefCell::new((0, 0, FxHashMap::default()));
+    /// This thread's copies of the segments' scope chains at their starts:
+    /// (values instance, `Engine::scope_gen`, by segment) ([`chain_start`]).
+    static CHAINS: std::cell::RefCell<ChainsCopy> =
+        std::cell::RefCell::new((0, 0, FxHashMap::default()));
     /// What the reads on one layout running on this thread met, innermost
     /// last ([`on_one_layout`]).
     static MET: std::cell::RefCell<Vec<Met>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -337,7 +396,7 @@ pub(crate) fn trace_inverted(
         return;
     }
     let name = |n: Option<NodeId>| n.map(|n| (n.raw(), eng.op(eng.node(n).op()).name()));
-    eprintln!(
+    elog!(
         "fold-trace: {at}: reader {} {} reads {} from {:?} at {:?} to {:?} at {:?}",
         me.id.raw(),
         eng.op(me.op()).name(),
@@ -389,11 +448,48 @@ pub(crate) fn fold(eng: &Engine, f: Field, from: Option<Pos>, to: Option<Pos>) -
     acc
 }
 
+thread_local! {
+    /// A `next` read checked as it was filed ([`as_filed`]): the node its
+    /// search ended at (None: the line's end), and whether that node is
+    /// the contribution it answers.
+    static AS_FILED: std::cell::Cell<Option<(Option<NodeId>, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// `f` with the `next` searches on this thread checked as a commit filed
+/// their reader (`commit`'s check of its own reads after its re-asks):
+/// a node before `to` (the search's end then: the contribution it
+/// answered, `item`, with it; None: the line's end) open now is taken as
+/// committed with what it contributed. It was not open when the reader
+/// was filed, so its commit, after the filing, asks the reader again if
+/// what it contributes moves the answer. Taken as a stop, it refuted the
+/// run on a change still to come: a node this commit had asked to run
+/// again, which read this one as its stop, became this one's stop in
+/// turn, each refuting the other's run for ever, one worker busy, the
+/// rest idle (review's next_readers_follow_their_stops_across_splits,
+/// hung at 16 threads on n11).
+pub(crate) fn as_filed<T>(to: Option<NodeId>, item: bool, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<(Option<NodeId>, bool)>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            AS_FILED.set(self.0);
+        }
+    }
+    let _reset = Reset(AS_FILED.replace(Some((to, item))));
+    f()
+}
+
 /// The first contribution to `f` after `after` (None: the start), or the
 /// first node after it that has not committed yet and whose operation may
 /// contribute `f` (`Operation::contributes`): a contribution that may still
 /// come is not the first.
 pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>, me: NodeId) -> Next {
+    // (checked as filed, `as_filed`: the nodes up to the filed end, where
+    // it stands)
+    let settled = match AS_FILED.get() {
+        None => None,
+        Some((None, incl)) => Some((None, incl)),
+        Some((Some(n), incl)) => pos_of(eng, n).map(|p| (Some(p), incl)),
+    };
     let mut cur: Option<SegId> = match after {
         Some(p) => eng.seg_for_pos(p).map(|s| s.id).or_else(|| eng.order.first()),
         None => eng.order.first(),
@@ -416,7 +512,10 @@ pub(crate) fn next_contribution(eng: &Engine, f: Field, after: Option<Pos>, me: 
                 }
                 // (a node to run, again or for the first time: its
                 // contribution is not known, the one it made last may go)
-                let open = eng.node(*id).is_open();
+                // (one before the search's filed end, open since, is
+                // taken as committed, `as_filed`)
+                let open = eng.node(*id).is_open()
+                    && !settled.is_some_and(|(end, incl)| end.is_none_or(|e| if incl { *p <= e } else { *p < e }));
                 if !open && let Some(&x) = inner.contribs.get(&f).and_then(|m| m.get(p)) {
                     hit = Some((
                         Next {
@@ -539,7 +638,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             .map(|b| vals.bool(b))
         }
         Step::Proj(p) => {
-            let x = v?;
+            let Some(x) = v else {
+                return eng.projection_of_none(p);
+            };
             let proj = eng.projection(p)?;
             Some(proj(x, vals))
         }
@@ -973,13 +1074,21 @@ fn following_from(
 
 /// The parents a sibling of `me` may have: `me`'s, then its parent's,
 /// up to the line's top (a placed node's siblings are the later
-/// placements of its parent and, past them, its parent's siblings); the
-/// chain above `me`'s parent found once, when a candidate needs it.
+/// placements of its parent and, past them, its parent's siblings). A
+/// candidate parent is one of those by its depth (`Node::depth`): one as
+/// deep as `me`'s parent or deeper, `me`'s own placements among them, is
+/// none, and one above is the ancestor that many steps up. The chain above
+/// `me`'s parent is walked only as far as a candidate needs, once: a
+/// node deep in a continuation chain (each step its predecessor's
+/// placement) checked against its own placements walks none of it.
 pub(crate) struct SiblingParents {
     me: NodeId,
     at: Pos,
     parent: Option<NodeId>,
-    above: Option<FxHashSet<NodeId>>,
+    /// `parent`'s depth
+    depth: u32,
+    /// `parent`'s ancestors found so far, nearest first
+    above: Vec<NodeId>,
 }
 
 impl SiblingParents {
@@ -988,7 +1097,8 @@ impl SiblingParents {
             me: me.id,
             at: me.pos_hint(),
             parent: me.parent,
-            above: None,
+            depth: me.depth.saturating_sub(1),
+            above: Vec::new(),
         }
     }
 
@@ -999,20 +1109,22 @@ impl SiblingParents {
         if p == self.parent {
             return true;
         }
-        let parent = self.parent;
-        self.above
-            .get_or_insert_with(|| {
-                let mut s = FxHashSet::default();
-                let mut p = parent;
-                while let Some(x) = p {
-                    p = eng.node(x).parent;
-                    if let Some(y) = p {
-                        s.insert(y);
-                    }
-                }
-                s
-            })
-            .contains(&q)
+        let Some(parent) = self.parent else {
+            return false;
+        };
+        let dq = eng.node(q).depth;
+        if dq >= self.depth {
+            return false;
+        }
+        let up = (self.depth - dq) as usize;
+        while self.above.len() < up {
+            let from = self.above.last().copied().unwrap_or(parent);
+            let Some(x) = eng.node(from).parent else {
+                return false;
+            };
+            self.above.push(x);
+        }
+        self.above[up - 1] == q
     }
 
     /// Whether `n` is a sibling of `me` whatever its state and claimer: one
@@ -1458,6 +1570,21 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 /// page's PDF side stands before it; the gate's latexmk_minted at -j1
 /// and -j8 past 300 s, lectures and handin-doc at -j1 "ran N times").
 pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    unsettled_before_where(eng, me, |_| true)
+}
+
+/// [`unsettled_before`] but for nodes whose operation may define nothing
+/// (`Operation::may_define`): their run moves no read of mine. One whose
+/// output its placer takes (a picture's child) moves the placer, which is
+/// to run again from that child's commit and is waited for then.
+pub(crate) fn unsettled_definer_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let v = eng.values();
+    unsettled_before_where(eng, me, |n| {
+        !matches!(eng.op(n.op()).may_define(&n.args(), v), crate::api::MayDefine::Nothing)
+    })
+}
+
+fn unsettled_before_where(eng: &Engine, me: &Node, counts: impl Fn(&Node) -> bool) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
     let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
@@ -1475,6 +1602,7 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
                     && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
                     && !eng.op(n.op()).final_only()
                     && !n.held_panic.load(Ordering::Acquire)
+                    && counts(n)
                 {
                     return Some(*id);
                 }
@@ -1872,7 +2000,29 @@ pub(crate) fn chain_start(eng: &Engine, s: &Arc<Segment>) -> Arc<[u64]> {
 /// brackets read now are not all those before the next).
 fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
     let g = eng.scope_gen.load(Ordering::Acquire);
-    let cached = |t: &Segment| t.chain.lock().as_ref().filter(|c| c.0 == g).map(|c| c.1.clone());
+    let inst = eng.values().instance();
+    // (this thread's copy of a segment's chain at `g` first: the same chain
+    // the segment holds for `g`, copied from it or found by this thread and
+    // kept on it, with no lock taken and no count shared with another
+    // thread. Every scoped read of every worker took the segment's lock and
+    // cloned its chain: amsldoc at -j8, 14x the cycles of -j1 there)
+    let mine =
+        |t: &Segment| CHAINS.with_borrow(|c| (c.0 == inst && c.1 == g).then(|| c.2.get(&t.id).cloned()).flatten());
+    let keep = |t: &Segment, c: &[u64]| {
+        CHAINS.with_borrow_mut(|m| {
+            if m.0 != inst || m.1 != g {
+                *m = (inst, g, FxHashMap::default());
+            }
+            m.2.insert(t.id, Arc::from(c));
+        });
+    };
+    let cached = |t: &Segment| {
+        mine(t).or_else(|| {
+            let c = t.chain.lock().as_ref().filter(|c| c.0 == g).map(|c| c.1.clone())?;
+            keep(t, &c);
+            Some(c)
+        })
+    };
     if let Some(c) = cached(s) {
         return Some(c);
     }
@@ -1893,6 +2043,7 @@ fn try_chain_start(eng: &Engine, s: &Arc<Segment>) -> Option<Arc<[u64]>> {
     let store = |t: &Segment, c: &Arc<[u64]>| {
         if eng.scope_gen.load(Ordering::Acquire) == g {
             *t.chain.lock() = Some((g, c.clone()));
+            keep(t, c);
         }
     };
     let (mut prev, mut c) = match known {

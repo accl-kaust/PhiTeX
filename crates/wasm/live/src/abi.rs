@@ -147,6 +147,12 @@ pub extern "C" fn ph_provide(
     });
 }
 
+/// [`session::withdraw`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_withdraw(name: *const u8, name_len: usize) {
+    session::host_turn(|| session::withdraw(&text(name, name_len)));
+}
+
 /// [`session::pack`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_pack(id: *const u8, id_len: usize, data: *const u8, data_len: usize, ok: i32) {
@@ -214,11 +220,25 @@ pub extern "C" fn ph_step() -> i32 {
     session::step_once()
 }
 
+/// [`session::start_threads`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_threads(n: usize) -> i32 {
+    session::host_turn(|| session::start_threads(n))
+}
+
 /// [`session::close`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_close() {
     session::host_turn(|| {
         session::close();
+    });
+}
+
+/// [`session::end`].
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_end() {
+    session::host_turn(|| {
+        session::end();
     });
 }
 
@@ -262,4 +282,17 @@ pub extern "C" fn ph_strips(p: *const u8, n: usize) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_frame(p: *const u8, n: usize) -> i32 {
     session::host_turn(|| session::frame(bytes(p, n)))
+}
+
+/// [`session::graph_give`]: the graph the host saved for the document
+/// about to open (`ph_open` next; none: empty).
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_graph_give(p: *const u8, n: usize) {
+    session::host_turn(|| session::graph_give(bytes(p, n)));
+}
+
+/// [`session::graph_take`]: the graph saved last, for the host to keep.
+#[unsafe(no_mangle)]
+pub extern "C" fn ph_graph() -> i32 {
+    session::host_turn(session::graph_take)
 }

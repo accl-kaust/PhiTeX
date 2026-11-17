@@ -63,6 +63,13 @@
 #![deny(unsafe_code)]
 #![allow(clippy::many_single_char_names, clippy::too_many_lines, clippy::too_many_arguments)]
 
+/// (profile) A diagnostic line, buffered per thread (`obs::log_line`).
+macro_rules! elog {
+    ($($t:tt)*) => {
+        crate::obs::log_line(format_args!($($t)*))
+    };
+}
+
 mod api;
 mod commit;
 mod crew;
@@ -74,6 +81,8 @@ mod lock;
 mod node;
 pub mod obs;
 mod order;
+mod persist;
+mod persist_probe;
 mod read;
 mod reads;
 mod sched;
@@ -89,6 +98,8 @@ pub use api::{
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
 pub use lock::held as locks_held;
+pub use persist::{Export, ImportError, ImportStats, Imported, ReadCheck};
+pub use persist_probe::PersistProbe;
 pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_value_plus};
 
 /// The stack of every thread a run is made on (the evaluation's own and
@@ -98,6 +109,26 @@ pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_valu
 /// job 21489; `\number` 336, conditionals 456): 10 MB, with room for
 /// the run below them.
 pub const WORKER_STACK: usize = 16 << 20;
+
+/// The engine's threads, kept for the life of the process (an
+/// evaluation's own and its pool's), end: each at rest returns now, each
+/// working once its job is done, and none is kept again. For a host whose
+/// process ends with them (a wasm core's end: its threads are the host's
+/// workers); for good.
+pub fn end_threads() {
+    crew::end();
+}
+
+/// The engine's kept threads made now, up to `n` in all, each at rest
+/// until a job comes (an evaluation on `n` threads runs on `n` of them):
+/// for a host whose threads are slow to start (a wasm core's, each a
+/// worker of the host's), which starts them ahead of the first
+/// evaluation. None where there are no threads, nor once [`end_threads`]
+/// has been called.
+pub fn start_threads(n: usize) {
+    crew::start(n);
+}
 pub use values::{
-    Collected, Field, FxHashMap, FxHashSet, FxHasher, SeqNode, Value, ValueId, Values, hash_bytes, hash_words,
+    Collected, Field, FxHashMap, FxHashSet, FxHasher, HashBytes, SeqNode, Value, ValueId, Values, hash_bytes,
+    hash_words,
 };

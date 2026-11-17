@@ -33,6 +33,7 @@ import { hintsFor, keyed } from "./hints.ts";
 import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./sheetline.ts";
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
+import type { PageSel } from "./sync.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -189,7 +190,7 @@ export interface PanelEvents {
   /** The editor to `file`'s [from, to) (UTF-16 offsets); `focus` false keeps the focus on the page. */
   onGotoRange?(file: string, from: number, to: number, focus?: boolean): void;
   /** Text selected on the pages (boxes by page, PDF points): to its source. */
-  onSelectPage?(sel: { k: number; rects: [number, number, number, number][] }[]): void;
+  onSelectPage?(sel: PageSel[]): void;
   /** Alt+Shift+P: return true if the host handled it (docked: PDF ⇄ PhiTeX); else the window collapses. */
   onShortcut?(): boolean;
   /** "Take the tour" (settings). */
@@ -1824,6 +1825,15 @@ export class Panel {
    * settles and dives into the page beneath, and the sheet is gone.
    */
   private sheetDown(): void {
+    // (the first pages in with no sheet up, a document ready when the tab
+    // opened (no opening plays then): opened all the same, and the tips not
+    // seen yet offered as after an opening. A first visit to a document
+    // built at once offered none)
+    if (!this.anim && !this.opened && !this.reopen) {
+      this.opened = true;
+      setTimeout(() => this.tips("unseen"), 600);
+      return;
+    }
     if (!this.anim || this.ending) return;
     if (performance.now() - this.animSince < 400) return this.stopSheet();
     this.ending = true;
@@ -3069,6 +3079,8 @@ export class Panel {
 
   private tipAt = -1;
   private tipList: typeof TIPS = [];
+  /** The listener closing the tip shown when its control is used. */
+  private tipUsed?: AbortController;
 
   /**
    * The tips now: those not seen yet, where the host keeps them from showing
@@ -3136,6 +3148,8 @@ export class Panel {
   private tip(i: number): void {
     const el = this.$("#tip");
     this.root.querySelectorAll(".ringed").forEach((e) => e.classList.remove("ringed"));
+    this.tipUsed?.abort();
+    this.tipUsed = undefined;
     this.tipAt = i;
     const t = this.tipList[i];
     if (!t) return void (el.hidden = true);
@@ -3144,6 +3158,10 @@ export class Panel {
     // (a control hidden at this width: the menu that holds it)
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
+    // (the control it points at used: the tip has done its work and goes, the tour
+    // with it; left open, it covered what the control opened, Compare's Next)
+    const used = (this.tipUsed = new AbortController());
+    target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
     el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
@@ -3584,8 +3602,11 @@ export class Panel {
     const pg = this.$<HTMLInputElement>("#pgin");
     if (this.root.activeElement !== pg) pg.value = n ? String(k + 1) : "–";
     this.$("#pgn").textContent = String(n);
-    // (as wide as the count's digits, the most it can say)
-    pg.style.width = `${String(n || 1).length + 1.6}ch`;
+    // (as wide as the count's digits, the most it can say, three at least:
+    // as a build streams its pages the count grows, and the buttons beside
+    // it moved under the pointer, a click on Compare at page 9 landing
+    // beside it at page 15)
+    pg.style.width = `${Math.max(3, String(n || 1).length) + 1.6}ch`;
     queueMicrotask(() => this.emit());
   }
 

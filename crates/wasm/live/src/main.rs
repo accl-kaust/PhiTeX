@@ -41,6 +41,12 @@
 //!   (`ph_main_output`), the PDF the viewer is shown (`ph_pdf`) or any
 //!   file the build wrote (`ph_file`).
 //!
+//! - `ph_end` ends the core for good: every thread of the module's own
+//!   returns from `wasi_thread_start` (the session thread after its step,
+//!   the engine's kept threads once at rest), every ask waiting for the
+//!   host answered as not had, so the host can join its workers and a
+//!   Node host exits by itself.
+//!
 //! Requests and answers are bytes in the module's memory: the host gets
 //! room with `ph_alloc`, and takes an answer's bytes at `ph_output_ptr`,
 //! `ph_output_len`.
@@ -89,6 +95,9 @@ static GLOBAL: mem::Counted = mem::Counted;
     )
 )]
 mod shell;
+// (natively too under test: its answers tested with the workspace's)
+#[cfg(any(target_arch = "wasm32", test))]
+mod step;
 #[cfg(target_arch = "wasm32")]
 mod store;
 // (the document, the session thread and what the exports call: safe code)

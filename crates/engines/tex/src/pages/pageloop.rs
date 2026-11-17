@@ -58,9 +58,12 @@ pub(crate) const FIRE_USED: &str = "pages:used";
 /// The lists of [`FIRE_USED`]'s first part.
 pub(crate) const FIRE_USED_BUCKETS: usize = 256;
 
-/// The list of [`FIRE_USED`]'s first part that holds field `f`.
-pub(crate) fn fire_used_bucket(f: ValueId) -> usize {
-    let h = f.raw().wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
+/// The list of [`FIRE_USED`]'s first part that holds field `f`: by its
+/// id as every store holding it at its place has it (`Values::stable_raw`),
+/// so the lists a graph loaded holds (`crate::api::Build::load`) are those
+/// its runs make again.
+pub(crate) fn fire_used_bucket(v: &Values, f: ValueId) -> usize {
+    let h = v.stable_raw(f).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
     usize::try_from(h).unwrap_or(0)
 }
 
@@ -91,9 +94,15 @@ pub(crate) fn fire_conflict_field(v: &Values, piece: NodeId, k: u32) -> Field {
 /// running before that definition.
 pub(crate) const FIRE_LEFT: &str = "pages:left";
 
-/// [`FIRE_LEFT`]' field of `f` in `piece`.
+/// [`FIRE_LEFT`]' field of `f` in `piece`: `f` by its id as every store
+/// holding it at its place has it (`Values::stable_raw`), so a graph
+/// loaded (`crate::api::Build::load`) names the field its runs read.
 pub(crate) fn fire_left_field(v: &Values, piece: NodeId, f: Field) -> Field {
-    v.field(&format!("{FIRE_LEFT}:{}:{}", piece.raw(), f.0.raw()))
+    v.field(&format!(
+        "{FIRE_LEFT}:{}:{}",
+        piece.raw(),
+        v.stable_raw(f.0)
+    ))
 }
 
 /// The page of a fired page, as its finisher reads it:
@@ -1490,6 +1499,17 @@ impl Run<'_, '_> {
         (prev, after, base): (Option<NodeId>, Option<(NodeId, NodeId)>, usize),
     ) {
         let v = self.v;
+        // (observe, `PHITEX_PAGE_PLACE`: each page's finisher and the
+        // piece it is placed after)
+        if crate::exec::obs_flag!("PHITEX_PAGE_PLACE") {
+            eprintln!(
+                "page-place: loop {} page {i} key {key:?} cursor {} prev {:?} after {:?}",
+                self.cx.node().raw(),
+                cursor.raw(),
+                prev.map(NodeId::raw),
+                after.map(|(c, f)| (c.raw(), f.raw()))
+            );
+        }
         self.loop_keys.taken.insert(key);
         self.cx
             .define_with(key.field(v, PAGE_OF), x, Locality::Global);
@@ -1791,6 +1811,18 @@ impl Run<'_, '_> {
                 i64::try_from(j).unwrap_or(i64::MAX),
             ),
         );
+        if crate::exec::obs_flag!("PHITEX_PAGE_PLACE") {
+            eprintln!(
+                "page-fire: loop {} key nth {} at {} k {} in_material {} best {} last spans {:?}",
+                self.cx.node().raw(),
+                page.key.nth,
+                page.at.raw(),
+                page.k,
+                page.in_material,
+                page.best,
+                &page.spans[page.spans.len().saturating_sub(3)..]
+            );
+        }
         self.emit_page(i, page.key, page.at, x, args, (prev, ls.after, ls.base));
         ls.checkpoints.push(Checkpoint {
             key: page.key,
@@ -2023,7 +2055,7 @@ impl Run<'_, '_> {
         self.ops
             .fin_defs_start
             .locked()
-            .get(&fin_key_class(hint, pen))
+            .get(&fin_key_class(v, hint, pen))
             .and_then(|d| d.last.iter().find(|e| e.0 == rtn).map(|e| e.1))
             // (`\deadcycles` guessed 0, its register maps kept)
             .map_or_else(empty, |x| rtn_as_guess(v, x))

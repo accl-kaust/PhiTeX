@@ -34,6 +34,19 @@ impl NodeId {
 #[cfg_attr(feature = "observe", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnitId(pub(crate) u32);
 
+impl UnitId {
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// The unit numbered `raw` (an id an exported graph kept, `Engine::import`).
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> UnitId {
+        UnitId(raw)
+    }
+}
+
 /// Where a definition is seen: its scope depth. Scopes are brackets on
 /// the line (`Effect`): a node closes some before itself and opens some
 /// after itself, and the depth at a position is the count of scopes open
@@ -595,6 +608,8 @@ pub struct Report {
     /// Runs stopped at a check (`Ctx::tick`) because a read moved while
     /// they ran: run again on what it moved to.
     pub stopped_stale: u64,
+    /// The runs' periodic checks (`Ctx::tick`), each counted once.
+    pub ticks: u64,
     /// Runs that panicked on inputs that moved while they ran, run again
     /// (a panic on inputs that still hold is `EvalError::OpPanicked`).
     pub stale_panics: u64,

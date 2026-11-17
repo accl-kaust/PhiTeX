@@ -24,6 +24,9 @@
 //!   are [`Ask::SetFile`], [`Ask::Edit`] and [`Ask::Closed`] (the file as
 //!   on disk again); while a file is open its buffer owns it
 //!   ([`Server::owns`]). `didSave` brings nothing the buffer did not.
+//!   `workspace/didChangeWatchedFiles` is [`Ask::Changed`] for each file
+//!   no buffer owns (created, changed or deleted outside the editor: read
+//!   again at the next build, as a watch's file event is).
 //! - **Builds.** [`Server::building`] (a build began),
 //!   [`Server::progress`] (its records) and [`Server::built`]: the
 //!   problems published by file (`textDocument/publishDiagnostics`, the
@@ -277,7 +280,24 @@ pub enum Trouble {
 /// `p` as a `file:` URI (its bytes past the unreserved ones and `/`
 /// percent-encoded).
 pub fn uri_of(p: &Path) -> String {
-    format!("file://{}", encode(&p.to_string_lossy()))
+    let s = p.to_string_lossy();
+    // (Windows's: `C:\x` (or `\\?\C:\x`, as a canonical path is) is
+    // `file:///C%3A/x`, a share's `\\host\share` `file://host/share`)
+    if cfg!(windows) {
+        let s = s.replace('\\', "/");
+        let s = s
+            .strip_prefix("//?/UNC/")
+            .map_or(s.clone(), |r| format!("//{r}"));
+        let s = s.strip_prefix("//?/").unwrap_or(&s);
+        if let Some(share) = s.strip_prefix("//") {
+            return format!("file://{}", encode(share));
+        }
+        if !s.starts_with('/') {
+            return format!("file:///{}", encode(s));
+        }
+        return format!("file://{}", encode(s));
+    }
+    format!("file://{}", encode(&s))
 }
 
 /// `s` with its bytes past the unreserved ones and `/` percent-encoded.
@@ -318,7 +338,22 @@ fn decode(s: &str) -> String {
 pub fn path_of(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    Some(PathBuf::from(decode(rest)))
+    let p = decode(rest);
+    // (Windows's: `file:///c%3A/x` (VS Code's) is `c:/x`, not the
+    // current drive's `/c:/x`; `file://host/share/x` a share's)
+    if cfg!(windows) {
+        return Some(PathBuf::from(windows_path(&p)));
+    }
+    Some(PathBuf::from(p))
+}
+
+/// The Windows path of a `file:` URI's decoded path `p` (past `file://`).
+fn windows_path(p: &str) -> String {
+    match p.as_bytes() {
+        [b'/', d, b':', ..] if d.is_ascii_alphabetic() => p[1..].to_owned(),
+        [b'/', ..] => p.to_owned(),
+        _ => format!("//{p}"),
+    }
 }
 
 /// The UTF-16 offset in `text` of LSP position `line`, `character` (a
@@ -1179,10 +1214,17 @@ impl Server {
                 }
             }
             // (notifications of no interest)
-            "$/cancelRequest"
-            | "$/setTrace"
-            | "textDocument/didSave"
-            | "workspace/didChangeWatchedFiles" => {}
+            "$/cancelRequest" | "$/setTrace" | "textDocument/didSave" => {}
+            // (changed outside the editor: those no buffer here owns)
+            "workspace/didChangeWatchedFiles" => {
+                for c in p["changes"].as_array().into_iter().flatten() {
+                    if let Some(file) = c["uri"].as_str().and_then(|u| self.name(u))
+                        && !lock(&self.st).docs.contains_key(&file)
+                    {
+                        self.host.ask(Ask::Changed { file });
+                    }
+                }
+            }
             "workspace/didChangeConfiguration" => {
                 let given = &p["settings"]["phitex"];
                 if given.is_object() {
@@ -1649,6 +1691,33 @@ mod tests {
     }
 
     #[test]
+    fn windows_uris() {
+        assert_eq!(windows_path("/c:/a b/x.tex"), "c:/a b/x.tex");
+        assert_eq!(windows_path("/D:/x.tex"), "D:/x.tex");
+        assert_eq!(windows_path("host/share/x.tex"), "//host/share/x.tex");
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                uri_of(Path::new(r"D:\a b\x.tex")),
+                "file:///D%3A/a%20b/x.tex"
+            );
+            assert_eq!(uri_of(Path::new(r"\\?\D:\a\x.tex")), "file:///D%3A/a/x.tex");
+            assert_eq!(
+                uri_of(Path::new(r"\\host\share\x.tex")),
+                "file://host/share/x.tex"
+            );
+            assert_eq!(
+                path_of("file:///d%3A/a%20b/x.tex").unwrap(),
+                Path::new(r"d:\a b\x.tex")
+            );
+            assert_eq!(
+                path_of(&uri_of(Path::new(r"D:\x\y.tex"))).unwrap(),
+                Path::new(r"D:\x\y.tex")
+            );
+        }
+    }
+
+    #[test]
     fn positions() {
         let t = "ab\nc😀d\n\nlast";
         assert_eq!(offset(t, 0, 0), 0);
@@ -1736,6 +1805,38 @@ mod tests {
         assert_eq!(
             lock(&sent).last().unwrap()["params"]["uri"],
             "overleaf://p1/ch%201.tex"
+        );
+    }
+
+    /// Files changed outside the editor (`workspace/didChangeWatchedFiles`)
+    /// are each read again at the next build ([`Ask::Changed`]), but one
+    /// the editor holds open: its buffer owns it.
+    #[test]
+    fn watched_files_changed_are_read_again_unless_open() {
+        let (s, host, _) = server();
+        init(&s, "file:///p", false);
+        s.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": "a"}}}));
+        lock(&host.0).clear();
+        s.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeWatchedFiles", "params": {"changes": [
+            {"uri": "file:///p/refs.bib", "type": 2},
+            {"uri": "file:///p/a.tex", "type": 2},
+            {"uri": "file:///p/fig/new.png", "type": 1},
+            {"uri": "file:///p/old.tex", "type": 3},
+            {"uri": "file:///elsewhere/x.tex", "type": 2}
+        ]}}));
+        assert_eq!(
+            *lock(&host.0),
+            [
+                Ask::Changed {
+                    file: "refs.bib".into()
+                },
+                Ask::Changed {
+                    file: "fig/new.png".into()
+                },
+                Ask::Changed {
+                    file: "old.tex".into()
+                },
+            ]
         );
     }
 

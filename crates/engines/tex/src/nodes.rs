@@ -1403,9 +1403,13 @@ pub(crate) fn sealed_of(v: &Values, l: ValueId) -> Option<Sealed> {
 }
 
 /// The hash of a box's head (its value's words before its list), in 56
-/// bits (an integer kept in its value's id, never interned).
-pub(crate) fn head_hash(head: &[ValueId]) -> i64 {
-    let words: Vec<u64> = head.iter().map(|x| x.raw()).collect();
+/// bits (an integer kept in its value's id, never interned). Of the
+/// words' ids as every store holding them at the same places has them
+/// (`Values::stable_raw`): a graph loaded into another store
+/// (`crate::api::Build::load`) matches a sealed line made before the save
+/// with the line made again after it.
+pub(crate) fn head_hash(v: &Values, head: &[ValueId]) -> i64 {
+    let words: Vec<u64> = head.iter().map(|&x| v.stable_raw(x)).collect();
     i64::try_from(phitex_defuse::hash_words(0x7365_616c_6564_0001, &words) >> 8).unwrap_or(0)
 }
 
@@ -1807,7 +1811,7 @@ pub(crate) fn unit_shape(
                     };
                     let zero = v.int(0);
                     let mut b = bx;
-                    let head = head_hash(&b[..6]);
+                    let head = head_hash(v, &b[..6]);
                     b[6] = zero;
                     b[7] = zero;
                     b[8] = zero;
@@ -1947,7 +1951,7 @@ mod tests {
         let s = sealed_of(&v, b[9]).expect("a stand-in");
         assert_eq!(
             (s.piece, s.k, s.head, s.skel),
-            (77, 1, head_hash(&real[..6]), ValueId::UNIT)
+            (77, 1, head_hash(&v, &real[..6]), ValueId::UNIT)
         );
         assert_eq!(
             list_of(&v, s.fonts)

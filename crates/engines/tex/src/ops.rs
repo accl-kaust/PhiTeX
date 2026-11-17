@@ -281,6 +281,26 @@ pub(crate) fn run_node(
             crate::api::mem_mb()
         );
     }
+    // (observe, `PHITEX_FATAL_TRACE`: a run that ended fatally, its node,
+    // its op, its time, its last log events and where its input stands)
+    if matches!(res, Err(Halt::Fatal)) && crate::exec::obs_flag!("PHITEX_FATAL_TRACE") {
+        let log = r.v.field("log");
+        let ev: Vec<String> = r
+            .contribs
+            .iter()
+            .filter(|(f, _)| *f == log)
+            .rev()
+            .take(6)
+            .map(|(_, x)| r.v.render(*x).chars().take(300).collect())
+            .collect();
+        eprintln!(
+            "fatal-trace: node {} op {} after {t_body:?}, {} commands; last log events {ev:?}; input {}",
+            r.cx.node().raw(),
+            r.op_name(),
+            r.cmds,
+            r.trace_context().chars().take(600).collect::<String>()
+        );
+    }
     if trace {
         eprintln!(
             "  -> {}",

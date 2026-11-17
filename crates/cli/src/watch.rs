@@ -59,6 +59,11 @@ enum Event {
     /// The editor's settings changed (`--lsp`): a new session where they
     /// change the threads or the main file.
     Configure(phitex_live::lsp::Settings),
+    /// The main file changed between its first read (the target resolved,
+    /// [`modern::Target::main_read`]) and the watcher's start, a write no
+    /// event told: the target resolved again (its engine is chosen by the
+    /// text), the files read again.
+    ReadEarly,
 }
 
 /// What the watch keeps from one session to the next (the editor's
@@ -173,9 +178,37 @@ impl Wanted {
     }
 }
 
-/// `p` canonical, where it is (else as it is).
+/// `p` canonical (absolute, its links resolved, no `.` or `..`), whether
+/// or not a file is there now: the longest part of it that exists made
+/// canonical, the rest joined. A file read is known by this one name
+/// however it was named (`./linked/far.png`, a folder's link, macOS's
+/// `/var` for `/private/var`) and so is each event of it, which the
+/// system reports at the real path: also while a save has it removed for
+/// a moment (an editor's or a program's save that removes the file and
+/// writes it anew, a build made in that moment), else its name kept as
+/// the build gave it and every later event of the file missed.
 fn canonical(p: &Path) -> PathBuf {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    if let Ok(c) = p.canonicalize() {
+        return c;
+    }
+    let parts: Vec<std::path::Component> = p.components().collect();
+    for k in (1..parts.len()).rev() {
+        let head: PathBuf = parts[..k].iter().collect();
+        let Ok(mut c) = head.canonicalize() else {
+            continue;
+        };
+        for part in &parts[k..] {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    c.pop();
+                }
+                other => c.push(other),
+            }
+        }
+        return c;
+    }
+    p.to_path_buf()
 }
 
 /// The system's watcher and the folders it watches outside the watch's
@@ -211,6 +244,13 @@ const CLOSES: bool = cfg!(any(target_os = "linux", target_os = "android"));
 /// anyway (a writer that keeps it open).
 const WRITE_WAIT: Duration = Duration::from_millis(500);
 
+/// How long nothing comes after a build before the watch saves its
+/// persisted graph again (the first build's is saved at once): a long
+/// pause in the work. A save takes a core for 0.2-0.5 s (Grail) and is
+/// given up for any event, so it never delays an edit by more than a
+/// check; kept rare all the same.
+const GRAPH_IDLE: Duration = Duration::from_secs(30);
+
 /// `changed` without the watch's own writes (`ours`: a change that
 /// leaves the bytes it wrote).
 fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
@@ -237,6 +277,8 @@ fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
 /// editor that saves by renaming the old file to a backup and writing a
 /// new one (vim's `backupcopy=no`, many others) leaves no file at that
 /// name for a moment, and a build read then is one of an empty text.
+/// Where the system says no close, a file is read at each event of it,
+/// and one not there waits as one removed.
 fn watcher(
     root: &Path,
     wanted: WantedRef,
@@ -247,7 +289,13 @@ fn watcher(
     let r = root.to_path_buf();
     // (the files written and not closed yet)
     let writing: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
+    // (the system's events as they come, on standard error, with
+    // PHITEX_WATCH_EVENTS set: what a platform really sends)
+    let log = std::env::var_os("PHITEX_WATCH_EVENTS").is_some();
     let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+        if log {
+            eprintln!("phitex watch: file event {ev:?}");
+        }
         let Ok(ev) = ev else { return };
         // (a rename's pair: its two halves come as `From` and `To` too)
         if matches!(
@@ -273,6 +321,28 @@ fn watcher(
             let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
             ev.paths.into_iter().filter(|p| w.wants(&r, p)).collect()
         };
+        let mut open = writing.lock().unwrap_or_else(PoisonError::into_inner);
+        // (`p` read after WRITE_WAIT unless an event of it comes first
+        // that reads it: its writer keeps it open, or it stays gone)
+        let wait = |open: &mut HashSet<PathBuf>, p: PathBuf| {
+            if open.insert(p.clone()) {
+                let (writing, ours, tx) = (writing.clone(), ours.clone(), tx.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(WRITE_WAIT);
+                    let late = writing
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&p);
+                    let mut changed = vec![p];
+                    if late {
+                        not_ours(&ours, &mut changed);
+                        if !changed.is_empty() {
+                            let _ = tx.send((Instant::now(), Event::Files(changed)));
+                        }
+                    }
+                });
+            }
+        };
         if CLOSES {
             let written = matches!(
                 ev.kind,
@@ -285,27 +355,10 @@ fn watcher(
                 ev.kind,
                 EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))
             );
-            let mut open = writing.lock().unwrap_or_else(PoisonError::into_inner);
             if written || gone {
                 // (read after WRITE_WAIT if its writer keeps it open)
                 for p in changed.drain(..) {
-                    if open.insert(p.clone()) {
-                        let (writing, ours, tx) = (writing.clone(), ours.clone(), tx.clone());
-                        std::thread::spawn(move || {
-                            std::thread::sleep(WRITE_WAIT);
-                            let late = writing
-                                .lock()
-                                .unwrap_or_else(PoisonError::into_inner)
-                                .remove(&p);
-                            let mut changed = vec![p];
-                            if late {
-                                not_ours(&ours, &mut changed);
-                                if !changed.is_empty() {
-                                    let _ = tx.send((Instant::now(), Event::Files(changed)));
-                                }
-                            }
-                        });
-                    }
+                    wait(&mut open, p);
                 }
             } else if closed {
                 // (a close of a file not written changes nothing)
@@ -320,8 +373,29 @@ fn watcher(
                 // still written is read once closed)
                 changed.retain(|p| !open.contains(p));
             }
+        } else {
+            // (no close said: a file there is read now, a wait for it
+            // ended; one gone from its name, not there now, waits as on
+            // Linux. Asked of the file, not of the event's kind: macOS's
+            // are the sums of what befell the name (a file written in
+            // place comes as created, its metadata and its data
+            // modified; one removed as removed and renamed))
+            let (gone, there): (Vec<PathBuf>, Vec<PathBuf>) = changed
+                .into_iter()
+                .partition(|p| std::fs::symlink_metadata(p).is_err());
+            for p in &there {
+                open.remove(p);
+            }
+            for p in gone {
+                wait(&mut open, p);
+            }
+            changed = there;
         }
+        drop(open);
         not_ours(&ours, &mut changed);
+        if log {
+            eprintln!("phitex watch: changed now {changed:?}");
+        }
         if !changed.is_empty() {
             let _ = tx.send((Instant::now(), Event::Files(changed)));
         }
@@ -425,6 +499,144 @@ fn write_pdf_now(
     }))
 }
 
+/// A build's PDF as kept for `phitex session png` ([`Shots`]): the
+/// layout the build left (its exact file made when asked), or its bytes.
+#[derive(Clone)]
+enum ShotPdf {
+    Layout(phitex_pdf::Layout),
+    Bytes(Arc<Vec<u8>>),
+}
+
+impl ShotPdf {
+    /// The build's exact PDF.
+    fn exact(&self) -> Result<Arc<Vec<u8>>, String> {
+        match self {
+            ShotPdf::Layout(l) => l.exact().map_err(|e| e.to_string()),
+            ShotPdf::Bytes(b) => Ok(b.clone()),
+        }
+    }
+}
+
+/// The last two builds' PDFs (`phitex session png --diff` draws the
+/// same part of both), each with its build's number.
+#[derive(Default)]
+struct Shots {
+    now: Option<(usize, ShotPdf)>,
+    before: Option<(usize, ShotPdf)>,
+}
+
+impl Shots {
+    /// Build `n`'s report `r` kept as the last build's PDF, the one kept
+    /// before it now the one before. A build of no PDF (an engine
+    /// failure, no page) changes nothing.
+    fn keep(&mut self, n: usize, r: &session::Report) {
+        if r.internal.is_some() {
+            return;
+        }
+        let pdf = match &r.out.layout {
+            Some(l) => ShotPdf::Layout(l.clone()),
+            None if r.out.pdf.is_empty() => return,
+            None => ShotPdf::Bytes(r.out.pdf.clone()),
+        };
+        self.before = self.now.replace((n, pdf));
+    }
+}
+
+/// `phitex session png`'s files of the last build ([`Ask::Shot`]), made
+/// off the watch's loop: the exact PDFs of the last build and the one
+/// before it as `build-N.pdf` in `dir` (each written once; the folder's
+/// other builds' removed); the pages (from 0) the engine placed the
+/// lines of the source ranges `at` on (`candidates`), and the glyph
+/// origins (as `phitex_tex::PageOrigins`) of those and of `want`; the
+/// label's `\newlabel` line of the `.aux`.
+fn shot_files(
+    shots: (Option<(usize, ShotPdf)>, Option<(usize, ShotPdf)>),
+    reads: Option<phitex_live::session::Reads>,
+    dir: &Path,
+    (at, want): (&[(String, usize, usize)], &[usize]),
+    label: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let (Some((n, now)), before) = shots else {
+        return Err("the last build made no PDF".to_owned());
+    };
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let put = |k: usize, pdf: &ShotPdf| -> Result<(PathBuf, Arc<Vec<u8>>), String> {
+        let p = dir.join(format!("build-{k}.pdf"));
+        let bytes = pdf.exact()?;
+        if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
+            let tmp = dir.join(format!("build-{k}.pdf.phitex-tmp"));
+            std::fs::write(&tmp, &**bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, &p).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        Ok((p, bytes))
+    };
+    let (pdf, bytes) = put(n, &now)?;
+    let before = match &before {
+        Some((k, b)) => Some((*k, put(*k, b)?.0)),
+        None => None,
+    };
+    // (the other builds' files gone: two builds' PDFs at most)
+    let keep: Vec<String> = std::iter::once(n)
+        .chain(before.as_ref().map(|b| b.0))
+        .map(|k| format!("build-{k}.pdf"))
+        .collect();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with("build-") && name.ends_with(".pdf") && !keep.contains(&name) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    let reads = reads.unwrap_or_default();
+    let newlabel = label.and_then(|l| {
+        let key = format!("\\newlabel{{{l}}}");
+        reads
+            .aux()
+            .lines()
+            .find(|x| x.starts_with(&key))
+            .map(str::to_owned)
+    });
+    let count = phitex_render::Renderer::new()
+        .pages(&Arc::<[u8]>::from(&bytes[..]))
+        .unwrap_or(0);
+    // (the pages the engine placed the ranges' first and last lines on)
+    let mut candidates = std::collections::BTreeSet::new();
+    for (file, a, b) in at {
+        for x in [*a, b.saturating_sub(1).max(*a)] {
+            candidates.extend(reads.pages_of_source(file, x));
+        }
+    }
+    let mut files: Vec<String> = Vec::new();
+    let mut pages: Vec<serde_json::Value> = Vec::new();
+    let asked: std::collections::BTreeSet<usize> = candidates
+        .iter()
+        .chain(want)
+        .copied()
+        .filter(|&k| k < count)
+        .collect();
+    for k in asked {
+        let (fs, o) = reads.page_origins(k);
+        let Some(o) = o else { continue };
+        files = fs;
+        let synth: Vec<bool> = (0..o.len()).map(|i| o.is_synth(i)).collect();
+        pages.push(json!({
+            "page": k,
+            "file": o.file, "start": o.start, "end": o.end, "synth": synth,
+            "x": o.x, "y": o.y, "w": o.w, "size": o.size,
+        }));
+    }
+    Ok(json!({
+        "build": n,
+        "pdf": pdf.display().to_string(),
+        "before": before.map(|(k, p)| json!({"build": k, "pdf": p.display().to_string()})),
+        "origins": reads.has_origins(),
+        "count": count,
+        "candidates": candidates,
+        "files": files,
+        "pages": pages,
+        "newlabel": newlabel,
+    }))
+}
+
 /// Whether `a` only reads the last build (the viewer's page origins, a
 /// source place's pages, a citation, the transcript): put off while a
 /// change waits to be built.
@@ -436,6 +648,8 @@ fn is_read(a: &Ask) -> bool {
             | Ask::Cites { .. }
             | Ask::Transcript
             | Ask::WritePdf { .. }
+            | Ask::Shot { .. }
+            | Ask::Compare { .. }
     )
 }
 
@@ -528,12 +742,12 @@ impl ReadsWorker {
                                 serde_json::Value::Array(
                                     links
                                         .into_iter()
-                                        .map(|(key, p, top)| {
+                                        .map(|(key, p, top, left)| {
                                             json!({
                                                 "key": key,
                                                 "label": labels.get(&key),
                                                 "number": numbers.get(&key),
-                                                "at": [p, top],
+                                                "at": [p, top, left],
                                             })
                                         })
                                         .collect(),
@@ -1191,6 +1405,8 @@ fn build_of(t: &Target) -> String {
     t.review_mode = review_mode;
     t.review_accept_disk = review_accept_disk;
     t.watch_ask_write = watch_ask_write;
+    // (when the main file was read: no part of what is built)
+    t.main_read = None;
     format!("{t:?}")
 }
 
@@ -1326,6 +1542,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             std::process::exit(crate::EXIT_INTERNAL);
         });
     spin.done();
+    s.keep_graphs(t.graph);
     // (no log laid out after a build; the PDF file appended an update
     // section after each edit, the exact file written when idle, but
     // with `--exact`)
@@ -1343,6 +1560,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
     let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
+    // (the persisted graph's save due, since the build that left it: the
+    // first build's at once, later ones once nothing has come for
+    // GRAPH_IDLE; given up for any event, as the SyncTeX file is. Saved
+    // as the watch ends too: a watch killed loses at most what came since)
+    let graph_due: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
+    let graph_saved = std::cell::Cell::new(false);
     // (the last build's diagnostics at their places still to be made, and
     // its evaluation's key: low priority, after the build is announced,
     // once no event waits; an edit before then drops them)
@@ -1533,10 +1756,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     if let Some(v) = view.as_ref().map(View::viewer) {
         let ui = ui.clone();
         status.meter().on_streamed(Box::new(move |p, pages| {
-            ui.streamed(p.page, p.hash);
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                if p.gone {
+                    v.withdraw_page(k);
+                    return;
+                }
                 v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
+            ui.streamed(p.page, p.hash);
         }));
     }
     // (the diff's session's own status (Compare, made when first asked):
@@ -1551,10 +1778,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             .listen(Box::new(move |p| shown.progress(p)));
         let ui = ui.clone();
         diff_status.meter().on_streamed(Box::new(move |p, pages| {
-            ui.streamed(p.page, p.hash);
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                if p.gone {
+                    v.diff_withdraw_page(k);
+                    return;
+                }
                 v.diff_stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
+            ui.streamed(p.page, p.hash);
         }));
     }
     {
@@ -1643,6 +1874,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     watching
         .borrow_mut()
         .add(&wanted.lock().unwrap_or_else(PoisonError::into_inner));
+    // (the main file written since it was read, before the watcher ran: no
+    // event will say so. A save that ended as the watch started (the file
+    // truncated, then filled) had the target resolved on its empty text,
+    // plain TeX, and the watch built that for good)
+    if let Some((was, p)) = &t.main_read
+        && modern::stamp(p).as_ref() != Some(was)
+    {
+        let _ = tx.send((Instant::now(), Event::ReadEarly));
+    }
     let raw = !on_stdio && !ui.json && keys::raw();
     let building = kept.building.clone();
     let at_wait = kept.waiting.clone();
@@ -1703,6 +1943,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let last = RefCell::new(Last::default());
     // (the last build when nothing is written: what the way out writes on a yes)
     let unwritten: RefCell<Option<session::Report>> = RefCell::new(None);
+    // (the last two builds' PDFs, for `phitex session png`)
+    let shots: RefCell<Shots> = RefCell::default();
     let asking = kept.asking.clone();
     // (the way out: it ends the process, unless the question it asks is
     // answered c, cancel: then it returns and the watch goes on)
@@ -1795,6 +2037,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (the records the builds changed, stored before the watch ends;
         // the exact PDF file and, with `--log`, the log)
         s.flush_records();
+        // (the persisted graph, `graph`, docs/spec-persisted-graph.md
+        // step 3: saved as the watch ends, its build quiet)
+        let _ = s.save_graph();
+        modern::graph_notes(s, o, ui);
         if let Some(u) = &s.updates()
             && let Err(e) = session::compact(u)
         {
@@ -1930,6 +2176,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (the records the build changed, stored as it settles: a no-op
         // unless a load changed them)
         s.flush_records();
+        // (the persisted graph's load at the first build, or why not)
+        modern::graph_notes(s, o, ui);
         // (an edit the build took while it ran: timed from it)
         let since = match (since, s.absorbed_at()) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -2037,6 +2285,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (an idle point after every build: the exact file written there
         // when it is not, and said to be on disk either way)
         idle_since.set(Some(Instant::now()));
+        graph_due.set(Some(Instant::now()));
         phitex_tex::timeline::lap("watch: files written (the PDF, the log, the aux files)");
         if phitex_tex::tex_time() {
             eprintln!(
@@ -2366,8 +2615,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     checked, changed, ..
                 },
                 d,
-            )) = asked_reread
+            )) = &asked_reread
             {
+                let (checked, changed, d) = (*checked, *changed, *d);
                 rows.push((
                     "files".to_owned(),
                     format!(
@@ -2527,6 +2777,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 "looked_up": r.looked_up,
                 "keys_ms": r.keys.as_secs_f64() * 1e3,
                 "lookups_ms": r.lookups.as_secs_f64() * 1e3,
+                // (what the two took: the paths keyed and the names looked
+                // up, in order)
+                "found": r.found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "absent": r.absent,
             })),
             // (runs in all, a node run again counted again: past
             // nodes_run, the work an edit did again)
@@ -2640,6 +2894,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if if pending { failed } else { !kept } {
             last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
         }
+        shots.borrow_mut().keep(builds, &r);
         // (nothing written: the last build kept, for the way out's question)
         if writing {
             drop(r);
@@ -2683,6 +2938,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     rebuild(&mut s, "cold", None, &mut cold_meanwhile);
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
+    // (`phitex session compare`'s diff: the agent's own, beside the
+    // viewer's, which it never switches)
+    let mut agent_cmp: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
     // (the diagnostics the last build left for later, made now: given to
     // the viewers and the editor, counted, said as an event)
@@ -2818,9 +3076,59 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
+        // (then the persisted graph: the first build's, later ones after
+        // a long pause; any event gives it up, kept due for the next pause)
+        let graph_left = graph_due.get().map(|t| {
+            if graph_saved.get() {
+                GRAPH_IDLE.saturating_sub(t.elapsed())
+            } else {
+                Duration::ZERO
+            }
+        });
+        if graph_left == Some(Duration::ZERO)
+            && held.is_empty()
+            && !s.synctex_due()
+            && diags_due.get().is_none()
+        {
+            match rx.try_recv() {
+                Ok(e) => held.push_back(e),
+                Err(mpsc::TryRecvError::Empty) => {
+                    let came: RefCell<Option<(Instant, Event)>> = RefCell::new(None);
+                    let stop = || {
+                        if came.borrow().is_some() {
+                            return true;
+                        }
+                        match rx.try_recv() {
+                            Ok(e) => {
+                                *came.borrow_mut() = Some(e);
+                                true
+                            }
+                            Err(mpsc::TryRecvError::Empty) => false,
+                            Err(mpsc::TryRecvError::Disconnected) => true,
+                        }
+                    };
+                    at_wait.store(true, Ordering::Relaxed);
+                    let t0 = Instant::now();
+                    let _ = s.save_graph_until(&stop);
+                    at_wait.store(false, Ordering::Relaxed);
+                    busy.borrow_mut().did("the graph saved", t0);
+                    // (given up: due again, from now)
+                    if let Some(e) = came.into_inner() {
+                        graph_due.set(Some(Instant::now()));
+                        held.push_back(e);
+                    } else {
+                        graph_due.set(None);
+                        graph_saved.set(true);
+                        modern::graph_notes(&s, o, ui);
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
         let wait = idle_since.get().map_or(Duration::from_secs(2), |t| {
             o.idle.saturating_sub(t.elapsed())
         });
+        let wait = graph_left.map_or(wait, |g| wait.min(g.max(Duration::from_millis(1))));
         let first = match held.pop_front() {
             Some(e) => e,
             None => match wait_for(&rx, wait, &at_wait) {
@@ -3041,6 +3349,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             .filter(|p| w.wants(&root, p))
                             .partition(|p| w.is_config(p))
                     };
+                    if std::env::var_os("PHITEX_WATCH_EVENTS").is_some() {
+                        eprintln!("phitex watch: the loop takes {ps:?} (settings {settings:?})");
+                    }
                     // (a settings' file changed (a .latexmkrc, a file it
                     // `do`es, phitex.toml): the target resolved again, a
                     // new session on its search paths)
@@ -3114,6 +3425,22 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 // (a build's end is taken by the loop that waits on it)
                 Event::Built => {}
+                Event::ReadEarly => {
+                    let why_now = "the main file changed as the watch started";
+                    match modern::resolve_again(o) {
+                        Ok((t2, dir)) if (build_of(&t2), Some(dir.clone())) != resolved => {
+                            if next.is_none() {
+                                next = Some(((t2, o.clone(), dir), why_now));
+                            }
+                        }
+                        // (the same target: its text read again, as a change's)
+                        _ => {
+                            main_changed = true;
+                            again = true;
+                            why.push(why_now.to_owned());
+                        }
+                    }
+                }
                 // (the file on disk is exact: written now (true), or
                 // already (false: nothing to compact, or a build since,
                 // which leaves it not exact and says nothing))
@@ -3195,6 +3522,71 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             hub.pdf_written(n, done);
                             continue;
                         }
+                        // (`phitex session png`: the PDFs and the pages'
+                        // origins written and read on a thread of their
+                        // own, from what the last build left)
+                        if let Ask::Shot {
+                            id,
+                            dir,
+                            at,
+                            pages,
+                            label,
+                        } = &a
+                        {
+                            let kept = {
+                                let k = shots.borrow();
+                                (k.now.clone(), k.before.clone())
+                            };
+                            let reads = s.reads();
+                            let (id, dir, at, pages, label) = (
+                                *id,
+                                root.join(dir),
+                                at.clone(),
+                                pages.clone(),
+                                label.clone(),
+                            );
+                            let hub = hub.clone();
+                            let _ = std::thread::Builder::new()
+                                .name("phitex-watch-shot".into())
+                                .spawn(move || {
+                                    let r = shot_files(
+                                        kept,
+                                        reads,
+                                        &dir,
+                                        (&at, &pages),
+                                        label.as_deref(),
+                                    );
+                                    hub.shot_made(id, r);
+                                });
+                            continue;
+                        }
+                        // (`phitex session compare`: the agent's diff, built
+                        // here, on the loop: it starts from the document's
+                        // build)
+                        if let Ask::Compare {
+                            id,
+                            rev,
+                            stop,
+                            look,
+                            at,
+                        } = &a
+                        {
+                            let t = Instant::now();
+                            let r = crate::compare::agent(
+                                &mut agent_cmp,
+                                &s,
+                                &root,
+                                &main_rel,
+                                &edits.buffers,
+                                rev.as_deref(),
+                                *stop,
+                                look,
+                                at.as_ref(),
+                            );
+                            busy.borrow_mut().did("session compare", t);
+                            hub.shot_made(*id, r);
+                            continue;
+                        }
                         if a == Ask::Transcript {
                             hub.transcript(last.borrow().builds, s.transcript());
                         }
@@ -3243,7 +3635,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                     }
                                     Err(e) => {
                                         ui.error(&e);
-                                        why.push("asked: a cold build".to_owned());
+                                        why.push("asked: a clean build".to_owned());
                                         again = true;
                                     }
                                 }
@@ -3382,6 +3774,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         {
             held.push_back((Instant::now(), Event::Reads));
         }
+        // (the agent's diff told the files changed, as the document's
+        // session was: its next `session compare` builds them)
+        if let Some(c) = agent_cmp.as_mut() {
+            c.files_changed(&edits.buffers, &diff_files);
+            if diff_reread {
+                c.reread();
+            }
+        }
         // (the diff: asked for, or diffed again after the edit)
         if let Some(v) = &view {
             let now = crate::compare::Now {
@@ -3428,12 +3828,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                     to.as_deref(),
                                     &now,
                                     &main_rel,
-                                    &s.job,
-                                    s.files(),
+                                    &s,
                                     diff_status.clone(),
                                     writing,
                                 )
-                                .map(|c| comparing = Some(c)),
+                                .map(|c| {
+                                    if ui.verbose > 0 {
+                                        ui.line(&st.dim(&format!("diff: {}", c.began)));
+                                    }
+                                    comparing = Some(c);
+                                }),
                             }
                         });
                         match (started, comparing.as_mut()) {
@@ -3556,11 +3960,49 @@ fn build_stats(
         "resident_kb": x.map_or(0, |x| x.rss_kb),
         "values_bytes": x.map_or(0, |x| x.values_bytes),
         "ok": r.out.errors.is_empty(),
+        // (the nodes it ran again, with their texts and why,
+        // `PHITEX_DIFF_RERAN=1`: Compare's check of what an edit runs)
+        "reran": std::env::var_os("PHITEX_DIFF_RERAN").map(|_| {
+            s.reran_texts()
+                .into_iter()
+                .map(|(op, t, why)| json!({"op": op, "text": t, "why": why}))
+                .collect::<Vec<_>>()
+        }),
     })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file's canonical name is the same while it is removed (a save's
+    /// moment between the old file and the new): through a folder's
+    /// link, with `.` in it, as the system's events name it.
+    #[cfg(unix)]
+    #[test]
+    fn canonical_holds_while_a_file_is_gone() {
+        let d = std::env::temp_dir().join(format!("phitex-canonical-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        std::fs::create_dir_all(d.join("project")).unwrap();
+        std::os::unix::fs::symlink(d.join("real"), d.join("project/linked")).unwrap();
+        let named = d.join("project/./linked/far.png");
+        std::fs::write(&named, b"x").unwrap();
+        let there = canonical(&named);
+        assert_eq!(there, d.join("real/far.png").canonicalize().unwrap());
+        std::fs::remove_file(&named).unwrap();
+        assert_eq!(canonical(&named), there, "removed");
+        assert_eq!(
+            canonical(&d.join("real/far.png")),
+            there,
+            "as the events name it"
+        );
+        assert_eq!(
+            canonical(&d.join("project/linked/sub/../far.png")),
+            there,
+            "through a missing folder and back"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// Nothing runs past a narrow terminal: a part too long for any line
     /// and the name's column cut at its edge.

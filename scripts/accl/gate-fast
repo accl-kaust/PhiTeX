@@ -10,6 +10,14 @@
 #                                       measurement; the gate runs 10)
 #   scripts/accl/gate-fast sweep [COMMIT] [N]   the research corpus's
 #                                       edit sweep in N shards (4)
+#   scripts/accl/gate-fast persist [COMMIT] [N] [J] [process]   the
+#                                       research corpus's edit sweep with
+#                                       the persisted graph's check
+#                                       (PHITEX_GRAPH_CHECK=1) at -j J
+#                                       in N shards (2, -j 1); `process`:
+#                                       across processes instead, each
+#                                       document's history of builds with
+#                                       PHITEX_GRAPH=1 (graphsweep.py)
 #   scripts/accl/gate-fast research [COMMIT]   the research corpus
 #                                       (gate-shard.sh research 0 1: ci/research.json
 #                                       against TeX Live, one job in the -doc
@@ -36,7 +44,7 @@
 # PHITEX_TEX_TIME=1; then the cold watch build at -j 1/8/16 timed by op
 # class beside the control GATE_CONTROL's recorded timings, default
 # 566fb842: gate-time.py); amsedit 8, amsedit 16 (the edit histories,
-# GATE_AMS_EDITS edits, 10); editkinds (amsldoc in one watch session
+# GATE_AMS_EDITS edits, 10; amsldoc's, then acmart's sample-sigconf's); editkinds (amsldoc in one watch session
 # per -j, 8 and 1, every edit kind in turn, gate-editkinds.py: each
 # edit's PDF against a cold build, red if not the same; its save-to-build
 # ms against its kind's target, rounds, runs and cutoffs, recorded in
@@ -128,7 +136,7 @@ sub() {
   tag="gf-$c-$1-$$-$RANDOM"
   for try in 1 2 3; do
     out=$(ACCL_COMMIT=$c ACCL_OPTS="$(with_scripts "$opts") --comment=$tag ${GATE_SBATCH-$gate_x}" "$here/accl" submit cmd \
-      env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" GATE_CG_DOC="${GATE_CG_DOC:-para4000 macros}" \
+      env GATE_TEST_TIMEOUT="${GATE_TEST_TIMEOUT:-120}" GATE_TEST_PAR="${GATE_TEST_PAR:-5}" GATE_AMS_EDITS="${GATE_AMS_EDITS:-10}" GATE_CG_DOC="${GATE_CG_DOC:-para4000 macros}" GRAPHSWEEP_IDS="${GRAPHSWEEP_IDS:-}" \
       bash -c "$boot" gate-shard "$@" 2> "$err") || true
     id=$(tail -1 <<< "$out")
     [[ "$id" =~ ^[0-9]+$ ]] && break
@@ -313,6 +321,24 @@ sweep() {
   echo "${ids[*]}"
 }
 
+# the persisted graph's check (docs/spec-persisted-graph.md, step 2):
+# the research corpus's edit sweep under PHITEX_GRAPH_CHECK=1, N shards
+# (default 2) at -j J (default 1), in the -doc image (gate-shard.sh
+# persist)
+persist() {
+  local opts img=${GATE_RESEARCH_IMAGE:-$ci_img} n=${2:-2} j=${3:-1} mode=${4:-} k
+  c=$(git rev-parse "${1:-HEAD}^{commit}")
+  order=""
+  stage
+  ids=()
+  build_first
+  opts="-c ${GATE_EDITS_CPUS:-16} --mem=96G -t 03:00:00 -J gf-persist $(on_bins cli)"
+  opts=${opts/--export=ALL,/--export=ALL,ACCL_IMAGE=$img,}
+  for k in $(seq 0 $((n - 1))); do ids+=("$(sub "$opts" "persist${mode:+-$mode}" "$k" "$n" "$j")"); done
+  echo "gate-fast: the persisted graph's check${mode:+ ($mode)} of $c at -j $j in $img, jobs ${ids[*]}" >&2
+  echo "${ids[*]}"
+}
+
 # the 50-edit histories (a measurement, not the gate)
 edits50() {
   c=$(git rev-parse "${1:-HEAD}^{commit}")
@@ -457,6 +483,7 @@ case ${1:-} in
   edits) shift; edits50 "$@" ;;
   research) shift; research "$@" ;;
   sweep) shift; sweep "$@" ;;
+  persist) shift; persist "$@" ;;
   control) shift; control "$@" ;;
   table) shift; table "$@" ;;
   -h | --help) sed -n '2,20p' "$0" ;;

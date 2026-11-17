@@ -91,7 +91,7 @@ impl CommitStats {
 pub(crate) fn own_write<'a>(
     eng: &'a Engine,
     node: &Node,
-) -> Option<(&'a Arc<Segment>, crate::lock::WriteGuard<'a, Inner>)> {
+) -> Option<(&'a Arc<Segment>, crate::lock::RWriteGuard<'a, Inner>)> {
     loop {
         if node.state() == State::Gone {
             return None;
@@ -260,7 +260,7 @@ fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8, rank: u64) -> 
     let bad = !matches!(t, Some(t) if t <= s)
         || (s == 1 && rank > 0 && t == Some(1) && sib_under(eng, x, a).is_some_and(|d| eng.node(d).rank() > rank));
     if bad && crate::obs::enabled() && crate::sched::wake_log() {
-        eprintln!(
+        elog!(
             "stranded: anchor {} slot {s}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
             a.raw(),
             x.raw(),
@@ -1119,7 +1119,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             d.value = rel_value_at(eng, d.f, node.id, c);
             if ftrace(eng, d.f) {
                 let i = reaching_at(eng, d.f, node.id, false);
-                eprintln!(
+                elog!(
                     "ftrace: rel-file {} by {} pos {} input-by {:?} input {} value {} t {}",
                     eng.values().as_str(d.f.0).unwrap_or_default(),
                     node.id.raw(),
@@ -1302,6 +1302,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Some(r) if p.unchanged || p.resumed.get() => p.moves_gen.min(r.moves_gen),
             _ => p.moves_gen,
         },
+        text: Some(p.text.clone()),
+        told: p.told,
     });
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
         r.as_ref().map_or_else(Default::default, |r| {
@@ -1342,164 +1344,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         Vec::with_capacity(old_fields.len()),
         Vec::with_capacity(old_contribs.len() + rec.contribs.len()),
     );
-    // (the reads filed at positions: field, reader, and whether a witness)
-    let mut here_reads: Vec<(Field, Reader, bool)> = Vec::with_capacity(reads.len());
-    let mut other_reads: Vec<(Field, Reader, Anchor, bool)> = Vec::with_capacity(reads.len());
-    let mut final_reads: Vec<(Field, Reader)> = Vec::new();
-    let mut range_reads: Vec<(Field, RangeReader)> = Vec::new();
-    let mut range_seen: Vec<Vec<(PathId, Option<ValueId>)>> = Vec::new();
-    let mut range_at: FxHashMap<RangeOf, usize> = FxHashMap::default();
-    let mut env_reads: Vec<(Field, crate::engine::EnvReader)> = Vec::new();
     // what the lock decides of the walks and of the run's own reads
     let mut walks: Vec<(Field, Here)> = Vec::with_capacity(nd);
     let mut wake: Vec<(NodeId, NodeId, Field)> = Vec::with_capacity(8);
     let mut later: Vec<(Field, Reader, NodeId)> = Vec::new();
     let mut holes: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
-    let mut waits: Vec<NodeId> = Vec::new();
     let mut unchecked: Vec<usize> = Vec::with_capacity(reads.len());
-    let mut refuted: Option<usize> = None;
     let mut ix = IndexOps::with_capacity(nd, nc, reads.len());
     let mut room: Option<Made> = None;
-    let mut next_answers: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
-    let parks = rec.state.is_some();
-    // (the readers filed, each once: a run asks one thing many times, a
-    // `TikZ` picture whether microtype's font list holds a font at each
-    // node's text, 20 592 reads of the list by 76 paths; filed each, every
-    // change of the list walked them all, 0.4 s of Grail's paragraph
-    // delete in its walks. Two records of one node, serial, place, path
-    // and answer are one reader: a walk asks them alike)
-    let mut filed_once: FxHashSet<FiledKey> = FxHashSet::default();
-    for (ri, r) in reads.iter().enumerate() {
-        if r.filed() && !file_all {
-            continue;
-        }
-        // (only a run that parks: a next run going on from it keeps its
-        // reads; any other's stand for its commit, and a walk asks no more
-        // of them than their serial)
-        let (kind, path) = r.kind_path();
-        let serial = if parks && stays_filed(kind, r) {
-            serial | FILED
-        } else {
-            serial
-        };
-        match kind {
-            ReadKind::Field { f, at } => {
-                let (anchor, inclusive) = match *at {
-                    Anchor::Me => (node.id, false),
-                    Anchor::Before(n) => (n, false),
-                    Anchor::AfterOwn(n) => (n, true),
-                    Anchor::End(_) | Anchor::Final => (node.id, true),
-                };
-                let rec = Reader::new(node.id, serial, anchor, inclusive, path, r.seen());
-                if !filed_once.insert((*f, serial, anchor, inclusive, path, r.seen())) {
-                    continue;
-                }
-                // (a derived read's witness, kept from an earlier run (one
-                // that stood, a state resumed from): filed on the field its
-                // name gives now as well, before the lock, so a change of
-                // that field asks it again)
-                if matches!(at, Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_))
-                    && let Some(spec) = read::derived_spec(eng, path)
-                    && read::derived_base(eng.values(), spec) != Some(*f)
-                    && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
-                    && g != *f
-                {
-                    here_reads.push((g, rec, true));
-                }
-                match at {
-                    // (a loop-back read: filed under the field, re-asked when
-                    // the last definition of it lands, changes or goes)
-                    Anchor::Final => final_reads.push((*f, rec)),
-                    Anchor::End(_) => other_reads.push((*f, rec, *at, false)),
-                    Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_) => here_reads.push((*f, rec, false)),
-                }
-            }
-            ReadKind::Env { f } => env_reads.push((
-                *f,
-                crate::engine::EnvReader {
-                    node: node.id,
-                    serial,
-                    path,
-                    seen: r.seen(),
-                },
-            )),
-            ReadKind::Fold { f, from, to, incl } => {
-                let i = *range_at.entry((*f, *from, *to, false, *incl)).or_insert_with(|| {
-                    range_reads.push((
-                        *f,
-                        RangeReader {
-                            node: node.id,
-                            serial,
-                            from: *from,
-                            to: *to,
-                            next: false,
-                            incl: *incl,
-                            hole: false,
-                            seen: Arc::from([]),
-                        },
-                    ));
-                    range_seen.push(Vec::new());
-                    range_reads.len() - 1
-                });
-                range_seen[i].push((path, r.seen()));
-            }
-            ReadKind::Next { f, after } => {
-                let i = *range_at.entry((*f, *after, None, true, false)).or_insert_with(|| {
-                    // (the bound's label and the search from it on one
-                    // layout, `read::on_one_layout`)
-                    let n = read::on_one_layout(eng, || {
-                        // (the bound's label taken under its segment's
-                        // lock, the segment met; a bound gone: its last)
-                        let from = match after {
-                            Some(n) => Some(read::pos_of(eng, *n).unwrap_or_else(|| eng.node(*n).pos_hint())),
-                            None => Some(read::unit_start(eng, node)),
-                        };
-                        next_contribution(eng, *f, from, node.id)
-                    });
-                    next_answers.insert(range_reads.len(), read::next_value(eng, &n));
-                    range_reads.push((
-                        *f,
-                        RangeReader {
-                            node: node.id,
-                            serial,
-                            from: *after,
-                            to: n.stop,
-                            next: true,
-                            incl: false,
-                            hole: n.item.is_none() && n.stop.is_some(),
-                            seen: Arc::from([]),
-                        },
-                    ));
-                    range_seen.push(Vec::new());
-                    range_reads.len() - 1
-                });
-                range_seen[i].push((path, r.seen()));
-                // (the range is filed as this search found it, its stop or
-                // the contribution it answers: a run that saw another
-                // answer is refuted here, not later by a search of its
-                // own, which may find what this one did not (a node that
-                // had contributed, re-asked meanwhile: its contribution
-                // passed over, `Node::is_open`) and let the run stand on a
-                // range filed past what it read; amsldoc -j16 ended with 0
-                // pages, the loop's rest on "none after 72" with node 75's
-                // contribution filed, 10 builds in 600 on one loaded node)
-                if refuted.is_none() && read::apply_path(eng, next_answers.get(&i).copied().flatten(), path) != r.seen()
-                {
-                    refuted = Some(ri);
-                }
-            }
-            ReadKind::Placed { .. } | ReadKind::Following { .. } => {}
-            ReadKind::Hole => {
-                if let Some(h) = r.seen().and_then(|x| eng.values().as_int(x)) {
-                    waits.push(NodeId::from_raw(u64::from_ne_bytes(h.to_ne_bytes())));
-                }
-            }
-        }
-    }
-    for ((_, r), seen) in range_reads.iter_mut().zip(range_seen) {
-        r.seen = Arc::from(seen);
-    }
-    let mut read_fields: Vec<Field> = here_reads.iter().map(|x| x.0).collect();
+    let mut plan = plan_reads(eng, node, &reads, serial, file_all, rec.state.is_some());
+    let next_ends = std::mem::take(&mut plan.next_ends);
+    let mut refuted = plan.refuted.take();
+    let mut read_fields: Vec<Field> = plan.here.iter().map(|x| x.0).collect();
     read_fields.sort_unstable();
     read_fields.dedup();
     // (what the run defines and contributes, by field: the last run's
@@ -1596,67 +1452,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let mut lap = crate::obs::Laps::new(t_lock);
         // brackets, then definitions at their depths
         bracket_change = file_brackets(eng, &mut inner, node, pos, brackets);
-        let contribs = &rec.contribs;
         // (predictions this commit replaced, handed on once the segment's
         // lock is let go)
-        for d in &filed {
-            let depth = d.depth;
-            let m = inner.defs.entry(d.f).or_default();
-            let first = m.is_empty();
-            match m.get_mut(&pos) {
-                Some(e)
-                    if e.value == d.value
-                        && (e.depth == depth || (e.provisional && at_top && e.depth == 0 && depth == GLOBAL)) =>
-                {
-                    if e.provisional {
-                        st.predictions_confirmed += 1;
-                    }
-                    e.depth = depth;
-                    e.provisional = false;
-                    e.rel = d.rel;
-                    e.by = node.id;
-                    e.multi = d.multi;
-                }
-                Some(e) => {
-                    // (judged when the evaluation ends, against what the
-                    // node then defines here: a run on stale inputs run
-                    // again is a rerun, its prediction right if its last
-                    // run agrees, `Engine::judge_predictions`)
-                    if e.provisional {
-                        replaced.push((node.id, d.f, e.value, e.depth));
-                    }
-                    *e = Def {
-                        depth,
-                        value: d.value,
-                        by: node.id,
-                        rel: d.rel,
-                        provisional: false,
-                        multi: d.multi,
-                    };
-                    changed_defs.push(d.f);
-                }
-                None => {
-                    m.insert(
-                        pos,
-                        Def {
-                            depth,
-                            value: d.value,
-                            by: node.id,
-                            rel: d.rel,
-                            provisional: false,
-                            multi: d.multi,
-                        },
-                    );
-                    changed_defs.push(d.f);
-                    if first {
-                        ix.defs_add.push(d.f);
-                    }
-                }
-            }
-            if let Some(c) = d.rel {
-                rels.push((d.f, c));
-            }
-        }
+        file_defs(
+            &mut inner,
+            node.id,
+            pos,
+            &filed,
+            at_top,
+            &mut st,
+            &mut replaced,
+            &mut changed_defs,
+            &mut rels,
+            &mut ix,
+        );
         for &f in &old_fields {
             if new_fields.contains(&f) {
                 continue;
@@ -1676,19 +1485,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         lap.lap("defs");
         // contributions
-        for &(f, x) in contribs {
-            let m = inner.contribs.entry(f).or_default();
-            let first = m.is_empty();
-            match m.insert(pos, x) {
-                Some(old) if old == x => {}
-                _ => {
-                    changed_contribs.push(f);
-                    if first {
-                        ix.contribs_add.push(f);
-                    }
-                }
-            }
-        }
+        file_contribs(&mut inner, pos, &rec.contribs, &mut changed_contribs, &mut ix);
         for &f in &old_contribs {
             if new_contribs.contains(&f) {
                 continue;
@@ -1837,6 +1634,21 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     && kn.rank() == rank
                     && !stranded(eng, &inner, &others, node.id, anchor, slot, sfloor, kpos, rank)
                 {
+                    // (kept, it is placed after the node it is placed after
+                    // now: what moves that node moves it, `relocate`, and
+                    // the checks of slots under a node, `slot_under`, find
+                    // it under the node it stands under; with its last
+                    // anchor it stayed behind when that one moved, and was
+                    // foreign between its new anchor and its continuation,
+                    // which was made anew, #45)
+                    // (every field of where it stands as a placement made
+                    // here sets them: anchor, slot, rank, continuation or
+                    // child)
+                    kn.anchor.store(anchor.raw() + 1, Ordering::Release);
+                    kn.slot.store(slot, Ordering::Release);
+                    kn.rank.store(rank, Ordering::Release);
+                    kn.follows
+                        .store(!matches!(what, Placement::Child(..)), Ordering::Release);
                     placed.push(k);
                     kept_end = Some(k);
                     prev = Some(k);
@@ -1983,38 +1795,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // reads anchored here
         node.commits.fetch_add(1, Ordering::AcqRel);
         node.committing.store(true, Ordering::SeqCst);
-        for (f, r, witness) in here_reads.drain(..) {
-            let a = eng.node(r.anchor());
-            if walk_trace(eng, f) {
-                eprintln!(
-                    "walk-trace: commit of node {} serial {} files a read anchored at {} (pos {} seg {}) in seg {} lo {} hi {}: {}",
-                    node.id.raw(),
-                    r.serial,
-                    r.anchor().raw(),
-                    a.pos_hint().0,
-                    a.seg_hint().0,
-                    seg.id.0,
-                    seg.lo.0,
-                    inner.hi.0,
-                    if r.anchor() == node.id
-                        || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor()))
-                    {
-                        "here"
-                    } else {
-                        "elsewhere"
-                    }
-                );
-            }
-            if r.anchor() == node.id || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor()))
-            {
-                if file_reader(eng, &mut inner, f, r, witness) {
-                    ix.readers_add.push(f);
-                }
-            } else {
-                let at = Anchor::Before(r.anchor());
-                other_reads.push((f, r, at, witness));
-            }
-        }
+        file_here_reads(eng, seg, &mut inner, node.id, &mut plan.here, &mut plan.other, &mut ix);
         lap.lap("readers");
         // the walks, as far as this segment goes
         changed_defs.sort_unstable();
@@ -2099,6 +1880,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             &mut placed,
         );
         let old = node.last.lock().replace(rec.clone());
+        // (the record replaced, kept where it may stand again, `Node::prior`)
+        *node.prior.lock() = old.clone().filter(|o| !Arc::ptr_eq(o, &rec) && o.may_stand_again());
         // (its record published: a placer that looked at it before this
         // sees the sequence moved, or this commit's read of the placer's
         // record below comes after the placer's, `waited_holds`)
@@ -2110,7 +1893,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let Some(f) = r.kind().field()
                 && ftrace(eng, f)
             {
-                eprintln!(
+                elog!(
                     "ftrace: read {} by {} ({}) serial {serial} seen {} filed {} {:?} t {}",
                     eng.values().as_str(f.0).unwrap_or_default(),
                     node.id.raw(),
@@ -2124,7 +1907,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
         for d in rec.defs.iter().filter(|_| crate::obs::enabled()) {
             if ftrace(eng, d.f) {
-                eprintln!(
+                elog!(
                     "ftrace: def {} by {} ({}) serial {serial} pos {} rel {:?} value {} changed {} t {}",
                     eng.values().as_str(d.f.0).unwrap_or_default(),
                     node.id.raw(),
@@ -2141,6 +1924,43 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             node.filed_floor.store(serial, Ordering::Release);
         }
         node.serial.store(serial, Ordering::Release);
+        // (`PHITEX_INTERMED_LOG`: the commit, its fields whose
+        // definitions and contributions moved, each changed definition's
+        // value)
+        if crate::obs::im_on() {
+            use std::fmt::Write as _;
+            for f in changed_defs.iter().chain(&changed_contribs) {
+                crate::obs::im_changed(f.0.raw());
+            }
+            let mut d = String::new();
+            // (a commit of thousands of definitions, the preamble's: their
+            // count alone)
+            if changed_defs.len() > 512 {
+                let _ = write!(d, " many={}", changed_defs.len());
+            } else {
+                let ch: std::collections::HashSet<Field> = changed_defs.iter().copied().collect();
+                let mut put = std::collections::HashSet::new();
+                for x in rec.defs.iter().filter(|x| ch.contains(&x.f)) {
+                    put.insert(x.f);
+                    let _ = write!(d, " {}={}", crate::obs::im_field(eng, x.f), x.value.raw());
+                }
+                for &f in changed_defs.iter().filter(|f| !put.contains(*f)) {
+                    let _ = write!(d, " {}=-", crate::obs::im_field(eng, f));
+                }
+            }
+            let mut c = String::new();
+            for &f in &changed_contribs {
+                let _ = write!(c, " {}", crate::obs::im_field(eng, f));
+            }
+            elog!(
+                "imc\t{}\t{serial}\t{}\t{}\t{}\t{}\t{d}\t{c}",
+                node.id.raw(),
+                crate::sched::log_clock(std::time::Instant::now()),
+                u8::from(old.as_ref().is_some_and(|o| o.output != rec.output)),
+                u8::from(old.as_ref().is_none_or(|o| o.provisional)),
+                eng.quiets.load(Ordering::Relaxed)
+            );
+        }
         // (`PHITEX_REFUTE_LOG`: a run again whose products are its last
         // run's, defined, contributed and output alike: a cutoff's)
         if refute_log()
@@ -2153,7 +1973,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     .iter()
                     .zip(&rec.defs)
                     .all(|(a, b)| a.f == b.f && a.value == b.value && a.rel == b.rel);
-            eprintln!(
+            elog!(
                 "redo:\t{}\t{}\t{}",
                 node.id.raw(),
                 eng.op(node.op()).name(),
@@ -2171,7 +1991,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     && let Some(name) = eng.values().as_str(f.0)
                     && (keys.is_empty() || keys.contains(&name))
                 {
-                    eprintln!(
+                    elog!(
                         "kread:\t{}\t{}\t{name}\t{}",
                         node.id.raw(),
                         pos.0,
@@ -2207,77 +2027,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a node read at that is gone by now: a read that found a value there
     // finds none, and no removal will ask it again)
     let mut anchor_gone: Vec<(Field, NodeId)> = gone_kept;
-    // (the reads at one anchor, in a row, filed under one hold of its
-    // segment's lock, at most `ANCHOR_BATCH` a hold: a picture's run reads
-    // everything before its parent, 144 000 reads at one node, a lock
-    // taken each)
-    let mut other_reads = other_reads.into_iter().peekable();
-    let mut firsts: Vec<Field> = Vec::new();
-    while let Some((f, r, at, witness)) = other_reads.next() {
-        // (a read at a unit's end: filed with the field, not at the node
-        // that was last when it committed. A node placed after that one,
-        // or a split of the last segment under way while the last node
-        // was looked up (the lookup's order of segments taken before the
-        // split's new one is in it), left the reader before a definition
-        // reaching the end, whose walk never came back to it: finishers
-        // at -j8 kept a page their loop had moved on from, marginpars28
-        // wrong in 10 of 120 builds. The walks that pass the unit's end
-        // re-ask it, `reask_ends`)
-        if let Anchor::End(u) = at {
-            eng.ranges.add_end(f, u, r, |x| live(eng, x.node(), x.serial));
-            continue;
-        }
-        let anchor = r.anchor();
-        let a = eng.node(anchor);
-        if let Some((seg, mut inner)) = own_write(eng, a) {
-            firsts.clear();
-            if file_reader(eng, &mut inner, f, r, witness) {
-                firsts.push(f);
-            }
-            let mut n = 1;
-            while n < ANCHOR_BATCH
-                && let Some((g, r2, _, w2)) =
-                    other_reads.next_if(|(_, x, at, _)| x.anchor() == anchor && !matches!(at, Anchor::End(_)))
-            {
-                if file_reader(eng, &mut inner, g, r2, w2) {
-                    firsts.push(g);
-                }
-                n += 1;
-            }
-            drop(inner);
-            for &g in &firsts {
-                eng.readers.add(g, seg.lo, seg.id);
-            }
-        } else {
-            if r.seen().is_some() {
-                anchor_gone.push((f, anchor));
-            }
-            while let Some((g, r2, _, _)) =
-                other_reads.next_if(|(_, x, at, _)| x.anchor() == anchor && !matches!(at, Anchor::End(_)))
-            {
-                if r2.seen().is_some() {
-                    anchor_gone.push((g, anchor));
-                }
-            }
-        }
-    }
-    file_ranges(eng, ww, range_reads, node.id, &mut st);
-    file_waits(eng, ww, node, serial, waits, &mut st);
-    if eng.op(node.op()).read_back() && !changed_defs.is_empty() {
-        eng.has_finals.store(true, Ordering::Release);
-        for &f in &changed_defs {
-            eng.ranges.mark_read_back(f);
-        }
-    }
-    for (f, r) in final_reads {
-        if !eng.has_finals.load(Ordering::Acquire) {
-            eng.has_finals.store(true, Ordering::Release);
-        }
-        eng.ranges.add_final(f, r, |x| live(eng, x.node(), x.serial));
-    }
-    for (f, r) in env_reads {
-        eng.ranges.add_envs(f, vec![r], |x| live(eng, x.node, x.serial));
-    }
+    file_elsewhere(eng, ww, node, serial, plan, &changed_defs, &mut anchor_gone, &mut st);
     // deferred placements: after a node elsewhere (one placed after this
     // node was removed or taken, which withdrew this record, goes with it)
     let mut moves = 0u64;
@@ -2605,6 +2355,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 let n = read::following_on(eng, node, i, &mut follow_at);
                 return read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), r.path()) != r.seen();
             }
+            // (a `next` filed here: checked as filed, `read::as_filed`)
+            if let ReadKind::Next { f, after } = *r.kind()
+                && let Some(&(to, item)) = next_ends.get(&(f, after))
+            {
+                return !read::as_filed(to, item, || read::holds(eng, node, r, &mut memo));
+            }
             !read::holds(eng, node, r, &mut memo)
         })
     });
@@ -2807,6 +2563,19 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Cause::Changed { field, .. } => read::reaching_at(eng, *field, node.id, false).and_then(|r| r.by),
             _ => None,
         };
+        // (`PHITEX_INTERMED_LOG`: the wake below has no node; the log
+        // names the one whose commit moved the read, the definer reaching
+        // it, else the last to move its field or the line's structure)
+        let _hint = crate::obs::im_on().then(|| {
+            let key = match &cause {
+                Cause::Changed { field, .. } | Cause::Range { field, .. } | Cause::Environment { field } => {
+                    field.0.raw()
+                }
+                _ => crate::obs::IM_STRUCTURE,
+            };
+            let h = by.map_or_else(|| crate::obs::im_changer(key), |b| b.raw() + 1);
+            ImHint(crate::obs::im_hint(if h == node.id.raw() + 1 { 0 } else { h }))
+        });
         // (its definer's walk came before this run filed the read: it
         // moved the read all the same)
         crate::sched::note_move(eng, by, node, &cause);
@@ -2849,6 +2618,542 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     st.reask_ns = ns(t0).saturating_sub(st.commit_ns);
     st
+}
+
+/// Files `node`'s definitions (`filed`, at their depths) at `pos` in its
+/// segment, under that segment's lock: a definition there already of the
+/// same value and depth confirmed in place (a prediction's), another
+/// replaced, a new one inserted. The fields whose definition there moved
+/// go to `changed`, each first of its segment to `ix`; the relations to
+/// `rels`; the predictions replaced to `replaced`. The commit's filing and
+/// a load's.
+fn file_defs(
+    inner: &mut Inner,
+    by: NodeId,
+    pos: Pos,
+    filed: &[Filed],
+    at_top: bool,
+    st: &mut CommitStats,
+    replaced: &mut Vec<(NodeId, Field, ValueId, u16)>,
+    changed: &mut Vec<Field>,
+    rels: &mut Vec<(Field, Rel)>,
+    ix: &mut IndexOps,
+) {
+    for d in filed {
+        let depth = d.depth;
+        let m = inner.defs.entry(d.f).or_default();
+        let first = m.is_empty();
+        match m.get_mut(&pos) {
+            Some(e)
+                if e.value == d.value
+                    && (e.depth == depth || (e.provisional && at_top && e.depth == 0 && depth == GLOBAL)) =>
+            {
+                if e.provisional {
+                    st.predictions_confirmed += 1;
+                }
+                e.depth = depth;
+                e.provisional = false;
+                e.rel = d.rel;
+                e.by = by;
+                e.multi = d.multi;
+            }
+            Some(e) => {
+                // (judged when the evaluation ends, against what the
+                // node then defines here: a run on stale inputs run
+                // again is a rerun, its prediction right if its last
+                // run agrees, `Engine::judge_predictions`)
+                if e.provisional {
+                    replaced.push((by, d.f, e.value, e.depth));
+                }
+                *e = Def {
+                    depth,
+                    value: d.value,
+                    by,
+                    rel: d.rel,
+                    provisional: false,
+                    multi: d.multi,
+                };
+                changed.push(d.f);
+            }
+            None => {
+                m.insert(
+                    pos,
+                    Def {
+                        depth,
+                        value: d.value,
+                        by,
+                        rel: d.rel,
+                        provisional: false,
+                        multi: d.multi,
+                    },
+                );
+                changed.push(d.f);
+                if first {
+                    ix.defs_add.push(d.f);
+                }
+            }
+        }
+        if let Some(c) = d.rel {
+            rels.push((d.f, c));
+        }
+    }
+}
+
+/// Files a node's contributions at `pos` in its segment, under that
+/// segment's lock: the fields whose contribution there moved go to
+/// `changed`, each first of its segment to `ix` (the caller drops their
+/// sums). The commit's filing and a load's.
+fn file_contribs(
+    inner: &mut Inner,
+    pos: Pos,
+    contribs: &[(Field, ValueId)],
+    changed: &mut Vec<Field>,
+    ix: &mut IndexOps,
+) {
+    for &(f, x) in contribs {
+        let m = inner.contribs.entry(f).or_default();
+        let first = m.is_empty();
+        match m.insert(pos, x) {
+            Some(old) if old == x => {}
+            _ => {
+                changed.push(f);
+                if first {
+                    ix.contribs_add.push(f);
+                }
+            }
+        }
+    }
+}
+
+/// Files the reads at a position (`here`, [`ReadPlan::here`]) whose
+/// anchor stands in `seg` (under its lock, `inner`): the reader's own
+/// node, or another there now; those whose anchor stands elsewhere go to
+/// `other`, to be filed in the anchor's segment after the lock
+/// ([`file_elsewhere`]). The commit's filing and a load's.
+fn file_here_reads(
+    eng: &Engine,
+    seg: &Segment,
+    inner: &mut Inner,
+    node: NodeId,
+    here: &mut Vec<(Field, Reader, bool)>,
+    other: &mut Vec<(Field, Reader, Anchor, bool)>,
+    ix: &mut IndexOps,
+) {
+    for (f, r, witness) in here.drain(..) {
+        let a = eng.node(r.anchor());
+        if walk_trace(eng, f) {
+            elog!(
+                "walk-trace: commit of node {} serial {} files a read anchored at {} (pos {} seg {}) in seg {} lo {} hi {}: {}",
+                node.raw(),
+                r.serial,
+                r.anchor().raw(),
+                a.pos_hint().0,
+                a.seg_hint().0,
+                seg.id.0,
+                seg.lo.0,
+                inner.hi.0,
+                if r.anchor() == node || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor()))
+                {
+                    "here"
+                } else {
+                    "elsewhere"
+                }
+            );
+        }
+        if r.anchor() == node || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor())) {
+            if file_reader(eng, inner, f, r, witness) {
+                ix.readers_add.push(f);
+            }
+        } else {
+            let at = Anchor::Before(r.anchor());
+            other.push((f, r, at, witness));
+        }
+    }
+}
+
+/// The filing after the segment's lock of what [`plan_reads`] planned:
+/// the reads anchored at nodes of other segments (in the anchor's, a
+/// batch of one anchor's under one hold of its lock) or at a unit's end,
+/// the range readers, the holes the run met, the loop-back and
+/// environment readers, and the fields a read-back node defined anew
+/// (`changed`) marked to be published. A read at a node gone by now
+/// that found a value there goes to `anchor_gone`. The commit's filing
+/// and a load's ([`file_record_reads`]); a reader whose answer moved
+/// meanwhile is asked again (`w`'s deque, or pending with none).
+fn file_elsewhere(
+    eng: &Engine,
+    w: Option<&Worker>,
+    node: &Arc<Node>,
+    serial: u32,
+    plan: ReadPlan,
+    changed: &[Field],
+    anchor_gone: &mut Vec<(Field, NodeId)>,
+    st: &mut CommitStats,
+) {
+    let ReadPlan {
+        other: other_reads,
+        ranges: range_reads,
+        waits,
+        finals: final_reads,
+        envs: env_reads,
+        ..
+    } = plan;
+    // (the reads at one anchor, in a row, filed under one hold of its
+    // segment's lock, at most `ANCHOR_BATCH` a hold: a picture's run reads
+    // everything before its parent, 144 000 reads at one node, a lock
+    // taken each)
+    let mut other_reads = other_reads.into_iter().peekable();
+    let mut firsts: Vec<Field> = Vec::new();
+    while let Some((f, r, at, witness)) = other_reads.next() {
+        // (a read at a unit's end: filed with the field, not at the node
+        // that was last when it committed. A node placed after that one,
+        // or a split of the last segment under way while the last node
+        // was looked up (the lookup's order of segments taken before the
+        // split's new one is in it), left the reader before a definition
+        // reaching the end, whose walk never came back to it: finishers
+        // at -j8 kept a page their loop had moved on from, marginpars28
+        // wrong in 10 of 120 builds. The walks that pass the unit's end
+        // re-ask it, `reask_ends`)
+        if let Anchor::End(u) = at {
+            eng.ranges.add_end(f, u, r, |x| live(eng, x.node(), x.serial));
+            continue;
+        }
+        let anchor = r.anchor();
+        let a = eng.node(anchor);
+        if let Some((seg, mut inner)) = own_write(eng, a) {
+            firsts.clear();
+            if file_reader(eng, &mut inner, f, r, witness) {
+                firsts.push(f);
+            }
+            let mut n = 1;
+            while n < ANCHOR_BATCH
+                && let Some((g, r2, _, w2)) =
+                    other_reads.next_if(|(_, x, at, _)| x.anchor() == anchor && !matches!(at, Anchor::End(_)))
+            {
+                if file_reader(eng, &mut inner, g, r2, w2) {
+                    firsts.push(g);
+                }
+                n += 1;
+            }
+            drop(inner);
+            for &g in &firsts {
+                eng.readers.add(g, seg.lo, seg.id);
+            }
+        } else {
+            if r.seen().is_some() {
+                anchor_gone.push((f, anchor));
+            }
+            while let Some((g, r2, _, _)) =
+                other_reads.next_if(|(_, x, at, _)| x.anchor() == anchor && !matches!(at, Anchor::End(_)))
+            {
+                if r2.seen().is_some() {
+                    anchor_gone.push((g, anchor));
+                }
+            }
+        }
+    }
+    file_ranges(eng, w, range_reads, node.id, st);
+    file_waits(eng, w, node, serial, waits, st);
+    if eng.op(node.op()).read_back() && !changed.is_empty() {
+        eng.has_finals.store(true, Ordering::Release);
+        for &f in changed {
+            eng.ranges.mark_read_back(f);
+        }
+    }
+    for (f, r) in final_reads {
+        if !eng.has_finals.load(Ordering::Acquire) {
+            eng.has_finals.store(true, Ordering::Release);
+        }
+        eng.ranges.add_final(f, r, |x| live(eng, x.node(), x.serial));
+    }
+    for (f, r) in env_reads {
+        eng.ranges.add_envs(f, vec![r], |x| live(eng, x.node, x.serial));
+    }
+}
+
+/// A load's filing of a node's record (`Engine::import`, the products
+/// half): its brackets, its definitions at their depths and its
+/// contributions filed at its label in its segment (`inner`, under its
+/// lock), with the field indexes, as its commit filed them
+/// ([`file_defs`], [`file_contribs`]). `defs` are the record's, a
+/// relation's value as the line holds it now (put right in place since
+/// the commit, `settle_rel`). The fields whose definitions it filed: a
+/// read-back node's are published at the next quiet point
+/// ([`file_record_reads`]).
+pub(crate) fn file_record_products(
+    eng: &Engine,
+    seg: &Segment,
+    inner: &mut Inner,
+    node: &Node,
+    defs: &[DefRec],
+    contribs: &[(Field, ValueId)],
+    effect: Effect,
+) -> Vec<Field> {
+    let pos = node.pos_hint();
+    let brackets = effect.brackets();
+    file_brackets(eng, inner, node, pos, brackets);
+    if eng.op(node.op()).settles_at_quiet() {
+        for d in defs {
+            eng.mark_settled(d.f);
+        }
+    }
+    let filed = filed_defs(&eng.values, defs, &brackets);
+    let mut st = CommitStats::default();
+    let (mut replaced, mut changed, mut rels, mut changed_contribs) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut ix = IndexOps::default();
+    file_defs(
+        inner,
+        node.id,
+        pos,
+        &filed,
+        false,
+        &mut st,
+        &mut replaced,
+        &mut changed,
+        &mut rels,
+        &mut ix,
+    );
+    file_contribs(inner, pos, contribs, &mut changed_contribs, &mut ix);
+    changed_contribs.sort_unstable();
+    changed_contribs.dedup();
+    for &f in &changed_contribs {
+        inner.resum(eng, f);
+        eng.bump(f);
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    for &f in &changed {
+        eng.bump(f);
+    }
+    ix.apply(eng, seg, inner);
+    changed
+}
+
+/// A load's filing of a node's record (`Engine::import`, the reads
+/// half, once every record's products are filed): every read filed as
+/// its commit files a run's that did not go on from another
+/// ([`plan_reads`], [`file_here_reads`], [`file_elsewhere`], the sibling
+/// reads with the nodes they passed), at the record's serial. `changed`:
+/// the fields its products half filed. False where a read was found not
+/// holding as filed (a `next` whose search answers otherwise, a read at
+/// a node gone): a line that was not quiet and consistent when saved.
+pub(crate) fn file_record_reads(eng: &Engine, node: &Arc<Node>, rec: &RunRecord, changed: &[Field]) -> bool {
+    let reads: Vec<crate::node::ReadRec> = rec.reads.iter().collect();
+    let serial = rec.serial;
+    let mut plan = plan_reads(eng, node, &reads, serial, true, rec.state.is_some());
+    let refuted = plan.refuted.take();
+    if let Some((seg, mut inner)) = own_write(eng, node) {
+        let mut ix = IndexOps::default();
+        file_here_reads(eng, seg, &mut inner, node.id, &mut plan.here, &mut plan.other, &mut ix);
+        ix.apply(eng, seg, &inner);
+    }
+    let mut gone = Vec::new();
+    let mut st = CommitStats::default();
+    file_elsewhere(eng, None, node, serial, plan, changed, &mut gone, &mut st);
+    file_pullers(eng, node, serial, &reads);
+    eng.note_stats(None, &st);
+    refuted.is_none() && gone.is_empty()
+}
+
+/// A record's reads as their filing takes them ([`plan_reads`]): those at
+/// a position (field, reader, whether a witness), those at another node
+/// or a unit's end, the loop-back, range and environment readers, the
+/// holes the run met, where each `next` filed ended, and the first read
+/// the plan found refuted (a `next` whose search answers otherwise now).
+pub(crate) struct ReadPlan {
+    pub(crate) here: Vec<(Field, Reader, bool)>,
+    pub(crate) other: Vec<(Field, Reader, Anchor, bool)>,
+    pub(crate) finals: Vec<(Field, Reader)>,
+    pub(crate) ranges: Vec<(Field, RangeReader)>,
+    pub(crate) envs: Vec<(Field, crate::engine::EnvReader)>,
+    pub(crate) waits: Vec<NodeId>,
+    /// (where each `next` filed here ended: the node, and whether it is
+    /// the contribution answered; its check after the re-asks is made as
+    /// filed, `read::as_filed`)
+    pub(crate) next_ends: FxHashMap<(Field, Option<NodeId>), (Option<NodeId>, bool)>,
+    pub(crate) refuted: Option<usize>,
+}
+
+/// Which of `reads` a filing of `node`'s record at `serial` files, and
+/// where (all where `file_all`, else those not kept filed from the run
+/// before, [`ReadRec::filed`]): the commit's and a load's alike. A `next`'s search is made here, on the
+/// line as it stands, and filed as found.
+pub(crate) fn plan_reads(
+    eng: &Engine,
+    node: &Node,
+    reads: &[crate::node::ReadRec],
+    serial: u32,
+    file_all: bool,
+    parks: bool,
+) -> ReadPlan {
+    let mut here_reads: Vec<(Field, Reader, bool)> = Vec::with_capacity(reads.len());
+    let mut other_reads: Vec<(Field, Reader, Anchor, bool)> = Vec::with_capacity(reads.len());
+    let mut final_reads: Vec<(Field, Reader)> = Vec::new();
+    let mut range_reads: Vec<(Field, RangeReader)> = Vec::new();
+    let mut range_seen: Vec<Vec<(PathId, Option<ValueId>)>> = Vec::new();
+    let mut range_at: FxHashMap<RangeOf, usize> = FxHashMap::default();
+    let mut env_reads: Vec<(Field, crate::engine::EnvReader)> = Vec::new();
+    let mut waits: Vec<NodeId> = Vec::new();
+    let mut refuted: Option<usize> = None;
+    let mut next_answers: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
+    let mut next_ends: FxHashMap<(Field, Option<NodeId>), (Option<NodeId>, bool)> = FxHashMap::default();
+    // (the readers filed, each once: a run asks one thing many times, a
+    // `TikZ` picture whether microtype's font list holds a font at each
+    // node's text, 20 592 reads of the list by 76 paths; filed each, every
+    // change of the list walked them all, 0.4 s of Grail's paragraph
+    // delete in its walks. Two records of one node, serial, place, path
+    // and answer are one reader: a walk asks them alike)
+    let mut filed_once: FxHashSet<FiledKey> = FxHashSet::default();
+    for (ri, r) in reads.iter().enumerate() {
+        if r.filed() && !file_all {
+            continue;
+        }
+        // (only a run that parks: a next run going on from it keeps its
+        // reads; any other's stand for its commit, and a walk asks no more
+        // of them than their serial)
+        let (kind, path) = r.kind_path();
+        let serial = if parks && stays_filed(kind, r) {
+            serial | FILED
+        } else {
+            serial
+        };
+        match kind {
+            ReadKind::Field { f, at } => {
+                let (anchor, inclusive) = match *at {
+                    Anchor::Me => (node.id, false),
+                    Anchor::Before(n) => (n, false),
+                    Anchor::AfterOwn(n) => (n, true),
+                    Anchor::End(_) | Anchor::Final => (node.id, true),
+                };
+                let rec = Reader::new(node.id, serial, anchor, inclusive, path, r.seen());
+                if !filed_once.insert((*f, serial, anchor, inclusive, path, r.seen())) {
+                    continue;
+                }
+                // (a derived read's witness, kept from an earlier run (one
+                // that stood, a state resumed from): filed on the field its
+                // name gives now as well, before the lock, so a change of
+                // that field asks it again)
+                if matches!(at, Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_))
+                    && let Some(spec) = read::derived_spec(eng, path)
+                    && read::derived_base(eng.values(), spec) != Some(*f)
+                    && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
+                    && g != *f
+                {
+                    here_reads.push((g, rec, true));
+                }
+                match at {
+                    // (a loop-back read: filed under the field, re-asked when
+                    // the last definition of it lands, changes or goes)
+                    Anchor::Final => final_reads.push((*f, rec)),
+                    Anchor::End(_) => other_reads.push((*f, rec, *at, false)),
+                    Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_) => here_reads.push((*f, rec, false)),
+                }
+            }
+            ReadKind::Env { f } => env_reads.push((
+                *f,
+                crate::engine::EnvReader {
+                    node: node.id,
+                    serial,
+                    path,
+                    seen: r.seen(),
+                },
+            )),
+            ReadKind::Fold { f, from, to, incl } => {
+                let i = *range_at.entry((*f, *from, *to, false, *incl)).or_insert_with(|| {
+                    range_reads.push((
+                        *f,
+                        RangeReader {
+                            node: node.id,
+                            serial,
+                            from: *from,
+                            to: *to,
+                            next: false,
+                            incl: *incl,
+                            hole: false,
+                            seen: Arc::from([]),
+                        },
+                    ));
+                    range_seen.push(Vec::new());
+                    range_reads.len() - 1
+                });
+                range_seen[i].push((path, r.seen()));
+            }
+            ReadKind::Next { f, after } => {
+                let i = *range_at.entry((*f, *after, None, true, false)).or_insert_with(|| {
+                    // (the bound's label and the search from it on one
+                    // layout, `read::on_one_layout`)
+                    let n = read::on_one_layout(eng, || {
+                        // (the bound's label taken under its segment's
+                        // lock, the segment met; a bound gone: its last)
+                        let from = match after {
+                            Some(n) => Some(read::pos_of(eng, *n).unwrap_or_else(|| eng.node(*n).pos_hint())),
+                            None => Some(read::unit_start(eng, node)),
+                        };
+                        next_contribution(eng, *f, from, node.id)
+                    });
+                    next_answers.insert(range_reads.len(), read::next_value(eng, &n));
+                    next_ends.insert((*f, *after), (n.stop, n.item.is_some()));
+                    range_reads.push((
+                        *f,
+                        RangeReader {
+                            node: node.id,
+                            serial,
+                            from: *after,
+                            to: n.stop,
+                            next: true,
+                            incl: false,
+                            hole: n.item.is_none() && n.stop.is_some(),
+                            seen: Arc::from([]),
+                        },
+                    ));
+                    range_seen.push(Vec::new());
+                    range_reads.len() - 1
+                });
+                range_seen[i].push((path, r.seen()));
+                // (the range is filed as this search found it, its stop or
+                // the contribution it answers: a run that saw another
+                // answer is refuted here, not later by a search of its
+                // own, which may find what this one did not (a node that
+                // had contributed, re-asked meanwhile: its contribution
+                // passed over, `Node::is_open`) and let the run stand on a
+                // range filed past what it read; amsldoc -j16 ended with 0
+                // pages, the loop's rest on "none after 72" with node 75's
+                // contribution filed, 10 builds in 600 on one loaded node)
+                if refuted.is_none() && read::apply_path(eng, next_answers.get(&i).copied().flatten(), path) != r.seen()
+                {
+                    refuted = Some(ri);
+                }
+            }
+            ReadKind::Placed { .. } | ReadKind::Following { .. } => {}
+            ReadKind::Hole => {
+                if let Some(h) = r.seen().and_then(|x| eng.values().as_int(x)) {
+                    waits.push(NodeId::from_raw(u64::from_ne_bytes(h.to_ne_bytes())));
+                }
+            }
+        }
+    }
+    for ((_, r), seen) in range_reads.iter_mut().zip(range_seen) {
+        r.seen = Arc::from(seen);
+    }
+    ReadPlan {
+        here: here_reads,
+        other: other_reads,
+        finals: final_reads,
+        ranges: range_reads,
+        envs: env_reads,
+        waits,
+        next_ends,
+        refuted,
+    }
+}
+
+/// (`PHITEX_INTERMED_LOG`) Restores the wake hint set before it.
+struct ImHint(u64);
+
+impl Drop for ImHint {
+    fn drop(&mut self) {
+        crate::obs::im_hint(self.0);
+    }
 }
 
 /// The commit of a run that did not run: every read of its last run still
@@ -3156,7 +3461,7 @@ fn walk_here(
             _ => read::rel_plain(eng, c, Some(i.value)),
         };
         if ftrace(eng, f) {
-            eprintln!(
+            elog!(
                 "ftrace: walk-here {} by {} rel {} pos {} input-by {} old {} new {} t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 by.raw(),
@@ -3192,17 +3497,15 @@ pub(crate) fn settle_predictions(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>
         let (b, _) = unpack_effect(n.effect.load(Ordering::Acquire));
         reask_after_effect(eng, w, n, n.pos_hint(), Brackets::default(), b, st);
     }
-    let Some(rec) = n.record() else {
-        return;
-    };
-    if !rec.provisional {
-        return;
-    }
-    for d in &rec.defs {
-        if let Some(c) = d.rel {
-            settle_rel(eng, d.f, n.id, c);
+    // (the fields its predictions were filed for, walked whether its run
+    // has committed since or not: one that confirmed them walked nothing,
+    // `Node::owed`)
+    let owed = std::mem::take(&mut *n.owed.lock());
+    for (f, rel) in owed {
+        if let Some(c) = rel {
+            settle_rel(eng, f, n.id, c);
         }
-        reask(eng, w, d.f, n.pos_hint(), n.seg_hint(), n.id, st);
+        reask(eng, w, f, n.pos_hint(), n.seg_hint(), n.id, st);
     }
 }
 
@@ -3222,7 +3525,7 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
         match inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
             Some(e) if e.by == by && e.rel == Some(c) => {
                 if ftrace(eng, f) {
-                    eprintln!(
+                    elog!(
                         "ftrace: settle {} by {} pos {} old {} new {} t {}",
                         eng.values().as_str(f.0).unwrap_or_default(),
                         by.raw(),
@@ -3536,7 +3839,7 @@ pub(crate) fn reask_from(
     let mut passed = false;
     let trace = walk_trace(eng, f);
     if trace {
-        eprintln!(
+        elog!(
             "walk-trace: from {} seg {} by {:?} stop_op {:?} level {level}",
             from.0,
             seg.0,
@@ -3583,7 +3886,7 @@ pub(crate) fn reask_from(
                 }
             }
             if trace {
-                eprintln!(
+                elog!(
                     "walk-trace:   seg {cur:?} holds readers of the field: [{}]",
                     readers
                         .iter()
@@ -3600,7 +3903,7 @@ pub(crate) fn reask_from(
             (readers, next, hole, deeper)
         };
         if trace {
-            eprintln!(
+            elog!(
                 "walk-trace:   seg {cur:?} lo {} from {} readers [{}] next {:?} hole {:?} deeper {}",
                 s.lo.0,
                 from.0,
@@ -3868,7 +4171,7 @@ fn walk_stopped(
     let fs = std::mem::take(&mut *node.stopped.lock());
     for (f, level) in fs {
         if walk_trace(eng, f) {
-            eprintln!(
+            elog!(
                 "walk-trace: stopped walks at node {} go on from {} (level {level}; its own: {})",
                 node.id.raw(),
                 pos.0,
@@ -3888,7 +4191,7 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     let rs = eng.ranges.ends(f, u, |x| live(eng, x.node(), x.serial));
     if rs.is_empty() {
         if ftrace(eng, f) {
-            eprintln!(
+            elog!(
                 "ftrace: end-walk {} by {} no reader t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 by.map_or(0, NodeId::raw),
@@ -3909,7 +4212,7 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     for r in rs {
         if tr {
             let n = eng.node(r.node());
-            eprintln!(
+            elog!(
                 "ftrace: end-walk {} by {} reader {} serial {} (now {}) state {:?} seen {} now {} t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 by.map_or(0, NodeId::raw),
@@ -4019,7 +4322,7 @@ fn note_refute(
         )
     };
     let op = |n: NodeId| eng.op(eng.node(n).op()).name();
-    eprintln!(
+    elog!(
         "refute:\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{at}\t{}\t{}",
         v.as_str(f.0).unwrap_or_default(),
         reader.raw(),
@@ -4039,7 +4342,7 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     if walk_trace(eng, f) {
         let alive = live(eng, r.node(), r.serial);
         let now = if alive { reader_answer(eng, f, r) } else { None };
-        eprintln!(
+        elog!(
             "walk-trace:     reader {} serial {} anchor {} live {alive} seen {} now {}",
             r.node().raw(),
             r.serial,
@@ -4066,6 +4369,18 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     let now = reader_answer(eng, f, r);
     if now != r.seen() {
         note_refute(eng, f, r.node(), by, r.seen(), now);
+        // (`PHITEX_INTERMED_LOG`: the value the reader is re-asked by)
+        if crate::obs::im_on() {
+            elog!(
+                "imv\t{}\t{}\t{}\t{}\t{}\t{}",
+                crate::sched::log_clock(std::time::Instant::now()),
+                r.node().raw(),
+                crate::obs::im_field(eng, f),
+                r.seen().map_or(-1, |x| i128::from(x.raw())),
+                now.map_or(-1, |x| i128::from(x.raw())),
+                by.map_or(0, |b| b.raw() + 1)
+            );
+        }
         // (a run made ahead of the frontier refuted: the speculation window
         // narrows, docs/spec-window.md)
         // (by the page layer's own change, a routine's give-back or a page
@@ -4205,7 +4520,7 @@ fn reask_ranges_in(
     let mut asked = 0usize;
     let mut starts: Vec<Option<NodeId>> = Vec::new();
     if walk_trace(eng, f) {
-        eprintln!(
+        elog!(
             "walk-trace: ranges at {} by {} fixed {fixed}: [{}]",
             at.0,
             by.raw(),
@@ -4241,7 +4556,7 @@ fn reask_ranges_in(
     // (`PHITEX_REASK_TRACE`, profile: a re-ask of 10 ms or more, its
     // field, the readers held, those asked and their starts)
     if crate::obs::enabled() && t0.elapsed().as_millis() >= 10 && std::env::var_os("PHITEX_REASK_TRACE").is_some() {
-        eprintln!(
+        elog!(
             "reask-trace: {} by {} at {}: {held} held, {asked} asked from {} starts, {:?}",
             eng.values().render(f.0),
             by.raw(),
@@ -4677,7 +4992,8 @@ pub(crate) fn built(
     id: NodeId,
 ) -> (Arc<Node>, Predicted) {
     let pred = predict(eng, op, &args);
-    let n = Node::new(id, unit, op, args, parent, SegId(0), Pos(0));
+    let depth = parent.map_or(0, |p| eng.node(p).depth + 1);
+    let n = Node::new(id, unit, op, args, parent, depth, SegId(0), Pos(0));
     n.effect.store(pack_effect(pred.effect), Ordering::Release);
     (Arc::new(n), pred)
 }
@@ -4735,6 +5051,8 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
         }
         eng.bump(d.f);
     }
+    // (the walk owed for them, `settle_predictions`)
+    node.owed.lock().extend(rec.defs.iter().map(|d| (d.f, d.rel)));
     *node.last.lock() = Some(rec);
 }
 
@@ -4854,6 +5172,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         inner.guarded.len(),
     );
     *node.last.lock() = None;
+    *node.prior.lock() = None;
     inner.replaced = inner.replaced.saturating_add(1);
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
@@ -4877,7 +5196,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     }
     for f in changed_defs {
         if ftrace(eng, f) {
-            eprintln!(
+            elog!(
                 "ftrace: retract {} by {} ({}) t {}",
                 eng.values().as_str(f.0).unwrap_or_default(),
                 node.id.raw(),
@@ -5452,7 +5771,7 @@ pub(crate) fn place(
 /// and slot, its label, and the node it went after or before.
 fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
     if crate::obs::enabled() && crate::sched::wake_log() {
-        eprintln!(
+        elog!(
             "placed: node {} op {:?} parent {:?} anchor {:?} slot {} at {:?} {how} {} (at {:?})",
             node.id.raw(),
             node.op(),
@@ -5536,6 +5855,8 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         waits: r.waits.clone(),
         scope_gen: r.scope_gen,
         moves_gen: r.moves_gen,
+        text: r.text.clone(),
+        told: r.told,
     }));
 }
 
@@ -5888,6 +6209,7 @@ pub(crate) fn relocate(
             flush_unwalked(eng, w, &m, st);
             m.set_state(State::Gone);
             let rec = m.last.lock().take();
+            *m.prior.lock() = None;
             lifted_walks(eng, w, &m, left, st);
             unfile_placed(eng, w, rec.as_deref());
             // (a node removed claims nothing: what it holds goes back)
@@ -5963,7 +6285,7 @@ pub(crate) fn relocate(
         }
     }
     if crate::obs::enabled() && crate::sched::wake_log() {
-        eprintln!(
+        elog!(
             "relocated: node {} op {:?} by {} with {} of its subtree, after {} (at {:?})",
             k.id.raw(),
             k.op(),
@@ -5984,7 +6306,7 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left,
     let (pos, seg) = old_place(eng, &left);
     for &f in &left.defs {
         if walk_trace(eng, f) {
-            eprintln!(
+            elog!(
                 "walk-trace: lifted node {} from {} seg {} (lifted at {} seg {}) hole {}",
                 m.id.raw(),
                 pos.0,
@@ -6381,7 +6703,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
     node.restated.fetch_add(1, Ordering::AcqRel);
     if bracket_trace() {
         let o = old.unwrap_or_default();
-        eprintln!(
+        elog!(
             "bracket-trace: file node {} ({}) pos {} old ({},{}) new ({},{}) gen {g} t {}",
             node.id.raw(),
             eng.op(node.op()).name(),
@@ -7099,7 +7421,7 @@ fn reask_after_effect_with(
     }
     st.scope_asked += readers.len() as u64;
     if bracket_trace() {
-        eprintln!(
+        elog!(
             "bracket-trace: walk by {} at {} old ({},{}) new ({},{}) end {:?} raced {:?} all {} readers {} t {}",
             by.id.raw(),
             at.0,
@@ -7885,6 +8207,70 @@ mod tests {
         fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
             Ok(cx.read(crate::values::Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
         }
+    }
+
+    /// `[f, x]`: defines f = x, and predicts it.
+    struct PredDef;
+
+    impl Operation for PredDef {
+        fn name(&self) -> &'static str {
+            "pred_def"
+        }
+
+        fn predicted_defs(
+            &self,
+            args: &[ValueId],
+            _values: &crate::values::Values,
+        ) -> Option<Vec<(crate::values::Field, ValueId)>> {
+            Some(vec![(crate::values::Field(args[0]), args[1])])
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.define(crate::values::Field(cx.args()[0]), cx.args()[1]);
+            Ok(cx.args()[1])
+        }
+    }
+
+    #[test]
+    fn a_prediction_its_node_confirms_before_its_placer_walks_still_reasks_the_readers_after() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // D defines f = 5, R after it reads f. C is placed between them
+        // with f = 7 predicted, and runs and commits before its placer's
+        // walk for the prediction (the commit queues what it placed, then
+        // walks: another worker may run it between): its run defines what
+        // was predicted, so its commit changes nothing and walks nothing.
+        // The placer's walk is still owed: R reads 7 (floats2col at -j16,
+        // a finisher's `\@currlist`, "Float(s) lost", #40).
+        let e = Engine::new();
+        let def = e.register(Arc::new(Def));
+        let pred_def = e.register(Arc::new(PredDef));
+        let reads = e.register(Arc::new(Reads));
+        let v = e.values();
+        let f = v.field("f").0;
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f, v.int(5)]);
+        let r = e.push(u, reads, vec![f]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(5));
+        let id = NodeId::from_raw(e.nodes.reserve() as u64);
+        let (node, pred) = super::built(&e, u, None, pred_def, vec![f, v.int(7)], id);
+        let c = super::place_after(&e, d, node, pred);
+        crate::sched::enqueue(
+            &e,
+            None,
+            &c,
+            crate::node::Wake {
+                by: None,
+                cause: crate::api::Cause::Created { by: None },
+                at_ns: e.now_ns(),
+            },
+        );
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(c.id).and_then(|o| v.as_int(o)), Some(7), "C ran");
+        let mut st = super::CommitStats::default();
+        super::settle_predictions(&e, None, &c, &mut st);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|o| v.as_int(o)), Some(7), "R reads C's f");
     }
 
     #[test]

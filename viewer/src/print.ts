@@ -109,6 +109,8 @@ header:active { cursor: grabbing; }
 .bar > .status { min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* (the count three digits wide at least, as the page box: panel.ts's nav) */
+.pageno #pgn { display: inline-block; min-width: 3ch; }
 .pageno input { width: 3ch; height: 22px; box-sizing: content-box; padding: 0 2px; padding: 0; text-align: center; font: inherit; color: var(--ph-fg); background: transparent;
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); }
 .zoomb { padding: 0 2px 0 8px; }
@@ -360,13 +362,16 @@ header:active { cursor: grabbing; }
 .peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
 .peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
-.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* (the title and the line under it wrap, whole: cut at one line, the card hid the
+   title, the one thing it is for; the list scrolls past 300px) */
+.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
 .peek .pc .hd code { flex: none; font: 10.5px/1.3 ui-monospace, "DM Mono", monospace; padding: 0 4px; border-radius: 3px; background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg2); }
-.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); overflow-wrap: anywhere; }
 .peek .pc .lk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; margin-top: 2px; font-size: 11.5px; }
 .peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
 .peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
 .peek .pc .lk button:hover { text-decoration: underline; }
+.peek .pc .lk button.u { overflow-wrap: anywhere; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
 .peek .pc .lk button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; border-radius: 2px; }
 /* where a jump landed, lit for a moment (viewer.ts flash): only its opacity animates */
 .slot .phx-flash { position: absolute; z-index: 2; pointer-events: none; border-radius: 3px; background: color-mix(in srgb, var(--ph-accent) 22%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ph-accent) 55%, transparent); animation: phx-flash 1.5s ease-out forwards; }

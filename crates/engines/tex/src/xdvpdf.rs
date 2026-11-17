@@ -52,6 +52,10 @@ use phitex_xdvipdfmx::specials::Again;
 use crate::exec::LockWait as _;
 use crate::val::{int_of, str_of};
 
+/// The job's binding of its date, in seconds (`SOURCE_DATE_EPOCH`, else
+/// the time the job began): the PDF's dates and `/ID` seed.
+pub(crate) const EPOCH: &str = "epoch";
+
 /// [`crate::XeTeX::pdf`]: the PDF made from the pages, as `xelatex` has
 /// `xdvipdfmx -q -E -o NAME.pdf` make it of its XDV.
 #[derive(Clone)]
@@ -275,7 +279,7 @@ impl Walk {
             None => (None, [0; 10], Vec::new()),
         };
         Walk {
-            id: page.raw(),
+            id: v.stable_raw(page),
             bx,
             counts,
             offsets: crate::assemble::dvi_offsets(v, page),
@@ -1172,6 +1176,13 @@ pub(crate) fn file(
     if pages.is_empty() {
         return Ok(v.str(""));
     }
+    // (the PDF's date read as the job's binding, `epoch`, where the job
+    // has one: a value the link's run reads, so a build whose date moved
+    // (a graph loaded in a later process with no `SOURCE_DATE_EPOCH`,
+    // docs/spec-persisted-graph.md §3.3) links again, not only one whose
+    // `\time` moved)
+    let date = crate::assemble::field(cx, EPOCH)?.map_or(p.date, |x| int_of(v, x));
+    let p = &XdvPdf { date, ..p.clone() };
     let comment = crate::assemble::field(cx, "dvicomment")?
         .map(|x| str_of(v, x))
         .unwrap_or_default();
@@ -1545,7 +1556,7 @@ fn shown(
     let shown = v.list(
         pages
             .iter()
-            .map(|p| v.int(i64::from_ne_bytes(p.raw().to_ne_bytes())))
+            .map(|&p| v.int(i64::from_ne_bytes(v.stable_raw(p).to_ne_bytes())))
             .collect(),
     );
     cx.contribute(v.field(crate::pdfout::SHOWN), v.seq_unit(shown));
@@ -1993,7 +2004,9 @@ impl phitex_defuse::Operation for XdvPage {
             progress.clone(),
             self.start.clone(),
         );
-        progress.stream_page_beside(k, hash, Box::new(move |start, last| {
+        cx.told_outside();
+        let writer = (cx.node().raw(), id);
+        progress.stream_page_beside(k, hash, writer, Box::new(move |start, last| {
             let progress = prog;
             let t0 = std::time::Instant::now();
             // (the document's named objects the pages before it made, made

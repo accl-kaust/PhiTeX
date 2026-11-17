@@ -93,7 +93,8 @@ export function plane(box: HTMLElement, dark: boolean): Opening {
     return w;
   };
   const frame = (now: number) => {
-    const dt = Math.min(50, now - last);
+    // (a frame's time is when the frame began, which may be before `last` was read: never back in time)
+    const dt = Math.max(0, Math.min(50, now - last));
     last = now;
     if (out >= 0 && from) {
       // (page in: to the middle nose up, then open out to the page)

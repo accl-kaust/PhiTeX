@@ -2064,7 +2064,7 @@ version = "0.0.0"
 
 [[package]]
 name = "phitex-cli"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "annotate-snippets",
  "bytesize",
@@ -2108,6 +2108,7 @@ name = "phitex-defuse"
 version = "0.0.0"
 dependencies = [
  "crossbeam-deque",
+ "crossbeam-utils",
  "libc",
  "serde",
  "serde_json",
@@ -2322,6 +2323,7 @@ dependencies = [
 name = "phitex-wasm-live"
 version = "0.0.0"
 dependencies = [
+ "phitex-codecs",
  "phitex-defuse",
  "phitex-live",
  "phitex-shelf",

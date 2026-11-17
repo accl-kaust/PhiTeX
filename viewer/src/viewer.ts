@@ -7,6 +7,7 @@ import type { Link, PageImage } from "./types.ts";
 import type { CiteAnswer } from "./session.ts";
 import { LAYER_LINES, caretAt, ensureText, holdText, textPending } from "./text.ts";
 import type { TextLine } from "./text.ts";
+import type { PageSel } from "./sync.ts";
 import { waspLength, waspOff, waspOn } from "./wasp.ts";
 
 export interface ViewerHost {
@@ -32,7 +33,7 @@ export interface ViewerHost {
   /** CSS pixels per PDF point at the current zoom (1 is 100%). */
   scale(): number;
   /** Text selected on the pages: its boxes by page, in PDF points from each page's top left. */
-  selected?(sel: { k: number; rects: [number, number, number, number][] }[]): void;
+  selected?(sel: PageSel[]): void;
   /** A double-click at (x, y) on page `k`, in PDF points from its top left. */
   dbl?(k: number, x: number, y: number): void;
   /** A click on a collaborator's name: their cursor, at `pos` (UTF-16) in `file`. */
@@ -217,7 +218,15 @@ export class Viewer {
           }
         }
         if (!out.size) return;
-        const sel2 = [...out].map(([k, rects]) => ({ k, rects }));
+        const sel2: PageSel[] = [...out].map(([k, rects]) => ({ k, rects }));
+        // (its first and last characters' edges: its source is from the one to the other)
+        const ends = this.selectionEnds(sel);
+        if (ends) {
+          const on = (k: number) => sel2.find((s) => s.k === k) ?? (sel2.push({ k, rects: [] }), sel2.at(-1)!);
+          on(ends.from.k).from = [ends.from.x, ends.from.y];
+          on(ends.to.k).to = [ends.to.x, ends.to.y];
+          sel2.sort((a, b) => a.k - b.k);
+        }
         const [x, y, w, h] = sel2[0].rects[0];
         this.picked = { k: sel2[0].k, x: x + w / 2, y: y + h / 2 };
         // (as the drag goes: told again only when it changed)
@@ -875,7 +884,7 @@ export class Viewer {
         // (the year next to the names: a long line cut at its end keeps it)
         `<div class="mt">${[[c.authors.length && esc(names(c.authors)), c.year && esc(c.year)].filter(Boolean).join(", "), c.venue && `<i>${esc(c.venue)}</i>`].filter(Boolean).join(" · ")}</div>` +
         `<div class="lk">` +
-        [doi ? `<button type="button" data-act="open" data-u="${esc(doi)}">DOI</button>` : c.url ? `<button type="button" data-act="open" data-u="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, "").split("/")[0])}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>·</i>") +
+        [doi ? `<button type="button" class="u" data-act="open" data-u="${esc(doi)}" title="${esc(doi)}">doi:${esc(c.doi!)}</button>` : c.url ? `<button type="button" class="u" data-act="open" data-u="${esc(c.url)}" title="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, ""))}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>·</i>") +
         `</div></section>`
       );
     };
@@ -962,11 +971,41 @@ export class Viewer {
    * and address where it prints them. Sentences end at ". " but not at an
    * initial's ("D. E. Knuth").
    */
+  /**
+   * The DOI or address starting at `m` in `text`, its line breaks taken out: the page's text
+   * has a space where the line broke, and TeX breaks a DOI or URL after a dot, a slash or a
+   * hyphen ("doi:10. 1145/3503222.3507772"); its end trimmed of the sentence's punctuation.
+   * With the span it covers, to take it out of the venue.
+   */
+  private static joined(text: string, m: number): { v: string; end: number } {
+    let i = m;
+    while (i < text.length) {
+      if (text[i] === " " && /[./\-_=?&#]/.test(text[i - 1]) && /[0-9A-Za-z]/.test(text[i + 1] ?? "")) i++;
+      else if (/[\s,;]/.test(text[i]) || /[)\]]/.test(text[i]) && !text.slice(m, i).includes("(")) break;
+      else i++;
+    }
+    let v = text.slice(m, i).replace(/ /g, "");
+    while (/[.)\]]$/.test(v) && !(v.endsWith(")") && v.includes("("))) v = v.slice(0, -1);
+    return { v, end: m + v.length + (text.slice(m, i).match(/ /g)?.length ?? 0) };
+  }
+
   private static asCited(label: string, text: string, at: [number, number]): Cited {
-    const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
-    const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
-    const years = [...text.matchAll(/\b(1[5-9]\d\d|20\d\d)[a-z]?\b/g)];
-    const year = years.at(-1)?.[0];
+    const dm = /\b10\.\s?\d{4,9}\s?\//.exec(text);
+    const doi = dm ? Viewer.joined(text, dm.index).v : undefined;
+    const um = /https?:\/\//.exec(text);
+    const url = um ? Viewer.joined(text, um.index).v : undefined;
+    // (the DOI or address shown as its own link: not again in the venue, "doi:" and all)
+    const shown = dm ?? um;
+    if (shown) {
+      const { end } = Viewer.joined(text, shown.index);
+      const from = /(?:doi:\s?|https?:\/\/(?:dx\.\s?)?doi\.\s?org\/\s?)?$/i.exec(text.slice(0, shown.index))!.index;
+      text = (text.slice(0, from) + text.slice(end)).replace(/\s+([.,;])/g, "$1").replace(/\s{2,}/g, " ").trim();
+    }
+    // (the year: the label's where it names one (natbib's "Kuon and Rose (2007)"), else the
+    // entry's last, never one end of a page range ("1749–1760": the card's year "1760"))
+    const year =
+      /\b(1[5-9]\d\d|20\d\d)[a-z]?\b/.exec(label)?.[0] ??
+      [...text.matchAll(/(?<![\d–-])\b(1[5-9]\d\d|20\d\d)[a-z]?\b(?![–-]\d)/g)].at(-1)?.[0];
     const parts: string[] = [];
     let cur = "";
     for (const w of text.split(" ")) {
@@ -976,8 +1015,12 @@ export class Viewer {
     }
     if (cur) parts.push(cur);
     const authors = (parts[0] ?? "").replace(/\.$/, "").split(/,\s*(?:and\s+)?|\s+and\s+/).map((a) => a.trim()).filter(Boolean);
-    const title = (parts[1] ?? parts[0] ?? text).replace(/\.$/, "");
-    const venue = parts.slice(2).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || undefined;
+    // (a sentence that is the year alone is no title: ACM's "Authors. 2025. Title. Venue."
+    // made the card's title "2025" and put the real title in the venue, cut off)
+    const rest = parts.slice(1);
+    if (rest.length > 1 && /^\(?(1[5-9]\d\d|20\d\d)[a-z]?\)?\.?$/.test(rest[0].trim())) rest.shift();
+    const title = (rest[0] ?? parts[0] ?? text).replace(/\.$/, "");
+    const venue = rest.slice(1).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || undefined;
     return { key: "", label, title, authors: parts.length > 1 ? authors : [], venue, year, doi, url, at };
   }
 
@@ -1098,11 +1141,12 @@ export class Viewer {
         waiting = true;
         continue;
       }
-      const e = c.at ? this.entryOn(c.at[0], c.at[1]) : null;
-      // (no entry read there: the key and its label, still a card)
       // (the label as the page prints it, where the entry has one ([1] in a numbered list):
       // what the reader sees; else the .aux's (natbib's "Knuth and Plass (1981)" for every style))
-      const aux = c.label != null ? Viewer.texText(c.label) : null, label = e?.label || aux;
+      const aux = c.label != null ? Viewer.texText(c.label) : null;
+      // (no entry read there: the key and its label, still a card)
+      const e = c.at ? this.entryOn(c.at[0], c.at[1], aux, c.at[2] ?? null) : null;
+      const label = e?.label || aux;
       out.push(e ? { ...Viewer.asCited(label ?? "", e.text, [c.at![0], e.top]), key: c.key, label: label ?? "" } : { key: c.key, label: label ?? c.key, title: c.key, authors: [], at: c.at ? [c.at[0], Math.max(0, c.at[1] - 10)] : undefined });
     }
     return waiting ? null : out;
@@ -1116,11 +1160,35 @@ export class Viewer {
    * matched to the line around it, the place was the line above's, the previous entry's:
    * every card one entry early, the first none.
    */
-  private entryOn(k: number, y: number): { label: string; text: string; top: number } | null {
-    const lines = this.pageLines(k);
-    let i = -1;
-    lines.forEach((l, j) => l.b >= y && (i < 0 || l.b < lines[i].b || (l.b === lines[i].b && l.x0 < lines[i].x0)) && (i = j));
-    if (i < 0) return null;
+  private entryOn(k: number, y: number, aux: string | null = null, left: number | null = null): { label: string; text: string; top: number } | null {
+    // (in the entry's column, where the destination gives its left (hyperref's
+    // anchor, the entry's start): in a two-column page the other column's
+    // lines at the same height read as the entry's, the card's title the
+    // body's "Filler text" and its venue the next entry's. A line of the
+    // column starts at its left, or a label's width or hanging indent past it)
+    const lines = this.pageLines(k).filter((l) => left == null || (l.x0 > left - 2 && l.x0 < left + 60));
+    // (the lines at or below the destination, nearest first)
+    const below = lines
+      .map((l, j) => [l, j] as const)
+      .filter(([l]) => l.b >= y)
+      .sort(([a], [c]) => a.b - c.b || a.x0 - c.x0);
+    if (!below.length) return null;
+    // (the entry's first line among the next few: hyperref raises the destination
+    // by the text's \baselineskip, more than a small-type bibliography's leading, so
+    // in acmart's references the nearest line below it was the previous entry's
+    // last one ("1760." of its pages) and the card read a page number as the
+    // title. A line of the entry's own: one starting with a printed label, else
+    // one naming the citation's first author (the .aux label's first name, natbib's
+    // "Kuon and Rose (2007)"), never a line of numbers alone)
+    const near = below.slice(0, 4);
+    const who = aux ? /\p{L}[\p{L}'’-]+/u.exec(aux)?.[0] : undefined;
+    const numbers = (t: string) => /^[\d\s.,;:–—-]+$/.test(t);
+    const pick =
+      near.find(([l]) => Viewer.LABEL.test(l.t)) ??
+      (who ? near.find(([l]) => l.t.includes(who)) : undefined) ??
+      near.find(([l]) => !numbers(l.t)) ??
+      near[0];
+    const i = pick[1];
     const first = lines[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines.length && out.length < 8; j++) {
       const l = lines[j];
@@ -1306,7 +1374,7 @@ export class Viewer {
     const f = document.createElement("div");
     f.className = "phx-flash";
     const pad = exact ? 2 : 3;
-    Object.assign(f.style, { left: `${((l - pad) / this.size.w) * 100}%`, top: `${((t - pad) / this.size.h) * 100}%`, width: `${((r - l + 2 * pad) / this.size.w) * 100}%`, height: `${((bt - t + 2 * pad) / this.size.h) * 100}%` });
+    this.place(f, { x: l - pad, y: t - pad, w: r - l + 2 * pad, h: bt - t + 2 * pad });
     f.addEventListener("animationend", () => f.remove());
     s.el.append(f);
   }
@@ -1451,7 +1519,6 @@ export class Viewer {
    */
   marks(marks: { k: number; boxes: [number, number, number, number][] }[]): void {
     for (const m of this.root.querySelectorAll(".sel")) m.remove();
-    const { w, h } = this.size;
     let first: HTMLElement | undefined, seen = false;
     const v = this.scroller.getBoundingClientRect();
     for (const { k, boxes } of marks) {
@@ -1461,7 +1528,7 @@ export class Viewer {
       for (const [x, y, bw, bh] of boxes) {
         const m = document.createElement("div");
         m.className = "mark sel";
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
         first ??= m;
         const r = m.getBoundingClientRect();
@@ -1504,13 +1571,56 @@ export class Viewer {
     return { node: texts[c.i].firstChild!, off: c.off, k, line: lines[c.i] };
   }
 
+  /**
+   * The ends of the text selected on the pages, from the text layer: its
+   * first character's left edge and its last's right edge, each on its
+   * line's baseline (PDF points) and its page. Null: none of it is a page's
+   * text.
+   */
+  private selectionEnds(sel: Selection): { from: { k: number; x: number; y: number }; to: { k: number; x: number; y: number } } | null {
+    type End = { k: number; x: number; y: number };
+    let from: End | null = null, to: End | null = null;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      for (const s of this.slots) {
+        if (!r.intersectsNode(s.el)) continue;
+        const k = Number(s.el.dataset.k);
+        for (const t of s.el.querySelectorAll("text")) {
+          const l = LAYER_LINES.get(t);
+          if (!l || !l.text || !r.intersectsNode(t)) continue;
+          const node = t.firstChild;
+          const a = node && r.startContainer === node ? r.startOffset : 0;
+          const b = node && r.endContainer === node ? r.endOffset : l.text.length;
+          // (its characters, not the spaces at its ends: a space is no glyph)
+          let i = a, j = b - 1;
+          while (i <= j && /\s/.test(l.text[i])) i++;
+          while (j >= i && /\s/.test(l.text[j])) j--;
+          if (j < i) continue;
+          from ??= { k, x: l.xs?.[i] ?? l.x + (l.w * i) / l.text.length, y: l.y };
+          to = { k, x: l.rs?.[j] ?? l.x + (l.w * (j + 1)) / l.text.length, y: l.y };
+        }
+      }
+    }
+    return from && to ? { from, to } : null;
+  }
+
+  /**
+   * The place in the pages' text under a point on the screen, kept in the
+   * column of `from` (a place this gave before) on its page, as a drag's end
+   * is (caretAt): its page, its line, the character it is before; a
+   * review handle's drag.
+   */
+  textPlace(cx: number, cy: number, from?: { k: number; line: TextLine }): { k: number; line: TextLine; off: number } | null {
+    const at = this.caretFrom(cx, cy, from);
+    return at && { k: at.k, line: at.line, off: at.off };
+  }
+
   /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
   private drawSelection(): void {
     for (const m of this.root.querySelectorAll(".seltext")) m.remove();
     const rn = this.root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
     const sel = rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
     if (!sel || sel.isCollapsed || !sel.rangeCount) return;
-    const { w, h } = this.size;
     for (let i = 0; i < sel.rangeCount; i++) {
       const r = sel.getRangeAt(i);
       for (const s of this.slots) {
@@ -1527,7 +1637,7 @@ export class Viewer {
           const m = document.createElement("div");
           m.className = "mark seltext";
           const top = l.y - l.size * 0.8, ht = l.size * 1.05;
-          Object.assign(m.style, { left: `${(x0 / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${((x1 - x0) / w) * 100}%`, height: `${(ht / h) * 100}%` });
+          this.place(m, { x: x0, y: top, w: x1 - x0, h: ht });
           s.el.append(m);
         }
       }
@@ -1552,8 +1662,8 @@ export class Viewer {
    */
   others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number }[]): void {
     for (const m of this.root.querySelectorAll(".peer")) m.remove();
-    const { w, h } = this.size;
-    const at = (m: HTMLElement, x: number, y: number) => Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` });
+    const { w } = this.size;
+    const at = (m: HTMLElement, x: number, y: number, bw?: number, bh?: number) => this.place(m, { x, y, w: bw, h: bh });
     for (const { k, boxes, label, hue, file, pos } of marks) {
       const s = this.slots[k];
       if (!s || !boxes.length) continue;
@@ -1561,8 +1671,7 @@ export class Viewer {
         const m = document.createElement("div");
         m.className = "peer";
         m.style.setProperty("--hue", String(hue));
-        at(m, x, y);
-        Object.assign(m.style, { width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        at(m, x, y, bw, bh);
         s.el.append(m);
       }
       const tag = document.createElement("div");
@@ -1611,7 +1720,6 @@ export class Viewer {
   culprits(marks: { k: number; boxes: [number, number, number, number][]; severity: "error" | "warning"; i?: number; rule?: "overfull" | "underfull"; amount?: number }[]): void {
     this.culpritMarks = marks;
     for (const m of this.root.querySelectorAll(".culprit")) m.remove();
-    const { w, h } = this.size;
     for (const { k, boxes, severity, i, rule, amount } of marks) {
       const s = this.slots[k];
       if (!s) continue;
@@ -1643,7 +1751,7 @@ export class Viewer {
         const m = document.createElement("div");
         m.className = `culprit rule ${rule}`;
         if (i !== undefined) m.dataset.i = String(i);
-        Object.assign(m.style, { left: `${((end + 1.5) / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${(5 / w) * 100}%`, height: `${(ht / h) * 100}%` });
+        this.place(m, { x: end + 1.5, y: top, w: 5, h: ht });
         s.el.append(m);
         continue;
       }
@@ -1652,7 +1760,7 @@ export class Viewer {
         m.className = `culprit ${severity}`;
         // (the caller's own index, the problem it is: the panel's hover says its message)
         if (i !== undefined) m.dataset.i = String(i);
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
       }
     }
@@ -1665,6 +1773,27 @@ export class Viewer {
    * away). The whole set, the last one's replaced; never scrolls, never asks
    * for a page (one drawn later keeps them, as paint does).
    */
+  /**
+   * `el` placed on its page at PDF points (any of its left `x`, top `y`,
+   * width `w`, height `h`) as fractions of the pages' size, and placed again
+   * when that size becomes known: a mark drawn before the first page came
+   * (a tab opened on notes, problems, a collaborator's cursor) was laid out
+   * on Letter's size, and on an A4 page stood lines below its text.
+   */
+  place(el: HTMLElement, p: { x?: number; y?: number; w?: number; h?: number }): void {
+    el.dataset.pt = JSON.stringify(p);
+    this.lay(el, p);
+  }
+
+  private lay(el: HTMLElement, p: { x?: number; y?: number; w?: number; h?: number }): void {
+    const { w, h } = this.size, st: Record<string, string> = {};
+    if (p.x !== undefined) st.left = `${(p.x / w) * 100}%`;
+    if (p.y !== undefined) st.top = `${(p.y / h) * 100}%`;
+    if (p.w !== undefined) st.width = `${(p.w / w) * 100}%`;
+    if (p.h !== undefined) st.height = `${(p.h / h) * 100}%`;
+    Object.assign(el.style, st);
+  }
+
   /** A page's size in PDF points (the pages' boxes are in them). */
   pageSize(): { w: number; h: number } {
     return this.size;
@@ -1672,7 +1801,6 @@ export class Viewer {
 
   reviewMarks(marks: { k: number; boxes: [number, number, number, number][]; cls: string; id: string; pin?: string; title?: string }[]): void {
     for (const m of this.root.querySelectorAll(".rv")) m.remove();
-    const { w, h } = this.size;
     const pinned = new Map<number, number[]>();
     for (const mk of marks) {
       const s = this.slots[mk.k];
@@ -1681,7 +1809,7 @@ export class Viewer {
         const m = document.createElement("div");
         m.className = `rv ${mk.cls}`;
         m.dataset.id = mk.id;
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(Math.max(bw, 1.5) / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: Math.max(bw, 1.5), h: bh });
         s.el.append(m);
       }
       if (mk.pin !== undefined) {
@@ -1697,7 +1825,7 @@ export class Viewer {
         b.dataset.id = mk.id;
         b.textContent = mk.pin;
         if (mk.title) (b.title = mk.title), b.setAttribute("aria-label", mk.title);
-        Object.assign(b.style, { top: `${(y / h) * 100}%` });
+        this.place(b, { y });
         s.el.append(b);
       }
     }
@@ -1722,7 +1850,7 @@ export class Viewer {
         s.el.append(m);
       }
       m.classList.remove("fade");
-      Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+      this.place(m, { x, y, w: bw, h: bh });
     });
     for (const m of have.slice(boxes.length)) m.remove();
     // (the first box in the middle of the view, unless it is in view already;
@@ -1763,7 +1891,7 @@ export class Viewer {
       for (const [x, y, bw, bh] of boxes) {
         const m = document.createElement("div");
         m.className = i === cur ? "mark fnd cur" : "mark fnd";
-        Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%`, width: `${(bw / w) * 100}%`, height: `${(bh / h) * 100}%` });
+        this.place(m, { x, y, w: bw, h: bh });
         s.el.append(m);
       }
     });
@@ -1883,6 +2011,8 @@ export class Viewer {
     if (hash) this.asked.delete(`${k}:${hash}`);
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
+    // (the marks placed at the size before, at this one)
+    if (resized) for (const el of this.root.querySelectorAll<HTMLElement>("[data-pt]")) this.lay(el, JSON.parse(el.dataset.pt!));
     s.img = img;
     this.waits(s);
     // (a tab opened at a place: there once the pages have their size)

@@ -31,6 +31,13 @@ export function git(dir, ...args) {
   return r.stdout;
 }
 
+/**
+ * A machine with no TeX Live, a CI runner's: TeX's files from Shelf for every
+ * phitex the tests start (PHITEX_BROWSER_SHELF=1); the homes are the tests'
+ * own, with no config in them.
+ */
+export const SHELF = process.env.PHITEX_BROWSER_SHELF === "1" ? ["--shelf"] : [];
+
 /** A `phitex watch` in `dir`; `home` (config and cache) kept apart from the user's. */
 export class Watch {
   constructor(dir, { file = "main.tex", args = [], home, pipe = true, env = {} } = {}) {
@@ -38,7 +45,7 @@ export class Watch {
     this.out = "";
     this.home = home;
     const bin = process.env.PHITEX_BIN ?? "phitex";
-    this.proc = spawn(bin, ["watch", ...args, ...(file ? [file] : [])], {
+    this.proc = spawn(bin, ["watch", ...SHELF, ...args, ...(file ? [file] : [])], {
       cwd: dir,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...(home ? { HOME: home, XDG_CONFIG_HOME: join(home, ".config") } : {}), BROWSER: "true", ...env },
@@ -46,10 +53,13 @@ export class Watch {
     for (const s of [this.proc.stdout, this.proc.stderr]) s.on("data", (d) => (this.out += d));
     this.exited = new Promise((ok) => this.proc.on("exit", (c) => ok(c)));
     Watch.all.add(this);
+    Watch.made.push(this);
     this.exited.then(() => Watch.all.delete(this));
   }
   /** Every watch still running (a failed test's): killed by `killAll`. */
   static all = new Set();
+  /** Every watch started since `report` last ran, running or not: what a failed test's said. */
+  static made = [];
   static killAll() {
     for (const w of Watch.all) w.proc.kill("SIGKILL");
   }
@@ -58,6 +68,8 @@ export class Watch {
     while (Date.now() < end) {
       const m = /http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]+\//.exec(this.out);
       if (m) return m[0];
+      // (a watch that stopped before it served the viewer: said now, not when the wait is up)
+      if (this.proc.exitCode !== null || this.proc.signalCode !== null) throw new Error(`the watch exited (${this.proc.exitCode ?? this.proc.signalCode}) before its viewer's address: ${this.out}`);
       await sleep(50);
     }
     throw new Error(`no viewer address in: ${this.out}`);
@@ -90,14 +102,22 @@ export class Browser {
     const b = new Browser();
     b.data = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-chrome-"));
     b.proc = spawn(chromiumName(), ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", "--window-size=1200,900", "--remote-debugging-port=0", `--user-data-dir=${b.data}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+    // (ready when it says where DevTools listens, however long a cold runner takes; a browser that
+    // exits first fails the start. A start that fails leaves no browser behind: one left running
+    // kept the test runner alive until the job's time ran out)
     let err = "";
-    b.proc.stderr.on("data", (d) => (err += d));
-    for (let i = 0; i < 300 && !b.port; i++) {
-      const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(err);
-      if (m) b.port = m[1];
-      else await sleep(50);
-    }
-    if (!b.port) throw new Error(`no browser: ${err}`);
+    b.port = await new Promise((ok, no) => {
+      b.proc.stderr.on("data", (d) => {
+        err += d;
+        const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(err);
+        if (m) ok(m[1]);
+      });
+      b.proc.on("error", (e) => no(new Error(`no browser: ${e.message}`)));
+      b.proc.on("exit", (c, sig) => no(new Error(`no browser: it exited (${c ?? sig}): ${err}`)));
+    }).catch(async (e) => {
+      await b.stop();
+      throw e;
+    });
     return b;
   }
   async tabs() {
@@ -105,7 +125,29 @@ export class Browser {
   }
   async tab(url = "about:blank") {
     const t = await (await fetch(`http://127.0.0.1:${this.port}/json/new?about:blank`, { method: "PUT" })).json();
-    return Tab.attach(t, url);
+    const tab = await Tab.attach(t, url);
+    this.opened.push(tab);
+    return tab;
+  }
+  /** The tabs opened since `report` last ran. */
+  opened = [];
+  /**
+   * After a test (an `afterEach`): if it failed, what its watches printed
+   * (their builds' lines, a failed build's errors) and what each of its tabs
+   * showed (the bar, the problems' list) on stderr, so the failure says what
+   * went wrong, not only what was waited for; then forgotten.
+   */
+  async report(t) {
+    const watches = Watch.made.splice(0), tabs = this.opened.splice(0);
+    if (t.passed) return;
+    const out = [`--- ${t.name} failed: what it saw ---`];
+    for (const [i, w] of watches.entries()) out.push(`watch ${i + 1} in ${w.dir}:`, w.out.length > 20000 ? `…${w.out.slice(-20000)}` : w.out);
+    for (const [i, tab] of tabs.entries()) {
+      const s = await tab.state().catch((e) => `? (${e.message})`);
+      const probs = await tab.q(`$("#diags")?.innerText ?? null`).catch(() => null);
+      out.push(`tab ${i + 1}: ${JSON.stringify(s)}`, `its problems: ${probs ?? "none shown"}`, `its errors: ${JSON.stringify(tab.errors)}`);
+    }
+    process.stderr.write(out.join("\n") + "\n");
   }
   async stop() {
     this.proc.kill("SIGKILL");

@@ -616,6 +616,84 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       grep -q "documents, " "$r/editsweep.txt" || red "edits: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
     fi
     ;;
+  persist-process)
+    # persist-process K N J: the persisted graph across processes
+    # (docs/spec-persisted-graph.md §5, step 3): shard K of N of
+    # ci/research.json, each document's history of `phitex build`
+    # processes as built by default (the graph kept) at -j J (scripts/ci/graphsweep.py):
+    # a clean build saving its graph; unchanged; three words typed; a
+    # .bib's entry, an image and the document class (shadowed by the
+    # document's copy) changed; the other -j; the graph file cut and a
+    # bit flipped; SOURCE_DATE_EPOCH changed. Red: a PDF, log, aux or
+    # SyncTeX file not the clean build's of the same files; a graph not
+    # loaded where it should be, or loaded where it must not; an
+    # unchanged load that ran a node.
+    k=$1 n=$2 j=${3:-1}
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "persist: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK"
+      python3 -I scripts/ci/graphsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
+        --out "$r/graph" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
+        --threads "$j" ${GRAPHSWEEP_IDS:+--ids "$GRAPHSWEEP_IDS"} > "$r/graphsweep.txt" 2>&1
+      grep '^graphsweep:' "$r/graphsweep.txt" | head -80 >> "$r/red.txt"
+      grep -q "documents, " "$r/graphsweep.txt" || red "persist: the sweep did not start: $(tail -1 "$r/graphsweep.txt")"
+      grep -q . "$r/red.txt" && status=red
+    fi
+    ;;
+  persist)
+    # persist K N [J]: the persisted graph's check (docs/spec-persisted-graph.md,
+    # step 2): shard K of N of ci/research.json under the watch at -j J
+    # (1) with PHITEX_GRAPH_CHECK=1, a word typed early, midway and late
+    # (scripts/ci/editsweep.py). After each build the session saves the
+    # build and loads it into a twin in its process (Build::save,
+    # Build::load), which must run no node with nothing changed and give
+    # the build's PDF, log and files; the next edit goes to the twin too,
+    # its outputs the build's (and at -j 1 its runs). Red: a load refused;
+    # a loaded build that ran a node unchanged or gave other bytes; an
+    # edit whose twin differs. Nothing is carved out: pdfTeX's link state
+    # (its pages and read-time commands) is saved (spec §2.2.4).
+    k=$1 n=$2 j=${3:-1}
+    fetched
+    bin=$w/bin/cli/rel/phitex
+    if [ ! -x "$bin" ]; then
+      red "persist: no CLI at \$w/bin/cli/rel/phitex"
+    else
+      export CI_WORK=$w/ci
+      mkdir -p "$CI_WORK"
+      python3 -I scripts/ci/editsweep.py --list ci/research.json --doc ci/research --bin "$bin" \
+        --out "$r/persist" --shard "$k/$n" --par "${GATE_EDITS_PAR:-4}" --timeout "${GATE_EDITS_TIMEOUT:-600}" \
+        --threads "$j" --graph-check > "$r/editsweep.txt" 2>&1
+      # (the sweep's bar of two runs a node a round is -j 1's: at more
+      # threads an edit's runs ahead of their inputs are the schedule's,
+      # reported apart; without any load revtex-aip's line-308 edit ran
+      # 250, 358 and 258 runs for 132-136 nodes at -j 8 in three
+      # processes, the PDF the cold build's each time, spec §2.2.4)
+      if [ "$j" = 1 ]; then
+        grep '^editsweep:' "$r/editsweep.txt" | head -60 >> "$r/red.txt"
+      else
+        grep '^editsweep:' "$r/editsweep.txt" | grep -v ' runs for [0-9]* nodes in ' | head -60 >> "$r/red.txt"
+        grep '^editsweep:' "$r/editsweep.txt" | grep ' runs for [0-9]* nodes in ' | sed "s/^/persist (-j $j, not red): /" >> "$r/known-red.txt"
+      fi
+      grep -q "documents, " "$r/editsweep.txt" || red "persist: the sweep did not start: $(tail -1 "$r/editsweep.txt")"
+      : > "$r/graph-check.txt"
+      for e in "$CI_WORK"/edit/*.err; do
+        [ -f "$e" ] || continue
+        id=$(basename "$e" .err)
+        grep -a '^graph-check' "$e" | sed "s/^/$id: /" >> "$r/graph-check.txt"
+        if grep -aq 'graph-check: load refused\|graph-check: load: DIFFER' "$e"; then
+          red "persist: $id: $(grep -a -m1 'graph-check: load refused\|graph-check: load: DIFFER' "$e" | cut -c1-300)"
+        elif grep -aq 'graph-check: edit [0-9]*: DIFFER' "$e"; then
+          red "persist: $id: $(grep -a -m1 'graph-check: edit [0-9]*: DIFFER' "$e" | cut -c1-300)"
+        fi
+      done
+      grep -q 'graph-check: load' "$r/graph-check.txt" || red "persist: no graph-check line: PHITEX_GRAPH_CHECK did not reach the watches"
+      grep -q . "$r/red.txt" && status=red
+    fi
+    ;;
   research)
     # research K N [shelf]: shard K of N of ci/research.json. The oracle
     # (TeX Live's pdflatex/xelatex, BibTeX, biber, makeindex to the
@@ -797,6 +875,14 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/amsh" amsldoc.tex $j $n $j "$r/edits-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
     grep -E '^acct-edit:' "$r/edits-j$j.err" 2>/dev/null | cut -c1-400 >> "$r/ams.txt"
     grep -q '"verdict": "same"' "$r/edits-j$j.json" 2>/dev/null || red "amsldoc edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
+    # (and acmart's sample-sigconf, a document with a figure of its own
+    # in a .pdf (sampleteaser.pdf) and BibTeX: the history's cold build
+    # once ran in the watch's directory with its .pdf files deleted, the
+    # figure with them, and differed by the harness's doing)
+    rm -rf "$w/acmh" "$w/acmh-given" "$w/acmh-cold" && cp -a ci/research/acmart "$w/acmh"
+    (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_CACHE_DIR=$w/acache \
+      timeout 2400 python3 -I scripts/accl/gate-edits.py "$bin" "$w/acmh" sample-sigconf.tex $j $n $j "$r/edits-acm-j$j.json" --exact-pdf) >> "$r/ams.txt" 2>&1
+    grep -q '"verdict": "same"' "$r/edits-acm-j$j.json" 2>/dev/null || red "sample-sigconf edit history -j $j: $(python3 -c "import json;print(json.load(open('$r/edits-acm-j$j.json')).get('verdict'))" 2>/dev/null || echo 'no result')"
     ;;
   editkinds)
     # editkinds: every edit kind on amsldoc, one watch session per -j,

@@ -706,6 +706,256 @@ fn watch_word_edit_ms() -> f64 {
     ms
 }
 
+/// RFC 4648 base64 `t` as little-endian `u32`s (the viewer's `origins`
+/// arrays).
+fn words_of_base64(t: &str) -> Vec<u32> {
+    let mut bytes = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in t.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue,
+        };
+        acc = acc << 6 | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push(u8::try_from(acc >> bits & 0xFF).unwrap_or(0));
+        }
+    }
+    let (words, _) = bytes.as_chunks::<4>();
+    words.iter().map(|&c| u32::from_le_bytes(c)).collect()
+}
+
+/// Glyph origins of the texts of floats on later pages, as the viewer
+/// asks for them (`phitex watch`, its socket's `origins`): a two-column
+/// paper's `figure*` (subcaptions, a `TikZ` picture's node texts, its
+/// caption) and figure, a one-column paper's floats moved to later pages
+/// (a float page, a table at a page's foot), and XeLaTeX's two-column
+/// `figure*` (issue #47). Each glyph of such a text is the bytes of that
+/// text (a caption's of its `\caption` argument, a node's text of its
+/// braces), each of its letters shown by one glyph, all of them on a page
+/// after the first where the float is moved there; no glyph (but a
+/// macro's, synthesized: `Figure 1:`, `(a)`) is placed in source text no
+/// page shows (a label, an environment's name, an option, a coordinate),
+/// and no byte is two glyphs'. The matcher filled the gaps between the
+/// words it matched with letters one by one: a caption's on the second
+/// page took the `i`, `g` of a label and the `ure` of `subfigure`, a node's
+/// text letters of the paragraph before it, and the viewer's double-click
+/// on them went there.
+#[test]
+#[allow(clippy::too_many_lines, reason = "three documents, one check")]
+fn glyph_origins_of_float_texts() {
+    // (an engine, a document, and its floats' texts with the first page,
+    // from 0, each is on)
+    type Doc<'a> = (&'a str, &'a str, &'a [(&'a str, usize)]);
+    let _one = one();
+    let later = 1;
+    let docs: [Doc; 3] = [
+        (
+            "pdflatex",
+            "floats2col",
+            &[
+                ("Lanterns over the northern quay", later),
+                ("Copper kettles cooling slowly", later),
+                (
+                    "Harbour scenes painted during the winter festival, with both panels drawn to the same scale.",
+                    later,
+                ),
+                ("Granite pit", later),
+                ("Marble quarry", later),
+                (
+                    "Stone travels from the granite pit to the marble quarry by cart.",
+                    later,
+                ),
+            ],
+        ),
+        (
+            "pdflatex",
+            "floats1col",
+            &[
+                (
+                    "Orchards bloom along the valley road in early spring.",
+                    later,
+                ),
+                ("Tools kept by each trade in the village.", 0),
+                ("Fishing boats return to the harbour at dusk.", later),
+                ("Weaver & Loom", 0),
+                ("Baker & Oven", 0),
+            ],
+        ),
+        (
+            "xelatex",
+            "floatsxe",
+            &[
+                ("Lanterns over the northern quay", later),
+                ("Granite pit", later),
+                ("Marble quarry", later),
+                ("Copper kettles cooling slowly", later),
+                (
+                    "Harbour scenes painted during the winter festival, with both panels drawn to the same scale.",
+                    later,
+                ),
+            ],
+        ),
+    ];
+    let mut fails = Vec::new();
+    for (engine, name, texts) in docs {
+        let file = format!("{name}.tex");
+        let src =
+            std::fs::read(fixtures().join("latex/origins").join(&file)).expect("the document");
+        let dir = scratch(&format!("float-origins-{name}"));
+        std::fs::write(dir.join(&file), &src).expect("the document");
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args([
+                "watch",
+                "--json",
+                "--synctex",
+                "--engine",
+                engine,
+                "-j",
+                "1",
+                &file,
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let mut stdin = child.stdin.take().expect("its input");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+            .as_str()
+            .expect("the viewer's url")
+            .to_owned();
+        let built = until(&mut lines, "build", &1.into(), &mut seen);
+        assert_eq!(built["ok"], true, "{name}: {built}");
+        let pages = usize::try_from(built["pages"].as_u64().expect("its pages")).unwrap_or(0);
+        let mut viewer = Viewer::connect(&url);
+        // (each page's glyphs: page, start, end, synthesized; in its order)
+        let mut glyphs: Vec<Vec<(u32, u32, bool)>> = Vec::new();
+        let mut id = 0;
+        for k in 0..pages {
+            let end = Instant::now() + Duration::from_secs(120);
+            let o = loop {
+                id += 1;
+                let r = viewer.ask(&serde_json::json!({"id": id, "op": "origins", "page": k}));
+                let j = &r["json"];
+                if j.get("pending").is_none() && j.get("n").is_some() {
+                    break j.clone();
+                }
+                assert!(Instant::now() < end, "{name}: page {k}'s origins: {r}");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let files: Vec<String> = o["files"]
+                .as_array()
+                .expect("the files")
+                .iter()
+                .map(|f| f.as_str().unwrap_or_default().to_owned())
+                .collect();
+            let at = files.iter().position(|f| f.ends_with(&file));
+            let (file_of, start, end, synth) = (
+                words_of_base64(o["file"].as_str().unwrap_or_default()),
+                words_of_base64(o["start"].as_str().unwrap_or_default()),
+                words_of_base64(o["end"].as_str().unwrap_or_default()),
+                words_of_base64(o["synth"].as_str().unwrap_or_default()),
+            );
+            // (a XeTeX native word's glyphs, one after another, all the
+            // word's bytes: once)
+            let mut gs: Vec<(u32, u32, bool)> = (0..file_of.len())
+                .filter(|&i| at.is_some_and(|f| file_of[i] as usize == f))
+                .map(|i| (start[i], end[i], synth[i / 32] >> (i % 32) & 1 == 1))
+                .collect();
+            gs.dedup();
+            glyphs.push(gs);
+        }
+        let _ = stdin.write_all(b"q\n");
+        drop(stdin);
+        lines.for_each(drop);
+        let _ = child.wait();
+        // (the source text a page shows: the paragraphs' lines, those
+        // that begin with a letter, and the texts of the floats)
+        let mut shown = vec![false; src.len()];
+        let mut at = 0;
+        for line in src.split_inclusive(|&b| b == b'\n') {
+            if line.first().is_some_and(u8::is_ascii_alphabetic) {
+                shown[at..at + line.len()].fill(true);
+            }
+            at += line.len();
+        }
+        let place = |t: &str| {
+            let a = src
+                .windows(t.len())
+                .position(|w| w == t.as_bytes())
+                .unwrap_or_else(|| panic!("{name}: {t:?} in the document"));
+            (a, a + t.len())
+        };
+        for (t, _) in texts {
+            let (a, b) = place(t);
+            shown[a..b].fill(true);
+        }
+        if let Some(a) = src.windows(9).position(|w| w == b"\\section{") {
+            let b = a + src[a..].iter().position(|&c| c == b'}').unwrap_or(0);
+            shown[a + 9..b].fill(true);
+        }
+        // (each byte: the glyphs placed on it, page and index)
+        let mut on: Vec<Vec<(usize, usize)>> = vec![Vec::new(); src.len()];
+        for (k, gs) in glyphs.iter().enumerate() {
+            for (i, &(s, e, synth)) in gs.iter().enumerate() {
+                if synth || e <= s {
+                    continue;
+                }
+                let (s, e) = (s as usize, (e as usize).min(src.len()));
+                if !shown[s..e].iter().all(|&x| x) {
+                    fails.push(format!(
+                        "{name}: page {} glyph {i} placed on {:?}, text no page shows",
+                        k + 1,
+                        String::from_utf8_lossy(&src[s..e])
+                    ));
+                }
+                for x in &mut on[s..e] {
+                    x.push((k, i));
+                }
+            }
+        }
+        for (b, gs) in on.iter().enumerate() {
+            if gs.len() > 1 {
+                fails.push(format!(
+                    "{name}: byte {b} {:?} is the glyphs {gs:?}'",
+                    char::from(src[b])
+                ));
+            }
+        }
+        for &(t, page) in texts {
+            let (a, b) = place(t);
+            for x in a..b {
+                if !src[x].is_ascii_alphanumeric() {
+                    continue;
+                }
+                match on[x].as_slice() {
+                    [(k, _)] if *k >= page => {}
+                    gs => fails.push(format!(
+                        "{name}: {t:?}: its {:?} at byte {x} is the glyphs {gs:?} (pages from 0), not one on page {} or after",
+                        char::from(src[x]),
+                        page + 1
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "float texts' origins:\n{}",
+        fails.join("\n")
+    );
+}
+
 /// `phitex watch --synctex` with a browser's socket: a save made while
 /// the viewer's asks are in flight (every page's origins, asked at once,
 /// as a browser asks for the pages it shows after a build), one made the
@@ -942,22 +1192,25 @@ fn watch_an_edit_that_makes_what_it_made_runs_its_node_alone() {
 /// 7 ms of 113 stagings of nothing). In a release build each build
 /// stays within 2 ms and 300 µs per 1000 nodes, and `r`'s check of the
 /// files within a small multiple of what the same calls cost this
-/// machine, timed beside it: a stat of each file found, kpathsea's lookup
-/// of each name not found (a bound in µs a file failed on loaded
-/// runners, 54 to 70 µs a file, #31; a file read again, or a second call
-/// a file, is over it on any machine).
+/// machine, timed beside it on the same files and names, those `r`
+/// reports it checked: a stat of each file found, kpathsea's lookup of
+/// each name not found (#31: a baseline of 7 files cycled and kpathsea's
+/// `.` the test's own folder compared other work, 1.6-3.7x on loaded
+/// runners; a file read again, or a second call a file, is over the bar).
 #[test]
 #[allow(clippy::too_many_lines, reason = "one watch session, step by step")]
 fn watch_no_change_rebuild() {
     /// The `r`s timed.
-    const CHECKS: u64 = 5;
-    /// `r`'s keys of the files found, at most this many times as many
-    /// stat calls (0.96-1.59 on accl, 8 runs; a second stat a file
-    /// 2.16-2.69, a read 8.6-10.2).
-    const KEYS_PER_STAT: f64 = 1.9;
+    const CHECKS: u64 = 15;
+    /// `r`'s keys of the files found, at most this many times the stat
+    /// calls on the same files, the median of the `r`s (mc, 8 copies on 16
+    /// CPUs, 208 runs: 0.97-1.44; a second stat a file 1.96-2.37, a read
+    /// 11.5-14.2).
+    const KEYS_PER_STAT: f64 = 1.7;
     /// `r`'s lookups of the names not found, at most this many times
-    /// kpathsea's (1.57-1.99 on accl; a second lookup a name 3.1-3.9).
-    const LOOKUPS_PER_LOOKUP: f64 = 2.5;
+    /// kpathsea's of the same names from the same folder (0.63-1.03; a
+    /// second lookup a name 1.39-1.78).
+    const LOOKUPS_PER_LOOKUP: f64 = 1.2;
     let _one = one();
     let big = big();
     let body = big
@@ -1008,41 +1261,33 @@ fn watch_no_change_rebuild() {
     };
     std::thread::sleep(Duration::from_millis(100));
     let (pdf_at, lst_at) = (stamp(&pdf), stamp(&dir.join("big.lst")));
-    // (the machine's own cost of the same calls, timed beside `r`'s:
-    // a stat of as many files found, the document's and TeX Live's fonts
-    // in turn, and kpathsea's lookup of the names not found, as the watch
-    // makes it, `tex::Tree::input`)
+    // (the machine's own cost of the same calls, timed beside `r`'s: a
+    // stat of each file `r` keyed and kpathsea's lookup of each name it
+    // looked up, the lists its event gives, in its order, each call timed
+    // alone as `r` times its own, `Session::reread_all_timed`; #31: a
+    // baseline of 7 files cycled, against `r`'s 59 on deeper paths,
+    // compared different work; and kpathsea's `.` is the document's
+    // folder, as the watch's is: a name not found reads the listing of
+    // each folder searched on the disk, kept only once the folder's time
+    // is two seconds old, and the watch's folder was just written, the
+    // test's own was not: 1.6-3.7x)
     let mut kpse = texlive_kpse();
-    let found: Vec<PathBuf> = ["cmr10.tfm", "cmmi10.tfm", "cmsy10.tfm", "cmbx10.tfm"]
-        .iter()
-        .map(|n| {
-            let p = kpse
-                .find_file(n.as_bytes(), phitex_kpse::Format::Tfm, false)
-                .expect("TeX Live's fonts");
-            PathBuf::from(String::from_utf8(p).expect("a path"))
-        })
-        .chain(
-            ["big.tex", "chap.tex", "big.lst"]
-                .iter()
-                .map(|n| dir.join(n)),
-        )
-        .collect();
-    let absent: Vec<String> = (0..40).map(|k| format!("absent-{k}.cfg")).collect();
-    let mut machine = |keys: usize, lookups: usize| {
-        let t = Instant::now();
-        for p in found.iter().cycle().take(keys) {
+    kpse.set_var("TEXMFDOTDIR", dir.to_str().expect("a UTF-8 path"));
+    let mut machine = |found: &[PathBuf], absent: &[String]| {
+        let mut stats = Duration::ZERO;
+        for p in found {
+            let t = Instant::now();
             std::hint::black_box(std::fs::metadata(p).ok());
+            stats += t.elapsed();
         }
-        let stats = t.elapsed().as_secs_f64() * 1e3;
-        let t = Instant::now();
-        for n in absent.iter().cycle().take(lookups) {
+        let mut lookups = Duration::ZERO;
+        for n in absent {
+            let t = Instant::now();
             std::hint::black_box(kpse.find_file(n.as_bytes(), phitex_kpse::Format::Tex, false));
+            lookups += t.elapsed();
         }
-        (stats, t.elapsed().as_secs_f64() * 1e3)
+        (stats.as_secs_f64() * 1e3, lookups.as_secs_f64() * 1e3)
     };
-    // (kpathsea's databases read, the files' entries cached, before any
-    // is timed)
-    machine(found.len(), absent.len());
     let check = |ev: &serde_json::Value, what: &str| {
         assert_eq!(ev["ok"], true, "{what}: {ev}");
         assert_eq!(ev["nodes_run"], 0, "{what} ran nodes: {ev}");
@@ -1062,9 +1307,10 @@ fn watch_no_change_rebuild() {
     };
     // (`r`'s check of the files, the keys of those found and the lookups
     // of those not, each against the same calls made here right after it:
-    // the least of each over the `r`s, so that a moment's load on a
-    // shared machine, on either side, is not taken for the check's cost)
-    let mut least = [f64::INFINITY; 4];
+    // the median of the `r`s' ratios, each `r` paired with the calls timed
+    // beside it, so that a moment's load on a shared machine, on either
+    // side, is not taken for the check's cost)
+    let (mut key_ratios, mut lookup_ratios) = (Vec::new(), Vec::new());
     let (mut keys, mut lookups) = (0, 0);
     for k in 1..=CHECKS {
         stdin.write_all(b"\n").expect("r");
@@ -1078,33 +1324,51 @@ fn watch_no_change_rebuild() {
         lookups = n(&r["looked_up"]);
         keys = checked - lookups;
         assert!(checked > 40 && lookups >= 40, "r {k} checked: {ev}");
+        let list = |f: &str| -> Vec<String> {
+            r[f].as_array()
+                .unwrap_or_else(|| panic!("r {k}: no {f} list: {ev}"))
+                .iter()
+                .map(|x| x.as_str().expect("a name").to_owned())
+                .collect()
+        };
+        let found: Vec<PathBuf> = list("found").into_iter().map(PathBuf::from).collect();
+        let absent = list("absent");
+        assert_eq!(absent.len(), lookups, "r {k}: the names looked up: {ev}");
+        assert!(
+            !found.is_empty() && found.len() <= keys,
+            "r {k}: the files keyed: {ev}"
+        );
+        if k == 1 {
+            eprintln!("watch: r keys {keys}: {found:?}\nwatch: r looks up: {absent:?}");
+            // (kpathsea's databases read, the files' entries cached, before
+            // any is timed)
+            machine(&found, &absent);
+        }
         let ms = |f: &str| r[f].as_f64().expect("the check's times");
         let (keys_ms, lookups_ms) = (ms("keys_ms"), ms("lookups_ms"));
-        let (stats_ms, kpse_ms) = machine(keys, lookups);
+        let (stats_ms, kpse_ms) = machine(&found, &absent);
         eprintln!(
             "watch: r {k}: {keys} keys {keys_ms:.3} ms ({keys} stat calls {stats_ms:.3} ms), {lookups} lookups {lookups_ms:.3} ms (kpathsea's {kpse_ms:.3} ms)"
         );
-        for (l, x) in least
-            .iter_mut()
-            .zip([keys_ms, stats_ms, lookups_ms, kpse_ms])
-        {
-            *l = l.min(x);
-        }
+        key_ratios.push(keys_ms / stats_ms);
+        lookup_ratios.push(lookups_ms / kpse_ms);
     }
-    let [keys_ms, stats_ms, lookups_ms, kpse_ms] = least;
+    let median = |mut xs: Vec<f64>| {
+        xs.sort_by(f64::total_cmp);
+        xs[xs.len() / 2]
+    };
+    let (keys_x, lookups_x) = (median(key_ratios), median(lookup_ratios));
     eprintln!(
-        "watch: r at best: the keys {:.2}x the stat calls, the lookups {:.2}x kpathsea's",
-        keys_ms / stats_ms,
-        lookups_ms / kpse_ms
+        "watch: r's median: the keys {keys_x:.2}x the stat calls, the lookups {lookups_x:.2}x kpathsea's"
     );
     if !cfg!(debug_assertions) {
         assert!(
-            keys_ms <= KEYS_PER_STAT * stats_ms,
-            "r's keys of {keys} files took {keys_ms:.3} ms at best, over {KEYS_PER_STAT}x the {stats_ms:.3} ms of as many stat calls"
+            keys_x <= KEYS_PER_STAT,
+            "r's keys of {keys} files took {keys_x:.2}x the same stat calls (the median of {CHECKS} `r`s), over {KEYS_PER_STAT}x"
         );
         assert!(
-            lookups_ms <= LOOKUPS_PER_LOOKUP * kpse_ms,
-            "r's lookups of {lookups} names took {lookups_ms:.3} ms at best, over {LOOKUPS_PER_LOOKUP}x the {kpse_ms:.3} ms of kpathsea's"
+            lookups_x <= LOOKUPS_PER_LOOKUP,
+            "r's lookups of {lookups} names took {lookups_x:.2}x kpathsea's of the same names (the median of {CHECKS} `r`s), over {LOOKUPS_PER_LOOKUP}x"
         );
     }
     std::thread::sleep(Duration::from_millis(50));
@@ -3029,8 +3293,9 @@ fn build_rounds_are_latexmks_runs() {
     ] {
         let dir = scratch(&format!("latexmk-rounds-{name}"));
         std::fs::write(dir.join(format!("{name}.tex")), src).expect("the document");
-        let build = || {
+        let build = |graph: &str| {
             let out = command(bin, &dir)
+                .env("PHITEX_GRAPH", graph)
                 .args(["build", "--json", &format!("{name}.tex")])
                 .output()
                 .expect("phitex runs");
@@ -3047,15 +3312,83 @@ fn build_rounds_are_latexmks_runs() {
             let pdf = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the PDF");
             (ev["rounds"].as_u64().expect("its rounds"), pdf)
         };
-        let (cold, pdf) = build();
+        let (cold, pdf) = build("1");
         assert_eq!(cold, cold_rounds, "{name}: the rounds from nothing");
-        let (again, pdf2) = build();
+        // (with no graph kept: one round, its files read back as they are)
+        let (again, pdf2) = build("0");
         assert_eq!(again, 1, "{name}: the rounds rebuilt with its files");
         assert!(
             pdf == pdf2,
             "{name}: the rebuild's PDF is not the first build's"
         );
+        // (the graph the first build kept, loaded: nothing changed, no
+        // round; `phitex build` keeps it by default)
+        let (loaded, pdf3) = build("1");
+        assert_eq!(loaded, 0, "{name}: the rounds rebuilt from its graph");
+        assert!(
+            pdf == pdf3,
+            "{name}: the loaded rebuild's PDF is not the first build's"
+        );
     }
+}
+
+/// A watch saves its persisted graph after its first build, not only as
+/// it ends: killed then, the next watch loads it and runs nothing. (A
+/// watch's graph is a watch's: `phitex build` writes its PDF in another
+/// layout, a key of the graph, and builds clean.)
+#[test]
+fn watch_saves_its_graph_after_the_first_build() {
+    let _one = one();
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let dir = scratch("watch-graph-first");
+    std::fs::write(
+        dir.join("hello.tex"),
+        "\\documentclass{article}\n\\begin{document}\nHello, world.\n\\end{document}\n",
+    )
+    .expect("the document");
+    let watch = || {
+        command(bin, &dir)
+            .env("PHITEX_GRAPH", "1")
+            .args(["watch", "--write", "--json", "--no-view", "hello.tex"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs")
+    };
+    let mut child = watch();
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    // (saved with nothing typed and the watch still running)
+    loop {
+        let g = until(&mut lines, "event", &"graph".into(), &mut seen);
+        if g["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("graph: saved"))
+        {
+            break;
+        }
+    }
+    child.kill().expect("the watch killed");
+    let _ = child.wait();
+    // (the next watch: its first build from the graph, nothing run)
+    let mut child = watch();
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let again = until(&mut lines, "build", &1.into(), &mut seen);
+    child.kill().expect("the watch killed");
+    let _ = child.wait();
+    assert!(
+        seen.iter().any(|l| l.contains("graph: loaded")),
+        "the watch after the killed one did not load its graph:\n{}",
+        seen.join("\n")
+    );
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["nodes_run"], 0, "{again}");
 }
 
 /// The exit statuses, as pdflatex's: 1 for a file that is not there, an
@@ -5781,6 +6114,793 @@ fn copied_text_has_its_word_spaces() {
     assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }
 
+/// A PNG of `w` by `h` pixels in two colours, a checkerboard of
+/// 10-pixel squares (a figure's picture for `session png`'s tests).
+#[allow(
+    clippy::many_single_char_names,
+    reason = "a picture's sizes and colours"
+)]
+fn checker_png(w: u32, h: u32, a: [u8; 3], b: [u8; 3]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for y in 0..h {
+        raw.push(0);
+        for x in 0..w {
+            raw.extend_from_slice(if (x / 10 + y / 10) % 2 == 0 { &a } else { &b });
+        }
+    }
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8], data: &[u8]| {
+        out.extend_from_slice(&u32::try_from(data.len()).expect("a chunk").to_be_bytes());
+        let mut c = kind.to_vec();
+        c.extend_from_slice(data);
+        out.extend_from_slice(&c);
+        out.extend_from_slice(&phitex_codecs::zlib::crc32(&c).to_be_bytes());
+    };
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    chunk(b"IHDR", &ihdr);
+    chunk(b"IDAT", &phitex_codecs::deflate::compress(&raw, 6));
+    chunk(b"IEND", &[]);
+    out
+}
+
+/// A watch started with `phitex session start` in `dir` (no viewer, its
+/// glyph origins kept by --synctex; its runtime folder `run`), stopped
+/// with `phitex session stop` when dropped.
+struct PngSession {
+    dir: PathBuf,
+    run: PathBuf,
+    /// Variables the watch and each command are run with.
+    env: Vec<(String, String)>,
+}
+
+impl PngSession {
+    fn start(dir: &Path, main: &str, extra: &[&str]) -> PngSession {
+        PngSession::start_with(dir, main, extra, &[])
+    }
+
+    fn start_with(dir: &Path, main: &str, extra: &[&str], env: &[(&str, &str)]) -> PngSession {
+        let run = dir.with_extension("run");
+        let _ = std::fs::remove_dir_all(&run);
+        std::fs::create_dir_all(&run).expect("a runtime folder");
+        let s = PngSession {
+            dir: dir.to_path_buf(),
+            run,
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        };
+        let mut args = vec![
+            "session",
+            "start",
+            main,
+            "--timeout",
+            "10m",
+            "--",
+            "--no-view",
+            "--synctex",
+        ];
+        args.extend_from_slice(extra);
+        let out = s.phitex(&args);
+        assert!(
+            out.status.success(),
+            "session start: {}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            std::fs::read_to_string(dir.join(".phitex/session.log")).unwrap_or_default()
+        );
+        s
+    }
+
+    fn phitex(&self, args: &[&str]) -> std::process::Output {
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), &self.dir)
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &self.run)
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .output()
+            .expect("phitex runs")
+    }
+
+    /// `phitex session ARGS --json`'s object, the verb done.
+    fn json(&self, args: &[&str]) -> serde_json::Value {
+        let mut all = vec!["session"];
+        all.extend_from_slice(args);
+        all.push("--json");
+        let out = self.phitex(&all);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            panic!(
+                "{args:?}: no JSON: {}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        assert!(out.status.success(), "{args:?}: {v}");
+        v
+    }
+}
+
+impl Drop for PngSession {
+    fn drop(&mut self) {
+        let _ = self.phitex(&["session", "stop"]);
+    }
+}
+
+/// A page's text lines and its pictures and rules (points from its top
+/// left), as the viewer's renderer reads the PDF `pdf`.
+fn page_parts(
+    pdf: &str,
+    page: usize,
+) -> (Vec<phitex_render::TextLine>, Vec<[f64; 4]>, Vec<[f64; 4]>) {
+    let bytes: std::sync::Arc<[u8]> = std::fs::read(pdf).expect("the PDF").into();
+    let mut r = phitex_render::Renderer::new();
+    let lines = r.text(&bytes, page).expect("the page's text");
+    let (_, _, marks) = r.marks(&bytes, page).expect("the page's drawings");
+    let of = |k: &phitex_render::MarkKind| {
+        marks
+            .iter()
+            .filter(|m| std::mem::discriminant(&m.kind) == std::mem::discriminant(k))
+            .map(|m| m.rect)
+            .collect::<Vec<_>>()
+    };
+    (
+        lines,
+        of(&phitex_render::MarkKind::Image),
+        of(&phitex_render::MarkKind::Path),
+    )
+}
+
+/// Whether box `b` (left, top, right, bottom) holds the text of `line`
+/// from `x0` to `x1` (its baseline's points, half an x-height up).
+fn holds_text(b: &[f64], l: &phitex_render::TextLine, x0: f64, x1: f64) -> bool {
+    let y = l.y - 0.3 * l.size;
+    b[0] - 0.5 <= x0 && x1 <= b[2] + 0.5 && b[1] <= y && y <= b[3]
+}
+
+fn holds_rect(b: &[f64], r: &[f64; 4]) -> bool {
+    b[0] - 0.5 <= r[0] && b[1] - 0.5 <= r[1] && r[2] <= b[2] + 0.5 && r[3] <= b[3] + 0.5
+}
+
+fn bbox_of(v: &serde_json::Value) -> Vec<f64> {
+    v["bbox"]
+        .as_array()
+        .expect("a bbox")
+        .iter()
+        .map(|x| x.as_f64().expect("points"))
+        .collect()
+}
+
+/// A PNG file's width and height (its IHDR).
+fn png_size(p: &str) -> (u32, u32) {
+    let b = std::fs::read(p).expect("the PNG");
+    assert_eq!(&b[..8], b"\x89PNG\r\n\x1a\n", "{p}: not a PNG");
+    let n = |i: usize| u32::from_be_bytes(b[i..i + 4].try_into().expect("4 bytes"));
+    (n(16), n(20))
+}
+
+/// The two-column article `session png`'s tests draw from: a `figure*`
+/// (a picture above its caption), a column figure (a `TikZ` picture with
+/// text in it), a table (its caption above, booktabs' rules), two
+/// subfigures with their own labels, an equation, a heading; typed
+/// paragraphs between.
+fn png_article() -> String {
+    let para = |k: usize| -> String {
+        let words = [
+            "graph", "engine", "column", "render", "glyph", "origin", "layout", "measure",
+            "signal", "theorem", "bound", "thread", "memory", "vector", "kernel", "sample",
+        ];
+        let mut out = String::new();
+        for i in 0..60 {
+            let w = words[(i * 7 + k * 3 + i / 5) % words.len()];
+            out.push_str(w);
+            out.push(if i % 11 == 10 { '.' } else { ' ' });
+            if i % 11 == 10 {
+                out.push(' ');
+            }
+            if i % 9 == 8 {
+                out.push('\n');
+            }
+        }
+        format!("Paragraph {k} begins. {out}\n\n")
+    };
+    format!(
+        "\\documentclass[twocolumn]{{article}}\n\\usepackage{{graphicx}}\n\\usepackage{{tikz}}\n\\usepackage{{subcaption}}\n\\usepackage{{booktabs}}\n\\begin{{document}}\n\\section{{Introduction}}\\label{{sec:intro}}\n{p1}{p2}\
+\\begin{{figure*}}[t]\n  \\centering\n  \\includegraphics[width=0.8\\textwidth]{{wide.png}}\n  \\caption{{A wide figure across both columns.}}\\label{{fig:wide}}\n\\end{{figure*}}\n{p3}\
+\\begin{{figure}}[t]\n  \\centering\n  \\begin{{tikzpicture}}\n    \\draw[thick] (0,0) rectangle (3,2);\n    \\node at (1.5,1) {{inside}};\n  \\end{{tikzpicture}}\n  \\caption{{A column figure.}}\\label{{fig:col}}\n\\end{{figure}}\n\
+\\begin{{table}}[t]\n  \\centering\n  \\caption{{A small table.}}\\label{{tab:t}}\n  \\begin{{tabular}}{{lr}}\\toprule Name & Value\\\\\\midrule alpha & 1\\\\ beta & 2\\\\\\bottomrule\\end{{tabular}}\n\\end{{table}}\n{p4}\
+\\begin{{figure}}[h]\n  \\centering\n  \\begin{{subfigure}}{{0.45\\columnwidth}}\\centering\\includegraphics[width=\\linewidth]{{a.png}}\\caption{{Left part}}\\label{{fig:left}}\\end{{subfigure}}\\hfill\n  \\begin{{subfigure}}{{0.45\\columnwidth}}\\centering\\includegraphics[width=\\linewidth]{{b.png}}\\caption{{Right part}}\\label{{fig:right}}\\end{{subfigure}}\n  \\caption{{Two parts side by side.}}\\label{{fig:two}}\n\\end{{figure}}\n{p5}\
+\\begin{{equation}}\n  E = mc^2 \\label{{eq:e}}\n\\end{{equation}}\n{p6}\
+The sentence on this line is the one to find.\n{p7}\\end{{document}}\n",
+        p1 = para(1),
+        p2 = para(2),
+        p3 = para(3),
+        p4 = para(4),
+        p5 = para(5),
+        p6 = para(6),
+        p7 = para(7),
+    )
+}
+
+/// The article's folder: the document and its pictures.
+fn png_article_dir(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    std::fs::write(dir.join("doc.tex"), png_article()).expect("the document");
+    for (f, w, h, a, b) in [
+        ("wide.png", 400, 120, [70, 130, 180], [200, 220, 240]),
+        ("a.png", 120, 90, [200, 80, 80], [250, 200, 200]),
+        ("b.png", 120, 90, [80, 160, 80], [200, 240, 200]),
+    ] {
+        std::fs::write(dir.join(f), checker_png(w, h, a, b)).expect("a picture");
+    }
+    dir
+}
+
+/// `phitex session png --label` on a two-column article: each label's
+/// float whole (its picture or table and its caption, a subfigure's own
+/// picture and caption), and nothing of the text around it; the PNG the
+/// part's size at the dpi asked.
+#[test]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+fn session_png_label() {
+    let _one = one();
+    let dir = png_article_dir("session-png-label");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let png = |label: &str| s.json(&["png", "--label", label, "--dpi", "100"]);
+    let parts = |v: &serde_json::Value| {
+        page_parts(
+            v["pdf"].as_str().expect("the PDF"),
+            usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page"),
+        )
+    };
+    let line = |lines: &[phitex_render::TextLine], t: &str| -> phitex_render::TextLine {
+        lines
+            .iter()
+            .find(|l| l.text.contains(t))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no line {t:?} in {:?}",
+                    lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+                )
+            })
+            .clone()
+    };
+    // (the words `t` of a line: their line and left and right)
+    let span =
+        |lines: &[phitex_render::TextLine], t: &str| -> (phitex_render::TextLine, f64, f64) {
+            let l = line(lines, t);
+            let i = l.text.find(t).expect("the words");
+            let a = l.text[..i].encode_utf16().count();
+            let e = a + t.encode_utf16().count() - 1;
+            let (x0, x1) = (l.xs[a], l.rs[e]);
+            (l, x0, x1)
+        };
+    let words = |b: &[f64], lines: &[phitex_render::TextLine], t: &str| {
+        let (l, x0, x1) = span(lines, t);
+        holds_text(b, &l, x0, x1)
+    };
+    // (no line of the text in it: a body line's middle outside)
+    let no_text = |b: &[f64], lines: &[phitex_render::TextLine], what: &str| {
+        // (the paragraphs' lines: their words, which no float has)
+        let body = [
+            "Paragraph",
+            "theorem",
+            "kernel",
+            "signal",
+            "memory",
+            "thread",
+            "sample",
+        ];
+        for l in lines
+            .iter()
+            .filter(|l| body.iter().any(|w| l.text.contains(w)))
+        {
+            let mid = l.x + l.w / 2.0;
+            assert!(
+                !holds_text(b, l, mid, mid),
+                "{what}: a line of the text in it: {:?} at {b:?}",
+                l.text
+            );
+        }
+    };
+    for (label, caption, number) in [
+        ("fig:wide", "A wide figure across both columns.", "1"),
+        ("fig:col", "A column figure.", "2"),
+        ("tab:t", "A small table.", "1"),
+        ("fig:left", "Left part", "3a"),
+        ("fig:two", "Two parts side by side.", "3"),
+        ("eq:e", "E", "1"),
+        ("sec:intro", "Introduction", "1"),
+    ] {
+        let v = png(label);
+        eprintln!("{label}: {v}");
+        let b = bbox_of(&v);
+        assert_eq!(v["number"], number, "{label}: {v}");
+        let (w, h) = png_size(v["png"].as_str().expect("its PNG"));
+        assert_eq!(
+            (v["width"].as_u64(), v["height"].as_u64()),
+            (Some(u64::from(w)), Some(u64::from(h))),
+            "{label}"
+        );
+        let px = |a: f64, z: f64| ((z - a) * 100.0 / 72.0).round();
+        assert!(
+            (f64::from(w) - px(b[0], b[2])).abs() <= 1.0
+                && (f64::from(h) - px(b[1], b[3])).abs() <= 1.0,
+            "{label}: {w}x{h} for {b:?}"
+        );
+        let (lines, images, paths) = parts(&v);
+        assert!(
+            words(&b, &lines, caption),
+            "{label}: its caption {caption:?} not in {b:?}"
+        );
+        match label {
+            "fig:wide" => {
+                let wide = images
+                    .iter()
+                    .find(|r| r[2] - r[0] > 300.0)
+                    .expect("the wide picture");
+                assert!(
+                    holds_rect(&b, wide),
+                    "{label}: its picture {wide:?} not in {b:?}"
+                );
+                no_text(&b, &lines, label);
+            }
+            "fig:col" => {
+                assert!(words(&b, &lines, "inside"), "{label}: the picture's text");
+                let frame = paths
+                    .iter()
+                    .find(|r| (r[2] - r[0] - 85.0).abs() < 4.0)
+                    .expect("the picture's frame");
+                assert!(
+                    holds_rect(&b, frame),
+                    "{label}: its picture {frame:?} not in {b:?}"
+                );
+                no_text(&b, &lines, label);
+            }
+            "tab:t" => {
+                for t in ["Name", "alpha", "beta"] {
+                    assert!(words(&b, &lines, t), "{label}: {t:?}");
+                }
+                let beta = line(&lines, "beta");
+                let rules: Vec<&[f64; 4]> = paths
+                    .iter()
+                    .filter(|r| {
+                        r[3] - r[1] < 5.0
+                            && r[0] < beta.x + 5.0
+                            && r[2] > beta.x
+                            && r[1] > b[1] - 20.0
+                            && r[1] < beta.y + 8.0
+                    })
+                    .collect();
+                assert_eq!(
+                    rules.len(),
+                    3,
+                    "{label}: booktabs' three rules: {rules:?} of {paths:?}, beta at {} {}",
+                    beta.x,
+                    beta.y
+                );
+                for r in rules {
+                    assert!(holds_rect(&b, r), "{label}: a rule {r:?} not in {b:?}");
+                }
+                no_text(&b, &lines, label);
+            }
+            "fig:left" => {
+                let left = images
+                    .iter()
+                    .find(|r| r[2] - r[0] < 150.0 && r[0] < b[0] + 30.0)
+                    .expect("its picture");
+                assert!(
+                    holds_rect(&b, left),
+                    "{label}: its picture {left:?} not in {b:?}"
+                );
+                let (right, x0, x1) = span(&lines, "Right part");
+                let mid = f64::midpoint(x0, x1);
+                assert!(
+                    !holds_text(&b, &right, mid, mid),
+                    "{label}: the other subfigure's caption in {b:?}"
+                );
+                let two = line(&lines, "Two parts");
+                assert!(
+                    two.y - 0.3 * two.size > b[3],
+                    "{label}: the figure's caption in {b:?}"
+                );
+            }
+            "fig:two" => {
+                for r in images.iter().filter(|r| r[2] - r[0] < 150.0) {
+                    assert!(holds_rect(&b, r), "{label}: a picture {r:?} not in {b:?}");
+                }
+                assert!(
+                    words(&b, &lines, "Left part") && words(&b, &lines, "Right part"),
+                    "{label}"
+                );
+                no_text(&b, &lines, label);
+            }
+            "eq:e" => {
+                assert!(words(&b, &lines, "(1)"), "{label}: its number");
+            }
+            _ => no_text(&b, &lines, label),
+        }
+    }
+    // (no such label: refused)
+    let out = s.phitex(&["session", "png", "--label", "fig:none"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `phitex session where LABEL` says the page and box `png` draws, and
+/// draws nothing; its text the same as its JSON.
+#[test]
+fn session_where() {
+    let _one = one();
+    let dir = png_article_dir("session-where");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let w = s.json(&["where", "fig:col"]);
+    assert!(w.get("png").is_none(), "{w}");
+    let p = s.json(&["png", "--label", "fig:col"]);
+    for k in ["page", "bbox", "build", "number"] {
+        assert_eq!(w[k], p[k], "{k}: where {w}, png {p}");
+    }
+    let out = s.phitex(&["session", "where", "fig:col"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let b = bbox_of(&w);
+    assert!(
+        text.starts_with(&format!(
+            "fig:col: page {}, {:.2} {:.2} {:.2} {:.2} pt",
+            w["page"], b[0], b[1], b[2], b[3]
+        )),
+        "{text}"
+    );
+}
+
+/// `phitex session png --at FILE:LINE`: the words that line made, padded
+/// by `--context`; not the lines around it.
+#[test]
+fn session_png_at_line() {
+    let _one = one();
+    let dir = png_article_dir("session-png-at");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let text = png_article();
+    let line = text
+        .lines()
+        .position(|l| l.starts_with("The sentence on this line"))
+        .expect("the line")
+        + 1;
+    let v = s.json(&["png", "--at", &format!("doc.tex:{line}"), "--context", "1"]);
+    let b = bbox_of(&v);
+    let page = usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page");
+    let (lines, _, _) = page_parts(v["pdf"].as_str().expect("the PDF"), page);
+    let all: String = lines.iter().map(|l| l.text.clone() + "\n").collect();
+    // (its words: from "The sentence" to "find.", across lines or not)
+    let mut seen = 0;
+    for l in &lines {
+        for w in ["sentence", "find."] {
+            if let Some(i) = l.text.find(w) {
+                let units = l.text[..i].encode_utf16().count();
+                let end = units + w.encode_utf16().count() - 1;
+                assert!(
+                    holds_text(&b, l, l.xs[units], l.rs[end]),
+                    "{w:?} not in {b:?}: {all}"
+                );
+                seen += 1;
+            }
+        }
+    }
+    assert_eq!(seen, 2, "{all}");
+    assert!(b[3] - b[1] < 40.0, "more than its lines: {b:?}");
+    let out = s.phitex(&["session", "png", "--at", "doc.tex:100000"]);
+    assert_eq!(out.status.code(), Some(4));
+}
+
+/// The document `session compare`'s tests diff: 40 paragraphs, each a
+/// line of its own and labelled, half in the main file and half in
+/// `sec.tex` (`\input`), a reference at the end.
+fn cmp_session_doc(dir: &Path) -> (String, String) {
+    let para = |k: usize| {
+        format!(
+            "Paragraph {k} begins here. Sentence one of paragraph {k} says what a sentence says at length. Sentence two of paragraph {k} says more of the same at some length, so that the paragraph runs over several lines.\\label{{p{k}}}\n\n"
+        )
+    };
+    let mut main = String::from("\\documentclass{article}\n\\begin{document}\n\\section{One}\n");
+    for k in 0..20 {
+        main.push_str(&para(k));
+    }
+    main.push_str("\\input{sec}\nSee paragraph \\ref{p30}.\n\n\\end{document}\n");
+    let mut sec = String::from("\\section{Two}\n");
+    for k in 20..40 {
+        sec.push_str(&para(k));
+    }
+    std::fs::write(dir.join("main.tex"), &main).expect("the main file");
+    std::fs::write(dir.join("sec.tex"), &sec).expect("its input");
+    git(dir, &["init", "-q"]);
+    git(dir, &["add", "main.tex", "sec.tex"]);
+    git(dir, &["commit", "-q", "-m", "the first version"]);
+    (main, sec)
+}
+
+/// Line (from 1) of `text` that has `needle`.
+fn line_of(text: &str, needle: &str) -> u64 {
+    let at = text.find(needle).expect("the needle");
+    u64::try_from(text[..at].matches('\n').count() + 1).expect("a line")
+}
+
+/// `phitex session compare REV`: the files as they are diffed against a
+/// git revision by a diff session of the agent's own, started from the
+/// watch's build: its build is an edit of the document's, and runs again
+/// no paragraph the diff left unchanged (only the three changed ones, in
+/// two files: the markup's definitions follow `\begin{document}`, the
+/// markup changes nothing another paragraph reads, and the slices between
+/// two changes keep their nodes); its PDF a clean build's of the
+/// marked-up files, byte for byte; each change placed (page, box) and
+/// named by file and line. Again after an edit: the change added. `--stop`
+/// ends it.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one session, in order")]
+fn session_compare_runs_only_the_changes() {
+    let _one = one();
+    let dir = scratch("session-compare");
+    let (main, sec) = cmp_session_doc(&dir);
+    let main2 = main
+        .replace(
+            "Sentence one of paragraph 5 ",
+            "Sentence ONE of paragraph 5 ",
+        )
+        .replace(
+            "Sentence two of paragraph 12 says more",
+            "Sentence two of paragraph 12 says rather more",
+        );
+    let sec2 = sec.replace(
+        "Sentence one of paragraph 33 says",
+        "Sentence one of paragraph 33 now says",
+    );
+    std::fs::write(dir.join("main.tex"), &main2).expect("the edit");
+    std::fs::write(dir.join("sec.tex"), &sec2).expect("the edit");
+    let s = PngSession::start_with(&dir, "main.tex", &[], &[("PHITEX_DIFF_RERAN", "1")]);
+    let v = s.json(&["compare", "HEAD"]);
+    assert!(
+        v["began"].as_str().is_some_and(|b| b.starts_with("fork:")),
+        "not started from the document's build: {}",
+        v["began"]
+    );
+    let changes = v["changes"].as_array().expect("the changes");
+    assert_eq!(changes.len(), 3, "{v}");
+    let want = [
+        ("main.tex", line_of(&main2, "Sentence ONE of paragraph 5 ")),
+        ("main.tex", line_of(&main2, "says rather more")),
+        ("sec.tex", line_of(&sec2, "33 now says")),
+    ];
+    for (c, (file, line)) in changes.iter().zip(want) {
+        assert_eq!(c["file"], file, "{c}");
+        assert_eq!(c["line"], line, "{c}");
+        assert!(c["page"].as_u64().is_some_and(|p| p >= 1), "{c}");
+        let b = bbox_of(c);
+        assert!(b[0] < b[2] && b[1] < b[3], "{c}");
+    }
+    // (no paragraph the diff left as it was run again, away from the
+    // changes: a node made to run again names a changed paragraph or one
+    // next to it (the engine's slices of the text, cut again where it
+    // changed, may take in the next paragraph's start); and the pieces
+    // run, a few for each change)
+    let edited_paras = [5usize, 12, 33];
+    let near = |n: usize| edited_paras.iter().any(|&e| n.abs_diff(e) <= 1);
+    for r in v["reran"].as_array().expect("the nodes run again") {
+        let text = r["text"].as_str().unwrap_or("");
+        for (k, _) in text.match_indices("Paragraph ") {
+            let n: String = text[k + 10..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if let Ok(n) = n.parse::<usize>() {
+                assert!(
+                    near(n),
+                    "paragraph {n}, unchanged and away from the changes, ran again ({}): {text:?}",
+                    r["why"]
+                );
+            }
+        }
+    }
+    let exec = v["runs_by_op"]["exec"].as_u64().unwrap_or(0);
+    assert!(
+        exec <= 3 * 3,
+        "{exec} pieces run for 3 changed paragraphs of 40: {}",
+        v["runs_by_op"]
+    );
+    // (its PDF: a clean build's of the marked-up files, the same job)
+    let check = |round: &str| {
+        let r = scratch(&format!("session-compare-clean-{round}"));
+        std::fs::copy(dir.join("main.tex"), r.join("main.tex")).expect("a copy");
+        let tex = dir.join(".phitex/compare/tex");
+        for f in ["main.tex", "sec.tex"] {
+            std::fs::copy(tex.join(f), r.join(f)).expect("the marked-up file");
+        }
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &r)
+            .args(["build", "main.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let want = std::fs::read(r.join("main.pdf")).expect("the clean PDF");
+        let got = std::fs::read(dir.join(".phitex/compare/main-diff.pdf")).expect("the diff's PDF");
+        assert!(
+            got == want,
+            "{round}: the diff's PDF is not a clean build's of its files: {}",
+            first_difference(&got, &want)
+        );
+    };
+    check("first");
+    // (an edit, the diff again: the change added, its build an edit)
+    let sec3 = sec2.replace(
+        "Sentence two of paragraph 35 says",
+        "Sentence two of paragraph 35 also says",
+    );
+    std::fs::write(dir.join("sec.tex"), &sec3).expect("another edit");
+    let w = s.json(&["wait"]);
+    assert_eq!(w["errors"].as_array().map_or(0, Vec::len), 0, "{w}");
+    let again = s.json(&["compare", "HEAD"]);
+    assert_eq!(
+        again["changes"].as_array().map_or(0, Vec::len),
+        4,
+        "{again}"
+    );
+    check("second");
+    // (the text, a line each)
+    let out = s.phitex(&["session", "compare", "HEAD"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("4 changes against HEAD"), "{text}");
+    assert!(text.contains("sec.tex:"), "{text}");
+    let stop = s.json(&["compare", "--stop"]);
+    assert_eq!(stop["stopped"], true, "{stop}");
+}
+
+/// `phitex session png --compare REV`: a part of the diff's pages, drawn
+/// as `png` draws one of the document's: change N's, a source line's, a
+/// label's.
+#[test]
+fn session_png_compare() {
+    let _one = one();
+    let dir = scratch("session-png-compare");
+    let (main, _) = cmp_session_doc(&dir);
+    let main2 = main.replace(
+        "Sentence two of paragraph 12 says more",
+        "Sentence two of paragraph 12 says rather more",
+    );
+    std::fs::write(dir.join("main.tex"), &main2).expect("the edit");
+    let session = PngSession::start(&dir, "main.tex", &[]);
+    let change = session.json(&["png", "--compare", "HEAD", "--change", "1", "--dpi", "100"]);
+    assert_eq!(change["target"], "change 1", "{change}");
+    let (wide, high) = png_size(change["png"].as_str().expect("its PNG"));
+    assert!(wide > 10 && high > 5, "{wide}x{high}");
+    let line = line_of(&main2, "says rather more");
+    let at = session.json(&[
+        "png",
+        "--compare",
+        "HEAD",
+        "--at",
+        &format!("main.tex:{line}"),
+    ]);
+    assert_eq!(at["page"], change["page"], "{at} {change}");
+    let b = bbox_of(&at);
+    let cb = bbox_of(&change);
+    assert!(
+        b[1] <= cb[1] + 0.5 && cb[3] <= b[3] + 0.5,
+        "the line's box holds the change's: {b:?} {cb:?}"
+    );
+    let lab = session.json(&["png", "--compare", "HEAD", "--label", "p12"]);
+    assert_eq!(lab["page"], at["page"], "{lab}");
+    let out = session.phitex(&["session", "png", "--compare", "HEAD", "--change", "9"]);
+    assert_eq!(out.status.code(), Some(4));
+}
+
+/// `phitex session png --diff`: the same part of the build before and of
+/// this one, side by side with the pixels that changed; none changed,
+/// none said.
+#[test]
+fn session_png_diff() {
+    let _one = one();
+    let dir = png_article_dir("session-png-diff");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    // (one build: nothing to compare with)
+    let out = s.phitex(&["session", "png", "--label", "fig:col", "--diff"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let text = png_article().replace("A column figure.", "A column figure, its caption longer.");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the edit");
+    let v = s.json(&["png", "--label", "fig:col", "--diff", "--dpi", "100"]);
+    assert!(v["changed"].as_u64().expect("a count") > 0, "{v}");
+    assert_eq!(
+        v["before"].as_u64(),
+        v["build"].as_u64().map(|b| b - 1),
+        "{v}"
+    );
+    let b = bbox_of(&v);
+    let w = ((b[2] - b[0]) * 100.0 / 72.0).round();
+    let (pw, ph) = png_size(v["png"].as_str().expect("its PNG"));
+    assert!(
+        (f64::from(pw) - (3.0 * w + 16.0)).abs() <= 3.0,
+        "{pw} for parts {w} wide"
+    );
+    assert_eq!(Some(u64::from(ph)), v["height"].as_u64());
+    // (the text again as it was: the build before has the edit, this one not;
+    // a save with no change between: alike)
+    std::fs::write(dir.join("doc.tex"), png_article()).expect("the edit undone");
+    let again = s.json(&["png", "--label", "fig:col", "--diff"]);
+    assert!(again["changed"].as_u64().expect("a count") > 0, "{again}");
+    std::fs::write(dir.join("doc.tex"), png_article() + "\n").expect("a blank line");
+    let same = s.json(&["png", "--label", "fig:col", "--diff"]);
+    assert_eq!(same["changed"], 0, "{same}");
+}
+
+/// `session png` of a xelatex document (fontspec): a figure and a table
+/// with its rules, each with its caption.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn session_png_xelatex() {
+    let _one = one();
+    let dir = scratch("session-png-xe");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\documentclass{article}\n\\usepackage{fontspec}\n\\usepackage{graphicx}\n\\begin{document}\n\\section{XeTeX}\nSome text before the figure, typed here, a line of it or two to show that the figure stands apart from it.\n\n\\begin{figure}[ht]\n  \\centering\n  \\includegraphics[width=5cm]{wide.png}\n  \\caption{A figure under xelatex.}\\label{fig:xe}\n\\end{figure}\nMore text after the figure, and before the table, a line or two of it.\n\n\\begin{table}[ht]\n  \\centering\n  \\caption{A xelatex table.}\\label{tab:xe}\n  \\begin{tabular}{|l|r|}\\hline A & 1\\\\\\hline B & 2\\\\\\hline\\end{tabular}\n\\end{table}\nText after the table closes the document.\n\\end{document}\n",
+    )
+    .expect("the document");
+    std::fs::write(
+        dir.join("wide.png"),
+        checker_png(400, 120, [70, 130, 180], [200, 220, 240]),
+    )
+    .expect("the picture");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    for (label, caption) in [
+        ("fig:xe", "A figure under xelatex."),
+        ("tab:xe", "A xelatex table."),
+    ] {
+        let v = s.json(&["png", "--label", label]);
+        let b = bbox_of(&v);
+        let page = usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page");
+        let (lines, images, paths) = page_parts(v["pdf"].as_str().expect("the PDF"), page);
+        let cap = lines
+            .iter()
+            .find(|l| l.text.contains(caption))
+            .expect("the caption");
+        assert!(holds_text(&b, cap, cap.x, cap.x + cap.w), "{label}: {b:?}");
+        if label == "fig:xe" {
+            assert!(
+                images.iter().all(|r| holds_rect(&b, r)),
+                "{label}: {images:?} in {b:?}"
+            );
+        } else {
+            let rules: Vec<_> = paths
+                .iter()
+                .filter(|r| r[1] > cap.y - 2.0 && r[1] < cap.y + 40.0)
+                .collect();
+            assert!(rules.len() >= 5, "{label}: {rules:?}");
+            assert!(
+                rules.iter().all(|r| holds_rect(&b, r)),
+                "{label}: {rules:?} in {b:?}"
+            );
+        }
+        for t in [
+            "Some text before",
+            "More text after",
+            "Text after the table",
+        ] {
+            let l = lines
+                .iter()
+                .find(|l| l.text.contains(t))
+                .expect("a line of text");
+            let mid = l.x + l.w / 2.0;
+            assert!(!holds_text(&b, l, mid, mid), "{label}: {t:?} in {b:?}");
+        }
+    }
+}
+
 /// `oracle/fixtures/latexmkrc/NAME/` copied (hidden files too) into a
 /// fresh directory, with an empty home of its own (no user's
 /// `.latexmkrc`) beside it.
@@ -6903,10 +8023,12 @@ fn compare_para(k: usize, first: &str) -> String {
 /// The marked-up document `tex` (latexdiff's, the viewer's `diff.tex`)
 /// built clean as `JOB-diff.tex` by `phitex build`: its PDF.
 fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
+    // (the job the document's: the diff's session is the document's job,
+    // started from its build, its outputs named `JOB-diff`)
     let d = scratch(name);
-    std::fs::write(d.join(format!("{job}-diff.tex")), tex).expect("the marked-up document");
+    std::fs::write(d.join(format!("{job}.tex")), tex).expect("the marked-up document");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &d)
-        .args(["build", "-j", "4", &format!("{job}-diff.tex")])
+        .args(["build", "-j", "4", &format!("{job}.tex")])
         .output()
         .expect("phitex build runs");
     assert!(
@@ -6914,7 +8036,7 @@ fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
         "the clean build of the marked-up document failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read(d.join(format!("{job}-diff.pdf"))).expect("the clean PDF")
+    std::fs::read(d.join(format!("{job}.pdf"))).expect("the clean PDF")
 }
 
 /// Compare (the viewer's diff against a git revision) streams the
@@ -6924,8 +8046,9 @@ fn clean_diff_pdf(name: &str, job: &str, tex: &[u8]) -> Vec<u8> {
 /// diff is shown and drawn from its own file (a word the edit deleted,
 /// on no page of the document's, on it), and the diff's build in after
 /// them; its PDF the one a clean build of the marked-up text writes,
-/// byte for byte. A second Compare (after a stop and an edit) is an edit
-/// of the diff's session, not a clean build, and exact too.
+/// byte for byte, though its build started from the document's (an edit,
+/// not a clean build). A second Compare (after a stop and an edit) is an
+/// edit of the diff's session, and exact too.
 #[test]
 #[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
 fn watch_compare_streams_its_pages() {
@@ -6973,14 +8096,18 @@ fn watch_compare_streams_its_pages() {
     assert_eq!(a["ok"], true, "{a}");
     // (its events until its build is in: the `settled` after its pages)
     let mut events: Vec<serde_json::Value> = Vec::new();
-    let mut first: Option<(u64, serde_json::Value, Duration)> = None;
+    let mut first: Option<(u64, Duration)> = None;
+    // (each page streamed as it is told, drawn then: the pages a build
+    // changes stream in the order they are made, at -j4 not the document's)
+    let mut streamed: Vec<(u64, String)> = Vec::new();
     loop {
         let e = viewer.until(|v| v.get("event").is_some() && v.get("id").is_none());
-        if e["event"] == "page" && first.is_none() {
+        if e["event"] == "page" {
             let k = e["k"].as_u64().expect("k");
             let f = viewer.ask(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
             assert_eq!(f["ok"], true, "page {k} streamed, its frame: {f}");
-            first = Some((k, f["json"].clone(), t0.elapsed()));
+            first.get_or_insert((k, t0.elapsed()));
+            streamed.push((k, f["json"]["text"].to_string()));
             events.push(e);
             events.append(&mut viewer.events);
             continue;
@@ -7000,6 +8127,21 @@ fn watch_compare_streams_its_pages() {
     let changes = told["diff"]["changes"].as_array().map_or(0, Vec::len);
     assert!(changes >= 2, "{told}");
     assert!(at("diff") < at("page"), "{kinds:?}");
+    // (told as not built yet, its changes with no place: the viewer goes to
+    // a change once the diff's state says it is built, its places with it)
+    assert_eq!(told["diff"]["built"], false, "{told}");
+    let last = events
+        .iter()
+        .rev()
+        .find(|e| e["event"] == "diff")
+        .expect("the diff told");
+    assert_eq!(last["diff"]["built"], true, "after its build: {last}");
+    assert!(
+        last["diff"]["changes"]
+            .as_array()
+            .is_some_and(|c| c.iter().all(|c| c["page"].is_u64())),
+        "each change placed once built: {last}"
+    );
     // (its build's progress, as a build's)
     assert!(
         events
@@ -7007,11 +8149,18 @@ fn watch_compare_streams_its_pages() {
             .any(|e| e["event"] == "progress" && e["phase"] == "typesetting"),
         "no progress told: {kinds:?}"
     );
-    let (k, streamed, first_at) = first.expect("a page streamed");
-    let text = streamed["text"].to_string();
+    let (k, first_at) = first.expect("a page streamed");
+    // (the diff's first page among them, drawn from its own file: the
+    // deleted word and its replacement on it, on no page of the document's)
     assert!(
-        text.contains("Firstly") && text.contains("Initially"),
-        "page {k} streamed is not the diff's (the deleted word and its replacement on it): {text}"
+        streamed
+            .iter()
+            .any(|(_, t)| t.contains("Firstly") && t.contains("Initially")),
+        "no page streamed is the diff's first (the deleted word and its replacement on it): {:?}",
+        streamed
+            .iter()
+            .map(|(k, t)| (k, t.chars().take(300).collect::<String>()))
+            .collect::<Vec<_>>()
     );
     let pages = viewer.ask(&json!({"id": 4, "op": "pages"}))["json"]["pages"]
         .as_array()
@@ -7033,7 +8182,8 @@ fn watch_compare_streams_its_pages() {
     let diff = until(&mut lines, "event", &"diff".into(), &mut seen);
     assert_eq!(diff["changes"], changes, "{diff}");
     assert_eq!(diff["errors"], 0, "{diff}");
-    assert_eq!(diff["cold"], true, "the first Compare: {diff}");
+    // (the first Compare an edit too: started from the document's build)
+    assert_eq!(diff["cold"], false, "the first Compare: {diff}");
     // (its PDF: a clean build's of the marked-up text)
     let tex = http_get(&url, "diff.tex");
     let want = clean_diff_pdf("watch-compare-clean", "paper", &tex);

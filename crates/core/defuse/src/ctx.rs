@@ -60,6 +60,12 @@ pub struct Ctx<'a> {
     /// The node whose commit the run stopped to wait for (`Ctx::read`
     /// on its prediction at depth 0).
     pub(crate) wait_on: Option<NodeId>,
+    /// Which rule set `wait_on`, for the run log (`PHITEX_RUN_LOG`).
+    pub(crate) wait_why: &'static str,
+    /// The stop for `wait_on` gives my worker to that node
+    /// (`Ctx::yield_to_prefix`): I am queued again once it is taken to
+    /// run (`sched::park_yielder`).
+    pub(crate) yielded: bool,
     /// The stop for `wait_on` is a wait, the run having done nothing
     /// ([`Ctx::wait_for_definer`]).
     pub(crate) waits_only: bool,
@@ -117,11 +123,12 @@ fn stop() -> Stop {
 
 impl<'a> Ctx<'a> {
     pub(crate) fn new(eng: &'a Engine, worker: Option<&'a Worker>, me: &'a Arc<Node>) -> Ctx<'a> {
+        let args = me.args();
         Ctx {
             eng,
             worker,
             me,
-            args: me.args(),
+            args: args.clone(),
             product: Product {
                 output: ValueId::UNIT,
                 defs: Vec::new(),
@@ -150,6 +157,8 @@ impl<'a> Ctx<'a> {
                 frontier: None,
                 parked_on: None,
                 stood: None,
+                text: (me.op(), args),
+                told: false,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -163,6 +172,8 @@ impl<'a> Ctx<'a> {
             last: me.run_record(),
             stuck: None,
             wait_on: None,
+            wait_why: "",
+            yielded: false,
             waits_only: false,
             wait_frontier: false,
             ahead_noted: false,
@@ -221,6 +232,7 @@ impl<'a> Ctx<'a> {
         self.placed_keys = None;
         self.stuck = None;
         self.wait_on = None;
+        self.yielded = false;
         self.waits_only = false;
         self.wait_frontier = false;
         self.goes_on = false;
@@ -549,6 +561,7 @@ impl<'a> Ctx<'a> {
                 .map_or_else(|| read::unit_start(eng, self.me), |b| b.pos_hint());
         if let Some(x) = read::on_one_layout(eng, || read::settling_hole_between(eng, self.me, lo)) {
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_routine";
             return Err(stop());
         }
         Ok(())
@@ -583,6 +596,7 @@ impl<'a> Ctx<'a> {
             && x.pos_hint() < self.me.pos_hint()
         {
             self.wait_on = Some(by);
+            self.wait_why = "wait_for_settling";
             return Err(stop());
         }
         if !r.provisional {
@@ -603,6 +617,7 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         self.wait_on = Some(by);
+        self.wait_why = "wait_for_settling";
         Err(stop())
     }
 
@@ -657,7 +672,7 @@ impl<'a> Ctx<'a> {
         eng.frontier_held.fetch_add(1, Relaxed);
         self.me.held_window.store(false, Relaxed);
         if crate::sched::run_log() {
-            eprintln!(
+            elog!(
                 "frontier: read held node {} field {} at {}",
                 self.me.id.raw(),
                 self.values().render(f.0),
@@ -1556,6 +1571,7 @@ impl<'a> Ctx<'a> {
     /// must not (the client noted why, and the run again takes the other).
     pub fn run_again(&mut self) -> Stop {
         self.wait_on = None;
+        self.yielded = false;
         stop()
     }
 
@@ -1902,6 +1918,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
             self.wait_on = Some(x);
+            self.wait_why = "wait_text_before";
             return Err(stop());
         }
         Ok(())
@@ -1923,6 +1940,8 @@ impl<'a> Ctx<'a> {
         };
         if let Some(x) = crate::sched::starved_by(self.eng, w, self.me) {
             self.wait_on = Some(x);
+            self.wait_why = "yield_to_prefix";
+            self.yielded = true;
             return Err(stop());
         }
         Ok(())
@@ -1951,6 +1970,7 @@ impl<'a> Ctx<'a> {
     /// into the text after it, run before the text before it.
     pub fn wait_for_hole(&mut self, h: NodeId, nothing_done: bool) -> Stop {
         self.wait_on = Some(h);
+        self.wait_why = "wait_for_hole";
         self.waits_only = nothing_done;
         stop()
     }
@@ -1966,6 +1986,7 @@ impl<'a> Ctx<'a> {
         let (h, _) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
         if let Some(x) = h {
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_definer";
             self.waits_only = nothing_done;
             return Err(stop());
         }
@@ -1973,8 +1994,9 @@ impl<'a> Ctx<'a> {
     }
 
     /// A read of `f` before my run's first command is done (nothing to
-    /// throw away): with the speculation window on (a clean build's
-    /// evaluation, more than one thread), where a node before me in my
+    /// throw away): with the first-read wait on (a clean build's
+    /// evaluation, [`Engine::set_first_read_wait`]) and more than one
+    /// thread, where a node before me in my
     /// unit has not committed and its operation names `f` among what it
     /// may define, the run waits for the nearest such node and runs when
     /// it commits: a wait, not a run (docs/spec-window.md, First reads).
@@ -1983,8 +2005,7 @@ impl<'a> Ctx<'a> {
     /// before, and a definition that moves it re-asks it.
     pub fn wait_for_first_definer(&mut self, f: Field) -> Result<(), Stop> {
         use std::sync::atomic::Ordering::Acquire;
-        if !self.eng.window_on.load(Acquire)
-            || !self.eng.first_reads_on.load(Acquire)
+        if !self.eng.first_read_wait.load(Acquire)
             || !self.has_other_threads()
             || self.seen.contains_key(&f)
             || !self.eng.op(self.me.op()).text()
@@ -2012,6 +2033,7 @@ impl<'a> Ctx<'a> {
         if let Some(&(x, _)) = hit {
             eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_first_definer";
             self.waits_only = true;
             return Err(stop());
         }
@@ -2040,6 +2062,7 @@ impl<'a> Ctx<'a> {
         if let Some(x) = read::on_one_layout(eng, || read::hole_with_pending_brackets(eng, me)) {
             eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.wait_on = Some(x);
+            self.wait_why = "wait_for_scope_opener";
             self.waits_only = true;
             return Err(stop());
         }
@@ -2083,6 +2106,7 @@ impl<'a> Ctx<'a> {
         let eng = self.eng;
         if let Some(x) = read::on_one_layout(eng, || read::unsettled_before(eng, self.me)) {
             self.wait_on = Some(x);
+            self.wait_why = "wait_settled";
             return Err(stop());
         }
         if crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire)) {
@@ -2098,6 +2122,20 @@ impl<'a> Ctx<'a> {
             return Err(stop());
         }
         Ok(())
+    }
+
+    /// Whether [`Ctx::wait_settled`] would let my run go on here: every
+    /// node before me settled, the settling layer's frontier past me, and
+    /// what I read still standing. Not a read, and no stop: a run that
+    /// finds it false can hand the act to a child of its own that waits
+    /// for the settled prefix instead (`phitex-tex`'s shell child), and
+    /// go on.
+    pub fn settled_here(&self) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        let eng = self.eng;
+        read::on_one_layout(eng, || read::unsettled_before(eng, self.me)).is_none()
+            && !crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire))
+            && self.own_reads_hold()
     }
 
     /// Narrows what I may define, for prediction. Accepted, not used by
@@ -2143,6 +2181,17 @@ impl<'a> Ctx<'a> {
     /// never handed out again.
     pub fn values_epoch(&self) -> u64 {
         self.eng.values.epoch()
+    }
+
+    /// This run told the client something outside the engine (a page
+    /// streamed to a viewer as it was made): its record is not taken
+    /// again for a later run ([`Ctx::last_run_stands`]'s record before the
+    /// last, `RunRecord::may_stand_again`), which would make its output
+    /// the node's again and tell nothing. A streamed page that moved and
+    /// moved back (a page put in, then the one before it taken out) was
+    /// the build's page again, never streamed.
+    pub fn told_outside(&mut self) {
+        self.product.told = true;
     }
 
     /// This run publishes nothing new: what my last run defined,
@@ -2288,10 +2337,11 @@ impl<'a> Ctx<'a> {
         {
             return None;
         }
-        let r = self
-            .last
-            .as_ref()
-            .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
+        let r = self.last.as_ref().filter(|r| {
+            !r.provisional
+                && (r.state.is_none() || self.me.parked_on.lock().is_none())
+                && r.made_from(&self.product.text)
+        })?;
         let mut memo = crate::node::HoldMemo::default();
         let moved = r.scope_moved(self.eng);
         if let Some(i) = r
@@ -2307,7 +2357,7 @@ impl<'a> Ctx<'a> {
                 let now = crate::read::answer_in(self.eng, self.me, rd.kind(), rd.path(), &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
-                eprintln!(
+                elog!(
                     "stands: node {} woken by {:?} runs: read {i} of {}: {} {:?} seen {} now {}",
                     self.me.id.raw(),
                     self.woke,
@@ -2318,7 +2368,7 @@ impl<'a> Ctx<'a> {
                     show(now)
                 );
             }
-            return None;
+            return self.prior_run_stands();
         }
         let output = r.output;
         // (its reads are the record's, filed as its readers: the commit
@@ -2326,6 +2376,69 @@ impl<'a> Ctx<'a> {
         self.product.stood = Some(r.clone());
         self.product.unchanged = true;
         Some(output)
+    }
+
+    /// [`Ctx::last_run_stands`] where my last run's reads moved: the
+    /// record that run replaced (`Node::prior`), where every read of it
+    /// gives what it gave, is this run's (a run is a function of its
+    /// reads), committed as a run's products: its reads filed anew, its
+    /// definitions and contributions in place of the last run's. A value
+    /// that moved and moved back runs nothing: Grail's citations are
+    /// bold question marks in the first pass, numbers in the second and
+    /// the third, and the picture after them that loads the bold font
+    /// first in the second pass alone ran three times, once a pass, for
+    /// the output of its first run (0.65 s at -j1 and at -j8, at the
+    /// end of the build).
+    fn prior_run_stands(&mut self) -> Option<ValueId> {
+        let p = self.me.prior.lock().clone()?;
+        if !p.may_stand_again() || !p.made_from(&self.product.text) {
+            return None;
+        }
+        let eng = self.eng;
+        // (each field's change count before its read is checked, as a
+        // run reads it: a change after the check is the commit's to see)
+        let epochs: Vec<u64> = p
+            .reads
+            .iter()
+            .map(|rd| rd.kind().field().map_or(u64::MAX, |f| eng.field_epoch(f)))
+            .collect();
+        let mut memo = crate::node::HoldMemo::default();
+        let moved = p.scope_moved(eng);
+        if !p
+            .reads
+            .iter()
+            .all(|rd| p.read_holds(eng, self.me, &rd, moved, &mut memo))
+        {
+            return None;
+        }
+        self.product.reads = p
+            .reads
+            .iter()
+            .zip(epochs)
+            .map(|(rd, e)| ReadRec::from_parts(*rd.kind(), rd.path(), false, e, rd.seen_raw()))
+            .collect();
+        self.product.defs = p.defs.clone();
+        self.product.contribs = p.contribs.clone();
+        self.product.sources = p.sources.to_vec();
+        self.product.effect = Some(p.effect);
+        if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
+            elog!(
+                "stands: node {} woken by {:?}: the record before its last stands ({} reads)",
+                self.me.id.raw(),
+                self.woke,
+                p.reads.len()
+            );
+        }
+        Some(p.output)
+    }
+
+    /// Whether this run is on the worker that asks the evaluation's edit
+    /// source (`Engine::evaluate_absorbing`): no edit is taken there until
+    /// the run ends. (Not the caller's thread: the evaluation runs on a
+    /// thread of the engine's own, `Engine::evaluate_with`.)
+    #[must_use]
+    pub fn asks_edits(&self) -> bool {
+        crate::sched::asks_edits()
     }
 
     /// Whether I ran before in this evaluation (this run is not my first
@@ -2427,6 +2540,7 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::placer_settled`] false): queued then, or at the quiet point.
     pub fn wait_for_placer(&mut self) -> Stop {
         self.wait_on = self.me.parent;
+        self.wait_why = "wait_for_placer";
         stop()
     }
 
@@ -2503,6 +2617,7 @@ impl<'a> Ctx<'a> {
         // (what waits behind a run gone long)
         if let Some(w) = self.worker {
             w.offer();
+            Worker::add(&w.ticks, 1);
         }
         self.ticks += 1;
         if self.ticks >= LONG_RUN_TICKS
@@ -2587,7 +2702,7 @@ impl<'a> Ctx<'a> {
         // (`PHITEX_RUN_LOG`, profile: which read stopped the run)
         if crate::sched::run_log() {
             let rd = &self.product.reads[at];
-            eprintln!(
+            elog!(
                 "recheck: node {} read {at} of {} moved: {}",
                 self.me.id.raw(),
                 self.product.reads.len(),

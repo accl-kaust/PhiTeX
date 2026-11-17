@@ -242,6 +242,7 @@ name = "phitex-defuse"
 version = "0.0.0"
 dependencies = [
  "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]

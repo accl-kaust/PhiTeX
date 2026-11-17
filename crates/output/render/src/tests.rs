@@ -256,7 +256,7 @@ fn links_are_read() {
         format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
         "<< /Type /Annot /Subtype /Link /Rect [72 698 100 712] /A << /S /URI /URI (https://example.org/) >> >>".to_owned(),
-        "<< /Type /Annot /Subtype /Link /Rect [72 600 100 612] /Dest [3 0 R /XYZ 0 500 null] >>".to_owned(),
+        "<< /Type /Annot /Subtype /Link /Rect [72 600 100 612] /Dest [3 0 R /XYZ 72 500 null] >>".to_owned(),
     ];
     let mut out = b"%PDF-1.4\n".to_vec();
     let mut at = Vec::new();
@@ -290,6 +290,9 @@ fn links_are_read() {
         "{:?}",
         f.links[1]
     );
+    // (the destination's left: where hyperref's anchor is, a bibliography
+    // entry's column)
+    assert_eq!(f.links[1].left, Some(72.0), "{:?}", f.links[1]);
 }
 
 /// The outline's entries, nested, with their pages and places; a page's
@@ -335,6 +338,7 @@ fn outline_and_text_are_read() {
         (o[0].title.as_str(), o[0].page, o[0].y),
         ("Intro", Some(0), Some(92.0))
     );
+    assert_eq!(o[0].label, None, "no /PageLabels: no printed number");
     assert_eq!(o[0].kids.len(), 1);
     assert_eq!(
         (o[0].kids[0].title.as_str(), o[0].kids[0].y),
@@ -975,4 +979,52 @@ fn missing_resources_never_fail_a_frame() {
     assert_eq!(at(140, 180), [255, 255, 255], "no external object");
     // (and the whole page as hayro draws it, the same)
     assert_eq!(px, whole(&pdf, 1.0));
+}
+
+#[test]
+fn outline_entries_have_their_pages_printed_numbers() {
+    // (pages 1-2 roman, 3-4 arabic from 1, 5 "A-3", 6 "B" (a range in a /Kids node, its
+    // dictionary by reference): the PDF's /PageLabels as hyperref writes them)
+    let page = |_| "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_owned();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R /Outlines 9 0 R /PageLabels 14 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R] /Count 6 >>".to_owned(),
+    ];
+    objs.extend((3..=8).map(page));
+    objs.extend([
+        "<< /Type /Outlines /First 10 0 R /Last 13 0 R /Count 4 >>".to_owned(),
+        "<< /Title (Preface) /Parent 9 0 R /Next 11 0 R /Dest [4 0 R /XYZ 0 700 null] >>".to_owned(),
+        "<< /Title (One) /Parent 9 0 R /Prev 10 0 R /Next 12 0 R /Dest [5 0 R /XYZ 0 700 null] >>".to_owned(),
+        "<< /Title (Appendix) /Parent 9 0 R /Prev 11 0 R /Next 13 0 R /Dest [7 0 R /XYZ 0 700 null] >>".to_owned(),
+        "<< /Title (Back) /Parent 9 0 R /Prev 12 0 R /Dest [8 0 R /XYZ 0 700 null] >>".to_owned(),
+        "<< /Kids [15 0 R 16 0 R] >>".to_owned(),
+        "<< /Nums [0 << /S /r >> 2 << /S /D >> 4 << /S /D /P (A-) /St 3 >>] /Limits [0 4] >>".to_owned(),
+        "<< /Nums [5 17 0 R] /Limits [5 5] >>".to_owned(),
+        "<< /S /A /St 2 >>".to_owned(),
+    ]);
+    let doc = pdf_of(&objs);
+    let o = Renderer::new().outline(&doc);
+    let got: Vec<(&str, Option<usize>, Option<&str>)> = o
+        .iter()
+        .map(|e| (e.title.as_str(), e.page, e.label.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("Preface", Some(1), Some("ii")),
+            ("One", Some(2), Some("1")),
+            ("Appendix", Some(4), Some("A-3")),
+            ("Back", Some(5), Some("B")),
+        ]
+    );
+}
+
+#[test]
+fn page_numbers_in_roman_and_letters() {
+    assert_eq!(roman(1994), "mcmxciv");
+    assert_eq!(roman(4), "iv");
+    assert_eq!(letters(1), "a");
+    assert_eq!(letters(26), "z");
+    assert_eq!(letters(27), "aa");
+    assert_eq!(letters(53), "aaa");
 }

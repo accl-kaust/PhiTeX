@@ -123,6 +123,11 @@ def main():
     pdf = os.path.join(d, stem + ".pdf")
     errp = os.environ.get("GATE_EDIT_STDERR") or os.path.join(d, "..", f"editkinds-j{j}.err")
     err = open(errp, "w")
+    # (the document as given, before the watch writes anything: each cold
+    # build's directory is this with the edited text, gate-edits.py's)
+    given = d.rstrip("/") + "-given"
+    shutil.rmtree(given, ignore_errors=True)
+    shutil.copytree(d, given)
     p = subprocess.Popen(
         [binary, "watch", "--no-view", "--json", *flags, "-j", j, main_],
         cwd=d, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
@@ -208,10 +213,8 @@ def main():
         hm = md5(pdf)
         cold = d.rstrip("/") + "-cold"
         shutil.rmtree(cold, ignore_errors=True)
-        shutil.copytree(d, cold)
-        for x in os.listdir(cold):
-            if x.endswith((".pdf", ".aux", ".toc", ".log", ".out", ".idx", ".ind", ".ilg")):
-                os.remove(os.path.join(cold, x))
+        shutil.copytree(given, cold)
+        shutil.copy2(path, os.path.join(cold, main_))
         cenv = {k: v for k, v in os.environ.items() if k != "PHITEX_ROUND_ACCT"}
         subprocess.run([binary, "build", *flags, "-j", j, main_], cwd=cold,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, env=cenv)

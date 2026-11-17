@@ -3,12 +3,12 @@
 // reported, then checks it stays fixed.
 //
 //   PHITEX_BIN=target/fastdev/phitex node --test --test-concurrency=1 viewer/browser/watch.test.mjs
-import { test, before, after } from "node:test";
+import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Browser, Watch, project, sleep, git } from "./lib.mjs";
+import { Browser, SHELF, Watch, project, sleep, git } from "./lib.mjs";
 
 // (the PDFs dated alike: an edited one compared with a full build)
 process.env.SOURCE_DATE_EPOCH = "0";
@@ -18,6 +18,8 @@ process.env.PHITEX_CACHE_DIR ??= join(home, "cache");
 let browser;
 before(async () => (browser = await Browser.start()));
 after(async () => (Watch.killAll(), await browser?.stop()));
+// (a failed test: what its watches printed and its tabs showed)
+afterEach(async (t) => browser?.report(t));
 
 const doc = (body, pre = "") => `\\documentclass{article}\n${pre}\\begin{document}\n${body}\n\\end{document}\n`;
 
@@ -48,7 +50,10 @@ test("Clean rebuild builds again from nothing; Rebuild reads the files again (it
   await t.click("#b-rec");
   await t.click("#r-clean");
   await waitBuild(w, 3);
-  assert.match(w.out, /3\s+asked: a cold build/);
+  // (a new session on the target resolved again, its first build a clean one: numbered from 1)
+  const again = w.out.split("a clean rebuild was asked: a new session\n");
+  assert.equal(again.length, 2, `the new session said: ${w.out}`);
+  assert.match(again[1], /^ok:\s+1\s+clean build/m);
   await w.stop();
 });
 
@@ -91,6 +96,31 @@ test("a .bib edited while watching is read again (item 17)", async () => {
   await w.stop();
 });
 
+/** Compare with the last commit (the picker's first row, From; To the working tree): its `n` changes counted in the diff bar. */
+async function compareWith(t, n) {
+  await t.click("#b-compare");
+  await t.until(`$$("#phx-pick .row").length > 0`, "the commits");
+  // (the picker marks a range: the commit clicked is From, To the working tree; then Compare)
+  await t.click("#phx-pick .row[data-i='0']");
+  await t.until(`!$("#phx-pick .ask .yes").disabled`, "the pair marked");
+  await t.click("#phx-pick .ask .yes");
+  await t.until(`/${n} changes/.test($("#diffbar").innerText)`, "the diff", 120000);
+}
+
+/**
+ * The diff bar's Next pressed: the page (from 1) the change was shown on,
+ * once its mark is there (a mark of this press's, not the last one's) and
+ * that page is the one in view.
+ */
+async function nextChange(t, pressed = async () => {}) {
+  await t.q(`$$(".mark.fnd.cur").forEach((m) => (m.dataset.was = "")) ?? 1`);
+  await t.click("#diffbar button[data-a='next']");
+  await pressed();
+  const k = await t.until(`(() => { const m = $$(".mark.fnd.cur").find((m) => m.dataset.was === undefined); return m ? +m.closest(".slot").dataset.k + 1 : 0; })()`, "the change marked on its page", 120000);
+  await t.until(`+$("#pgin").value === ${k}`, `page ${k} in view, the change's`);
+  return k;
+}
+
 test("Next change goes to the page of that change; the style popover floats over the pages (items 24, 22)", async () => {
   const para = (i, w) => `Paragraph ${i} ${w} ` + "lorem ipsum dolor sit amet ".repeat(30) + "\n\n";
   const body = (w) => Array.from({ length: 30 }, (_, i) => para(i, i % 10 === 0 ? w : "same")).join("");
@@ -102,22 +132,43 @@ test("Next change goes to the page of that change; the style popover floats over
   w.write("main.tex", doc(body("beta")));
   const t = await browser.tab(await w.url());
   await t.until(`+$("#pgn")?.textContent > 3`, "the pages");
-  await t.click("#b-compare");
-  await t.until(`$$("#phx-pick .row").length > 0`, "the commits");
-  await t.click("#phx-pick .row[data-i='0']");
-  await t.until(`/3 changes/.test($("#diffbar").innerText)`, "the diff", 120000);
+  await compareWith(t, 3);
   const pages = [];
-  for (let i = 0; i < 3; i++) {
-    await t.click("#diffbar button[data-a='next']");
-    await sleep(1200);
-    pages.push(Number(await t.q(`$("#pgin").value`)));
-  }
+  for (let i = 0; i < 3; i++) pages.push(await nextChange(t));
   assert.ok(pages[0] < pages[1] && pages[1] < pages[2], `each change on its own page, further on: ${pages}`);
   await t.click("#diffbar button[data-a='settings']");
   const box = await t.q(`(() => { const b = $("#diffset").getBoundingClientRect(), s = $("#stage").getBoundingClientRect(); return { pos: getComputedStyle($("#diffset")).position, w: b.width, stage: s.width }; })()`);
   assert.equal(box.pos, "absolute", "a popover, not a column beside the pages");
   await t.click("#diffset button[data-bars]");
   await t.until(`$("#diffset button[data-bars]").getAttribute("aria-checked") === "true"`, "the change bars on");
+  await w.stop();
+});
+
+test("Compare started while the document is typeset, Next pressed while the diff is: each change shown on its page once the diff's are in (#49)", async () => {
+  // (a long document: its build and the diff's take seconds, pages streamed
+  // as they go; the changes far apart, each paragraph's number on its page)
+  const at = [0, 150, 300];
+  const para = (i, w) => `Paragraph ${i} ${w} ` + "lorem ipsum dolor sit amet ".repeat(30) + "\n\n";
+  const body = (w) => Array.from({ length: 400 }, (_, i) => para(i, at.includes(i) ? w : "same")).join("");
+  const dir = project({ "main.tex": doc(body("alpha")) });
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "one");
+  writeFileSync(join(dir, "main.tex"), doc(body("beta")));
+  // (a home of its own: the tip its tab shows is the first, beside the status, not one over the diff bar)
+  const w = new Watch(dir, { home: mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-")) });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 3`, "the first pages");
+  assert.equal(builds(w), 0, "Compare asked while the document's first build streams its pages");
+  await compareWith(t, 3);
+  // (the changes counted at once, Next pressed then: the diff not typeset
+  // yet, no change placed, none marked along the scrollbar)
+  const pages = [await nextChange(t, async () => assert.equal(await t.q(`$$("#smarks i.change").length`), 0, "Next pressed before the changes were placed"))];
+  for (let i = 1; i < 3; i++) pages.push(await nextChange(t));
+  assert.ok(pages[0] < pages[1] && pages[1] < pages[2], `each change on its own page, further on: ${pages}`);
+  for (const [i, k] of pages.entries())
+    await t.until(`(() => { const l = $$(".slot")[${k - 1}]?.querySelector(".phx-text"); return !!l && !l.hasAttribute("data-pending") && /Paragraph ${at[i]} (alpha\\s*)?beta/.test(l.textContent); })()`, `paragraph ${at[i]}'s change on page ${k}`);
+  assert.deepEqual(t.errors, []);
   await w.stop();
 });
 
@@ -142,6 +193,41 @@ test("a double-click finds its source after comment lines were added above it (i
   const [, l0, c0] = before.split(":"), [, l1, c1] = after.split(":");
   assert.equal(+l1, +l0 + 5, `${before} -> ${after}`);
   assert.equal(c1, c0, `${before} -> ${after}`);
+  await w.stop();
+});
+
+test("a double-click on a float's text on page 2 of a two-column paper goes to its own line: the figure*'s caption and subcaptions, a TikZ node's text (#47)", async () => {
+  const text = readFileSync(new URL("../../oracle/fixtures/latex/origins/floats2col.tex", import.meta.url), "utf8");
+  const lineOf = (s) => text.slice(0, text.indexOf(s)).split("\n").length;
+  const { w, t } = await open({ "main.tex": text });
+  await t.until(`+$("#pgn")?.textContent >= 2`, "page 2", 240000);
+  await sleep(1500);
+  /** Each place find marks `word` at, double-clicked: the source line the watch said, in the pages' order. */
+  const lines = async (word) => {
+    await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = ${JSON.stringify(word)}; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+    const n = await t.until(`$$(".mark.fnd").length`, `${word} found`);
+    const out = [];
+    for (let k = 0; k < n; k++) {
+      const at = await t.until(`(() => { const m = $$(".mark.fnd")[${k}]; if (!m) return null; m.scrollIntoView({ block: "center" }); const r = m.getBoundingClientRect(); return r.width ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; })()`, `${word} ${k + 1} shown`);
+      await sleep(300);
+      const from = w.out.length;
+      await t.mouse(at.x, at.y, 1);
+      await t.mouse(at.x, at.y, 2);
+      const end = Date.now() + 10000;
+      while (!/source: main\.tex:\d+/.test(w.out.slice(from)) && Date.now() < end) await sleep(50);
+      out.push(+(/source: main\.tex:(\d+)/.exec(w.out.slice(from))?.[1] ?? 0));
+    }
+    // (find closed, its marks gone: the next word's are its own)
+    await t.q(`(() => { const i = $("#findq"); i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); $("#find").hidden = true; return 1; })()`);
+    await t.until(`$$(".mark.fnd").length === 0`, "find's marks gone");
+    return out;
+  };
+  // (the figure*'s caption and subcaptions; the TikZ nodes' texts, then the figure's caption that names them again)
+  assert.deepEqual(await lines("Harbour"), [lineOf("\\caption{Harbour")]);
+  assert.deepEqual(await lines("Lanterns"), [lineOf("\\caption{Lanterns")]);
+  assert.deepEqual(await lines("kettles"), [lineOf("\\caption{Copper kettles")]);
+  assert.deepEqual(await lines("Granite"), [lineOf("{Granite pit}"), lineOf("\\caption{Stone travels")]);
+  assert.deepEqual(await lines("Marble"), [lineOf("{Marble quarry}"), lineOf("\\caption{Stone travels")]);
   await w.stop();
 });
 
@@ -205,22 +291,34 @@ async function coldPdf(dir, main = "main.tex") {
   const { spawnSync } = await import("node:child_process");
   const copy = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-cold-"));
   cpSync(dir, copy, { recursive: true, filter: (p) => !/\.(pdf|log|aux|synctex\.gz)$/.test(p) || /fig/.test(p) });
-  const r = spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", "--no-synctex", main], { cwd: copy, env: { ...process.env, HOME: home } });
+  const r = spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", ...SHELF, "--no-synctex", main], { cwd: copy, env: { ...process.env, HOME: home } });
   if (r.status !== 0) throw new Error(`cold build: ${r.stderr}`);
   return readFileSync(join(copy, main.replace(/\.tex$/, ".pdf")));
 }
 
 test("a figure or a file of any extension replaced on disk rebuilds, as a full build makes it (images, unlisted extensions)", async () => {
   const { spawnSync } = await import("node:child_process");
-  const { writeFileSync, copyFileSync } = await import("node:fs");
-  const magick = (args, out) => spawnSync("magick", [...args, out]);
+  const { writeFileSync, copyFileSync, renameSync } = await import("node:fs");
+  const { dirname, basename } = await import("node:path");
+  // (ImageMagick 7's magick, else 6's convert: an Ubuntu runner has only convert)
+  const im = spawnSync("magick", ["-version"]).status === 0 ? "magick" : "convert";
+  // (drawn beside it, then renamed over it: a figure replaced whole, as a
+  // plotting tool's save does. Drawn in place, ImageMagick 6 on the CI runner
+  // left the watch a file it closed before it was whole, and that build
+  // failed reading it (issue #36); this test is about a replaced figure)
+  const magick = (args, out) => {
+    const tmp = join(dirname(out), `.tmp-${Date.now()}-${basename(out)}`);
+    const r = spawnSync(im, [...args, tmp]);
+    if (r.status !== 0) throw new Error(`${im} failed: ${r.error ?? r.stderr}`);
+    renameSync(tmp, out);
+  };
   const tex = doc("Figures.\n\n\\includegraphics{figpng}\n\\includegraphics{figjpg}\n\\includegraphics[width=3cm]{figpdf}\n\n\\input{notes.md}", "\\usepackage{graphicx}\n");
   const dir = project({ "main.tex": tex, "notes.md": "Notes one.\n" });
   // (the PDF figure made elsewhere, copied in: its own build's files stay out of the project)
   const side = project({ "inc.tex": doc("Inner text A.") });
   const figure = (text) => {
     writeFileSync(join(side, "inc.tex"), doc(text));
-    spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", "--no-synctex", "inc.tex"], { cwd: side, env: { ...process.env, HOME: home } });
+    spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", ...SHELF, "--no-synctex", "inc.tex"], { cwd: side, env: { ...process.env, HOME: home } });
     copyFileSync(join(side, "inc.pdf"), join(dir, "figpdf.pdf"));
   };
   magick(["-size", "40x30", "xc:red"], join(dir, "figpng.png"));
@@ -302,7 +400,7 @@ test("a selection is one block a line; its text has its spaces, no space inside 
   await w.stop();
 });
 
-test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept in phitex.toml (item 1, kinds)", async () => {
+test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept for the document (item 1, kinds)", async () => {
   const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
   const body = "{\\hsize=2cm \\noindent Incomprehensibilities characteristically.\\par}\n\nThen \\nosuchcommandhere here.";
   const { w, t } = await open({ "main.tex": doc(body) }, { at: fresh });
@@ -317,13 +415,19 @@ test("the problems' kinds filter the list, the page's marks and the scrollbar's,
   assert.equal(await t.q(`$$(".slot .culprit.rule").length`), 0, "the bar gone from the page");
   assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /Overfull/, "gone from the list");
   assert.ok((await t.q(`$$("#smarks i").length`)) < marks0, "fewer scrollbar marks");
-  await sleep(500);
-  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"overfull"/);
+  // (the filters are this document's, kept in the browser: not the user's phitex.toml, 98d9b0888)
+  assert.match(await t.q(`JSON.stringify(Object.entries(localStorage).filter(([k]) => k.startsWith("phitex.kinds.hidden.")))`), /\\"overfull\\"/);
+  assert.ok(!existsSync(join(fresh, ".config", "phitex", "phitex.toml")) || !/problems-hidden/.test(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8")), "not in phitex.toml");
+  // (the same document reloaded: the choice held)
+  await t.go(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0`, "the pages after a reload");
+  await problems(t);
+  await t.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull still off");
   await w.stop();
-  // (another document: the choice held)
+  // (another document: its own filters, every kind shown)
   const { w: w2, t: t2 } = await open({ "main.tex": doc(body + "\n\nOther.") }, { at: fresh });
   await problems(t2);
-  await t2.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull still off");
+  await t2.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "true"`, "overfull shown in another document");
   await w2.stop();
 });
 
@@ -345,8 +449,7 @@ test("LaTeX's warnings are problems: an undefined \\ref and \\cite are warnings 
   await t.until(`$$(".slot .culprit.warning").length === 0`, "the warnings' underlines gone");
   assert.ok((await t.q(`$$(".slot .culprit.error").length`)) >= 1, "the error's underline stays");
   assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /undefined on page/, "gone from the list");
-  await sleep(500);
-  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"reference"/);
+  assert.match(await t.q(`JSON.stringify(Object.entries(localStorage).filter(([k]) => k.startsWith("phitex.kinds.hidden.")))`), /\\"reference\\"/, "kept for this document");
   // (the label defined: the warnings go, the underlines with them)
   await t.click("#diags [data-kind='reference']");
   w.write("main.tex", doc("See \\ref{lbl} here\\label{lbl} and \\cite{nosuchkey}.\n\nThen \\nosuchcommandhere here."));
@@ -537,6 +640,153 @@ test("a link's window zooms: Ctrl+wheel and a trackpad's pinch at the pointer, t
   s = await peek(".peek.pinned");
   assert.deepEqual([Math.round(s0[0] - s.scroll[0]), Math.round(s0[1] - s.scroll[1])], [60, 40], "dragged 60, 40: panned as much");
   assert.ok(s.ink > 20, "drawn where it panned to");
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});
+
+/** Text of `n` sentences, its words drawn from a fixed list by a seeded generator (every line its own: no two lines of the page alike). */
+function prose(n, seed) {
+  const words = "incremental typesetting rebuilds only what an edit touches dependency records which macros registers fonts node read change invalidates exactly readers hyphenation interword glue page builder decisions replayed deterministically output identical conventional sources nevertheless characteristically unpredictable implementations occasionally misrepresent responsibilities measure everything twice before believing anything column baseline justification typographical considerations notwithstanding experimental evaluation demonstrates substantially improved latency across representative workloads".split(" ");
+  const rnd = (k) => ((seed = (seed * 1103515245 + 12345) % 2147483648), seed % k);
+  return Array.from({ length: n }, (_, i) => {
+    const ws = Array.from({ length: 12 + rnd(8) }, () => words[rnd(words.length)]);
+    if (i % 3 === 0) ws.splice(3, 0, `\\emph{${words[rnd(words.length)]}}`);
+    if (i % 3 === 1) ws.splice(4, 0, `$x_{${i}}^2 + \\alpha$`);
+    if (i % 4 === 2) ws.splice(2, 0, `${words[rnd(words.length)]}~\\cite{k}`);
+    return ws.join(" ") + ".";
+  }).join("\n");
+}
+
+test("a note made in one column of a two-column paper is drawn in that column, as selected, its handles at its ends, after a reload too; a handle dragged past its line keeps to the column; pins numbered as the list (notes in two columns)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const at = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  execFileSync(process.env.PHITEX_BIN ?? "phitex", ["config", "experimental-review", "on"], { env: { ...process.env, HOME: at, XDG_CONFIG_HOME: join(at, ".config") } });
+  // (a paragraph with a footnote, a float between it and the next, the column
+  // full: the selection's bytes hold the footnote's and the float's text, set
+  // at the column's foot and atop the other column)
+  const body = `${prose(14, 3)}\n\n${prose(9, 5)}\\footnote{Footnote text typeset at the foot of the column.}\n\\begin{figure}[t]\\centering\\fbox{Figure}\\caption{A caption typeset where the float lands.}\\end{figure}\n\n${prose(9, 7)}\n\n${prose(40, 11)}\n\\begin{thebibliography}{1}\\bibitem{k} D. Knuth. 1984.\\end{thebibliography}`;
+  const { w, t } = await open({ "main.tex": `\\documentclass[twocolumn]{article}\n\\begin{document}\n${body}\n\\end{document}\n` }, { at });
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 1700, deviceScaleFactor: 1, mobile: false });
+  // (the pages' layout at rest: the first page's box the same for 400 ms. A
+  // resize, or the review's side opening, fits the pages to the narrower stage
+  // a moment later; a place measured before it is not where the page is
+  // after, and a press there falls on the text, not on a handle)
+  const settled = async () => {
+    let last = null, same = 0;
+    for (const end = Date.now() + 20000; same < 2; await sleep(200)) {
+      assert.ok(Date.now() < end, "the pages' layout at rest");
+      const now = await t.q(`(() => { const b = $(".slot")?.getBoundingClientRect(); return b ? [b.left, b.top, b.width, b.height].map(Math.round).join() : null; })()`);
+      same = now && now === last ? same + 1 : 0;
+      last = now;
+    }
+  };
+  // (the first page's text layer filled and shown: a layer is filled a page
+  // a frame once the view rests (text.ts), and the page drawn again (the
+  // build's next pass) or a zoom's end (the pages fitted to the resize)
+  // holds it out of the layout (display: none) until then. A person's press
+  // fills it; a place read from it before then was none, or every line's
+  // box at 0, 0)
+  const ready = `(() => { const l = $(".slot")?.querySelector(".phx-text"); return !!l && !l.matches(".zooming *, [data-pending], [data-hold]"); })()`;
+  // (the first build in and good: a failed one says why, the watch's output printed)
+  await waitBuild(w, 1);
+  assert.match(w.out, /^ok:\s+1\s/m, "the first build has no error");
+  await t.until(`${ready} && $(".slot").querySelectorAll("text").length > 50`, "the first page's text");
+  await settled();
+  // (places on the first page as fractions of it: the review's side opening
+  // narrows the pages; `F` maps a screen box to them)
+  const F = `const S = $(".slot").getBoundingClientRect(); const F = (b) => [(b.left - S.left) / S.width, (b.right - S.left) / S.width, (b.top - S.top) / S.height, (b.bottom - S.top) / S.height];`;
+  // (a line of its text: `col` "L" or "R", the `li`th from the top, its `ci`th
+  // character (from the end if negative): the screen point at its left edge or
+  // right, `f` the same as a fraction of the page; `mid` where the right column starts)
+  const line = (col, li, ci, right = false) =>
+    t.until(`${ready} && (() => { $(".slot").scrollIntoView({ block: "start" }); ${F} const all = [...$(".slot").querySelectorAll("text")].filter((x) => x.textContent.length > 30).map((x) => [x, x.getBoundingClientRect()]); const mid = Math.min(...all.map(([, b]) => b.left).filter((l) => l > S.left + S.width / 2)); const ls = all.filter(([, b]) => (${JSON.stringify(col)} === "L") === (b.left < mid)).sort((a, b) => a[1].top - b[1].top); const [x] = ls.at(${li}) ?? []; if (!x) return null; const n = x.textContent.length, off = ${ci} < 0 ? n + ${ci} : ${ci}; const r = document.createRange(); r.setStart(x.firstChild, off); r.setEnd(x.firstChild, off + 1); const b = r.getBoundingClientRect(); const px = ${right} ? b.right - 1 : b.left + 1, py = (b.top + b.bottom) / 2; return { x: px, y: py, f: [(px - S.left) / S.width, (py - S.top) / S.height], mid: (mid - S.left) / S.width, hyphen: x.textContent.trimEnd().endsWith("-") }; })()`, `line ${li} of the ${col === "L" ? "left" : "right"} column`);
+  // (from the paragraph with the footnote to the one after the float, all in the left column)
+  const first = await line("L", 18, 4), last = await line("L", 30, -5, true);
+  assert.ok(first && last && last.y > first.y, "the lines are there");
+  const mid = first.mid;
+  await t.drag(first.x, first.y, last.x, last.y);
+  await sleep(400);
+  const blocks = await t.q(`(() => { ${F} return $$(".mark.seltext").map((m) => F(m.getBoundingClientRect())); })()`);
+  assert.ok(blocks.length >= 10 && blocks.every(([, r]) => r < mid), `the selection in the left column (it starts at ${mid}): ${JSON.stringify(blocks)}`);
+  await t.until(`$(".rv-pop [data-k='note']")`, "the note's button");
+  await t.click(".rv-pop [data-k='note']");
+  await t.until(`$(".rv-compose textarea")`, "the note's box");
+  await t.q(`(() => { const a = $(".rv-compose textarea"); a.value = "Two columns"; a.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+  await t.click(".rv-compose [data-save]");
+  const marks = () =>
+    t.until(`(() => { ${F} const ms = $$(".slot .rv.n-note:not(.rv-pin):not(.rv-h)").map((m) => F(m.getBoundingClientRect())); const hs = $$(".slot .rv-h").map((h) => { const b = h.getBoundingClientRect(), f = F(b); return { end: h.classList.contains("end"), x: (f[0] + f[1]) / 2, top: f[2], bottom: f[3], sx: b.left + b.width / 2, sy: (b.top + b.bottom) / 2, on: b.top >= 0 && b.bottom <= innerHeight }; }); return ms.length && hs.length === 2 ? { ms, hs } : null; })()`, "the note's marks and its two handles");
+  const top = Math.min(...blocks.map((b) => b[2])), bottom = Math.max(...blocks.map((b) => b[3]));
+  const rows = (bs) => new Set(bs.map((b) => Math.round((b[2] + b[3]) * 200))).size;
+  const near = (h, p) => Math.abs(h.x - p.f[0]) < 0.008 && h.top <= p.f[1] && h.bottom >= p.f[1];
+  const check = async (what) => {
+    const { ms, hs } = await marks();
+    // (every mark in the left column, between the selection's first and last
+    // lines: not the footnote's text at the column's foot, nor the float's in
+    // the right column, nor a bar across both columns)
+    assert.ok(ms.every(([, r, mt, mb]) => r < mid && mt >= top - 0.004 && mb <= bottom + 0.004), `${what}: the marks where the selection was (${top}-${bottom}, left of ${mid}): ${JSON.stringify(ms)}`);
+    assert.ok(Math.abs(rows(ms) - rows(blocks)) <= 2, `${what}: a mark a selected line (${rows(ms)} rows, the selection ${rows(blocks)})`);
+    const s = hs.find((h) => !h.end), e = hs.find((h) => h.end);
+    assert.ok(near(s, first), `${what}: the start handle at the first character: ${JSON.stringify(s)} vs ${JSON.stringify(first.f)}`);
+    assert.ok(near(e, last), `${what}: the end handle at the last character: ${JSON.stringify(e)} vs ${JSON.stringify(last.f)}`);
+    assert.ok(s.on && e.on, `${what}: both handles on screen`);
+    return e;
+  };
+  await settled();
+  await check("saved");
+  const notes = JSON.parse(w.read(".phitex/notes.json"));
+  const note = (notes.notes ?? notes).find((n) => n.thread?.[0]?.text === "Two columns");
+  assert.doesNotMatch(note.anchor.quote, /^\s/, "the anchor starts at the first character selected");
+  // (a reload: the note drawn again from its anchor alone, selected by a click on its mark)
+  await t.go(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0 && $$(".slot .rv.n-note").length > 0`, "the note's marks after a reload", 120000);
+  await sleep(800);
+  await line("L", 0, 0);
+  const m = await t.q(`(() => { const b = $(".slot .rv.n-note:not(.rv-pin)").getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+  await t.mouse(m[0], m[1]);
+  // (the note selected opens the review's side: the pages fitted again)
+  await settled();
+  await check("after a reload");
+  // (the end handle dragged two lines down, past its line's end into the gap
+  // between the columns: the note ends on that line, in the left column)
+  const to = await line("L", 32, -1, true);
+  const gap = await t.q(`(() => { const S = $(".slot").getBoundingClientRect(); return S.left + ${mid} * S.width - 3; })()`);
+  // (the handle where it is now, after line()'s scroll)
+  const e = await t.q(`(() => { const b = $(".slot .rv-h.end").getBoundingClientRect(); return { sx: b.left + b.width / 2, sy: (b.top + b.bottom) / 2 }; })()`);
+  await t.drag(e.sx, e.sy, gap, to.y, 16);
+  for (const end = Date.now() + 20000; ; await sleep(100)) {
+    const n = JSON.parse(w.read(".phitex/notes.json"));
+    if ((n.notes ?? n).find((x) => x.id === note.id).anchor.end > note.anchor.end) break;
+    assert.ok(Date.now() < end, "the note's end moved");
+  }
+  await sleep(800);
+  const { ms, hs } = await marks();
+  const moved = hs.find((h) => h.end);
+  // (snapped to its word's end: a word a break hyphenated ends on the next line)
+  const below = await line("L", 33, 0);
+  const on = to.hyphen ? below : to;
+  assert.ok(moved.x < mid && moved.top <= on.f[1] && moved.bottom >= on.f[1], `the end on the line it was let go beside (its word's end), in the left column: ${JSON.stringify(moved)} vs ${JSON.stringify(on.f)} (hyphenated: ${to.hyphen})`);
+  assert.ok(ms.every(([, r]) => r < mid), `the marks still in the left column: ${JSON.stringify(ms)}`);
+  // (two notes more, written after it: one in the right column, one above it;
+  // the pins number them as they come in the pages, as the list does, not
+  // by their posts (each had one: every pin said 1))
+  for (const [a, b, text] of [[["R", 4, 2], ["R", 6, -3, true], "Right"], [["L", 3, 2], ["L", 5, -3, true], "Above"]]) {
+    await settled();
+    const p = await line(...a), q = await line(...b);
+    await t.drag(p.x, p.y, q.x, q.y);
+    await t.until(`$(".rv-pop [data-k='note']")`, "the note's button");
+    await t.click(".rv-pop [data-k='note']");
+    await t.until(`$(".rv-compose textarea")`, "the note's box");
+    await t.q(`(() => { const a = $(".rv-compose textarea"); a.value = ${JSON.stringify(text)}; a.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+    await t.click(".rv-compose [data-save]");
+    await t.until(`$$(".slot .rv-pin").length === ${text === "Right" ? 2 : 3}`, `${text}'s pin`);
+  }
+  await sleep(500);
+  const all = JSON.parse(w.read(".phitex/notes.json"));
+  const id = (text) => (all.notes ?? all).find((n) => n.thread?.[0]?.text === text).id;
+  const pins = await t.q(`Object.fromEntries($$(".slot .rv-pin").map((p) => [p.dataset.id, p.textContent]))`);
+  assert.deepEqual([pins[id("Above")], pins[id("Two columns")], pins[id("Right")]], ["1", "2", "3"], `the pins in reading order: ${JSON.stringify(pins)}`);
+  const cards = await t.q(`$$(".rside .card.note").map((c) => [c.dataset.id, c.querySelector(".num")?.textContent])`);
+  assert.deepEqual(cards, [[id("Above"), "1"], [id("Two columns"), "2"], [id("Right"), "3"]], "the list in the same order, the same numbers");
   assert.deepEqual(t.errors, []);
   await w.stop();
 });

@@ -189,6 +189,34 @@ pub enum Ask {
         to: Option<String>,
         synctex: bool,
     },
+    /// What `phitex session png` and `where` look at, made now of the
+    /// last build: its exact PDF and the last build's before it, as
+    /// `build-N.pdf` in folder `dir`, the pages the lines of the source
+    /// ranges `at` (file, start, end) were placed on, and the glyph
+    /// origins of those and of `pages` (from 0): done by the session's
+    /// owner, which says when, by `id`.
+    Shot {
+        id: u64,
+        dir: String,
+        at: Vec<(String, usize, usize)>,
+        pages: Vec<usize>,
+        label: Option<String>,
+    },
+    /// `phitex session compare` (and `png --compare`): the files as they
+    /// are diffed against version `rev` (a git revision, or the path of an
+    /// older copy of the main file) by a diff session of the agent's own,
+    /// beside the viewer's (none: the last one again; `stop`: ended), in
+    /// the look `look` (markup, subtype, added and deleted colours, each
+    /// none: as it was), its build waited for; `at` (a file and a line
+    /// from 1): where what that line made is on the diff's pages too.
+    /// Done by the session's owner, which says when, by `id`.
+    Compare {
+        id: u64,
+        rev: Option<String>,
+        stop: bool,
+        look: [Option<String>; 4],
+        at: Option<(String, usize)>,
+    },
     /// A change reached the screen this long after it was made.
     Painted(u64),
     /// File `file`'s text is the editor's buffer from now on.
@@ -223,6 +251,14 @@ pub enum Ask {
     /// The editor's buffer of `file` is gone (closed): the file as on
     /// disk again.
     Closed {
+        file: String,
+    },
+    /// File `file` changed outside the editor (on disk, or as the host
+    /// gave it: created, saved over, removed): read again at the next
+    /// build where the editor has no buffer of it, as a watch's file
+    /// event is (the viewer's `changed`, LSP's
+    /// `workspace/didChangeWatchedFiles`).
+    Changed {
         file: String,
     },
     /// The editor's cursor at byte `at` of `file`'s text (the glyph
@@ -380,6 +416,23 @@ impl Streamed {
             json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n, "exact": exact})
                 .to_string(),
         )
+    }
+
+    /// Page `k` streamed withdrawn ([`Viewer::withdraw_page`]): no file of
+    /// its own, its identity none; and the `withdrawn` event to tell,
+    /// `settled` the pages the build in has (none: it was not streamed).
+    fn withdraw(&mut self, k: usize, settled: usize) -> Option<String> {
+        if !matches!(self.hashes.get(k), Some(Some(_))) {
+            return None;
+        }
+        self.hashes[k] = None;
+        while self.hashes.last() == Some(&None) {
+            self.hashes.pop();
+        }
+        self.pdfs.remove(&k);
+        self.inexact.remove(&k);
+        let n = settled.max(self.hashes.len());
+        Some(json!({"event": "withdrawn", "k": k, "pages": n}).to_string())
     }
 
     /// `hashes` with the pages streamed over them (a viewer that asks
@@ -673,12 +726,12 @@ impl Viewer {
     }
 
     /// The outline of the PDF shown, as the viewer's entries
-    /// (`viewer/src/outline.ts`' `Entry`: title, page, place, entries).
+    /// (`viewer/src/outline.ts`' `Entry`: title, page, its printed number, place, entries).
     fn outline_json(&self) -> Value {
         fn conv(es: &[phitex_render::Entry]) -> Value {
             Value::Array(
                 es.iter()
-                    .map(|e| json!({"t": e.title, "p": e.page, "y": e.y, "k": conv(&e.kids)}))
+                    .map(|e| json!({"t": e.title, "p": e.page, "l": e.label, "y": e.y, "k": conv(&e.kids)}))
                     .collect(),
             )
         }
@@ -868,6 +921,19 @@ impl Viewer {
         }
     }
 
+    /// Page `k` (from 0) of the diff's build streamed while it runs is
+    /// withdrawn, as [`Viewer::withdraw_page`] is the document's.
+    pub fn diff_withdraw_page(&self, k: usize) {
+        let mut d = lock(&self.diff);
+        let settled = d.hashes.len();
+        let told = d.streamed.withdraw(k, settled);
+        let shown = d.shown;
+        drop(d);
+        if let Some(e) = told.filter(|_| shown) {
+            self.emit(&e);
+        }
+    }
+
     /// The diff is (still) under way: its state, PDF, pages and text; the
     /// browsers told, and given its pages if they are the ones shown (the
     /// pages it streamed, its own from now on).
@@ -997,9 +1063,14 @@ impl Viewer {
     /// its top left, a point's slack around each link's box), as hyperref
     /// makes them: each a link to the named destination `cite.KEY`. Each
     /// key in the links' order, with where its link goes (its entry: page
-    /// from 0, its top). Exact, read from the PDF: a document without
-    /// hyperref's citation links has none.
-    pub fn cite_links(&self, k: usize, x: f64, y: f64) -> Vec<(String, usize, Option<f64>)> {
+    /// from 0, its top, its left). Exact, read from the PDF: a document
+    /// without hyperref's citation links has none.
+    pub fn cite_links(
+        &self,
+        k: usize,
+        x: f64,
+        y: f64,
+    ) -> Vec<(String, usize, Option<f64>, Option<f64>)> {
         let Some(pdf) = self.pdf() else {
             return Vec::new();
         };
@@ -1013,7 +1084,7 @@ impl Viewer {
             .filter_map(|l| {
                 let key = l.name.as_deref()?.strip_prefix("cite.")?.to_owned();
                 match l.target {
-                    phitex_render::Target::Page(p, top) => Some((key, p, top)),
+                    phitex_render::Target::Page(p, top) => Some((key, p, top, l.left)),
                     phitex_render::Target::Uri(_) => None,
                 }
             })
@@ -1044,6 +1115,23 @@ impl Viewer {
             return;
         }
         let told = lock(&self.streamed).put(k, hash, pdf, pages, exact);
+        if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
+            self.emit(&e);
+        }
+    }
+
+    /// Page `k` (from 0) streamed while the build runs is withdrawn
+    /// ([`phitex_tex::StreamedPage::gone`]: the run that made it was
+    /// refuted, and no page that stands is there as told): its file
+    /// dropped, the page the last build has there shown again, or none
+    /// past those, and the viewers told,
+    /// `{"event":"withdrawn","k":K,"pages":N}` (`N` the pages there are
+    /// now: the last build's, or as far as a page streamed that stands).
+    /// Told only while the document's pages are the ones shown, as
+    /// [`Viewer::stream_page`]'s.
+    pub fn withdraw_page(&self, k: usize) {
+        let settled = lock(&self.pages).hashes.len();
+        let told = lock(&self.streamed).withdraw(k, settled);
         if let Some(e) = told.filter(|_| !lock(&self.diff).shown) {
             self.emit(&e);
         }
@@ -1440,6 +1528,22 @@ impl Viewer {
             "rebuild" => {
                 s.ask(Ask::Rebuild);
                 ok(json!({}))
+            }
+            // (`{"op":"changed","files":[...]}`: files changed outside the
+            // editor, each read again, not every file a Rebuild checks)
+            "changed" => {
+                let files: Vec<String> = req
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| f.as_str().map(str::to_owned))
+                    .collect();
+                let n = files.len();
+                for file in files {
+                    s.ask(Ask::Changed { file });
+                }
+                ok(json!({"queued": n}))
             }
             // (Clean rebuild: the build dropped, made again from nothing)
             "cold" => {
@@ -1853,6 +1957,56 @@ mod tests {
         let e = take();
         assert_eq!(e.len(), 1, "{e:?}");
         assert_eq!(e[0]["event"], "page");
+    }
+
+    /// A page streamed and then withdrawn (the run that made it refuted)
+    /// is the last build's page again, or no page past those: its file
+    /// dropped, the viewers told the pages there are now. One never
+    /// streamed, or withdrawn already, tells nothing.
+    #[test]
+    fn a_page_withdrawn_is_the_builds_again() {
+        let v = Viewer::default();
+        let got: Arc<Mutex<Vec<Value>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| {
+                lock(&got).push(serde_json::from_str(t).unwrap());
+            }));
+        }
+        let take = || std::mem::take(&mut *lock(&got));
+        let pages = |v: &Viewer| -> Value {
+            serde_json::from_str::<Value>(&v.answer(&json!({"id": 1, "op": "pages"}))).unwrap()
+                ["json"]["pages"]
+                .clone()
+        };
+        v.built(&Built {
+            pdf: None,
+            hashes: vec![0x21, 0x22],
+            history: 0,
+            ms: 0.0,
+            diagnostics: Some(Vec::new()),
+            since_ms: None,
+            origins: None,
+            changed: None,
+            parts: serde_json::Map::new(),
+        });
+        take();
+        v.stream_page(1, 0x23, vec![6; 10], 2, true);
+        v.stream_page(3, 0x24, vec![7; 10], 4, true);
+        assert_eq!(take().len(), 2);
+        // (a page past the build's: none there again, the pages two)
+        v.withdraw_page(3);
+        assert_eq!(take(), [json!({"event": "withdrawn", "k": 3, "pages": 2})]);
+        assert_eq!(v.streamed_hashes(), vec![None, Some(0x23 ^ STREAMED)]);
+        // (one of the build's: its page again)
+        v.withdraw_page(1);
+        assert_eq!(take(), [json!({"event": "withdrawn", "k": 1, "pages": 2})]);
+        assert_eq!(v.streamed_hashes(), Vec::<Option<u64>>::new());
+        assert_eq!(pages(&v), json!(["0000000000000021", "0000000000000022"]));
+        // (nothing streamed there: nothing told)
+        v.withdraw_page(1);
+        v.withdraw_page(7);
+        assert_eq!(take(), Vec::<Value>::new());
     }
 
     #[test]

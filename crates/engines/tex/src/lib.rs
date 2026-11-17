@@ -79,13 +79,14 @@ mod xetex;
 mod xpic;
 
 pub use api::{
-    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, FONT_KEY, Finder, Hint,
-    Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report, Severity,
-    Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key, font_name,
-    terminal_banner,
+    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, EnvReask, FAIL_END, FONT_KEY, Finder,
+    Hint, LoadStats, Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report,
+    Save, Severity, Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id,
+    file_stat_key, font_name, terminal_banner,
 };
 pub use exec::{
-    Progress, SpawnWorker, StreamHook, StreamedPage, cpus as exec_cpus, set_spawn_worker,
+    Progress, SpawnWorker, StreamHook, StreamedPage, cpus as exec_cpus, end_threads,
+    set_spawn_worker, start_threads,
 };
 pub use native::NativeFonts;
 
@@ -103,6 +104,13 @@ pub fn boxscope_on() -> bool {
 #[must_use]
 pub fn interned_names() -> (u32, u32) {
     val::cs_counts()
+}
+/// The internal names numbered `from` and after, in the order they were
+/// first seen (a test's look at what a session minted).
+#[doc(hidden)]
+#[must_use]
+pub fn internal_names_from(from: u32) -> Vec<String> {
+    val::internal_names_from(from)
 }
 /// Interns control sequence `name` in this process's table, as a build
 /// meeting it would (a test's way to fill the table first).

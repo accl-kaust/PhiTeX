@@ -305,6 +305,45 @@ test("a diff's pages streamed into a view that showed the document's", async () 
   assert.deepEqual(w.hashes, ["f0", "f1", "f2"]);
 });
 
+// `phitex watch`'s pages streamed and taken back (`withdrawn`, spec §2.1c):
+// an edit took the last page out, its page streamed before its run was
+// refuted. The view shows the pages the watch has now (its `pages` answer),
+// not the page taken back, as soon as it is told, before the build is in.
+test("a streamed page withdrawn: the view shows the watch's pages again, the page past the end gone", async () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  let emit!: (e: unknown) => void;
+  let shown: { pages: string[]; inexact: number[] } = { pages: ["b0", "b1"], inexact: [] };
+  const core = {
+    request: async (r: { op: string }) => (r.op === "pages" ? { ok: true, json: shown } : { ok: false }),
+    onEvent: (cb: (e: unknown) => void) => (emit = cb),
+  };
+  const laid: string[][] = [];
+  const sink = new Proxy(
+    { layout: (hs: string[]) => laid.push([...hs]) },
+    { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) },
+  );
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined, remote: { source: () => undefined } });
+  const w = s as unknown as { opened: boolean; hashes: string[]; chain: Promise<unknown> };
+  w.opened = true;
+  w.hashes = ["b0", "b1"];
+  emit({ event: "building", on: true });
+  // (page 1 streamed over the build's, and a page 2 past its end)
+  emit({ event: "page", k: 1, hash: "s1", pages: 2, exact: true });
+  emit({ event: "page", k: 2, hash: "s2", pages: 3, exact: true });
+  assert.deepEqual(laid.at(-1), ["b0", "s1", "s2"]);
+  // (page 2 taken back: none there, page 1's streamed one still stands)
+  shown = { pages: ["b0", "s1"], inexact: [] };
+  emit({ event: "withdrawn", k: 2, pages: 2 });
+  await w.chain;
+  assert.deepEqual(laid.at(-1), ["b0", "s1"]);
+  // (page 1 taken back too: the build's page 1 again)
+  shown = { pages: ["b0", "b1"], inexact: [] };
+  emit({ event: "withdrawn", k: 1, pages: 2 });
+  await w.chain;
+  assert.deepEqual(laid.at(-1), ["b0", "b1"]);
+  assert.deepEqual(w.hashes, ["b0", "b1"]);
+});
+
 // `phitex watch`'s status: busy from the `building` event to its end, and
 // only so. A progress record or a page after the build was in (a fetch's, a
 // worker's last page, Compare's diff built in the background, which says no
@@ -346,4 +385,22 @@ test("the watch's busy is its building events', not a late progress record's", a
   assert.equal(now(), true);
   emit({ event: "building", on: false });
   assert.equal(now(), false);
+});
+
+test("a clean rebuild opens the project's files as they are: one removed or renamed is not opened again", async () => {
+  const project: Record<string, string> = { "main.tex": "\\input part\n\\bye\n", "part.tex": "part\n", "old.tex": "old\n" };
+  const host: EditorHost = { loadProject: async () => ({ ...project }), onOpen: () => {}, onChanges: () => {} };
+  const opens: Record<string, string>[] = [];
+  const core = {
+    request: async (r: { op: string; files?: Record<string, string> }) => (r.op === "open" && opens.push(r.files!), { ok: true, json: { pages: 1, pending: 0, build_ms: 1 } }),
+  };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  const s = new PreviewSession(host, core as never, sink as never, { checkEveryMs: 0, schedule: () => undefined, now: () => 0 });
+  await s.start();
+  assert.ok("old.tex" in opens.at(-1)!);
+  // (old.tex deleted, part.tex edited: the files as the host has them now)
+  await s.clean({ "main.tex": "\\input part\n\\bye\n", "part.tex": "part two\n" });
+  const tex = Object.keys(opens.at(-1)!).filter((f) => f.endsWith(".tex")).sort();
+  assert.deepEqual(tex, ["main.tex", "part.tex"]);
+  assert.equal(opens.at(-1)!["part.tex"], "part two\n");
 });

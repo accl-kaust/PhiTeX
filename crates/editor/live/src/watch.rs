@@ -107,7 +107,9 @@ impl Edits {
             Ask::Painted(us) => return Applied::Painted(us),
             Ask::Rebuild => return Applied::Rebuild,
             // (the owner's, which holds the last build: never here)
-            Ask::WritePdf { .. } => return Applied::Nothing,
+            Ask::WritePdf { .. } | Ask::Shot { .. } | Ask::Compare { .. } => {
+                return Applied::Nothing;
+            }
             Ask::Transcript => {
                 if let Some(v) = viewer {
                     v.set_transcript(&s.transcript());
@@ -139,12 +141,12 @@ impl Edits {
                         Value::Array(
                             links
                                 .into_iter()
-                                .map(|(key, p, top)| {
+                                .map(|(key, p, top, left)| {
                                     json!({
                                         "key": key,
                                         "label": labels.get(&key),
                                         "number": numbers.get(&key),
-                                        "at": [p, top],
+                                        "at": [p, top, left],
                                     })
                                 })
                                 .collect(),
@@ -177,6 +179,8 @@ impl Edits {
                 self.buffers.remove(&file);
                 file
             }
+            // (the buffer, where the editor holds one, stands)
+            Ask::Changed { file } => file,
             Ask::Cursor {
                 file,
                 at,

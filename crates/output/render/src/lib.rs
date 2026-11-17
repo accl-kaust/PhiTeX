@@ -48,7 +48,7 @@ use hayro::hayro_interpret::{
     InterpreterCache, InterpreterSettings, SoftMask, interpret_page,
 };
 use hayro::hayro_syntax::Pdf;
-use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Object, ObjectIdentifier};
+use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Object, ObjectIdentifier, Stream};
 use hayro::hayro_syntax::page::Page;
 use hayro::kurbo::{Affine, BezPath, PathEl, Rect, Shape};
 use hayro::vello_cpu::{self, Pixmap, RenderContext};
@@ -125,6 +125,10 @@ pub struct Link {
     pub rect: [f64; 4],
     pub target: Target,
     pub name: Option<String>,
+    /// Where a page destination's left is given (`/XYZ`'s left, points
+    /// from the page's left): hyperref's anchor, the start of its line
+    /// (a bibliography entry's, in the column it is in).
+    pub left: Option<f64>,
 }
 
 /// A page as the viewer shows it: its size in pixels and in points, its
@@ -169,7 +173,13 @@ struct Doc {
     outline: Option<Vec<Entry>>,
     /// Its named destinations, each found once.
     names: Names,
+    /// Its images' contents, hashed once each ([`Probe::content`]).
+    contents: Contents,
 }
+
+/// The hash of each image's samples in a document, by where its
+/// dictionary is in the file's bytes.
+type Contents = HashMap<(usize, usize), u64>;
 
 /// How many documents a [`Renderer`] keeps open: the build's file and the
 /// pages streamed around the view (each streamed page is a file of its own).
@@ -253,9 +263,94 @@ struct Probe<'b> {
     saved: Vec<u64>,
     boxes: &'b mut HashMap<u128, (Rect, u64)>,
     chars: Vec<Ch>,
+    /// The document's images' contents ([`Probe::content`]), and its
+    /// file's bytes (where a dictionary there is, for good).
+    contents: &'b mut Contents,
+    file: &'b [u8],
+    /// Each drawing, glyph by glyph, in the page's order, with the clips
+    /// and groups around it ([`Renderer::marks`]); none: not kept.
+    marks: Option<Vec<Mark>>,
+    /// The outermost clip or group open (0: none), and how many were
+    /// opened at the outermost level so far.
+    outer: u32,
+    nests: u32,
+}
+
+/// What a [`Mark`] draws.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarkKind {
+    /// A glyph: its origin (points from the page's top left), its font's
+    /// size (points) and its text (its `ToUnicode`'s).
+    Glyph {
+        x: f64,
+        y: f64,
+        size: f64,
+        text: String,
+    },
+    Path,
+    Image,
+}
+
+/// A drawing on a page ([`Renderer::marks`]): its box (points from the
+/// page's top left: left, top, right, bottom), what it is, and the clip
+/// or group it is drawn in, outermost (0: none; another number for each
+/// clip or group the page's own content opens: a form's, a picture's).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mark {
+    pub rect: [f64; 4],
+    pub kind: MarkKind,
+    pub nest: u32,
 }
 
 impl Probe<'_> {
+    /// What image `image` draws: its samples, and its masks' (hashed once
+    /// a document where its dictionary is in the file). hayro's key of an
+    /// image hashes its dictionary's bytes only, so a picture replaced by
+    /// another of its size and kind (a figure saved over in another
+    /// colour) kept its key, and its band, once the image object was
+    /// rewritten in place: the old picture drawn on (the frontends' disk
+    /// test, a figure's second change); two such pictures on a page were
+    /// one too.
+    fn content(&mut self, image: &Image<'_, '_>) -> u64 {
+        match image {
+            Image::Raster(r) => {
+                let s = r.stream();
+                let d = s.dict().data();
+                let range = self.file.as_ptr_range();
+                let at = (d.as_ptr() as usize, d.len());
+                let kept = range.contains(&d.as_ptr());
+                let hash = || {
+                    hash_of(|h| {
+                        s.raw_data().hash(h);
+                        for m in [&b"SMask"[..], b"Mask"] {
+                            if let Some(m) = s.dict().get::<Stream<'_>>(m) {
+                                m.raw_data().hash(h);
+                            }
+                        }
+                    })
+                };
+                if kept {
+                    *self.contents.entry(at).or_insert_with(hash)
+                } else {
+                    // (an inline image: in a content stream decoded for
+                    // this drawing, its place no name of it)
+                    hash()
+                }
+            }
+            // (a stencil mask: its samples, decoded; its stream out of reach)
+            Image::Stencil(st) => {
+                let mut out = 0;
+                st.with_stencil(
+                    |luma, _| {
+                        out = hash_of(|h| (luma.width, luma.height, &luma.data).hash(h));
+                    },
+                    None,
+                );
+                out
+            }
+        }
+    }
+
     fn push(&mut self, bbox: Rect, id: u64, at: Affine) {
         if bbox.is_finite() && bbox.width() >= 0.0 && bbox.height() >= 0.0 {
             let t = at.translation();
@@ -268,13 +363,34 @@ impl Probe<'_> {
         }
     }
 
+    /// A mark of `bbox` kept, where marks are kept.
+    fn mark(&mut self, bbox: Rect, kind: MarkKind) {
+        let nest = self.outer;
+        if let Some(m) = self.marks.as_mut()
+            && bbox.is_finite()
+        {
+            m.push(Mark {
+                rect: [bbox.x0, bbox.y0, bbox.x1, bbox.y1],
+                kind,
+                nest,
+            });
+        }
+    }
+
     fn nest(&mut self, what: u64) {
+        if self.saved.is_empty() {
+            self.nests += 1;
+            self.outer = self.nests;
+        }
         self.saved.push(self.around);
         self.around = hash_of(|h| (self.around, what).hash(h));
     }
 
     fn unnest(&mut self) {
         self.around = self.saved.pop().unwrap_or(0);
+        if self.saved.is_empty() {
+            self.outer = 0;
+        }
     }
 }
 
@@ -321,6 +437,7 @@ impl<'a> Device<'a> for Probe<'_> {
                 f64::from(s.line_width) * k + 1.0,
             );
         }
+        self.mark(bbox, MarkKind::Path);
         let mut origin = hayro::kurbo::Point::ZERO;
         let id = hash_of(|h| {
             self.around.hash(h);
@@ -386,12 +503,18 @@ impl<'a> Device<'a> for Probe<'_> {
                     let key = t.cache_key();
                     let (local, _) = *self.boxes.entry(key).or_insert_with(|| {
                         let mut inner = HashMap::new();
+                        let mut contents = Contents::new();
                         let mut sub = Probe {
                             items: Vec::new(),
                             around: 0,
                             saved: Vec::new(),
                             boxes: &mut inner,
                             chars: Vec::new(),
+                            contents: &mut contents,
+                            file: &[],
+                            marks: None,
+                            outer: 0,
+                            nests: 0,
                         };
                         t.interpret(&mut sub, Affine::IDENTITY, Affine::IDENTITY, &props.paint);
                         let ink = sub.items.iter().map(|i| i.bbox).reduce(|a, b| a.union(b));
@@ -407,11 +530,20 @@ impl<'a> Device<'a> for Probe<'_> {
             lin(full, &mut h);
             let (d, o) = (full.translation(), at.translation());
             (q(d.x - o.x), q(d.y - o.y)).hash(&mut h);
-            if visible {
-                bbox = Some(bbox.map_or(gb, |b| b.union(gb)));
-            }
             // (the em: outlines are 1000 units to it)
             let em = full.as_coeffs()[3].abs() * 1000.0;
+            if visible {
+                bbox = Some(bbox.map_or(gb, |b| b.union(gb)));
+                if self.marks.is_some() {
+                    let kind = MarkKind::Glyph {
+                        x: d.x,
+                        y: d.y,
+                        size: em,
+                        text: text.clone(),
+                    };
+                    self.mark(gb, kind);
+                }
+            }
             let wx = full.as_coeffs()[0].abs() * adv;
             self.chars.push(Ch {
                 x: d.x,
@@ -439,9 +571,12 @@ impl<'a> Device<'a> for Probe<'_> {
             f64::from(image.width()),
             f64::from(image.height()),
         ));
+        self.mark(bbox, MarkKind::Image);
+        let content = self.content(&image);
         let id = hash_of(|h| {
             self.around.hash(h);
             image.cache_key().hash(h);
+            content.hash(h);
             props.soft_mask.as_ref().map(CacheKey::cache_key).hash(h);
             format!("{:?}", props.blend_mode).hash(h);
             lin(props.transform, h);
@@ -523,7 +658,10 @@ fn page_index(pages: &[Page<'_>], id: ObjectIdentifier) -> Option<usize> {
 }
 
 /// A destination (`[page /XYZ x y z]` and its kin) as a page and a top.
-fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> {
+/// A destination's page (from 0), top (points from the page's top) and left.
+type Place = (usize, Option<f64>, Option<f64>);
+
+fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<Place> {
     let mut it = arr.raw_iter();
     let page = match it.next()? {
         MaybeRef::Ref(r) => page_index(pages, r.into())?,
@@ -534,23 +672,22 @@ fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> 
         MaybeRef::NotRef(Object::Name(n)) => Some(n.as_str().to_owned()),
         _ => None,
     });
-    let top = match kind.as_deref() {
-        Some("XYZ") => {
-            let _left = it.next();
-            it.next().and_then(|o| match o {
-                MaybeRef::NotRef(Object::Number(n)) => Some(n.as_f64()),
-                _ => None,
-            })
-        }
-        Some("FitH" | "FitBH") => it.next().and_then(|o| match o {
-            MaybeRef::NotRef(Object::Number(n)) => Some(n.as_f64()),
-            _ => None,
-        }),
+    let num = |o: Option<MaybeRef<Object<'_>>>| match o {
+        Some(MaybeRef::NotRef(Object::Number(n))) => Some(n.as_f64()),
         _ => None,
+    };
+    let (left, top) = match kind.as_deref() {
+        Some("XYZ") => {
+            let left = num(it.next());
+            (left, num(it.next()))
+        }
+        Some("FitH" | "FitBH") => (None, num(it.next())),
+        _ => (None, None),
     };
     let h = f64::from(pages[page].render_dimensions().1);
     let y0 = pages[page].media_box().y0;
-    Some((page, top.map(|t| h - (t - y0))))
+    let x0 = pages[page].media_box().x0;
+    Some((page, top.map(|t| h - (t - y0)), left.map(|l| l - x0)))
 }
 
 /// A destination's value (an array, or a dictionary with one under `/D`).
@@ -566,7 +703,7 @@ fn as_dest(o: Object<'_>) -> Option<Array<'_>> {
 /// (a value written inside its node).
 enum NameVal {
     Ref(ObjectIdentifier),
-    At(Option<(usize, Option<f64>)>),
+    At(Option<Place>),
 }
 
 /// A document's named destinations (the catalog's `/Dests` dictionary,
@@ -581,17 +718,12 @@ struct Names {
     /// The tree's names (none: not read yet).
     tree: Option<HashMap<Vec<u8>, NameVal>>,
     /// Each name asked, and its place.
-    asked: HashMap<Vec<u8>, Option<(usize, Option<f64>)>>,
+    asked: HashMap<Vec<u8>, Option<Place>>,
 }
 
 impl Names {
     /// Named destination `name`'s page and top.
-    fn place(
-        &mut self,
-        pdf: &Pdf,
-        pages: &[Page<'_>],
-        name: &[u8],
-    ) -> Option<(usize, Option<f64>)> {
+    fn place(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<Place> {
         if let Some(p) = self.asked.get(name) {
             return *p;
         }
@@ -600,7 +732,7 @@ impl Names {
         p
     }
 
-    fn find(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<(usize, Option<f64>)> {
+    fn find(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<Place> {
         let xref = pdf.xref();
         let root: Dict<'_> = xref.get(xref.root_id())?;
         if let Some(d) = root.get::<Dict<'_>>(b"Dests")
@@ -693,6 +825,7 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
             h - (v[1].min(v[3]) - mb.y0),
         ];
         let mut name = None;
+        let mut left = None;
         let mut dest = |o: Object<'_>| -> Option<Target> {
             match o {
                 Object::Array(a) => dest_of(pages, &a),
@@ -706,7 +839,10 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
                 }
                 _ => None,
             }
-            .map(|(p, y)| Target::Page(p, y))
+            .map(|(p, y, x)| {
+                left = x;
+                Target::Page(p, y)
+            })
         };
         let target = if let Some(act) = a.get::<Dict<'_>>(b"A") {
             match act
@@ -726,7 +862,12 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -
             a.get::<Object<'_>>(b"Dest").and_then(&mut dest)
         };
         if let Some(target) = target {
-            out.push(Link { rect, target, name });
+            out.push(Link {
+                rect,
+                target,
+                name,
+                left,
+            });
         }
     }
     out
@@ -756,7 +897,22 @@ fn probe(
     pw: f64,
     ph: f64,
     boxes: &mut HashMap<u128, (Rect, u64)>,
+    cf: (&mut Contents, &[u8]),
 ) -> (Vec<Item>, Vec<Ch>) {
+    let (items, chars, _) = probe_with(page, base, (pw, ph), boxes, cf, false);
+    (items, chars)
+}
+
+/// [`probe`], and with `marks` each drawing glyph by glyph
+/// ([`Renderer::marks`]).
+fn probe_with(
+    page: &Page<'_>,
+    base: Affine,
+    (pw, ph): (f64, f64),
+    boxes: &mut HashMap<u128, (Rect, u64)>,
+    (contents, file): (&mut Contents, &[u8]),
+    marks: bool,
+) -> (Vec<Item>, Vec<Ch>, Vec<Mark>) {
     let icache = InterpreterCache::new();
     let mut probe = Probe {
         items: Vec::new(),
@@ -764,6 +920,11 @@ fn probe(
         saved: Vec::new(),
         boxes,
         chars: Vec::new(),
+        contents,
+        file,
+        marks: marks.then(Vec::new),
+        outer: 0,
+        nests: 0,
     };
     let mut ctx = Context::new(
         base,
@@ -782,7 +943,7 @@ fn probe(
     for i in &mut items {
         i.bbox = i.bbox.intersect(page_rect.inflate(1.0, 1.0));
     }
-    (items, probe.chars)
+    (items, probe.chars, probe.marks.unwrap_or_default())
 }
 
 /// An entry of the PDF's outline: its title, its page (from 0) and place
@@ -791,6 +952,10 @@ fn probe(
 pub struct Entry {
     pub title: String,
     pub page: Option<usize>,
+    /// Its page's number as the document prints it (the catalog's
+    /// `/PageLabels`, hyperref's `\thepage`: "iv", "A-3"); `None`: no labels,
+    /// the page's place stands for its number.
+    pub label: Option<String>,
     pub y: Option<f64>,
     pub kids: Vec<Entry>,
 }
@@ -835,7 +1000,7 @@ fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
                 .and_then(Object::into_string)
                 .map(|s| text_string(s.as_bytes()))
                 .unwrap_or_default();
-            let mut dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
+            let mut dest = |o: Object<'_>| -> Option<Place> {
                 match o {
                     Object::Array(a) => dest_of(pages, &a),
                     Object::String(s) => names.place(pdf, pages, s.as_bytes()),
@@ -854,6 +1019,7 @@ fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
             out.push(Entry {
                 title,
                 page: place.map(|p| p.0),
+                label: None,
                 y: place.and_then(|p| p.1),
                 kids,
             });
@@ -874,7 +1040,135 @@ fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
     };
     // (at most this many entries: a cycle of /Next ends there)
     let mut budget = 100_000usize;
-    level(pdf, pages, first, &mut budget, names)
+    let mut out = level(pdf, pages, first, &mut budget, names);
+    if let Some(labels) = page_labels(&root, pages.len()) {
+        fn name(es: &mut [Entry], labels: &[String]) {
+            for e in es {
+                e.label = e.page.and_then(|k| labels.get(k)).cloned();
+                name(&mut e.kids, labels);
+            }
+        }
+        name(&mut out, &labels);
+    }
+    out
+}
+
+/// Each page's number as the document prints it, from the catalog's
+/// `/PageLabels` number tree (ISO 32000 12.4.2: a range from each key, its
+/// style `/S`, prefix `/P` and first number `/St`); `None` where the PDF
+/// has none.
+fn page_labels(root: &Dict<'_>, n: usize) -> Option<Vec<String>> {
+    let tree = root.get::<Dict<'_>>(b"PageLabels")?;
+    let mut ranges: Vec<(usize, Option<Dict<'_>>)> = Vec::new();
+    let mut stack = vec![tree];
+    // (at most this many nodes: a cycle of /Kids ends there)
+    let mut budget = 10_000usize;
+    while let Some(node) = stack.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        if let Some(nums) = node.get::<Array<'_>>(b"Nums") {
+            let mut it = nums.iter::<Object<'_>>();
+            while let (Some(k), Some(v)) = (it.next(), it.next()) {
+                let Object::Number(k) = k else { continue };
+                let Ok(k) = usize::try_from(k.as_i64()) else {
+                    continue;
+                };
+                ranges.push((
+                    k,
+                    if let Object::Dict(d) = v {
+                        Some(d)
+                    } else {
+                        None
+                    },
+                ));
+            }
+        }
+        if let Some(kids) = node.get::<Array<'_>>(b"Kids") {
+            stack.extend(kids.iter::<Dict<'_>>());
+        }
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    ranges.sort_by_key(|r| r.0);
+    let mut out = Vec::with_capacity(n);
+    let mut r = 0;
+    for k in 0..n {
+        while r + 1 < ranges.len() && ranges[r + 1].0 <= k {
+            r += 1;
+        }
+        let (start, d) = &ranges[r];
+        if *start > k {
+            // (before the first range: no label given, the page's place)
+            out.push((k + 1).to_string());
+            continue;
+        }
+        let Some(d) = d else {
+            out.push(String::new());
+            continue;
+        };
+        let prefix = d
+            .get::<Object<'_>>(b"P")
+            .and_then(Object::into_string)
+            .map(|s| text_string(s.as_bytes()))
+            .unwrap_or_default();
+        let first = match d.get::<Object<'_>>(b"St") {
+            Some(Object::Number(v)) => v.as_i64().max(1),
+            _ => 1,
+        };
+        let num = u64::try_from(first).unwrap_or(1) + (k - start) as u64;
+        let style = match d.get::<Object<'_>>(b"S") {
+            Some(Object::Name(s)) => s.as_str().to_owned(),
+            _ => String::new(),
+        };
+        let body = match style.as_str() {
+            "D" => num.to_string(),
+            "R" => roman(num).to_uppercase(),
+            "r" => roman(num),
+            "A" => letters(num).to_uppercase(),
+            "a" => letters(num),
+            _ => String::new(),
+        };
+        out.push(prefix + &body);
+    }
+    Some(out)
+}
+
+/// `n` in lowercase roman numerals.
+fn roman(mut n: u64) -> String {
+    const R: [(u64, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut s = String::new();
+    for (v, t) in R {
+        while n >= v {
+            s.push_str(t);
+            n -= v;
+        }
+    }
+    s
+}
+
+/// `n` as PDF's letter numbering: a to z, then aa to zz, aaa…
+#[allow(clippy::cast_possible_truncation)]
+fn letters(n: u64) -> String {
+    let n = n.max(1) - 1;
+    let c = char::from(b'a' + (n % 26) as u8);
+    std::iter::repeat_n(c, (n / 26) as usize + 1).collect()
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -986,6 +1280,7 @@ impl Renderer {
             texts: HashMap::new(),
             outline: None,
             names: Names::default(),
+            contents: Contents::new(),
         })
     }
 
@@ -1013,12 +1308,122 @@ impl Renderer {
             if let Some(page) = pages.get(k) {
                 let base = page.initial_transform(true).to_kurbo();
                 let (w, h) = page.render_dimensions();
-                let (_, chars) = probe(page, base, f64::from(w), f64::from(h), &mut self.boxes);
+                let (_, chars) = probe(
+                    page,
+                    base,
+                    f64::from(w),
+                    f64::from(h),
+                    &mut self.boxes,
+                    (&mut doc.contents, &doc.bytes),
+                );
                 let lines = lines_of(&chars, 1.0);
                 doc.texts.insert(k, lines);
             }
         }
         let out = doc.texts.get(&k).cloned();
+        self.keep_doc(doc);
+        out
+    }
+
+    /// Page `k`'s size (points) and drawings in the order the page draws
+    /// them, each glyph its own ([`Mark`]): what `phitex session png`
+    /// finds a figure's parts in. `None`: no such page, or the PDF does
+    /// not open.
+    pub fn marks(&mut self, pdf: &Arc<[u8]>, k: usize) -> Option<(f64, f64, Vec<Mark>)> {
+        let mut doc = self.open(pdf)?;
+        let out = doc.pdf.pages().get(k).map(|page| {
+            let base = page.initial_transform(true).to_kurbo();
+            let (w, h) = page.render_dimensions();
+            let (w, h) = (f64::from(w), f64::from(h));
+            let (_, _, marks) = probe_with(
+                page,
+                base,
+                (w, h),
+                &mut self.boxes,
+                (&mut doc.contents, &doc.bytes),
+                true,
+            );
+            (w, h, marks)
+        });
+        self.keep_doc(doc);
+        out
+    }
+
+    /// The part `rect` of page `k` (points from its top left: left, top,
+    /// right, bottom) drawn at `scale` pixels a point on white: its
+    /// pixels, RGBA, nothing kept. `None`: no such page, the PDF does
+    /// not open, or a part of no pixels or more than 2^15 a side.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a part of a page in pixels: checked to fit a u16"
+    )]
+    pub fn draw_part(
+        &mut self,
+        pdf: &Arc<[u8]>,
+        k: usize,
+        rect: [f64; 4],
+        scale: f64,
+    ) -> Option<Strip> {
+        let doc = self.open(pdf)?;
+        let out = (|| {
+            let pages = doc.pdf.pages();
+            let page = pages.get(k)?;
+            let [x0, y0, x1, y1] = rect;
+            let (pw, ph) = ((x1 - x0) * scale, (y1 - y0) * scale);
+            if !(pw >= 1.0 && ph >= 1.0 && pw < 32768.0 && ph < 32768.0) {
+                return None;
+            }
+            let (sw, sh) = (pw.round().max(1.0) as u16, ph.round().max(1.0) as u16);
+            let base = Affine::translate((-x0 * scale, -y0 * scale))
+                * Affine::scale(scale)
+                * page.initial_transform(true).to_kurbo();
+            let mut ctx = RenderContext::new(sw, sh);
+            render_into(
+                page,
+                &RenderCache::new(),
+                &InterpreterSettings::default(),
+                &RenderSettings::default(),
+                &mut ctx,
+                base,
+            );
+            ctx.flush();
+            let mut pix = Pixmap::new(sw, sh);
+            ctx.render_with(
+                &mut pix,
+                &mut vello_cpu::Resources::default(),
+                vello_cpu::RasterizerSettings {
+                    target_init: vello_cpu::TargetInit::Clear(
+                        vello_cpu::color::palette::css::WHITE,
+                    ),
+                    ..Default::default()
+                },
+            );
+            let mut rgba = pix.data_as_u8_slice().to_vec();
+            unpremultiply(&mut rgba);
+            Some(Strip {
+                w: u32::from(sw),
+                h: u32::from(sh),
+                rgba,
+            })
+        })();
+        self.keep_doc(doc);
+        out
+    }
+
+    /// Named destination `name`'s page (from 0), top (points from the
+    /// page's top) and left, as the catalog's `/Dests` or `/Names` tree
+    /// gives it (hyperref's anchors: `figure.caption.3`, `table.2`).
+    pub fn dest(
+        &mut self,
+        pdf: &Arc<[u8]>,
+        name: &str,
+    ) -> Option<(usize, Option<f64>, Option<f64>)> {
+        let mut doc = self.open(pdf)?;
+        let out = {
+            let pages = doc.pdf.pages();
+            doc.names.place(&doc.pdf, pages, name.as_bytes())
+        };
         self.keep_doc(doc);
         out
     }
@@ -1055,7 +1460,8 @@ impl Renderer {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        clippy::cast_possible_wrap
+        clippy::cast_possible_wrap,
+        clippy::too_many_lines
     )]
     fn frame_of(
         &mut self,
@@ -1087,7 +1493,14 @@ impl Renderer {
 
         // (the probe: every drawing's box and identity, the text)
         let t1 = Instant::now();
-        let (items, chars) = probe(page, base, f64::from(pw), f64::from(ph), &mut self.boxes);
+        let (items, chars) = probe(
+            page,
+            base,
+            f64::from(pw),
+            f64::from(ph),
+            &mut self.boxes,
+            (&mut doc.contents, &doc.bytes),
+        );
         let text = lines_of(&chars, s);
         doc.texts.insert(k, text.clone());
         let links = links_of(pdf, pages, page, &mut doc.names);

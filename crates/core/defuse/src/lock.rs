@@ -2,7 +2,7 @@
 //!
 //! | lock | taken by | held for |
 //! |---|---|---|
-//! | a segment's `inner` (`segment::Segment`) | a read; a commit; a placement; a split; a `next` filed at its stop; brackets filed | one map operation, or one commit's diff of one node; never two segments at once (but a rebalance's window), never across a run |
+//! | a segment's `inner` (`segment::Segment`, an `RLock`: a reader takes its own shard) | a read; a commit; a placement; a split; a `next` filed at its stop; brackets filed | one map operation, or one commit's diff of one node; never two segments at once (but a rebalance's window), never across a run |
 //! | a segment's `chain` (`segment::Segment`) | a scope chain found or kept (`read::chain_start`) | an `Arc` clone or swap |
 //! | the order's list (`order::Order::segs`) | a position lookup; a split or a new unit | a binary search; one insert |
 //! | a field-index shard (`index::FieldIndex`: definitions, contributions, readers) | a read's or a commit's skip | one set lookup or insert |
@@ -32,6 +32,8 @@ use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 use std::time::Instant;
+
+use crossbeam_utils::sync::{ShardedLock, ShardedLockReadGuard, ShardedLockWriteGuard};
 
 thread_local! {
     static WAIT_NS: Cell<u64> = const { Cell::new(0) };
@@ -84,19 +86,11 @@ pub(crate) type WriteGuard<'a, T> = Held<RwLockWriteGuard<'a, T>>;
 /// A held guard of an [`Mx`].
 pub(crate) type MxGuard<'a, T> = Held<MutexGuard<'a, T>>;
 
-pub(crate) struct Lock<T>(RwLock<T>, std::sync::atomic::AtomicU64);
+pub(crate) struct Lock<T>(RwLock<T>);
 
 impl<T> Lock<T> {
     pub(crate) const fn new(x: T) -> Lock<T> {
-        Lock(RwLock::new(x), std::sync::atomic::AtomicU64::new(0))
-    }
-
-    /// How many exclusive guards were taken so far: read under a shared
-    /// guard, it is the count for what that guard sees, and any change
-    /// after it counts again (a cache of what the guarded value says,
-    /// kept with this count, stands while it is the same).
-    pub(crate) fn writes(&self) -> u64 {
-        self.1.load(std::sync::atomic::Ordering::Acquire)
+        Lock(RwLock::new(x))
     }
 
     /// A shared guard: `try_read` first, and only a refused try is timed.
@@ -128,13 +122,93 @@ impl<T> Lock<T> {
     /// An exclusive guard, timed as `read`.
     #[cfg_attr(feature = "profile", track_caller)]
     pub(crate) fn write(&self) -> WriteGuard<'_, T> {
+        Held::new(self.write_inner())
+    }
+
+    #[cfg_attr(feature = "profile", track_caller)]
+    fn write_inner(&self) -> RwLockWriteGuard<'_, T> {
+        match self.0.try_write() {
+            Ok(g) => return g,
+            Err(TryLockError::Poisoned(p)) => return p.into_inner(),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        let t = Instant::now();
+        for _ in 0..SPIN_TRIES {
+            spin();
+            match self.0.try_write() {
+                Ok(g) => return timed(g, t),
+                Err(TryLockError::Poisoned(p)) => return timed(p.into_inner(), t),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
+        let g = self.0.write().unwrap_or_else(PoisonError::into_inner);
+        timed(g, t)
+    }
+}
+
+/// A held shared guard of an [`RLock`].
+pub(crate) type RReadGuard<'a, T> = Held<ShardedLockReadGuard<'a, T>>;
+/// A held write guard of an [`RLock`].
+pub(crate) type RWriteGuard<'a, T> = Held<ShardedLockWriteGuard<'a, T>>;
+
+/// A [`Lock`] whose readers each take a shard of their own: no reader
+/// writes a line another reader takes, and a writer takes every shard. For
+/// what every worker reads and few write at once: a segment's `inner`,
+/// which every read of a definition in it takes (the preamble's segments,
+/// read by every paragraph: amsldoc at -j8, 58% of the loads of lines
+/// another core had written were the read lock's own count).
+pub(crate) struct RLock<T>(ShardedLock<T>, std::sync::atomic::AtomicU64);
+
+impl<T> RLock<T> {
+    pub(crate) fn new(x: T) -> RLock<T> {
+        RLock(ShardedLock::new(x), std::sync::atomic::AtomicU64::new(0))
+    }
+
+    /// How many exclusive guards were taken so far: read under a shared
+    /// guard, it is the count for what that guard sees, and any change
+    /// after it counts again (a cache of what the guarded value says,
+    /// kept with this count, stands while it is the same).
+    pub(crate) fn writes(&self) -> u64 {
+        self.1.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A shared guard, its own shard's: `try_read` first, a refused try
+    /// timed.
+    #[cfg_attr(feature = "profile", track_caller)]
+    pub(crate) fn read(&self) -> RReadGuard<'_, T> {
+        Held::new(self.read_inner())
+    }
+
+    #[cfg_attr(feature = "profile", track_caller)]
+    fn read_inner(&self) -> ShardedLockReadGuard<'_, T> {
+        match self.0.try_read() {
+            Ok(g) => return g,
+            Err(TryLockError::Poisoned(p)) => return p.into_inner(),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        let t = Instant::now();
+        for _ in 0..SPIN_TRIES {
+            spin();
+            match self.0.try_read() {
+                Ok(g) => return timed(g, t),
+                Err(TryLockError::Poisoned(p)) => return timed(p.into_inner(), t),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
+        let g = self.0.read().unwrap_or_else(PoisonError::into_inner);
+        timed(g, t)
+    }
+
+    /// An exclusive guard, every shard's, timed as `read`.
+    #[cfg_attr(feature = "profile", track_caller)]
+    pub(crate) fn write(&self) -> RWriteGuard<'_, T> {
         let g = self.write_inner();
         self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Held::new(g)
     }
 
     #[cfg_attr(feature = "profile", track_caller)]
-    fn write_inner(&self) -> RwLockWriteGuard<'_, T> {
+    fn write_inner(&self) -> ShardedLockWriteGuard<'_, T> {
         match self.0.try_write() {
             Ok(g) => return g,
             Err(TryLockError::Poisoned(p)) => return p.into_inner(),

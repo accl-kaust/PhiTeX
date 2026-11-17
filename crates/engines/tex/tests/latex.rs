@@ -1336,9 +1336,16 @@ fn latex_pictures_in_a_paragraph_are_children() {
 /// (each shows a `\ref` to a label at the document's end): its run takes
 /// all their new outputs in one run once their children have run, not
 /// one run per picture (lie-hasse's piece of diagrams ran once per
-/// picture moved, and again for its own guess). Counted against the
-/// same document whose pictures do not change; the PDF the same at -j1
-/// and -j8.
+/// picture moved, and again for its own guess). In latexmk's rounds,
+/// where the label's number reaches the pictures in the second (one
+/// round, as the test first ran, had them never change). Counted as the
+/// paragraphs' runs the pictures' outputs asked for (`Output pic`): one
+/// at most, at -j1 and -j8 (one per picture made three). Not as all the
+/// paragraphs' runs against the same document whose pictures do not
+/// change: at -j8 both make some 40 runs more than at -j1, each asked for
+/// by the preamble's definitions their pieces ran before
+/// (`\@nodocument`, `\hsize`, ...), a number the schedule moves by five
+/// either way (#33). The PDF the same at -j1 and -j8.
 #[test]
 fn latex_pictures_that_all_change_take_one_run() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-change");
@@ -1352,10 +1359,21 @@ fn latex_pictures_that_all_change_take_one_run() {
         )
     };
     let runs = |b: &phitex_tex::Build| common::runs_of(b, "exec") + common::runs_of(b, "resume");
+    // (the paragraphs' runs a picture child's output asked for)
+    let by_pictures = |b: &phitex_tex::Build| {
+        b.stats
+            .reruns
+            .iter()
+            .filter(|(_, op, why)| (*op == "exec" || *op == "resume") && why == "Output pic")
+            .count()
+    };
     let mut out = Vec::new();
     for threads in [1, 8] {
+        // (latexmk's rounds: the label's number reaches the pictures in
+        // the second)
         let opts = |name: &str| Options {
             threads: Some(threads),
+            fixpoint: true,
             ..pdf_opts(name, &dir)
         };
         let moving = doc("see \\lastref");
@@ -1366,15 +1384,29 @@ fn latex_pictures_that_all_change_take_one_run() {
         let b = common::build(opts("still"), Some(&prelude(true)), &still);
         let (ra, rb) = (runs(&a), runs(&b));
         eprintln!(
-            "-j{threads}: paragraph runs {ra} (pictures moved) vs {rb}; pic runs {} vs {}",
+            "-j{threads}: paragraph runs {ra} (pictures moved) vs {rb}, asked for by the pictures {} vs {}; pic runs {} vs {}",
+            by_pictures(&a),
+            by_pictures(&b),
             common::runs_of(&a, "pic"),
             common::runs_of(&b, "pic")
         );
         assert!(
-            ra <= rb + 1,
-            "-j{threads}: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
-            a.stats.runs_by_op
+            by_pictures(&a) <= 1,
+            "-j{threads}: the pictures that moved asked their paragraph {} times: {:?}",
+            by_pictures(&a),
+            a.stats.reruns
         );
+        // (at -j1 the runs the label's number adds where the pictures show
+        // it: the pictures' paragraph reads `\lastref`, which changed, its
+        // rest after it, and the pictures' outputs taken once: 33 against
+        // 30, where one per picture made 35)
+        if threads == 1 {
+            assert!(
+                ra <= rb + 3,
+                "-j1: the pictures that moved ran the paragraphs {ra} times, {rb} where none moved: {:?}",
+                a.stats.reruns
+            );
+        }
         out.push(a.output().0);
     }
     assert!(out[0] == out[1], "-j8's PDF is not -j1's");
@@ -4124,6 +4156,216 @@ fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
             );
         }
     }
+}
+
+/// A `\csname` whose control sequence the next command assigns globally
+/// (pgf's `\pgfsys@invalidate@currentid`: `\expandafter\global\expandafter
+/// \let\csname pgf@sys@id@keylist@<ref>\endcsname\pgfutil@empty`) reads
+/// nothing of it: whatever §372 found, the binding after the `\let` is the
+/// same global one. A paragraph put first that defines the name globally
+/// runs no later paragraph again; a `\csname` met otherwise (tested, shown,
+/// let locally) reads as before. Every edited PDF equals a cold build's,
+/// at one and eight threads.
+#[test]
+fn a_csname_bound_globally_at_once_reads_nothing() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/csname-dead");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |first: bool| {
+        let mut s = String::from("\\documentclass{article}\n\\begin{document}\n");
+        if first {
+            s.push_str("First \\expandafter\\gdef\\csname kl@a\\endcsname{set} and \\csname kl@a\\endcsname.\n\n");
+        }
+        for i in 0..8 {
+            let _ = write!(
+                s,
+                "Paragraph {i} \\expandafter\\global\\expandafter\\let\\csname kl@a\\endcsname\\empty \
+                 \\expandafter\\global\\expandafter\\let\\csname kl@b{i}\\endcsname\\relax words.\n\n"
+            );
+        }
+        s.push_str(
+            "Tested: \\expandafter\\ifx\\csname kl@u\\endcsname\\relax relax\\else other\\fi; \
+             {\\expandafter\\let\\csname kl@l\\endcsname\\empty local}\\expandafter\\meaning\\csname kl@l\\endcsname; \
+             \\expandafter\\gdef\\csname kl@g\\endcsname{g}\\meaning\\kl@g; \\meaning\\kl@a.\n\n\\end{document}\n",
+        );
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("csdead", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for first in [true, false] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            // (by the cause, not the node's text, which names it too)
+            let on: Vec<&String> = r.iter().filter(|x| x.contains(" cs:kl@a [")).collect();
+            assert!(
+                on.is_empty(),
+                "-j{threads} first {first}: ran again on kl@a: {on:?}"
+            );
+        }
+    }
+}
+
+/// A macro call with arguments counts the tokens it writes toward its
+/// run's work ticks, one a 8192 (`Run::tok_work`): a recursion whose
+/// argument grows (Grail's resumes on a moved `\Sectionformat`) copies
+/// millions of tokens in a few thousand calls and commands, and its run
+/// must be checked as often as that work says, or one on a read that
+/// moved runs on to "TeX capacity exceeded". Here 1500 calls, the
+/// argument 8 tokens longer a call: at least 8 * 1500 * 1499 / 2 tokens
+/// written, so at least that / 8192 ticks, where calls and commands
+/// alone make none. (`Ctx::tick` looks at a long run's reads at powers of
+/// two of its checks; counted in commands and calls only, Grail's
+/// recursion made too few to reach the next one.)
+#[test]
+fn a_macro_call_counts_its_tokens_toward_the_runs_checks() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/tok-ticks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |calls: u32| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\
+             \\def\\r#1{{\\advance\\count255 1 \\ifnum\\count255<{calls} \\expandafter\\r\\else\\expandafter\\@gobble\\fi{{#1aaaaaaaa}}}}\n\
+             \\makeatother\n\\begin{{document}}\n\\count255=0 \\r{{}}Done: \\the\\count255.\n\\end{{document}}\n"
+        )
+    };
+    let ticks = |calls: u32| {
+        let b = common::build(
+            Options {
+                threads: Some(1),
+                ..pdf_opts("tokticks", &dir)
+            },
+            Some(&prelude(true)),
+            &doc(calls),
+        );
+        b.stats.ticks
+    };
+    let (none, many) = (ticks(1), ticks(1500));
+    let tokens = 8 * 1500 * 1499 / 2;
+    assert!(
+        many >= none + tokens / 8192,
+        "1500 growing calls made {many} checks, one call {none}: at least {} more for {tokens} tokens",
+        tokens / 8192
+    );
+}
+
+/// A file whose last paragraph has no blank line after it, then an
+/// `\input` of a file that begins with a section: the paragraph reads on
+/// into the second file to its `\section`, so a run reads that file's
+/// first lines itself, numbered as a file's, and cuts the rest into
+/// pieces. Those pieces' lines are the file's, not a fold of the lines the
+/// nodes before them began, which missed the lines read with numbers
+/// (Grail's appendix at -j1: every line in the log two short). The log is
+/// the same at one and eight threads, and names the paragraph's lines.
+#[test]
+fn a_files_rest_read_on_into_keeps_its_line_numbers() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rest-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::write(
+        dir.join("prev.tex"),
+        "\\section{Prev}\n\nA paragraph of the previous file\nthat ends without a blank line.\n",
+    )
+    .expect("prev.tex");
+    std::fs::write(
+        dir.join("app.tex"),
+        "\\section{Next}\n\\label{sec:next}\n\nA first paragraph\nof two lines.\n\n\
+         The second paragraph aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
+         goes on a line\nand another.\n\nLast.\n",
+    )
+    .expect("app.tex");
+    let doc = "\\documentclass{article}\n\\begin{document}\nSome text before.\n\n\
+               \\input{prev}\n\\input{app}\n\n\\end{document}\n";
+    let mut logs = Vec::new();
+    for threads in [1, 8] {
+        let b = common::build(
+            Options {
+                threads: Some(threads),
+                ..pdf_opts("restlines", &dir)
+            },
+            Some(&prelude(true)),
+            doc,
+        );
+        let log = b.output().1.clone();
+        let at: Vec<&str> = log
+            .lines()
+            .filter(|l| l.contains("in paragraph at lines"))
+            .collect();
+        assert!(
+            at.len() == 1 && at[0].ends_with("in paragraph at lines 7--10"),
+            "-j{threads}: {at:?}"
+        );
+        logs.push(log);
+    }
+    assert_eq!(logs[0], logs[1]);
+}
+
+/// A page fires at a candidate a piece's run goes on past (inside a
+/// group of the run's own): TeX ran the routine there, so its `[1]` comes
+/// before what the paragraphs after the fire log, wherever the cuts are. Cut at every candidate (`cut_min` 1)
+/// or at none (`cut_min` the most), the logs are one: the finisher, placed
+/// after the whole piece, has its events where the piece passed the fire
+/// (lie-hasse at -j8: `[21]` after 420 lines the paragraphs after it
+/// logged, where its cuts were not -j1's).
+#[test]
+fn a_page_fired_inside_a_piece_logs_where_tex_ran_its_routine() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/fire-log");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    // (the paragraphs in a group of one run's own: its candidates are cut
+    // only once it has done `cut_min` commands)
+    let mut many = String::from("\\begingroup ");
+    for i in 0..60 {
+        let _ = write!(
+            many,
+            "\\message{{P{i}}}Paragraph {i} has words enough to fill a line or two of the page, words and words and more words to set.\\par "
+        );
+    }
+    many.push_str("\\endgroup");
+    let doc = format!(
+        "\\documentclass{{article}}\n\\def\\many{{{many}}}\n\\begin{{document}}\n\\many\n\\end{{document}}\n"
+    );
+    let log = |cut_min: u64| {
+        let b = common::build(
+            Options {
+                threads: Some(1),
+                cut_min: Some(cut_min),
+                ..pdf_opts("firelog", &dir)
+            },
+            Some(&prelude(true)),
+            &doc,
+        );
+        b.output().1.clone()
+    };
+    let (every, none) = (log(1), log(u64::MAX));
+    // (the last paragraph's message after the first page, as TeX has it)
+    let after_first = |l: &str| l.find("[1").is_some_and(|i| l[i..].contains("P59"));
+    assert!(after_first(&every), "cut at every candidate: {every}");
+    assert!(
+        after_first(&none),
+        "uncut: [1] after the last paragraph's message: {none}"
+    );
+    assert_eq!(every, none, "the logs cut at every candidate and at none");
 }
 
 /// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's

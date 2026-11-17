@@ -25,6 +25,10 @@ pub struct Flat {
     /// The runs of `text`, in order; bytes between runs (a line end added
     /// after a file without one) come from no file.
     pub segs: Vec<Seg>,
+    /// Each file's text as read ([`Flat::files`]'s order): what the flat
+    /// text left out of it (its `\input` commands, the line end it ended
+    /// with) for [`crate::split`].
+    pub sources: Vec<String>,
 }
 
 impl Flat {
@@ -78,6 +82,7 @@ pub fn flatten(files: &dyn Files, main: &str) -> Result<Flat, String> {
     };
     let mut f = Flat {
         files: vec![main.to_owned()],
+        sources: vec![text.clone()],
         ..Flat::default()
     };
     let mut stack = vec![main.to_owned()];
@@ -110,6 +115,7 @@ fn put_file(
         put_run(f, file, text, from, inp.start);
         let k = f.files.iter().position(|p| *p == path).unwrap_or_else(|| {
             f.files.push(path.clone());
+            f.sources.push(body.clone());
             f.files.len() - 1
         });
         if inp.include {

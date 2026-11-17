@@ -657,6 +657,42 @@ impl RangeIndex {
         push_pruned(&mut w.entry(f).or_default().finals, r, live);
     }
 
+    /// (persist, `Engine::export`) Each field's loop-back state: the value
+    /// published for its `At::Final` readers, and whether it is marked to
+    /// be checked (`dirty`) and published anew (`pending`).
+    pub(crate) fn finals_state(&self) -> Vec<(Field, Option<Reaching>, bool, bool)> {
+        let mut out = Vec::new();
+        for sh in &*self.shards {
+            for (f, m) in sh.0.read().iter() {
+                if m.published.is_some() || m.dirty || m.pending {
+                    out.push((*f, m.published, m.dirty, m.pending));
+                }
+            }
+        }
+        out
+    }
+
+    /// (persist, `Engine::import`) `f`'s loop-back state as saved
+    /// ([`RangeIndex::finals_state`]), in place of what the filing made.
+    pub(crate) fn set_finals_state(&self, f: Field, published: Option<Reaching>, dirty: bool, pending: bool) {
+        let mut w = self.shards[range_shard(f)].0.write();
+        let m = w.entry(f).or_default();
+        m.published = published;
+        m.dirty = dirty;
+        m.pending = pending;
+    }
+
+    /// (persist) Every field's loop-back marks cleared: the filing's, before
+    /// the saved ones are put back ([`RangeIndex::set_finals_state`]).
+    pub(crate) fn clear_finals_marks(&self) {
+        for sh in &*self.shards {
+            for m in sh.0.write().values_mut() {
+                m.dirty = false;
+                m.pending = false;
+            }
+        }
+    }
+
     /// The value published for `f`'s `At::Final` readers, if any.
     pub(crate) fn published(&self, f: Field) -> Option<Reaching> {
         self.shards[range_shard(f)].0.read().get(&f).and_then(|m| m.published)

@@ -14,10 +14,15 @@
 //! returns. The pool's workers wait for each other, so a job that waited
 //! for a thread to come free could hold the evaluation for ever: none
 //! waits.
+//!
+//! [`end`] ends them (a wasm core's end, its host's workers): every thread
+//! at rest returns, and every one still working returns once its job is
+//! done; a job given after it still runs, on a thread that then returns.
 
 use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -31,6 +36,11 @@ const THREADED: bool = !cfg!(all(target_arch = "wasm32", not(target_feature = "a
 /// the thread that had waited longest, so each edit's runs began cold).
 struct Crew {
     idle: Mutex<Vec<Arc<Slot>>>,
+    /// The threads made so far ([`Crew::start`] makes up to a count).
+    made: std::sync::atomic::AtomicUsize,
+    /// [`end`] called: no thread comes to rest again (set with `idle`
+    /// held, read with it or with the thread's own slot held).
+    ended: AtomicBool,
 }
 
 /// A thread's own place to be given a job.
@@ -46,12 +56,69 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn crew() -> &'static Crew {
     static C: OnceLock<Crew> = OnceLock::new();
-    C.get_or_init(|| Crew {
-        idle: Mutex::new(Vec::new()),
-    })
+    C.get_or_init(Crew::new)
+}
+
+/// The process's crew ends ([`Crew::end`]).
+pub fn end() {
+    crew().end();
+}
+
+/// The process's crew made up to `n` threads ([`Crew::start`]).
+pub fn start(n: usize) {
+    crew().start(n);
 }
 
 impl Crew {
+    fn new() -> Crew {
+        Crew {
+            idle: Mutex::new(Vec::new()),
+            made: std::sync::atomic::AtomicUsize::new(0),
+            ended: AtomicBool::new(false),
+        }
+    }
+
+    /// The crew's threads end: each at rest returns now, each working once
+    /// its job is done, and none comes to rest again (a job given later runs
+    /// on a thread of its own, which then returns). For a host that ends the
+    /// whole process's threads (a wasm core's end: its workers are the host's
+    /// and leave only when their threads return); for good.
+    fn end(&self) {
+        let idle = {
+            let mut idle = lock(&self.idle);
+            self.ended.store(true, Ordering::SeqCst);
+            std::mem::take(&mut *idle)
+        };
+        for slot in idle {
+            // (under the slot's lock: its thread has checked `ended` and waits, or will see it)
+            let _held = lock(&slot.job);
+            slot.cv.notify_one();
+        }
+    }
+
+    /// Threads made, each straight to rest, until `n` have been made in
+    /// all (none where there are no threads, nor once ended).
+    fn start(&'static self, n: usize) {
+        if !THREADED {
+            return;
+        }
+        while !self.ended.load(Ordering::SeqCst)
+            && self
+                .made
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |m| (m < n).then_some(m + 1))
+                .is_ok()
+        {
+            let made = std::thread::Builder::new()
+                .name("defuse-worker".to_owned())
+                .stack_size(crate::WORKER_STACK)
+                .spawn(move || self.serve());
+            if made.is_err() {
+                self.made.fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
+        }
+    }
+
     /// `job` on a thread at once: the idle one that worked last, else a new
     /// one it starts on.
     fn submit(&'static self, job: Job) {
@@ -69,6 +136,7 @@ impl Crew {
             slot.cv.notify_one();
             return;
         }
+        self.made.fetch_add(1, Ordering::SeqCst);
         std::thread::Builder::new()
             .name("defuse-worker".to_owned())
             .stack_size(crate::WORKER_STACK)
@@ -83,12 +151,22 @@ impl Crew {
     fn serve(&'static self) {
         let slot = Arc::new(Slot::default());
         loop {
-            lock(&self.idle).push(slot.clone());
+            {
+                let mut idle = lock(&self.idle);
+                if self.ended.load(Ordering::SeqCst) {
+                    return;
+                }
+                idle.push(slot.clone());
+            }
             let job = {
                 let mut j = lock(&slot.job);
                 loop {
                     if let Some(job) = j.take() {
                         break job;
+                    }
+                    // (ended while at rest: taken off the idle list by `end`, no job to come)
+                    if self.ended.load(Ordering::SeqCst) {
+                        return;
                     }
                     j = slot.cv.wait(j).unwrap_or_else(PoisonError::into_inner);
                 }
@@ -190,5 +268,79 @@ where
             }
             t
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::time::Duration;
+
+    /// Tells `Sender` when its thread ends (a thread-local's drop runs as
+    /// the thread returns).
+    struct Gone(Sender<&'static str>, &'static str);
+
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = self.0.send(self.1);
+        }
+    }
+
+    thread_local! {
+        static GONE: std::cell::RefCell<Option<Gone>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// A job that marks its thread: `tx` hears `name` when the thread ends.
+    fn marking(tx: &Sender<&'static str>, name: &'static str, ran: Sender<()>) -> Job {
+        let tx = tx.clone();
+        Box::new(move || {
+            GONE.with(|g| *g.borrow_mut() = Some(Gone(tx, name)));
+            let _ = ran.send(());
+        })
+    }
+
+    fn heard(rx: &Receiver<&'static str>) -> Option<&'static str> {
+        rx.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    /// A crew's end ends its threads (a wasm core's workers leave only
+    /// when their threads return; issue #46: they waited at rest for ever,
+    /// and the host's process did not end): a thread at rest returns at
+    /// once, one working returns when its job is done, and a job given
+    /// after the end still runs, on a thread that then returns.
+    #[test]
+    fn end_returns_every_thread() {
+        let crew: &'static Crew = Box::leak(Box::new(Crew::new()));
+        let (tx, rx) = channel();
+        // (one working: its job waits for `go`)
+        let (go_tx, go) = channel::<()>();
+        let (ran, done) = channel();
+        let tx2 = tx.clone();
+        crew.submit(Box::new(move || {
+            GONE.with(|g| *g.borrow_mut() = Some(Gone(tx2, "working")));
+            let _ = ran.send(());
+            let _ = go.recv();
+        }));
+        done.recv_timeout(Duration::from_secs(10)).expect("the job began");
+        // (one at rest: another thread, its job done, waiting for the next)
+        let (ran, done) = channel();
+        crew.submit(marking(&tx, "rested", ran));
+        done.recv_timeout(Duration::from_secs(10)).expect("the job ran");
+        let t = std::time::Instant::now();
+        while lock(&crew.idle).is_empty() {
+            assert!(t.elapsed() < Duration::from_secs(10), "the thread came to rest");
+            std::thread::yield_now();
+        }
+        crew.end();
+        assert_eq!(heard(&rx), Some("rested"), "the thread at rest returned at the end");
+        go_tx.send(()).unwrap();
+        assert_eq!(heard(&rx), Some("working"), "the working thread returned after its job");
+        let (ran, done) = channel();
+        crew.submit(marking(&tx, "after", ran));
+        done.recv_timeout(Duration::from_secs(10))
+            .expect("a job given after the end ran");
+        assert_eq!(heard(&rx), Some("after"), "its thread returned");
+        assert!(lock(&crew.idle).is_empty(), "no thread at rest");
     }
 }
