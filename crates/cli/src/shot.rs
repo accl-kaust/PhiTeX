@@ -23,8 +23,6 @@
 //!   the source says the element has such things there and the
 //!   neighbour drawn beside it does not ([`region`]).
 
-use std::path::Path;
-
 use phitex_render::{Mark, MarkKind};
 
 /// A page's glyph origin: the file (an index into the answer's files),
@@ -86,17 +84,35 @@ pub fn whole_words(t: &[u8], a: usize, b: usize) -> bool {
 }
 
 /// Whether `origin`, a file as the glyph origins name it, is `file` (a
-/// name from the project's root): with or without `./` and `.tex`, or an
-/// absolute path that ends in it.
+/// name from the project's root): with or without `./` and `.tex`, or a
+/// rooted path ([`rooted`]) whose last components are it. Either may use
+/// `/` or `\\` between its components (a Windows host's names).
 #[must_use]
 pub fn same_file(origin: &str, file: &str) -> bool {
-    let a = origin.trim_start_matches("./");
-    let b = file.trim_start_matches("./");
-    a == b
-        || format!("{a}.tex") == b
-        || a == format!("{b}.tex")
-        || (Path::new(a).is_absolute()
-            && (a.ends_with(&format!("/{b}")) || a.ends_with(&format!("/{b}.tex"))))
+    let (a, b) = (slashed(origin), slashed(file));
+    // (the names without `./` and `.tex`, either side)
+    let bare = |s: &str| -> String {
+        let s = s.trim_start_matches("./");
+        s.strip_suffix(".tex").unwrap_or(s).to_owned()
+    };
+    let (a, b) = (bare(&a), bare(&b));
+    a == b || (rooted(&a) && a.ends_with(&format!("/{b}")))
+}
+
+/// `p` with every `\\` a `/`: a name compared whatever its host's separator.
+fn slashed(p: &str) -> String {
+    p.replace('\\', "/")
+}
+
+/// Whether `p` names a file from a root, not from the project's: `/` or
+/// `\\` first (a POSIX path, a Windows UNC or rooted one), or a drive
+/// letter (`C:`), on every host alike ([`std::path::Path::is_absolute`] says false
+/// for `/home/...` on Windows and for `C:\\...` elsewhere).
+#[must_use]
+pub fn rooted(p: &str) -> bool {
+    let b = p.as_bytes();
+    matches!(b.first(), Some(b'/' | b'\\'))
+        || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
 }
 
 /// `t` with its comments blanked (`%` to the line's end, unless escaped):
@@ -1170,6 +1186,30 @@ mod tests {
         assert!(same_file("chap/one", "chap/one.tex"));
         assert!(same_file("/home/u/doc/chap/one.tex", "chap/one.tex"));
         assert!(!same_file("chap/one.tex", "one.tex"));
+        // (Windows' forms, on every host)
+        assert!(same_file("C:\\doc\\chap\\one.tex", "chap/one.tex"));
+        assert!(same_file("C:/doc/chap/one.tex", "chap\\one.tex"));
+        assert!(same_file("\\\\server\\share\\chap\\one", "chap/one.tex"));
+        assert!(same_file(".\\chap\\one.tex", "chap/one.tex"));
+        assert!(!same_file("C:\\doc\\xchap\\one.tex", "chap/one.tex"));
+        assert!(!same_file("/home/u/doc/xchap/one.tex", "chap/one.tex"));
+        assert!(!same_file("chap\\one.tex", "one.tex"));
+    }
+
+    #[test]
+    fn rooted_names_on_every_host() {
+        for p in [
+            "/home/u/a.tex",
+            "\\\\server\\share\\a.tex",
+            "\\a.tex",
+            "C:\\a.tex",
+            "c:/a.tex",
+        ] {
+            assert!(rooted(p), "{p}");
+        }
+        for p in ["a.tex", "chap/a.tex", "chap\\a.tex", "./a.tex", ":a"] {
+            assert!(!rooted(p), "{p}");
+        }
     }
 
     /// Claims as fixed answers.
