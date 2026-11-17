@@ -8,6 +8,26 @@ run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.0 name
 milestones, not versions.
 
+## 1.0.4 (2026-11-17)
+
+Compare got a lot smarter, and Firefox opens your Overleaf projects again :)
+
+- **Compare reads like your paper.** Comparing with a past version
+  (latexdiff) now shows tables row by row, figures and tables that moved
+  or changed as whole blocks, and a changed picture old and new side by
+  side. Citations are compared one key at a time, so adding a reference to
+  `\cite{a,b}` marks just the new one, and long marked lines break
+  properly instead of running off the page. Small edits that change
+  nothing you can see stay unmarked.
+- **Blame, beside Compare.** Margin bars show who changed each line and
+  when, coloured by age, by author, or since a version you pick. Hover a
+  bar to see the change and jump to it.
+- **Fixed:** in Firefox, Overleaf projects stopped opening in 1.0.3
+  ("Permission denied to access property constructor"). They open again,
+  and Compare and replaced figures work there too. Sorry about that one!
+
+Thanks for the quick reports, they made this release!
+
 ## 1.0.3 (2026-11-17)
 
 Opening a paper again is now nearly instant, everywhere PhiTeX runs :)
