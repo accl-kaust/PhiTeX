@@ -29,6 +29,7 @@
 )]
 
 mod attach;
+mod blame;
 mod cache;
 mod compare;
 mod compat;
