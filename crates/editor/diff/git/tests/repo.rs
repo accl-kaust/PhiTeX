@@ -262,3 +262,84 @@ fn diff_against_a_commit() {
         "{files:?}"
     );
 }
+
+/// Blame: each line with the commit that last changed it, by its author
+/// (name, email, subject); a line only the working tree has is not
+/// committed; a merge's lines from its side branch keep the side's commit;
+/// a figure's image blamed whole.
+#[test]
+fn blame() {
+    let root = fixture("blame");
+    let paper = root.join("paper");
+    let commit = |who: &str, msg: &str| {
+        git(&root, &["add", "-A"]);
+        git(
+            &root,
+            &[
+                "-c",
+                &format!("user.name={who}"),
+                "-c",
+                &format!("user.email={}@example.com", who.to_lowercase()),
+                "commit",
+                "-q",
+                "-m",
+                msg,
+            ],
+        );
+    };
+    write(&paper.join("body.tex"), "One.\nTwo.\nThree.\n");
+    write(&paper.join("fig.png"), "\u{89}PNG first");
+    commit("Alice", "Body: one, two, three");
+    write(
+        &paper.join("body.tex"),
+        "One.\nTwo, rewritten.\nThree.\nFour.\n",
+    );
+    commit("Bob", "Rewrite two, add four");
+    git(&root, &["checkout", "-q", "-b", "side", "HEAD"]);
+    write(
+        &paper.join("body.tex"),
+        "Zero.\nOne.\nTwo, rewritten.\nThree.\nFour.\n",
+    );
+    commit("Carol", "Add zero on a branch");
+    git(&root, &["checkout", "-q", "main"]);
+    write(&paper.join("fig.png"), "\u{89}PNG second");
+    commit("Dana", "A new figure");
+    git(
+        &root,
+        &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+    );
+    let repo = Repo::discover(&paper).unwrap();
+    let now = b"Zero.\nOne.\nTwo, rewritten.\nThree, not committed.\nFour.\n";
+    let b = repo.blame("body.tex", Some(now)).unwrap();
+    let who: Vec<Option<&str>> = b
+        .lines
+        .iter()
+        .map(|l| l.map(|k| b.commits[k].author.as_str()))
+        .collect();
+    assert_eq!(
+        who,
+        [Some("Carol"), Some("Alice"), Some("Bob"), None, Some("Bob")]
+    );
+    let bob = &b.commits[b.lines[2].unwrap()];
+    assert_eq!(bob.subject, "Rewrite two, add four");
+    assert_eq!(bob.email, "bob@example.com");
+    assert!(bob.id.to_string().starts_with(&bob.short));
+    // (as HEAD has it: every line committed)
+    let at_head = repo.blame("body.tex", None).unwrap();
+    assert_eq!(at_head.lines.len(), 5);
+    assert!(at_head.lines.iter().all(Option::is_some));
+    // (a file HEAD does not have: nothing committed)
+    let new = repo.blame("nonesuch.tex", Some(b"a\nb\n")).unwrap();
+    assert_eq!(new.lines, [None, None]);
+    // (a figure: its last change; changed on disk, not committed)
+    let fig = repo.last_change("fig.png", None).unwrap().unwrap();
+    assert_eq!(fig.author, "Dana");
+    assert_eq!(
+        repo.last_change("fig.png", Some("\u{89}PNG second".as_bytes()))
+            .unwrap()
+            .unwrap()
+            .subject,
+        "A new figure"
+    );
+    assert_eq!(repo.last_change("fig.png", Some(b"other")).unwrap(), None);
+}

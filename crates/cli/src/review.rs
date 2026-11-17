@@ -1004,6 +1004,12 @@ impl Hub {
         refresh(&mut st, &file, Some(after));
     }
 
+    /// An attached editor's buffer of `file` (none: no editor holds it,
+    /// the disk's is what a build reads): what the viewer's Blame blames.
+    pub fn buffer(&self, file: &str) -> Option<String> {
+        lock(&self.st).buffers.get(file).cloned()
+    }
+
     /// An editor closed `file`: the disk's again.
     pub fn user_closed(&self, file: &str) {
         let file = file.strip_prefix("./").unwrap_or(file);
@@ -1024,6 +1030,7 @@ impl Hub {
             "phitex/session/pdf" => self.pdf(p),
             "phitex/session/shot" => self.shot(p),
             "phitex/session/compare" => self.compare(p),
+            "phitex/session/blame" => self.blame(p),
             "phitex/review/mode" | "phitex/review/workspace" | "phitex/propose"
                 if !lock(&self.st).changes =>
             {
@@ -1444,6 +1451,40 @@ impl Hub {
                     v["main"] = json!(main);
                     v
                 });
+            }
+            st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// `session blame`: the pages `pages` (from 0; none: every page) of
+    /// the last build, each printed line with the commit that last changed
+    /// its source ([`crate::blame::pages`]), from the pages' glyph origins
+    /// the watch reads off its loop ([`Ask::Blame`]).
+    fn blame(&self, p: &Value) -> Result<Value, Fail> {
+        let pages: Vec<usize> = p["pages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| k.as_u64().and_then(|k| usize::try_from(k).ok()))
+            .collect();
+        let mut st = lock(&self.st);
+        if st.builds.is_empty() {
+            return Err(refused("no build yet: `phitex session wait` first"));
+        }
+        st.shots.0 += 1;
+        let id = st.shots.0;
+        drop(st);
+        self.ask_watch(Ask::Blame { id, pages });
+        let mut st = lock(&self.st);
+        loop {
+            if st.ended {
+                return Err(Fail {
+                    status: EXIT_NO_SESSION,
+                    message: "the watch ended".into(),
+                });
+            }
+            if let Some(r) = st.shots.1.remove(&id) {
+                return r.map_err(refused);
             }
             st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
         }

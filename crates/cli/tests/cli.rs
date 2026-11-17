@@ -8386,3 +8386,88 @@ fn watch_compare_time() {
     }
     let _ = child.wait();
 }
+
+/// `phitex session blame`: a project in git, two commits by two authors
+/// and a paragraph not committed yet; each printed line of the page with
+/// the commit that last changed its source (by the pages' glyph origins),
+/// the paragraph on disk only "not committed". No build: the pages as
+/// they are.
+#[test]
+fn session_blame() {
+    let _one = one();
+    let dir = scratch("session-blame");
+    let head = "\\documentclass{article}\n\\begin{document}\n";
+    let alice = "Alice wrote this paragraph first.\n\n";
+    let bob = "Bob wrote this paragraph later.\n\n";
+    let carol = "Carol has not committed this paragraph.\n\n";
+    let tail = "\\end{document}\n";
+    let commit = |who: &str, msg: &str| {
+        git(&dir, &["add", "main.tex"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                &format!("user.name={who}"),
+                "-c",
+                &format!("user.email={}@phitex.invalid", who.to_lowercase()),
+                "commit",
+                "-q",
+                "-m",
+                msg,
+            ],
+        );
+    };
+    git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("main.tex"), format!("{head}{alice}{tail}")).expect("v1");
+    commit("Alice", "First paragraph");
+    std::fs::write(dir.join("main.tex"), format!("{head}{alice}{bob}{tail}")).expect("v2");
+    commit("Bob", "Second paragraph");
+    let now = format!("{head}{alice}{bob}{carol}{tail}");
+    std::fs::write(dir.join("main.tex"), &now).expect("not committed");
+    let session = PngSession::start(&dir, "main.tex", &[]);
+    let got = session.json(&["blame", "--page", "1"]);
+    let commits = got["commits"].as_array().expect("the commits");
+    let pages = got["pages"].as_array().expect("the pages");
+    assert_eq!(pages.len(), 1, "{got}");
+    assert_eq!(pages[0]["page"], 0, "{got}");
+    let lines = pages[0]["lines"].as_array().expect("the printed lines");
+    let at = |needle: &str| {
+        let n = line_of(&now, needle);
+        lines
+            .iter()
+            .find(|l| {
+                l["file"] == "main.tex"
+                    && l["lines"][0].as_u64() <= Some(n)
+                    && Some(n) <= l["lines"][1].as_u64()
+            })
+            .unwrap_or_else(|| panic!("no printed line from main.tex:{n}: {got}"))
+            .clone()
+    };
+    let author = |l: &serde_json::Value| -> String {
+        let k = usize::try_from(l["commit"].as_u64().expect("a commit")).expect("an index");
+        commits[k]["author"].as_str().unwrap_or("").to_owned()
+    };
+    let first = at("Alice wrote");
+    assert_eq!(author(&first), "Alice", "{first}");
+    assert_eq!(first["uncommitted"], false, "{first}");
+    let second = at("Bob wrote");
+    assert_eq!(author(&second), "Bob", "{second}");
+    let bk = usize::try_from(second["commit"].as_u64().expect("a commit")).expect("an index");
+    assert_eq!(commits[bk]["subject"], "Second paragraph", "{got}");
+    assert_eq!(commits[bk]["email"], "bob@phitex.invalid", "{got}");
+    assert!(
+        commits[bk]["short"].as_str().is_some_and(|h| h.len() >= 4),
+        "{got}"
+    );
+    let third = at("Carol has");
+    assert_eq!(third["uncommitted"], true, "{third}");
+    // (the text, a printed line a row)
+    let out = session.phitex(&["session", "blame"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("Bob") && text.contains("Second paragraph"),
+        "{text}"
+    );
+    assert!(text.contains("not committed"), "{text}");
+}

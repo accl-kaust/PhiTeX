@@ -637,6 +637,38 @@ fn shot_files(
     }))
 }
 
+/// `phitex session blame`'s pages (from 0; none: every page) of the last
+/// build, their glyph origins blamed ([`crate::blame::pages`]).
+fn blame_pages(
+    reads: Option<phitex_live::session::Reads>,
+    want: &[usize],
+    root: &Path,
+) -> Result<serde_json::Value, String> {
+    let reads = reads.ok_or("the last build left no pages")?;
+    // (every page: until the first with no origins, past the last)
+    let ks: Box<dyn Iterator<Item = usize>> = if want.is_empty() {
+        Box::new(0..)
+    } else {
+        Box::new(want.iter().copied())
+    };
+    let mut files: Vec<String> = Vec::new();
+    let mut pages = Vec::new();
+    for k in ks {
+        let (fs, o) = reads.page_origins(k);
+        let Some(o) = o else {
+            if want.is_empty() {
+                break;
+            }
+            continue;
+        };
+        if fs.len() > files.len() {
+            files = fs;
+        }
+        pages.push(json!({"page": k, "file": o.file, "start": o.start, "x": o.x, "y": o.y}));
+    }
+    crate::blame::pages(root, &files, &pages)
+}
+
 /// Whether `a` only reads the last build (the viewer's page origins, a
 /// source place's pages, a citation, the transcript): put off while a
 /// change waits to be built.
@@ -649,6 +681,7 @@ fn is_read(a: &Ask) -> bool {
             | Ask::Transcript
             | Ask::WritePdf { .. }
             | Ask::Shot { .. }
+            | Ask::Blame { .. }
             | Ask::Compare { .. }
     )
 }
@@ -1648,6 +1681,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     }
                     _ => None,
                 }));
+                // (Blame: the files named, as the build reads them, from the
+                // project's git history; an overlay, no build)
+                let here = root.clone();
+                v.on_blame(Box::new(move |files| crate::blame::files(&here, files)));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {
@@ -3556,6 +3593,21 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                         (&at, &pages),
                                         label.as_deref(),
                                     );
+                                    hub.shot_made(id, r);
+                                });
+                            continue;
+                        }
+                        // (`phitex session blame`: the pages' origins read
+                        // and blamed on a thread of their own, from what the
+                        // last build left)
+                        if let Ask::Blame { id, pages } = &a {
+                            let reads = s.reads();
+                            let (id, pages, root) = (*id, pages.clone(), root.clone());
+                            let hub = hub.clone();
+                            let _ = std::thread::Builder::new()
+                                .name("phitex-watch-blame".into())
+                                .spawn(move || {
+                                    let r = blame_pages(reads, &pages, &root);
                                     hub.shot_made(id, r);
                                 });
                             continue;

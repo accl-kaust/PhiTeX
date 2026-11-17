@@ -825,6 +825,7 @@ phitex session pdf [-o PATH] [--synctex]       # the exact PDF written now (any 
 phitex session propose -m WHY [--title T] [--revise ID]   # a proposal (§9.6), or the changes waiting named
 phitex session mode [direct|propose]
 phitex session stop                            # as q: the exact PDF written, then the watch ends
+phitex session blame [--page N]                # each printed line with its git commit (§10)
 phitex session list                            # the running watches
 phitex session notes [--open] [--all] | reply ID TEXT | resolve ID [TEXT] | changes
 ```
@@ -1225,3 +1226,40 @@ Proposal = {id: "p2", title, why, status, mode: "direct" | "propose",
             hunks: [Hunk & {state: "open" | "accepted" | "rejected" | "conflict"}]}
 ```
 
+
+## 10. Blame on the page
+
+Status: built 2026-11-17 (the design approved that day). Who last
+changed what the pages show, drawn over them by the viewer
+(`viewer/src/blame.ts`): a 3 px bar in the margin of each printed line,
+coloured by the line's commit's age (a violet ramp; older than six months,
+none), its author (Okabe–Ito without yellow, by a hash of the email, grey
+past six; Overleaf's collaborator colours there) or whether it changed
+since a tag, a date or a commit (one violet); text not committed yet
+hatched grey; a tint over the words (off, the paragraph under the pointer,
+all); a card on hover with the subject, short hash, author, age and source
+lines, and Compare with before this commit (the host's Compare, its
+latexdiff), Show in editor, Copy hash. An overlay only: no build, no new
+TeX run; the PDF stays byte-identical.
+
+- **Mapping.** Each glyph's source bytes (the glyph origins, §2.1d) are a
+  line of its file, so a printed line is blamed as the newest commit of
+  the lines it came from; a macro's glyphs are its call's, so text a macro
+  made is blamed at its use. A float's picture has no glyphs: its
+  caption's lines are blamed as text, and the space above them in its
+  column as the picture's file (an image's last change, a TikZ input's
+  lines, else the float's own lines). A bibliography entry is its `.bib`
+  entry, by the `.bbl`'s `\bibitem` key.
+- **The `blame` op** (the watch's; VS Code's extension host and Overleaf's
+  content script answer it from their own history): `{op: "blame", files:
+  [NAME]}` → `{commits: [{id, short, author, email, time, subject}],
+  files: {NAME: {text, lines: [commit index or -1]} | {last: commit index
+  or -1} | {error}}, refs: [{name, kind, time}], now}`. A text file is
+  blamed as the build reads it (an attached editor's buffer, else the
+  disk's), `-1` its lines `HEAD` does not have; a binary file (an image)
+  has its last change. The watch reads git itself (`phitex-git`, no `git`
+  process); renames are not followed.
+- **`phitex session blame [--page N]…`** (`phitex/session/blame`
+  `{pages?}` → `{commits, pages: [{page, lines: [{y, x, file, lines:
+  [first, last], commit, uncommitted}]}]}`): each printed line of the last
+  build's pages with its commit, for an agent.

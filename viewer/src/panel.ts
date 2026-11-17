@@ -33,6 +33,7 @@ import { hintsFor, keyed } from "./hints.ts";
 import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./sheetline.ts";
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
+import { BLAME_CSS, Blame, type BlameHost } from "./blame.ts";
 import type { PageSel } from "./sync.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -295,6 +296,8 @@ export interface PanelOptions {
   footer?: boolean;
   /** Notes on the pages and the agent's changes under review (review.ts): where the host keeps them (the watch). */
   review?: ReviewHost;
+  /** Blame over the pages (blame.ts): the host's history (git, Overleaf's). Absent: no Blame toggle. */
+  blame?: BlameHost;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -368,6 +371,7 @@ const PATHS: Record<string, string> = {
   more_horiz: "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
   search: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
   compare: "M9.01 14H2v2h7.01v3L13 15l-3.99-4v3zm5.98-1v-3H22V8h-7.01V5L11 9l3.99 4z",
+  history: "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
   copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
@@ -569,7 +573,7 @@ export class Panel {
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
       html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame ? BLAME_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -580,6 +584,7 @@ export class Panel {
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
     <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
+    <button type="button" class="ib wide" id="b-blame" title="Blame: who last changed each line, from the history" aria-label="Blame" aria-pressed="false" hidden><span class="icon">history</span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
@@ -604,6 +609,7 @@ export class Panel {
       ${item("x-review", "rate_review", "Notes and changes", "m")}
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item("x-compare", "compare", "Compare…", "", "narrow")}
+      ${item("x-blame", "history", "Blame", "", "narrow")}
       <hr>
       ${item("x-settings", "tips", "Settings…")}
       ${item("x-tips", "tips", "What's new")}
@@ -613,6 +619,7 @@ export class Panel {
     <div class="tip" id="tip" role="dialog" aria-live="polite" hidden></div>
   </div>
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
+  <div class="blamebar" id="blamebar" role="toolbar" aria-label="Blame"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
@@ -651,6 +658,7 @@ export class Panel {
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#x-review, #b-review", !!opts.review);
+    offer("#x-blame, #b-blame", !!opts.blame);
     offer("#b-find, #x-find", !!ev.onFind);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -778,6 +786,17 @@ export class Panel {
       backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : undefined,
     });
     this.extras(opts);
+    if (opts.blame) {
+      const b = this.$("#b-blame");
+      const bl = (this.blame = new Blame(
+        { root: this.root, stage: this.$("#stage"), bar: this.$("#blamebar"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), pressed: (on) => b.setAttribute("aria-pressed", String(on)) },
+        opts.blame,
+      ));
+      b.onclick = this.$("#x-blame").onclick = () => (this.menu(null), bl.toggle());
+      // (the pages drawn dark or light again: the bars' colours with them)
+      let dark = this.sheetDark();
+      new MutationObserver(() => dark !== this.sheetDark() && ((dark = this.sheetDark()), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+    }
     if (opts.review) {
       const rv = (this.review = new Review(
         { root: this.root, win: this.win, stage: this.$("#stage"), viewer: this.viewer, msg: (t, err) => this.msg(t, !!err, true), scrollMarks: (m) => ((this.noteMarks = m), this.drawScrollMarks()), laidOut: () => requestAnimationFrame(() => ((this.stageSize = null), this.redraw())) },
@@ -840,6 +859,8 @@ export class Panel {
   private menus: [string, string][] = [];
   /** Notes and changes (opts.review). */
   review?: Review;
+  /** Blame over the pages (opts.blame): its toggle is the bar's, or the host's (Overleaf's toolbar). */
+  blame?: Blame;
 
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   private menu(m: string | null): void {
@@ -1332,6 +1353,7 @@ export class Panel {
     void this.underline(this.culpritDiags);
     // (the notes' and changes' marks looked up again in the new origins)
     this.review?.refresh();
+    this.blame?.refresh();
   }
 
   /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */

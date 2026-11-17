@@ -99,6 +99,17 @@ pub enum Verb {
         #[arg(long, value_name = "N")]
         build: Option<u64>,
     },
+    /// Who last changed what the pages show: each printed line with the
+    /// git commit that last changed its source
+    ///
+    /// From the project's git history and the pages' glyph origins (the
+    /// viewer's Blame); a line with text not committed yet says so. No
+    /// build: the pages as they are.
+    Blame {
+        /// Only page N (from 1; repeat for more; default every page)
+        #[arg(long = "page", value_name = "N")]
+        pages: Vec<usize>,
+    },
     /// Write the exact PDF now, and print its path
     ///
     /// The last build's PDF, byte for byte the one a clean build makes
@@ -697,6 +708,20 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         for l in &lines[from..] {
                             println!("{l}");
                         }
+                    }
+                    Ok(0)
+                }
+                Verb::Blame { pages } => {
+                    let ks: Vec<usize> = pages.iter().map(|k| k.saturating_sub(1)).collect();
+                    let v = c.call(
+                        "phitex/session/blame",
+                        &json!({"pages": ks}),
+                        Some(Duration::from_secs(300)),
+                    )?;
+                    if as_json {
+                        out(&v);
+                    } else {
+                        print_blame(&v, st);
                     }
                     Ok(0)
                 }
@@ -2630,6 +2655,61 @@ fn draw(f: &Found, what: &What, dpi: u32, to: Option<&str>, diff: bool) -> Resul
     Ok(v)
 }
 
+/// `session blame`'s answer, a printed line a row: the page, the source
+/// lines, the commit (short hash, author, date, subject) or "not
+/// committed".
+fn print_blame(v: &Value, st: Style) {
+    let commits = v["commits"].as_array().cloned().unwrap_or_default();
+    for p in v["pages"].as_array().into_iter().flatten() {
+        let k = p["page"].as_u64().unwrap_or(0) + 1;
+        for l in p["lines"].as_array().into_iter().flatten() {
+            let file = l["file"].as_str().unwrap_or("?");
+            let (a, z) = (
+                l["lines"][0].as_u64().unwrap_or(0),
+                l["lines"][1].as_u64().unwrap_or(0),
+            );
+            let place = if a == z {
+                format!("{file}:{a}")
+            } else {
+                format!("{file}:{a}-{z}")
+            };
+            let who = if l["uncommitted"].as_bool() == Some(true) {
+                "not committed".to_owned()
+            } else if let Some(c) = l["commit"]
+                .as_u64()
+                .and_then(|c| commits.get(usize::try_from(c).ok()?))
+            {
+                let day = c["time"].as_i64().map(day).unwrap_or_default();
+                format!(
+                    "{} {} {} {}",
+                    c["short"].as_str().unwrap_or(""),
+                    c["author"].as_str().unwrap_or(""),
+                    day,
+                    c["subject"].as_str().unwrap_or("")
+                )
+            } else {
+                "-".to_owned()
+            };
+            println!("p{k} {:<24} {}", st.dim(&place), who);
+        }
+    }
+}
+
+/// A time (seconds since the epoch) as its UTC date, `2026-11-17`.
+fn day(t: i64) -> String {
+    // (days since 1970-01-01 to a civil date: Howard Hinnant's algorithm)
+    let z = t.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2683,5 +2763,12 @@ mod tests {
         assert_eq!(duration("2").unwrap(), Some(Duration::from_secs(2)));
         assert_eq!(duration("0").unwrap(), None);
         assert!(duration("soon").is_err());
+    }
+
+    #[test]
+    fn days_are_utc_dates() {
+        assert_eq!(super::day(0), "1970-01-01");
+        assert_eq!(super::day(1_763_337_600), "2025-11-17");
+        assert_eq!(super::day(951_782_400), "2000-02-29");
     }
 }

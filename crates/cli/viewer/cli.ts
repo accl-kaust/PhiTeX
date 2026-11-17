@@ -25,6 +25,7 @@ import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/s
 import type { DiffLook, SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
 import type { ReviewHost, ReviewState } from "../../../viewer/src/review.ts";
+import type { BlameData, BlameHost } from "../../../viewer/src/blame.ts";
 
 
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
@@ -375,6 +376,22 @@ const review: ReviewHost = {
   },
 };
 
+/**
+ * Blame (blame.ts): the watch reads the project's git history (its `blame`
+ * op, crates/cli/src/blame.rs), each file as the build reads it; the pages'
+ * places from the session's glyphs; "Compare with before this commit" is
+ * the watch's Compare against the commit's parent.
+ */
+const blame: BlameHost = {
+  async blame(files) {
+    const r = await sock.request({ op: "blame", files });
+    return r.ok ? (r.json as unknown as BlameData) : (r.error ?? "no history here");
+  },
+  glyphs: (k) => session.pageGlyphs(k),
+  goto: (file, line) => source(file, line),
+  compare: (c) => void controls.start({ from: c ? `${c.id}^` : "HEAD", to: null }, c ? `Before ${c.short}` : "The last commit", c ? c.subject : "against your changes"),
+};
+
 const panel = new Panel(
   {
     onPage: () => {},
@@ -452,6 +469,7 @@ const panel = new Panel(
     host: "watch",
     outline: true,
     review,
+    blame,
     keys: true,
     header: true,
     footer: false,
