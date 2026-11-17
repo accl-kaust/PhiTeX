@@ -414,15 +414,28 @@ export interface Seg {
   para: number;
 }
 
-/** A page's glyphs as printed lines: one baseline (to half a point), split where the next glyph is a column away (18 pt). */
+/**
+ * A page's glyphs as printed lines: the glyphs within a point of one
+ * baseline (a rounded baseline split a line where its glyphs' places
+ * straddled the rounding), left to right, split where the next glyph is a
+ * column away (18 pt).
+ */
 export function printedLines(gs: Glyph[]): Glyph[][] {
-  const base = (g: Glyph) => Math.round(g.y * 2);
-  const order = [...gs].sort((a, b) => base(a) - base(b) || a.x - b.x);
+  const rows: Glyph[][] = [];
+  for (const g of [...gs].sort((a, b) => a.y - b.y)) {
+    const r = rows.at(-1);
+    if (r && g.y - r[0].y < 1) r.push(g);
+    else rows.push([g]);
+  }
   const out: Glyph[][] = [];
-  for (const g of order) {
-    const l = out.at(-1);
-    if (l && base(l[0]) === base(g) && g.x - l.at(-1)!.x < 18) l.push(g);
-    else out.push([g]);
+  for (const r of rows) {
+    r.sort((a, b) => a.x - b.x);
+    let l: Glyph[] = [];
+    for (const g of r) {
+      if (l.length && g.x - l.at(-1)!.x >= 18) out.push(l), (l = []);
+      l.push(g);
+    }
+    out.push(l);
   }
   return out;
 }

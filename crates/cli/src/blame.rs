@@ -210,27 +210,40 @@ struct Printed {
     glyphs: Vec<usize>,
 }
 
-/// A page's glyphs (their origins, in reading order) as printed lines: a
-/// new line where the baseline moves or the next glyph is more than 18 pt
-/// to the right (the next column) or back to the left.
+/// A page's glyphs as printed lines: those within a point of one baseline
+/// (a rounded baseline split a line whose glyphs straddled the rounding),
+/// left to right, a new line where the next glyph is 18 pt or more to the
+/// right (the next column).
 fn printed(x: &[f32], y: &[f32]) -> Vec<Printed> {
-    // (a baseline to half a point: a glyph a hair lower is on the same line)
-    let base = |i: usize| (y[i] * 2.0).round();
     let mut order: Vec<usize> = (0..x.len()).collect();
-    order.sort_by(|&a, &b| base(a).total_cmp(&base(b)).then(x[a].total_cmp(&x[b])));
-    let mut out: Vec<Printed> = Vec::new();
+    order.sort_by(|&a, &b| y[a].total_cmp(&y[b]));
+    let mut rows: Vec<Vec<usize>> = Vec::new();
     for i in order {
-        match out.last_mut() {
-            Some(l) if (base(i) - (l.y * 2.0).round()).abs() < 0.5 && x[i] - l.x1 < 18.0 => {
-                l.x1 = x[i];
-                l.glyphs.push(i);
+        match rows.last_mut() {
+            Some(r) if y[i] - y[r[0]] < 1.0 => r.push(i),
+            _ => rows.push(vec![i]),
+        }
+    }
+    let mut out: Vec<Printed> = Vec::new();
+    for mut r in rows {
+        r.sort_by(|&a, &b| x[a].total_cmp(&x[b]));
+        let mut at = out.len();
+        for i in r {
+            match out.get_mut(at) {
+                Some(l) if x[i] - l.x1 < 18.0 => {
+                    l.x1 = x[i];
+                    l.glyphs.push(i);
+                }
+                _ => {
+                    out.push(Printed {
+                        y: y[i],
+                        x0: x[i],
+                        x1: x[i],
+                        glyphs: vec![i],
+                    });
+                    at = out.len() - 1;
+                }
             }
-            _ => out.push(Printed {
-                y: y[i],
-                x0: x[i],
-                x1: x[i],
-                glyphs: vec![i],
-            }),
         }
     }
     out
@@ -355,6 +368,10 @@ mod tests {
         let ls = printed(&x, &y);
         let gs: Vec<Vec<usize>> = ls.iter().map(|l| l.glyphs.clone()).collect();
         assert_eq!(gs, [vec![0, 1, 2], vec![3, 4], vec![5, 6], vec![7]]);
+        // (glyphs either side of a half point: one line, not two interleaved)
+        let two = printed(&[10.0, 15.0, 20.0, 25.0], &[189.74, 189.76, 189.74, 189.76]);
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].glyphs, [0, 1, 2, 3]);
     }
 
     #[test]

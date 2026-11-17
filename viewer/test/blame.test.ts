@@ -67,9 +67,12 @@ test("a line's look: age ramp light and dark, uncommitted hatched, since one vio
   assert.equal(lookOf(m, 1, "since", false, NOW - DAY, colors), null);
 });
 
-test("printed lines: one baseline (to half a point), split a column apart", () => {
+test("printed lines: one baseline (within a point), split a column apart", () => {
   const ls = printedLines([g(10, 100, "m", 0), g(15, 100.2, "m", 1), g(160, 100, "m", 2), g(10, 112, "m", 3)]);
   assert.deepEqual(ls.map((l) => l.map((x) => x.start)), [[0, 1], [2], [3]]);
+  // (glyphs either side of a half point: one line, not two interleaved)
+  const two = printedLines([g(10, 189.74, "m", 0), g(15, 189.76, "m", 1), g(20, 189.74, "m", 2), g(25, 189.76, "m", 3)]);
+  assert.deepEqual(two.map((l) => l.map((x) => x.start)), [[0, 1, 2, 3]]);
 });
 
 test("floats: the environment's bytes, its caption's (brace-matched), its images and inputs", () => {
