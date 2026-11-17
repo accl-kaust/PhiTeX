@@ -2004,7 +2004,7 @@ impl Src<'_> {
         let mut texts = self.texts.borrow_mut();
         let t = texts.entry(file).or_insert_with(|| {
             let name = self.names.get(file as usize)?;
-            if Path::new(name).is_absolute() {
+            if crate::shot::rooted(name) {
                 return None;
             }
             source(self.root, name)
@@ -2402,7 +2402,7 @@ fn locate(
     let top = root.canonicalize().unwrap_or_else(|_| root.clone());
     let user = |f: u32| {
         names.get(f as usize).is_some_and(|n| {
-            !Path::new(n).is_absolute()
+            !crate::shot::rooted(n)
                 && (top.join(n).is_file() || top.join(format!("{n}.tex")).is_file())
         })
     };
@@ -2424,7 +2424,7 @@ fn locate(
         let t = texts.entry(f).or_insert_with(|| {
             names
                 .get(f as usize)
-                .filter(|n| !Path::new(n).is_absolute())
+                .filter(|n| !crate::shot::rooted(n))
                 .and_then(|n| source(&root, n))
         });
         t.as_deref()
