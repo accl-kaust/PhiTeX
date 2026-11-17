@@ -74,6 +74,141 @@ fn every_pair() {
     }
 }
 
+/// The arguments of the markup's commands in `tex` (`\DIFadd{…}`,
+/// `\DIFdel{…}` and their `FL` forms), comments skipped.
+fn markup_args(tex: &str) -> Vec<&str> {
+    let b = tex.as_bytes();
+    let mut out = Vec::new();
+    for cmd in ["\\DIFadd{", "\\DIFdel{", "\\DIFaddFL{", "\\DIFdelFL{"] {
+        for (k, _) in tex.match_indices(cmd) {
+            let line = tex[..k].rfind('\n').map_or(0, |l| l + 1);
+            if tex[line..k].contains('%') {
+                continue;
+            }
+            let open = k + cmd.len() - 1;
+            let mut depth = 0usize;
+            let mut i = open;
+            while i < b.len() {
+                match b[i] {
+                    b'\\' => i += 1,
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            out.push(&tex[open + 1..i.min(b.len())]);
+        }
+    }
+    out
+}
+
+/// The markup never cuts a unit apart: no markup command's argument holds
+/// an environment (a float, an alignment, a display, a verbatim one), an
+/// alignment's `&` or `\\`, a paragraph's end or a rule; a citation in it
+/// is in short ones (at most three keys an `\mbox`: the markup breaks
+/// between them), and no break is put after one (`\hskip0pt`, where a
+/// line could begin with the punctuation after it).
+#[test]
+fn units_are_never_cut() {
+    for case in corpus() {
+        let name = case.file_name().unwrap().to_string_lossy().into_owned();
+        let old = Dir(case.join("old"));
+        let new = Dir(case.join("new"));
+        let d = diff(&old, &new, "main.tex", &Options::default()).unwrap();
+        for arg in markup_args(&d.tex) {
+            for bad in [
+                "\\begin{",
+                "\\end{",
+                "\\\\",
+                "\n\n",
+                "\\par ",
+                "rule",
+                "\\multicolumn",
+            ] {
+                assert!(!arg.contains(bad), "{name}: {bad} in the markup of {arg:?}");
+            }
+            let amp = arg
+                .match_indices('&')
+                .any(|(k, _)| k == 0 || &arg[k - 1..k] != "\\");
+            assert!(!amp, "{name}: & in the markup of {arg:?}");
+            for (k, _) in arg.match_indices("\\mbox{\\cite") {
+                let keys = arg[k..].split('}').next().unwrap_or("");
+                let list = keys.rsplit('{').next().unwrap_or("");
+                assert!(list.split(',').count() <= 3, "{name}: {arg:?}");
+            }
+        }
+        let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF";
+        let body = &d.tex[d.tex.find(end).unwrap_or(0)..];
+        assert!(!body.contains("\\hskip0pt"), "{name}");
+        // (each unit's markup closed: as many ends as begins)
+        for unit in ["block", "inline", "math", "color", "tabular"] {
+            for side in ["add", "del"] {
+                let side = if unit == "tabular" { "" } else { side };
+                let b = d.tex.matches(&format!("\\DIF{unit}{side}begin")).count();
+                let e = d.tex.matches(&format!("\\DIF{unit}{side}end")).count();
+                assert_eq!(b, e, "{name}: {unit} {side}");
+            }
+        }
+    }
+}
+
+/// A float deleted or added whole is in its environment still, framed,
+/// and a deleted one keeps its old number (its counter given back); a
+/// changed table's rows of other things are a row deleted and a row
+/// added, a changed citation is diffed by key.
+#[test]
+fn floats_tables_and_citations() {
+    let run = |case: &str| {
+        let c = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/corpus")
+            .join(case);
+        // (white space aside)
+        diff(
+            &Dir(c.join("old")),
+            &Dir(c.join("new")),
+            "main.tex",
+            &Options::default(),
+        )
+        .unwrap()
+        .tex
+        .split_whitespace()
+        .collect::<String>()
+    };
+    let t = run("look_table_del");
+    assert!(
+        t.contains("\\begin{table*}[t]\\DIFfloatnumber{0}\\DIFblockdelbegin"),
+        "{t}"
+    );
+    assert!(
+        t.contains("\\DIFblockdelend\\DIFfloatrestore\\end{table*}"),
+        "{t}"
+    );
+    assert!(
+        t.contains("\\begin{table}[h]\\DIFfloatnumber{1}\\DIFblockdelbegin"),
+        "{t}"
+    );
+    let t = run("look_table_add");
+    assert!(t.contains("\\begin{table*}[t]\\DIFblockaddbegin"), "{t}");
+    let t = run("look_table_change");
+    // (the row of another framework: deleted, the new one added, not
+    // their cells paired)
+    assert!(t.contains("\\DIFdelFL{Morpher~"), "{t}");
+    assert!(t.contains("\\DIFaddFL{Pillars~"), "{t}");
+    assert!(t.contains("\\multicolumn{2}{c}{Runs"), "{t}");
+    let t = run("look_cite_long");
+    assert!(t.contains("k12,k14,"), "{t}");
+    assert!(
+        t.contains("\\DIFdel{\\mbox{\\cite{k13}}}\\DIFadd{\\mbox{\\cite{k44,k45}}}."),
+        "{t}"
+    );
+}
+
 /// A version diffed against itself has no change, and its markup is its
 /// text.
 #[test]

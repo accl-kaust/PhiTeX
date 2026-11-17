@@ -4,6 +4,7 @@
 use crate::myers::patience as lcs;
 use crate::sig::{Class, EnvKind, Signatures};
 use crate::tok::{Kind, SECTIONS, Tok};
+use std::hash::Hash;
 
 /// Common runs shorter than this between two changes are made part of
 /// them (latexdiff's `MINWORDSBLOCK`).
@@ -89,6 +90,10 @@ pub struct Em<'a> {
     /// The added tokens in the buffer not written yet: where in `new`,
     /// where in the buffer.
     pending: Vec<(usize, usize)>,
+    /// Whether the look shows deleted text ([`crate::Markup::shows_deleted`]):
+    /// if not, a deleted float, display or picture is commented out, not
+    /// shown as a unit.
+    pub show_del: bool,
 }
 
 impl<'a> Em<'a> {
@@ -106,6 +111,7 @@ impl<'a> Em<'a> {
             spans: Vec::new(),
             adds: Vec::new(),
             pending: Vec::new(),
+            show_del: true,
         }
     }
 
@@ -181,8 +187,17 @@ impl<'a> Em<'a> {
 
     /// A run of paragraphs that differ, diffed by tokens (`old_end`,
     /// `new_end`: where the tokens after them begin).
+    ///
+    /// The paragraphs are set looser where they must (`\DIFparloose`
+    /// before them, `\DIFparunloose` after: TeX's emergency stretch, which
+    /// only a paragraph that cannot be set otherwise uses): marked words
+    /// are boxes, never hyphenated, and a narrow column of them would
+    /// otherwise run lines into the margin. The paragraphs after are set
+    /// as they were.
     pub fn run(&mut self, old: &[Tok], new: &[Tok], old_end: usize, new_end: usize) {
+        self.push("\\DIFparloose ");
         self.seq(old, new, old_end, new_end, Ctx::default());
+        self.push("\\DIFparunloose ");
     }
 
     /// Diff two token sequences (ending at `old_end`, `new_end`).
@@ -214,15 +229,27 @@ impl<'a> Em<'a> {
     fn hunk(&mut self, old: &[Tok], new: &[Tok], old_end: usize, new_end: usize, ctx: Ctx) {
         // (only nodes pair: the leaves were not common, or the first diff
         // would have matched them)
-        let key = |t: &Tok, side: usize, i: usize| {
+        // (a citation or a reference list pairs with one of the same
+        // command and options: its keys are diffed)
+        let key = |t: &Tok, text: &str, side: usize, i: usize| {
             if t.is_node() {
-                (0, t.prefix)
+                (0, pair_key(t, text))
+            } else if let Some(h) = cite_head(t, text) {
+                (3, h)
             } else {
                 (side, i as u64)
             }
         };
-        let ok: Vec<_> = old.iter().enumerate().map(|(i, t)| key(t, 1, i)).collect();
-        let nk: Vec<_> = new.iter().enumerate().map(|(i, t)| key(t, 2, i)).collect();
+        let ok: Vec<_> = old
+            .iter()
+            .enumerate()
+            .map(|(i, t)| key(t, self.old, 1, i))
+            .collect();
+        let nk: Vec<_> = new
+            .iter()
+            .enumerate()
+            .map(|(i, t)| key(t, self.new, 2, i))
+            .collect();
         let pairs = lcs(&ok, &nk);
         let (mut i, mut j) = (0, 0);
         for (pi, pj) in pairs
@@ -236,10 +263,24 @@ impl<'a> Em<'a> {
             }
             if pi < old.len() {
                 let (o, n) = (&old[pi], &new[pj]);
-                if o.key == n.key || !n.is_node() {
+                let ne = new.get(pj + 1).map_or(new_end, |t| t.start);
+                let oe = old.get(pi + 1).map_or(old_end, |t| t.start);
+                if o.key == n.key {
                     self.same(n);
-                } else {
+                } else if !n.is_node() {
+                    self.cite(o, n, oe, ne, ctx);
+                } else if alike(o, n) {
                     self.pair(o, n, ctx);
+                } else {
+                    // (two different floats: the old one deleted, the new
+                    // one added, each whole)
+                    self.block(
+                        std::slice::from_ref(o),
+                        std::slice::from_ref(n),
+                        oe,
+                        ne,
+                        ctx,
+                    );
                 }
             }
             i = pi + 1;
@@ -247,14 +288,101 @@ impl<'a> Em<'a> {
         }
     }
 
+    /// Two citations (or reference lists) of the same command and options
+    /// whose keys differ: one citation of the keys both have, as the new
+    /// one orders them, then the keys only the old one has, deleted, and
+    /// those only the new one has, added (each a short citation of a few
+    /// keys, so that the markup breaks between them). With no key in
+    /// common, the old one deleted and the new one added.
+    fn cite(&mut self, o: &Tok, n: &Tok, old_end: usize, new_end: usize, ctx: Ctx) {
+        let os = &self.old[o.start..o.cend];
+        let ns = &self.new[n.start..n.cend];
+        let (Some(ol), Some(nl)) = (key_list(os), key_list(ns)) else {
+            self.block(
+                std::slice::from_ref(o),
+                std::slice::from_ref(n),
+                old_end,
+                new_end,
+                ctx,
+            );
+            return;
+        };
+        let okeys = keys(&os[ol.1..ol.2]);
+        let nkeys = keys(&ns[nl.1..nl.2]);
+        let common: Vec<&str> = nkeys
+            .iter()
+            .copied()
+            .filter(|k| okeys.contains(k))
+            .collect();
+        let gone: Vec<&str> = okeys
+            .iter()
+            .copied()
+            .filter(|k| !nkeys.contains(k))
+            .collect();
+        let came: Vec<&str> = nkeys
+            .iter()
+            .copied()
+            .filter(|k| !okeys.contains(k))
+            .collect();
+        if common.is_empty() {
+            self.block(
+                std::slice::from_ref(o),
+                std::slice::from_ref(n),
+                old_end,
+                new_end,
+                ctx,
+            );
+            return;
+        }
+        if gone.is_empty() && came.is_empty() {
+            // (the same keys, reordered or spaced otherwise)
+            self.same(n);
+            return;
+        }
+        let start = self.out.len();
+        let head = &ns[..nl.0];
+        self.push(head);
+        self.push(&format!("{{{}}}", common.join(",")));
+        for (side, ks) in [(Side::Del, &gone), (Side::Add, &came)] {
+            if ks.is_empty() || (side == Side::Del && !self.show_del) {
+                continue;
+            }
+            self.push(" ");
+            let mut buf = cite_chunks(head, ks);
+            self.flush(&mut buf, side, ctx);
+        }
+        self.push(&self.new[n.cend..n.end]);
+        let section = self.section.clone();
+        self.changes.push(RawChange {
+            old: (o.start, o.cend),
+            new: (n.start, n.cend),
+            out: (start, self.out.len()),
+            section,
+        });
+    }
+
     /// Two nodes with the same prefix: the new one's open and close parts,
     /// and their children diffed.
+    ///
+    /// A changed alignment is boxed (`\DIFtabularbegin` … `\DIFtabularend`)
+    /// and, if its cells' old and new text make it wider than the line,
+    /// scaled down to the line's width: it stays in its column.
     fn pair(&mut self, o: &Tok, n: &Tok, ctx: Ctx) {
         self.note_section(n);
+        let boxed =
+            matches!(&n.kind, Kind::Env { name, kind: EnvKind::Tabular } if name != "longtable");
         let ctx = ctx.enter(n);
+        if boxed {
+            self.push("\\DIFtabularbegin ");
+        }
         self.push(&self.new[n.start..n.open_end]);
         self.seq(&o.children, &n.children, o.close_start, n.close_start, ctx);
-        self.push(&self.new[n.close_start..n.end]);
+        if boxed {
+            self.push(&self.new[n.close_start..n.cend]);
+            self.unit_end("\\DIFtabularend", &self.new[n.cend..n.end]);
+        } else {
+            self.push(&self.new[n.close_start..n.end]);
+        }
     }
 
     /// A token the same on both sides.
@@ -282,10 +410,25 @@ impl<'a> Em<'a> {
         let n = span(new, new_at);
         let start = self.out.len();
         let fl = if ctx.fl { "FL" } else { "" };
+        // (a deletion the old text set apart from the word before it,
+        // that word now written with no space after it: set apart still)
+        let spaced = |t: &str, at: usize| t[..at].ends_with(char::is_whitespace);
+        if old.first().is_some_and(|t| spaced(self.old, t.start))
+            && self.out.ends_with(|c: char| {
+                c.is_alphanumeric() || matches!(c, '.' | ',' | ';' | ':' | ')' | ']')
+            })
+        {
+            self.push("\\DIFchangesep ");
+        }
         if !old.is_empty() {
             self.push(&format!("\\DIFdelbegin{fl} "));
             self.mark(old, Side::Del, ctx);
             self.push(&format!("\\DIFdelend{fl} "));
+            // (deleted text right before added text with no space between
+            // is set apart from it: `fooarbar` reads as one word)
+            if !new.is_empty() && old.last().is_some_and(|t| t.end == t.cend) {
+                self.push("\\DIFchangesep ");
+            }
         }
         if !new.is_empty() {
             self.push(&format!("\\DIFaddbegin{fl} "));
@@ -335,9 +478,17 @@ impl<'a> Em<'a> {
                 }
                 Kind::Mbox => {
                     self.added(side, t.start, buf.len());
-                    buf.push_str("\\mbox{");
-                    buf.push_str(&src[t.start..t.cend]);
-                    buf.push_str("}\\hskip0pt ");
+                    let body = &src[t.start..t.cend];
+                    match key_list(body) {
+                        Some((h, a, b)) if !body[..h].contains('[') => {
+                            buf.push_str(&cite_chunks(&body[..h], &keys(&body[a..b])));
+                        }
+                        _ => {
+                            buf.push_str("\\mbox{");
+                            buf.push_str(body);
+                            buf.push('}');
+                        }
+                    }
                     if t.cend < t.end {
                         self.added(side, t.cend, buf.len());
                     }
@@ -348,12 +499,24 @@ impl<'a> Em<'a> {
                     self.push(text);
                     self.nl = !text.ends_with('\n');
                 }
+                Kind::Picture => {
+                    self.flush(&mut buf, side, ctx);
+                    self.picture(t, side);
+                }
                 Kind::Unsafe
-                | Kind::Rule
-                | Kind::Picture
-                | Kind::Par
-                | Kind::Amp
-                | Kind::RowEnd => {
+                    if side == Side::Del
+                        && self.show_del
+                        && (shown_whole(text) || self.user_macro(text))
+                        && !self.old_only(text) =>
+                {
+                    self.flush(&mut buf, side, ctx);
+                    self.whole(t, side, false);
+                }
+                Kind::Unsafe if side == Side::Add && is_image(text) => {
+                    self.flush(&mut buf, side, ctx);
+                    self.whole(t, side, false);
+                }
+                Kind::Unsafe | Kind::Rule | Kind::Par | Kind::Amp | Kind::RowEnd => {
                     self.flush(&mut buf, side, ctx);
                     match side {
                         // (an added item's label marked: `\item[\DIFadd{x}]`)
@@ -366,6 +529,12 @@ impl<'a> Em<'a> {
                             }
                             None => self.push(text),
                         },
+                        // (a deleted paragraph's end: still one, so that
+                        // a deleted paragraph is a paragraph, not run into
+                        // the next)
+                        Side::Del if t.kind == Kind::Par && self.show_del && !ctx.fl => {
+                            self.push(text);
+                        }
                         Side::Del => {
                             self.comment_out(text);
                             // (a deleted item: an item still, its label
@@ -423,13 +592,23 @@ impl<'a> Em<'a> {
                     self.flush(&mut buf, side, ctx);
                     let inner = ctx.enter(t);
                     match (side, kind) {
+                        // (a float added or deleted: whole, in a frame)
+                        (_, EnvKind::Float) => self.float(t, side),
+                        // (an alignment added or deleted whole: as it is,
+                        // coloured, its cells never cut apart)
+                        (_, EnvKind::Tabular) if side == Side::Add || self.show_del => {
+                            self.alignment(t, side);
+                        }
                         (Side::Add, _) => self.node(t, side, inner),
-                        (Side::Del, EnvKind::Tabular)
-                            if matches!(name.as_str(), "tabular" | "tabular*") =>
-                        {
+                        (Side::Del, EnvKind::Tabular) => self.comment_out(text),
+                        // (a list or a layout environment deleted: still
+                        // one, its text struck out)
+                        (Side::Del, EnvKind::List) if !self.sigs.old_only(name) => {
                             self.node(t, side, inner);
                         }
-                        (Side::Del, EnvKind::Tabular) => self.comment_out(text),
+                        (Side::Del, EnvKind::Plain) if LAYOUT.contains(&name.as_str()) => {
+                            self.node(t, side, inner);
+                        }
                         (Side::Del, _) => {
                             // (its items are not items any more)
                             let inner = Ctx {
@@ -476,134 +655,173 @@ impl<'a> Em<'a> {
         self.mark(&run, side, ctx);
     }
 
-    /// Display math, coarse: an added one as it is, its body marked; a
-    /// deleted one as an unnumbered display (`displaymath`, or `align*`,
-    /// `eqnarray*` for an alignment) of its body struck out, its labels
-    /// commented out.
-    fn display(&mut self, t: &Tok, env: &str, arr: bool, body: (usize, usize), side: Side) {
+    /// A float added or deleted: whole, as it is typeset, in a frame
+    /// (`\DIFblockaddbegin` … `\DIFblockaddend`, `\DIFblockdel…`) inside
+    /// its own environment, so that it floats as it did. A deleted one's
+    /// labels are dropped (the new version's are the labels) and its
+    /// captions step their counter back after it: the new version's floats
+    /// keep their numbers. One the look does not show, or that needs a
+    /// command only the old preamble defines, is commented out.
+    fn float(&mut self, t: &Tok, side: Side) {
         let src = self.text(side);
+        let text = &src[t.start..t.end];
+        let (open, body, close) = (
+            &src[t.start..t.open_end],
+            &src[t.open_end..t.close_start],
+            &src[t.close_start..t.end],
+        );
         match side {
             Side::Add => {
-                self.push(&src[t.start..body.0]);
-                self.math(&src[body.0..body.1], side, None);
-                self.push(&src[body.1..t.end]);
+                self.push(open);
+                self.push("\\DIFblockaddbegin ");
+                self.push(body);
+                self.push("\\DIFblockaddend ");
+                self.push(close);
             }
+            Side::Del if !self.show_del || self.old_only(text) => self.comment_out(text),
             Side::Del => {
-                let (repl, max_amp) = if !arr {
-                    ("displaymath", Some(0))
-                } else if self.amsmath {
-                    ("align*", None)
-                } else {
-                    ("eqnarray*", Some(2))
-                };
-                let _ = env;
-                self.push(&format!("\\begin{{{repl}}}"));
-                self.math(&src[body.0..body.1], side, max_amp);
-                self.push(&format!("\\end{{{repl}}}"));
-                self.push(&src[t.cend..t.end]);
+                // (numbered as it was in the old version, the counter
+                // given back after it)
+                let numbered = captions(body) > 0;
+                self.push(open);
+                if numbered {
+                    self.push(&format!("\\DIFfloatnumber{{{}}}", self.old_number(t)));
+                }
+                self.push("\\DIFblockdelbegin ");
+                self.push(&self.unlabel(body));
+                self.push("\\DIFblockdelend ");
+                if numbered {
+                    self.push("\\DIFfloatrestore ");
+                }
+                self.push(close);
             }
         }
     }
 
-    /// A math body marked: each cell (between `&` and `\\`, outside nested
-    /// environments) in `\DIFadd{…}`/`\DIFdel{…}`; labels, tags and
-    /// `\intertext` outside (deleted: commented out); `max_amp`: how many
-    /// `&` a row may keep (the replacement's columns).
-    fn math(&mut self, body: &str, side: Side, max_amp: Option<usize>) {
-        let b = body.as_bytes();
-        let mut buf = String::new();
-        let mut depth = 0usize;
-        let mut amps = 0usize;
-        let mut i = 0;
-        let ctx = Ctx::default();
-        while i < b.len() {
-            match b[i] {
-                b'%' => {
-                    let e = line_end(b, i);
-                    self.flush(&mut buf, side, ctx);
-                    self.push(&body[i..e]);
-                    i = e;
-                }
-                b'{' => {
-                    let e = brace_end(b, i);
-                    buf.push_str(&body[i..e]);
-                    i = e;
-                }
-                b'$' if side == Side::Del => i += 1,
-                b'&' if depth == 0 => {
-                    self.flush(&mut buf, side, ctx);
-                    amps += 1;
-                    if max_amp.is_none_or(|m| amps <= m) {
-                        self.push("&");
-                    } else {
-                        self.push(" ");
-                    }
-                    i += 1;
-                }
-                b'\\' => {
-                    let (name, mut e) = cs_at(body, i);
-                    match name {
-                        // (math delimiters in math: an old version that
-                        // does not compile; dropped from a deleted body)
-                        "[" | "]" | "(" | ")" if side == Side::Del => {}
-                        "begin" => {
-                            depth += 1;
-                            buf.push_str(&body[i..e]);
-                        }
-                        "end" => {
-                            depth = depth.saturating_sub(1);
-                            buf.push_str(&body[i..e]);
-                        }
-                        "\\" if depth == 0 => {
-                            self.flush(&mut buf, side, ctx);
-                            // (its star and optional argument)
-                            if b.get(e) == Some(&b'*') {
-                                e += 1;
-                            }
-                            if b.get(e) == Some(&b'[')
-                                && let Some(k) = body[e..].find(']')
-                            {
-                                e += k + 1;
-                            }
-                            amps = 0;
-                            if max_amp == Some(0) {
-                                self.push(" ");
-                            } else {
-                                self.push(&body[i..e]);
-                            }
-                        }
-                        "label" | "tag" | "nonumber" | "notag" | "qedhere" | "intertext"
-                        | "shortintertext"
-                            if depth == 0 =>
-                        {
-                            self.flush(&mut buf, side, ctx);
-                            if b.get(e) == Some(&b'*') {
-                                e += 1;
-                            }
-                            let mut a = e;
-                            while a < b.len() && b[a] == b' ' {
-                                a += 1;
-                            }
-                            if b.get(a) == Some(&b'{') {
-                                e = brace_end(b, a);
-                            }
-                            match side {
-                                Side::Add => self.push(&body[i..e]),
-                                Side::Del => self.comment_out(&body[i..e]),
-                            }
-                        }
-                        _ => buf.push_str(&body[i..e]),
-                    }
-                    i = e;
-                }
-                _ => {
-                    let ch = body[i..].chars().next().map_or(1, char::len_utf8);
-                    buf.push_str(&body[i..i + ch]);
-                    i += ch;
-                }
+    /// An alignment added or deleted whole: as it is, coloured
+    /// (`\DIFcoloraddbegin` … `\DIFcoloraddend`): its cells and rules are
+    /// never cut apart by markup.
+    fn alignment(&mut self, t: &Tok, side: Side) {
+        let src = self.text(side);
+        let text = &src[t.start..t.cend];
+        if side == Side::Del && self.old_only(text) {
+            self.comment_out(&src[t.start..t.end]);
+            return;
+        }
+        let s = side_name(side);
+        // (an alignment that is a paragraph's material begins one: the
+        // colour then is in it; longtable is vertical material)
+        let leave = !text.starts_with("\\begin{longtable");
+        self.push(&format!(
+            "{}\\DIFcolor{s}begin ",
+            if leave { "\\leavevmode" } else { "" }
+        ));
+        self.push(&match side {
+            Side::Add => text.to_owned(),
+            Side::Del => self.unlabel(text),
+        });
+        self.unit_end(&format!("\\DIFcolor{s}end"), &src[t.cend..t.end]);
+    }
+
+    /// A picture or a verbatim environment added or deleted: whole, as it
+    /// is. A verbatim one (its own lines) in a block's frame, as a float's
+    /// (a long one, which a frame could not break across pages, coloured
+    /// only); a picture in a frame of its own in the line.
+    fn picture(&mut self, t: &Tok, side: Side) {
+        let src = self.text(side);
+        let text = &src[t.start..t.cend];
+        if side == Side::Del && (!self.show_del || self.old_only(text)) {
+            self.comment_out(&src[t.start..t.end]);
+            return;
+        }
+        let s = side_name(side);
+        let name = env_name(text).unwrap_or("");
+        if PICTURES.contains(&name) {
+            self.whole(t, side, true);
+        } else if text.lines().count() > 40 {
+            self.push(&format!("\\DIFcolor{s}begin "));
+            self.push(text);
+            self.unit_end(&format!("\\DIFcolor{s}end"), &src[t.cend..t.end]);
+        } else {
+            self.push(&format!("\\DIFblock{s}begin "));
+            self.push(text);
+            self.unit_end(&format!("\\DIFblock{s}end"), &src[t.cend..t.end]);
+        }
+    }
+
+    /// A token shown whole in the line, as it is: framed (a picture, an
+    /// image: `\DIFinlineaddbegin` … `\DIFinlineaddend`) or coloured
+    /// (`\verb`, which no markup command can take as an argument).
+    fn whole(&mut self, t: &Tok, side: Side, framed: bool) {
+        let src = self.text(side);
+        let text = &src[t.start..t.cend];
+        let s = side_name(side);
+        let kind = if framed || is_image(text) {
+            "inline"
+        } else {
+            "color"
+        };
+        self.push(&format!("\\leavevmode\\DIF{kind}{s}begin "));
+        self.push(text);
+        self.unit_end(&format!("\\DIF{kind}{s}end"), &src[t.cend..t.end]);
+    }
+
+    /// A unit's closing command `cmd`, then the white space after the unit
+    /// (`{}` ending the command where there is some: a space after a
+    /// control word would be taken by it, not typeset).
+    fn unit_end(&mut self, cmd: &str, ws: &str) {
+        if ws.is_empty() {
+            self.push(&format!("{cmd} "));
+        } else {
+            self.push(&format!("{cmd}{{}}"));
+            self.push(ws);
+        }
+    }
+
+    /// Display math, whole: an added one as it is, its body coloured
+    /// (`\DIFmathaddbegin` … `\DIFmathaddend`); a deleted one as it was,
+    /// unnumbered (its environment's starred form: the new version's
+    /// equations keep their numbers), its labels dropped, its body
+    /// coloured (`\DIFmathdel…`). Math is never cut apart by markup.
+    fn display(&mut self, t: &Tok, env: &str, arr: bool, body: (usize, usize), side: Side) {
+        let src = self.text(side);
+        let (open, inner, close) = (
+            &src[t.start..body.0],
+            &src[body.0..body.1],
+            &src[body.1..t.cend],
+        );
+        let s = side_name(side);
+        // (the colour's end before a last `\\`, which would make a row of
+        // its own)
+        let trimmed = inner.trim_end();
+        let cut = trimmed.strip_suffix("\\\\").map_or(inner.len(), str::len);
+        match side {
+            Side::Add => {
+                self.push(open);
+                self.push(&format!("\\DIFmath{s}begin "));
+                self.push(&inner[..cut]);
+                self.push(&format!("\\DIFmath{s}end "));
+                self.push(&inner[cut..]);
+                self.push(&src[body.1..t.end]);
+            }
+            Side::Del if !self.show_del || self.old_only(&src[t.start..t.cend]) => {
+                self.comment_out(&src[t.start..t.end]);
+            }
+            Side::Del => {
+                let star = unnumbered(env, arr, self.amsmath);
+                let swap = |part: &str| match &star {
+                    Some(to) => part.replacen(&format!("{{{env}}}"), &format!("{{{to}}}"), 1),
+                    None => part.to_owned(),
+                };
+                self.push(&swap(open));
+                self.push(&format!("\\DIFmath{s}begin "));
+                self.push(&unlabel(&inner[..cut], |_| true));
+                self.push(&format!("\\DIFmath{s}end "));
+                self.push(&unlabel(&inner[cut..], |_| true));
+                self.push(&swap(close));
+                self.push(&src[t.cend..t.end]);
             }
         }
-        self.flush(&mut buf, side, ctx);
     }
 
     /// Write the run in `buf` in its markup (white space alone as it is).
@@ -624,13 +842,23 @@ impl<'a> Em<'a> {
                 (Side::Del, false) => "DIFdel",
                 (Side::Del, true) => "DIFdelFL",
             };
-            let s = format!("\\{cmd}{{{buf}}}");
+            // (the white space after the run outside it: not struck out
+            // or underlined, a space the text has; but after a control
+            // word, which takes it)
+            let mut k = buf.trim_end().len();
+            let last = buf[..k].rfind('\\').map_or("", |b| &buf[b + 1..k]);
+            if !last.is_empty() && last.bytes().all(|c| c.is_ascii_alphabetic()) {
+                k = buf.len();
+            }
+            let s = format!("\\{cmd}{{{}}}{}", &buf[..k], &buf[k..]);
             self.push(&s);
             let at = self.out.len() - s.len();
             let open = cmd.len() + 2;
             self.adds.extend(pending.iter().map(|&(n, o)| {
                 if o == 0 {
                     (n, at, None)
+                } else if o >= k {
+                    (n, at + open + o + 1, None)
                 } else {
                     (n, at + open + o, Some(cmd))
                 }
@@ -653,6 +881,55 @@ impl<'a> Em<'a> {
         }
         self.push("%DIFDELCMD < %%%");
         self.nl = true;
+    }
+
+    /// Deleted text without the labels the new version defines too (it
+    /// has them where they are now; one only the old version has is kept:
+    /// a reference to what was deleted still finds it).
+    fn unlabel(&self, text: &str) -> String {
+        unlabel(text, |key| self.new.contains(&format!("\\label{{{key}}}")))
+    }
+
+    /// How many numbered captions the old version's floats of float `t`'s
+    /// kind had before it: its number, less one, in the old version.
+    fn old_number(&self, t: &Tok) -> usize {
+        let src = &self.old[..t.start];
+        let name = env_name(&self.old[t.start..t.cend]).unwrap_or("");
+        let base = name.trim_end_matches('*');
+        let mut n = 0;
+        let mut at = 0;
+        while let Some(k) = src[at..].find("\\begin{") {
+            let b = at + k;
+            at = b + 7;
+            let line = src[..b].rfind('\n').map_or(0, |l| l + 1);
+            if src[line..b].contains('%') {
+                continue;
+            }
+            let Some(this) = env_name(&src[b..]) else {
+                continue;
+            };
+            if this.trim_end_matches('*') != base {
+                continue;
+            }
+            let end = src[b..]
+                .find(&format!("\\end{{{this}}}"))
+                .map_or(src.len(), |e| b + e);
+            n += captions(&src[b..end]);
+            at = end.max(at);
+        }
+        n
+    }
+
+    /// Whether `text` is a use of one of the document's own macros with
+    /// arguments (what it typesets is shown when deleted, coloured, as
+    /// `\verb` is).
+    fn user_macro(&self, text: &str) -> bool {
+        // (one that takes an argument: one without may open what another
+        // closes, `\beq` an equation)
+        let (name, _) = cs_at(text, 0);
+        text.starts_with('\\')
+            && self.sigs.user(name)
+            && self.sigs.cmd(name).is_some_and(|s| s.spec.contains('m'))
     }
 
     /// Whether deleted text uses a command only the old preamble defines.
@@ -801,4 +1078,301 @@ fn is_item(text: &str) -> bool {
     text.strip_prefix("\\item")
         .or_else(|| text.strip_prefix("\\bibitem"))
         .is_some_and(|r| !r.starts_with(|c: char| c.is_ascii_alphabetic()))
+}
+
+/// `add` or `del`, as the markup's command names have them.
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Add => "add",
+        Side::Del => "del",
+    }
+}
+
+/// The environments shown in a frame in the line, not as a block.
+const PICTURES: &[&str] = &[
+    "tikzpicture",
+    "picture",
+    "pgfpicture",
+    "tikzcd",
+    "DIFnomarkup",
+];
+
+/// The layout environments a deletion keeps (their text struck out in
+/// them): they number nothing.
+const LAYOUT: &[&str] = &[
+    "center",
+    "flushleft",
+    "flushright",
+    "quote",
+    "quotation",
+    "verse",
+    "minipage",
+    "multicols",
+    "small",
+    "footnotesize",
+    "scriptsize",
+];
+
+/// The name of the environment `text` begins (`\begin{name}`).
+fn env_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("\\begin")?.trim_start();
+    let rest = rest.strip_prefix('{')?;
+    Some(rest[..rest.find('}')?].trim())
+}
+
+/// Whether `text` is an image (`\includegraphics…`), shown framed.
+fn is_image(text: &str) -> bool {
+    let (name, _) = cs_at(text, 0);
+    text.starts_with('\\') && matches!(name, "includegraphics" | "includesvg")
+}
+
+/// Whether a deleted unsafe token is shown whole (an image, `\verb`)
+/// rather than commented out.
+fn shown_whole(text: &str) -> bool {
+    let (name, _) = cs_at(text, 0);
+    text.starts_with('\\')
+        && (is_image(text) || matches!(name, "verb" | "lstinline" | "url" | "path"))
+}
+
+/// `text` without the `\label{…}` commands `drop` takes.
+fn unlabel(text: &str, drop: impl Fn(&str) -> bool) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(k) = text[i..].find("\\label") {
+        let at = i + k;
+        let mut e = at + 6;
+        if b.get(e).is_some_and(u8::is_ascii_alphabetic) {
+            out.push_str(&text[i..e]);
+            i = e;
+            continue;
+        }
+        while b.get(e).is_some_and(|c| *c == b' ') {
+            e += 1;
+        }
+        if b.get(e) == Some(&b'{') {
+            let end = brace_end(b, e);
+            if drop(text[e + 1..end.saturating_sub(1)].trim()) {
+                out.push_str(&text[i..at]);
+            } else {
+                out.push_str(&text[i..end]);
+            }
+            i = end;
+        } else {
+            out.push_str(&text[i..at + 6]);
+            i = at + 6;
+        }
+    }
+    out.push_str(&text[i..]);
+    out
+}
+
+/// How many numbered `\caption`s `text` has.
+fn captions(text: &str) -> usize {
+    let b = text.as_bytes();
+    text.match_indices("\\caption")
+        .filter(|(k, _)| {
+            let next = b.get(k + 8).copied().unwrap_or(b' ');
+            !next.is_ascii_alphabetic() && next != b'*' && next != b'@'
+        })
+        .count()
+}
+
+/// The unnumbered form of display environment `env` (none: it is one
+/// already, or has none: as it is).
+fn unnumbered(env: &str, arr: bool, amsmath: bool) -> Option<String> {
+    if env.is_empty() || env.ends_with('*') || env == "displaymath" {
+        return None;
+    }
+    let ams = [
+        "equation", "align", "alignat", "gather", "multline", "flalign", "xalignat",
+    ];
+    if amsmath && ams.contains(&env) {
+        return Some(format!("{env}*"));
+    }
+    match env {
+        "equation" if !arr => Some("displaymath".into()),
+        "eqnarray" => Some("eqnarray*".into()),
+        _ => None,
+    }
+}
+
+/// The commands whose last argument is a list of keys (citations,
+/// cleveref's references): diffed by key.
+const KEYED: &[&str] = &[
+    "cite",
+    "citep",
+    "citet",
+    "citealp",
+    "citealt",
+    "citeauthor",
+    "citeyear",
+    "citeyearpar",
+    "Cite",
+    "parencite",
+    "Parencite",
+    "textcite",
+    "Textcite",
+    "autocite",
+    "Autocite",
+    "footcite",
+    "cref",
+    "Cref",
+    "labelcref",
+];
+
+/// A keyed command's parts (`text` its whole text): where its key group
+/// begins (its command and options before), and its keys' range.
+fn key_list(text: &str) -> Option<(usize, usize, usize)> {
+    let b = text.as_bytes();
+    if b.first() != Some(&b'\\') {
+        return None;
+    }
+    let (name, mut e) = cs_at(text, 0);
+    if !KEYED.contains(&name) {
+        return None;
+    }
+    loop {
+        while b.get(e).is_some_and(u8::is_ascii_whitespace) {
+            e += 1;
+        }
+        match b.get(e)? {
+            b'*' => e += 1,
+            b'[' => {
+                let mut depth = 0usize;
+                let mut k = e;
+                loop {
+                    match b.get(k)? {
+                        b'{' => depth += 1,
+                        b'}' => depth = depth.saturating_sub(1),
+                        b']' if depth == 0 => break,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                e = k + 1;
+            }
+            b'{' => break,
+            _ => return None,
+        }
+    }
+    let end = brace_end(b, e);
+    (end == text.trim_end().len() && end > e + 1).then_some((e, e + 1, end - 1))
+}
+
+/// The keys of a key list, trimmed, the empty ones dropped.
+fn keys(list: &str) -> Vec<&str> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// A keyed token's head (its command and options, white space
+/// normalized), hashed: what two citations must share for their keys to
+/// be diffed.
+fn cite_head(t: &Tok, text: &str) -> Option<u64> {
+    use std::hash::{DefaultHasher, Hasher};
+    if t.kind != Kind::Mbox {
+        return None;
+    }
+    let body = &text[t.start..t.cend];
+    let (h, _, _) = key_list(body)?;
+    let mut hs = DefaultHasher::new();
+    "cite".hash(&mut hs);
+    crate::tok::norm_hash(&body[..h], &mut hs);
+    Some(hs.finish())
+}
+
+/// Keys `ks` cited by `head`, a few at a time, each citation in an
+/// `\mbox` (the underlining's unit) and a space between them: the markup
+/// breaks between them as text does, never one long box.
+fn cite_chunks(head: &str, ks: &[&str]) -> String {
+    ks.chunks(3)
+        .map(|c| format!("\\mbox{{{head}{{{}}}}}", c.join(",")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What two nodes must share to be paired: their prefix, and a float's
+/// label (a float is paired with the one of its label, not the next one
+/// of its kind).
+fn pair_key(t: &Tok, text: &str) -> u64 {
+    use std::hash::{DefaultHasher, Hasher};
+    if !is_float(t) {
+        return t.prefix;
+    }
+    let label = t
+        .children
+        .iter()
+        .map(|c| &text[c.start..c.cend])
+        .find(|c| c.starts_with("\\label"));
+    let mut h = DefaultHasher::new();
+    t.prefix.hash(&mut h);
+    label.hash(&mut h);
+    h.finish()
+}
+
+/// The keys of `t`'s leaves, at any depth, in order.
+fn leaves(t: &Tok, out: &mut Vec<u64>) {
+    for c in &t.children {
+        if c.is_node() {
+            leaves(c, out);
+        } else {
+            out.push(c.key);
+        }
+    }
+}
+
+fn is_float(t: &Tok) -> bool {
+    matches!(
+        t.kind,
+        Kind::Env {
+            kind: EnvKind::Float,
+            ..
+        }
+    )
+}
+
+/// Whether two nodes paired are alike enough to be diffed inside: a float
+/// sharing a third of its tokens with the other, a row its first cell or
+/// two thirds of its tokens (else one is deleted and the other added,
+/// each whole: a row of another thing is not this one's cells changed).
+fn alike(o: &Tok, n: &Tok) -> bool {
+    if is_float(o) {
+        // (by their words, at any depth: a float is mostly one node, its
+        // tabular or its algorithm)
+        let mut ol = Vec::new();
+        let mut nl = Vec::new();
+        leaves(o, &mut ol);
+        leaves(n, &mut nl);
+        return lcs(&ol, &nl).len() * 3 >= ol.len().max(nl.len());
+    }
+    if o.kind == Kind::Row {
+        // (its cells' keys; the first cell's words, its name: what a
+        // citation or a command in it is aside)
+        let cells = |t: &Tok| {
+            let mut cells: Vec<Vec<u64>> = vec![Vec::new()];
+            for c in &t.children {
+                match c.kind {
+                    Kind::Amp => cells.push(Vec::new()),
+                    Kind::Rule | Kind::Comment | Kind::Ws | Kind::RowEnd => {}
+                    _ => cells.last_mut().unwrap_or(&mut Vec::new()).push(c.key),
+                }
+            }
+            cells
+        };
+        let name = |t: &Tok| {
+            t.children
+                .iter()
+                .take_while(|c| c.kind != Kind::Amp)
+                .filter(|c| c.kind == Kind::Word)
+                .map(|c| c.key)
+                .collect::<Vec<u64>>()
+        };
+        let (oc, nc) = (cells(o), cells(n));
+        let same = oc.iter().zip(&nc).filter(|(a, b)| a == b).count();
+        return name(o) == name(n) || same * 3 >= oc.len().max(nc.len()) * 2;
+    }
+    true
 }

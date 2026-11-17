@@ -698,11 +698,13 @@ fn read_args(lx: &[Lx], i: usize, spec: &str, text: &str) -> (Vec<Arg>, Pos) {
                     p.i += 1;
                 }
             }
-            'o' => {
+            // (`r`: an optional `(…)` argument, booktabs' `\cmidrule(lr)`)
+            'o' | 'r' => {
+                let (open, close) = if c == 'o' { ("[", "]") } else { ("(", ")") };
                 let q = skip_ws(lx, p.i);
                 if let Some(Lx::Char(a, b)) = lx.get(q)
-                    && &text[*a..*b] == "["
-                    && let Some(e) = find_char(lx, q + 1, text, "]")
+                    && &text[*a..*b] == open
+                    && let Some(e) = find_char(lx, q + 1, text, close)
                 {
                     args.push(Arg::Opt);
                     p.i = e + 1;

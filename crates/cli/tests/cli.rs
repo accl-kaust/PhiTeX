@@ -6757,6 +6757,207 @@ fn session_compare_runs_only_the_changes() {
     assert_eq!(stop["stopped"], true, "{stop}");
 }
 
+/// Files under `from` copied to `to`, folders made.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("a folder");
+    for e in std::fs::read_dir(from).expect("a folder").flatten() {
+        let (f, t) = (e.path(), to.join(e.file_name()));
+        if f.is_dir() {
+            copy_tree(&f, &t);
+        } else {
+            std::fs::copy(&f, &t).expect("a copy");
+        }
+    }
+}
+
+/// What the typesetting of one side of a compare case showed: its errors,
+/// its overfull boxes, its words (letters, folded; hyphenation off, so a
+/// word is whole), and how many pairs of its glyphs overlap.
+struct Typeset {
+    errors: usize,
+    overfull: usize,
+    words: std::collections::HashMap<String, usize>,
+    overlaps: usize,
+}
+
+/// `main.tex` in `dir` built (`\sloppy` and no hyphenation from
+/// `\begin{document}` on, so that a line overfull is one a box makes and a
+/// word is never cut), and read back.
+fn typeset(dir: &Path) -> Typeset {
+    let main = dir.join("main.tex");
+    let text = std::fs::read_to_string(&main).expect("the main file");
+    let text = text.replacen(
+        "\\begin{document}",
+        "\\begin{document}\\sloppy\\hyphenpenalty=10000 \\exhyphenpenalty=10000 ",
+        1,
+    );
+    std::fs::write(&main, text).expect("the main file");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir)
+        .args(["build", "-y", "main.tex"])
+        .output()
+        .expect("phitex runs");
+    let log = std::fs::read_to_string(dir.join("main.log")).unwrap_or_default();
+    let errors =
+        log.lines().filter(|l| l.starts_with("! ")).count() + usize::from(!out.status.success());
+    let overfull = log.matches("Overfull \\hbox").count();
+    let mut words = std::collections::HashMap::new();
+    let mut overlaps = 0;
+    if let Ok(pdf) = std::fs::read(dir.join("main.pdf")) {
+        let pdf: std::sync::Arc<[u8]> = pdf.into();
+        let mut r = phitex_render::Renderer::new();
+        for k in 0..r.pages(&pdf).unwrap_or(0) {
+            for l in r.text(&pdf, k).unwrap_or_default() {
+                for w in l.text.split(|c: char| !c.is_alphanumeric()) {
+                    if w.chars().any(char::is_alphabetic) {
+                        *words.entry(w.to_lowercase()).or_insert(0) += 1;
+                    }
+                }
+            }
+            let Some((_, _, marks)) = r.marks(&pdf, k) else {
+                continue;
+            };
+            let mut glyphs: Vec<[f64; 4]> = marks
+                .iter()
+                .filter(|m| {
+                    matches!(&m.kind, phitex_render::MarkKind::Glyph { text, .. }
+                        if text.chars().any(char::is_alphanumeric))
+                })
+                .map(|m| m.rect)
+                .filter(|r| r[2] > r[0] && r[3] > r[1])
+                .collect();
+            glyphs.sort_by(|a, b| a[0].total_cmp(&b[0]));
+            for (i, a) in glyphs.iter().enumerate() {
+                for b in &glyphs[i + 1..] {
+                    if b[0] >= a[2] {
+                        break;
+                    }
+                    let w = a[2].min(b[2]) - a[0].max(b[0]);
+                    let h = a[3].min(b[3]) - a[1].max(b[1]);
+                    let small = ((a[2] - a[0]) * (a[3] - a[1])).min((b[2] - b[0]) * (b[3] - b[1]));
+                    if w > 0.0 && h > 0.0 && w * h > 0.3 * small {
+                        overlaps += 1;
+                    }
+                }
+            }
+        }
+    }
+    Typeset {
+        errors,
+        overfull,
+        words,
+        overlaps,
+    }
+}
+
+/// Compare's markup typesets as the text does, for every pair of the
+/// diff's corpus (`crates/editor/diff/tests/corpus`: tables deleted, added
+/// and changed, long citations changed, math, floats, verbatim, lists,
+/// sections, footnotes, passages across pages, two columns): the marked-up
+/// document builds without an error; the markup makes no line overfull
+/// (one unbreakable run would, a long citation's in one box); its words
+/// are the old version's and the new one's, every word of each there and
+/// none from elsewhere (a column spec or an argument typeset as text would
+/// be); and no glyph of it sits on another (a float's cells loose in the
+/// text, set over the other column, would).
+#[test]
+fn compare_markup_typesets_cleanly() {
+    let _one = one();
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../editor/diff/tests/corpus");
+    let mut cases: Vec<PathBuf> = std::fs::read_dir(&corpus)
+        .expect("the corpus")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("old").is_dir() && p.join("new").is_dir())
+        .collect();
+    cases.sort();
+    // (each case's three builds at once, a few cases at a time)
+    let results: Vec<(String, Vec<Typeset>)> = std::thread::scope(|sc| {
+        let mut out = Vec::new();
+        for chunk in cases.chunks(4) {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|case| {
+                    sc.spawn(move || {
+                        let name = case
+                            .file_name()
+                            .expect("a name")
+                            .to_string_lossy()
+                            .into_owned();
+                        let d = phitex_diff::diff(
+                            &phitex_diff::Dir(case.join("old")),
+                            &phitex_diff::Dir(case.join("new")),
+                            "main.tex",
+                            &phitex_diff::Options::default(),
+                        )
+                        .expect("the diff");
+                        let sides: Vec<Typeset> = std::thread::scope(|s2| {
+                            let hs: Vec<_> = ["old", "new", "diff"]
+                                .into_iter()
+                                .map(|side| {
+                                    let dir = scratch(&format!("compare-look-{name}-{side}"));
+                                    copy_tree(
+                                        &case.join(if side == "old" { "old" } else { "new" }),
+                                        &dir,
+                                    );
+                                    if side == "diff" {
+                                        std::fs::write(dir.join("main.tex"), &d.tex)
+                                            .expect("the diff");
+                                    }
+                                    s2.spawn(move || typeset(&dir))
+                                })
+                                .collect();
+                            hs.into_iter().map(|h| h.join().expect("a build")).collect()
+                        });
+                        (name, sides)
+                    })
+                })
+                .collect();
+            out.extend(handles.into_iter().map(|h| h.join().expect("a case")));
+        }
+        out
+    });
+    let mut bad = Vec::new();
+    for (name, sides) in &results {
+        let [old, new, diff] = &sides[..] else {
+            unreachable!()
+        };
+        if diff.errors > 0 {
+            bad.push(format!("{name}: {} errors", diff.errors));
+        }
+        if diff.overfull > new.overfull.max(old.overfull) {
+            bad.push(format!(
+                "{name}: {} overfull lines (old {}, new {})",
+                diff.overfull, old.overfull, new.overfull
+            ));
+        }
+        if diff.overlaps > old.overlaps + new.overlaps {
+            bad.push(format!(
+                "{name}: {} glyphs on others (old {}, new {})",
+                diff.overlaps, old.overlaps, new.overlaps
+            ));
+        }
+        let count = |t: &Typeset, w: &str| t.words.get(w).copied().unwrap_or(0);
+        // (what a command only the old preamble defines typesets cannot be
+        // shown: `macros`' \oldmacro)
+        let unshown: &[&str] = if name == "macros" { &["old"] } else { &[] };
+        for w in old.words.keys().chain(new.words.keys()) {
+            let (o, n, d) = (count(old, w), count(new, w), count(diff, w));
+            if d < o.max(n) && !unshown.contains(&w.as_str()) {
+                bad.push(format!("{name}: {w:?} {d} times, old {o}, new {n}"));
+            }
+        }
+        for (w, &d) in &diff.words {
+            let (o, n) = (count(old, w), count(new, w));
+            if d > o + n {
+                bad.push(format!("{name}: {w:?} {d} times, old {o}, new {n}"));
+            }
+        }
+    }
+    bad.sort();
+    bad.dedup();
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
 /// `phitex session png --compare REV`: a part of the diff's pages, drawn
 /// as `png` draws one of the document's: change N's, a source line's, a
 /// label's.
