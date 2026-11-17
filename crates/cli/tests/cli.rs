@@ -8096,14 +8096,18 @@ fn watch_compare_streams_its_pages() {
     assert_eq!(a["ok"], true, "{a}");
     // (its events until its build is in: the `settled` after its pages)
     let mut events: Vec<serde_json::Value> = Vec::new();
-    let mut first: Option<(u64, serde_json::Value, Duration)> = None;
+    let mut first: Option<(u64, Duration)> = None;
+    // (each page streamed as it is told, drawn then: the pages a build
+    // changes stream in the order they are made, at -j4 not the document's)
+    let mut streamed: Vec<(u64, String)> = Vec::new();
     loop {
         let e = viewer.until(|v| v.get("event").is_some() && v.get("id").is_none());
-        if e["event"] == "page" && first.is_none() {
+        if e["event"] == "page" {
             let k = e["k"].as_u64().expect("k");
             let f = viewer.ask(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
             assert_eq!(f["ok"], true, "page {k} streamed, its frame: {f}");
-            first = Some((k, f["json"].clone(), t0.elapsed()));
+            first.get_or_insert((k, t0.elapsed()));
+            streamed.push((k, f["json"]["text"].to_string()));
             events.push(e);
             events.append(&mut viewer.events);
             continue;
@@ -8145,11 +8149,18 @@ fn watch_compare_streams_its_pages() {
             .any(|e| e["event"] == "progress" && e["phase"] == "typesetting"),
         "no progress told: {kinds:?}"
     );
-    let (k, streamed, first_at) = first.expect("a page streamed");
-    let text = streamed["text"].to_string();
+    let (k, first_at) = first.expect("a page streamed");
+    // (the diff's first page among them, drawn from its own file: the
+    // deleted word and its replacement on it, on no page of the document's)
     assert!(
-        text.contains("Firstly") && text.contains("Initially"),
-        "page {k} streamed is not the diff's (the deleted word and its replacement on it): {text}"
+        streamed
+            .iter()
+            .any(|(_, t)| t.contains("Firstly") && t.contains("Initially")),
+        "no page streamed is the diff's first (the deleted word and its replacement on it): {:?}",
+        streamed
+            .iter()
+            .map(|(k, t)| (k, t.chars().take(300).collect::<String>()))
+            .collect::<Vec<_>>()
     );
     let pages = viewer.ask(&json!({"id": 4, "op": "pages"}))["json"]["pages"]
         .as_array()
