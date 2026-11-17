@@ -86,14 +86,16 @@ const ULEM: &str = r"\mathchardef\phitexdifbox=31001\relax
 /// document has it, so that its boxes, `\mbox`, a caption, keep it: else
 /// pushed, `\phitexdifcpop` popping it); `\phitexdifmark{R G B}{text}` the
 /// text in the colour, in a group (out of math, a paragraph begun: no
-/// colour whatsit left in the vertical list).
+/// colour whatsit left in the vertical list), its spaces able to stretch
+/// further than the text's (marked words are boxes, never hyphenated: a
+/// line of them can still be filled, not run into the margin).
 const COLOR: &str = r"\def\phitexdifstack{\ifcsname @pdfcolorstack\endcsname\csname @pdfcolorstack\endcsname\else0\fi}
 \def\phitexdifpdf{\ifcsname XeTeXrevision\endcsname\else\ifx\pdfcolorstack\phitexdifundefined\else\ifnum\pdfoutput>0 1\fi\fi\fi}
 \protected\def\phitexdifpush#1{\ifnum0\phitexdifpdf=1 \pdfcolorstack\phitexdifstack push{#1 rg #1 RG}\else\special{color push rgb #1}\fi}
 \protected\def\phitexdifpop{\ifnum0\phitexdifpdf=1 \pdfcolorstack\phitexdifstack pop\else\special{color pop}\fi}
 \def\phitexdifcommas#1 #2 #3\relax{#1,#2,#3}
 \protected\def\phitexdifcontent#1{\edef\phitexdifx{#1}\ifdefined\color\edef\phitexdifx{\noexpand\color[rgb]{\expandafter\phitexdifcommas\phitexdifx\relax}}\phitexdifx\expandafter\let\csname default@color\expandafter\endcsname\csname current@color\endcsname\let\phitexdifcpop\relax\else\phitexdifpush{#1}\let\phitexdifcpop\phitexdifpop\fi}
-\protected\long\def\phitexdifmark#1#2{\ifmmode\else\leavevmode\fi{\phitexdifcontent{#1}#2\phitexdifcpop}}";
+\protected\long\def\phitexdifmark#1#2{\ifmmode\else\leavevmode\fi{\ifmmode\else\spaceskip\fontdimen2\font plus2\fontdimen2\font minus\fontdimen4\font\relax\fi\phitexdifcontent{#1}#2\phitexdifcpop}}";
 
 /// Whole units in a frame (floats, verbatim, pictures, images): the
 /// unit's box framed, `\phitexdifframe{box}{R G B}{dashed}{rule}{sep}`
@@ -396,10 +398,6 @@ fn units(m: Markup, a: &str, d: &str, colored: bool) -> Vec<String> {
     l.push("\\protected\\def\\phitexdiftabend{\\egroup\\ifdim\\wd\\phitexdiftbox>\\linewidth\\ifdefined\\resizebox\\resizebox{\\linewidth}{!}{\\box\\phitexdiftbox}\\else\\box\\phitexdiftbox\\fi\\else\\box\\phitexdiftbox\\fi}".into());
     l.push("\\providecommand{\\DIFtabularbegin}{\\phitexdiftabbegin}".into());
     l.push("\\providecommand{\\DIFtabularend}{\\phitexdiftabend}".into());
-    l.push("\\protected\\def\\phitexdifloose{\\edef\\phitexdifes{\\the\\emergencystretch}\\emergencystretch=3em\\relax}".into());
-    l.push("\\protected\\def\\phitexdifunloose{\\ifdefined\\phitexdifes\\emergencystretch=\\phitexdifes\\relax\\fi}".into());
-    l.push("\\providecommand{\\DIFparloose}{\\phitexdifloose}".into());
-    l.push("\\providecommand{\\DIFparunloose}{\\phitexdifunloose}".into());
     l.push("\\protected\\def\\phitexdifchangesep{\\ifhmode\\hskip.2em\\relax\\fi}".into());
     l.push("\\providecommand{\\DIFchangesep}{\\phitexdifchangesep}".into());
     l.push("\\providecommand{\\DIFfloatnumber}[1]{\\edef\\phitexdifsavedcount{\\the\\value{\\csname @captype\\endcsname}}\\setcounter{\\csname @captype\\endcsname}{#1}}".into());

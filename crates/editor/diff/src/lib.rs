@@ -1039,15 +1039,11 @@ mod tests {
 
     fn body(d: &DiffOut) -> String {
         // (the body after the markup's definitions, and the line end
-        // after `\begin{document}`; the changed paragraphs' looser setting
-        // aside)
-        let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF\n";
+        // after `\begin{document}`)
+        let end = "%DIF END PREAMBLE EXTENSION ADDED BY LATEXDIFF\n\n";
         let s = d.tex.find(end).unwrap() + end.len();
         let e = d.tex.rfind("\\end{document}").unwrap();
-        let b = d.tex[s..e]
-            .replace("\\DIFparloose ", "")
-            .replace("\\DIFparunloose ", "");
-        b.strip_prefix('\n').unwrap_or(&b).to_owned()
+        d.tex[s..e].to_owned()
     }
 
     /// The diff's text back to the user's files (the viewer's follow,

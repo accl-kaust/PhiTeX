@@ -187,17 +187,8 @@ impl<'a> Em<'a> {
 
     /// A run of paragraphs that differ, diffed by tokens (`old_end`,
     /// `new_end`: where the tokens after them begin).
-    ///
-    /// The paragraphs are set looser where they must (`\DIFparloose`
-    /// before them, `\DIFparunloose` after: TeX's emergency stretch, which
-    /// only a paragraph that cannot be set otherwise uses): marked words
-    /// are boxes, never hyphenated, and a narrow column of them would
-    /// otherwise run lines into the margin. The paragraphs after are set
-    /// as they were.
     pub fn run(&mut self, old: &[Tok], new: &[Tok], old_end: usize, new_end: usize) {
-        self.push("\\DIFparloose ");
         self.seq(old, new, old_end, new_end, Ctx::default());
-        self.push("\\DIFparunloose ");
     }
 
     /// Diff two token sequences (ending at `old_end`, `new_end`).
