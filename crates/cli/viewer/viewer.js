@@ -7297,7 +7297,7 @@ var Blame = class {
     this.card.hidden = true;
     this.card.setAttribute("role", "dialog");
     this.card.setAttribute("aria-label", "Commit");
-    p.root.append(this.card);
+    (p.stage.closest(".win") ?? p.root).append(this.card);
     p.stage.addEventListener("pointermove", (e) => this.move(e));
     p.stage.addEventListener("pointerleave", () => !this.pinned && this.over(null));
     p.stage.addEventListener("click", (e) => this.click(e));
@@ -7547,9 +7547,16 @@ var Blame = class {
     );
     this.card.hidden = false;
     const W2 = this.card.offsetWidth || 320, H2 = this.card.offsetHeight || 120;
-    const vw = innerWidth, vh = innerHeight;
-    this.card.style.left = `${Math.max(6, Math.min(vw - W2 - 6, e.clientX + 14))}px`;
-    this.card.style.top = `${e.clientY + H2 + 20 > vh ? Math.max(6, e.clientY - H2 - 12) : e.clientY + 16}px`;
+    const box = this.p.stage.getBoundingClientRect();
+    const x = Math.max(box.left + 6, Math.min(box.right - W2 - 6, e.clientX + 14));
+    const y = e.clientY + H2 + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H2 - 12) : e.clientY + 16;
+    this.card.style.left = `${x}px`;
+    this.card.style.top = `${y}px`;
+    const at = this.card.getBoundingClientRect();
+    if (Math.abs(at.left - x) > 0.5 || Math.abs(at.top - y) > 0.5) {
+      this.card.style.left = `${2 * x - at.left}px`;
+      this.card.style.top = `${2 * y - at.top}px`;
+    }
   }
   act(e) {
     e.stopPropagation();

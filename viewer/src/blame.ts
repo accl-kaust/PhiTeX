@@ -722,7 +722,8 @@ export class Blame {
     this.card.hidden = true;
     this.card.setAttribute("role", "dialog");
     this.card.setAttribute("aria-label", "Commit");
-    p.root.append(this.card);
+    // (in the panel's window, so the host's tokens (--ph-*) colour it)
+    (p.stage.closest(".win") ?? p.root).append(this.card);
     p.stage.addEventListener("pointermove", (e) => this.move(e));
     p.stage.addEventListener("pointerleave", () => !this.pinned && this.over(null));
     p.stage.addEventListener("click", (e) => this.click(e));
@@ -994,10 +995,20 @@ export class Blame {
       html`<span class="strip" style="${`background:${lk.hatch ? HATCH_SWATCH : lk.color}`}"></span><div class="sub">${c ? c.subject || "(no subject)" : "Not committed yet"}</div><div class="meta">${c ? html`${hashes ? html`<code>${c.short}</code> · ` : ""}${c.author || c.email} · ${agoWords(c.time, m.now)}` : "Your changes since the last " + word}</div><div class="src">${src}</div><div class="acts">${this.host.compare ? html`<button type="button" data-a="cmp">${c ? `Compare with before this ${word}` : `Compare with the last ${word}`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`,
     );
     this.card.hidden = false;
+    // (near the pointer, inside the pages' box (a pane's, in a host's page); placed, then moved by
+    // where it landed: a fixed box is placed in its containing block, which a host's transform or
+    // containment makes its pane, not the window)
     const W = this.card.offsetWidth || 320, H = this.card.offsetHeight || 120;
-    const vw = innerWidth, vh = innerHeight;
-    this.card.style.left = `${Math.max(6, Math.min(vw - W - 6, e.clientX + 14))}px`;
-    this.card.style.top = `${e.clientY + H + 20 > vh ? Math.max(6, e.clientY - H - 12) : e.clientY + 16}px`;
+    const box = this.p.stage.getBoundingClientRect();
+    const x = Math.max(box.left + 6, Math.min(box.right - W - 6, e.clientX + 14));
+    const y = e.clientY + H + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H - 12) : e.clientY + 16;
+    this.card.style.left = `${x}px`;
+    this.card.style.top = `${y}px`;
+    const at = this.card.getBoundingClientRect();
+    if (Math.abs(at.left - x) > 0.5 || Math.abs(at.top - y) > 0.5) {
+      this.card.style.left = `${2 * x - at.left}px`;
+      this.card.style.top = `${2 * y - at.top}px`;
+    }
   }
 
   private act(e: Event): void {
