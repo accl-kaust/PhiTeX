@@ -3112,17 +3112,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     let _ = s.save_graph_until(&stop);
                     at_wait.store(false, Ordering::Relaxed);
                     busy.borrow_mut().did("the graph saved", t0);
-                    match came.into_inner() {
-                        // (given up: due again, from now)
-                        Some(e) => {
-                            graph_due.set(Some(Instant::now()));
-                            held.push_back(e);
-                        }
-                        None => {
-                            graph_due.set(None);
-                            graph_saved.set(true);
-                            modern::graph_notes(&s, o, ui);
-                        }
+                    // (given up: due again, from now)
+                    if let Some(e) = came.into_inner() {
+                        graph_due.set(Some(Instant::now()));
+                        held.push_back(e);
+                    } else {
+                        graph_due.set(None);
+                        graph_saved.set(true);
+                        modern::graph_notes(&s, o, ui);
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,
