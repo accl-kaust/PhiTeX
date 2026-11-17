@@ -656,10 +656,10 @@ export const BLAME_CSS = `
 .blamebar .x { all: unset; cursor: pointer; padding: 0 6px; color: var(--ph-fg2); border-radius: var(--ph-radius); }
 .blamebar .x:hover { background: var(--ph-hover); color: var(--ph-fg); }
 .slot .bl { position: absolute; pointer-events: none; }
-.slot .bl.bar { border-radius: 1px; width: 3px; }
-.slot .bl.bar.on { width: 4px; }
-.slot .bl.tint { border-radius: 1px; }
-.slot .bl.hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
+.slot .bl-bar { border-radius: 1px; width: 3px; }
+.slot .bl-bar.bl-on { width: 4px; }
+.slot .bl-tint { border-radius: 1px; }
+.slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
 .blcard { position: fixed; z-index: 30; width: min(320px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 8px; box-shadow: 0 6px 24px rgb(20 24 33 / 22%); padding: 9px 12px 9px 16px; font-size: 13px; line-height: 1.35; }
 .blcard[hidden] { display: none; }
 .blcard .strip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; border-radius: 8px 0 0 8px; }
@@ -670,7 +670,7 @@ export const BLAME_CSS = `
 .blcard .acts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
 .blcard .acts button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); font-size: 12.5px; }
 .blcard .acts button:hover, .blcard .acts button:focus-visible { text-decoration: underline; }
-@media (prefers-reduced-motion: no-preference) { .slot .bl.tint { transition: opacity .12s; } }
+@media (prefers-reduced-motion: no-preference) { .slot .bl-tint { transition: opacity .12s; } }
 `;
 
 const HATCH_SWATCH = "repeating-linear-gradient(45deg,#9AA0A6 0 1.5px,transparent 1.5px 4px)";
@@ -846,13 +846,13 @@ export class Blame {
             const l = this.look(c);
             if (!l) continue;
             const t = document.createElement("div");
-            t.className = `bl tint${l.hatch ? " hatch" : ""}`;
+            t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
             Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
             frag.append(t);
           }
         }
         const b = document.createElement("div");
-        b.className = `bl bar${lk.hatch ? " hatch" : ""}${lit ? " on" : ""}`;
+        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${lit ? " bl-on" : ""}`;
         Object.assign(b.style, { left: pct(s.bx, w), top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color });
         frag.append(b);
       }
