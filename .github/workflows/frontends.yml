@@ -189,6 +189,9 @@ jobs:
           # loads it and builds nothing, a change made on the server while the tab
           # was away built after it and saved)
           node tools/dev/mock-run.mjs test/scenarios/ci-graph.json
+          # (the dashboard's folders, on the mock's dashboard: the recent projects at the
+          # top level, a search, a folder opened, a drag into a folder, a settings change)
+          node tools/dev/mock-run.mjs test/scenarios/dashboard.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe
