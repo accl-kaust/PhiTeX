@@ -460,6 +460,16 @@ header:active { cursor: grabbing; }
 .strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
 .stage.stale ~ .strips .banner, .approx.on { display: block; }
+/* the main file asked (a first build on a guess): over the opening's sheet too, until answered */
+.strips:has(.mainask.on) { z-index: 4; }
+.mainask { --sev: var(--ph-info); }
+.mainask.on { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.mainask .q { font-weight: 600; }
+.mainask .why { color: var(--ph-fg2); flex-basis: 100%; }
+.mainsel { font: inherit; color: var(--ph-fg); background: var(--ph-bg, transparent); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 1px 4px; max-width: 100%; }
+.mainask .keep { all: unset; cursor: pointer; padding: 2px 10px; border-radius: var(--ph-pill); background: var(--ph-accent); color: var(--ph-accent-fg); font-weight: 600; }
+.mainask .keep:focus-visible { outline: 2px solid var(--ph-fg); outline-offset: 2px; }
+.card .mainrow { align-items: center; color: var(--ph-fg2); }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
 .stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }

@@ -204,6 +204,9 @@ jobs:
           # (the toolbar's status while builds come fast: nothing after it moves, its words at
           # most about four times a second, never "no page changed" while pages change)
           node tools/dev/mock-run.mjs test/scenarios/status-steady.json
+          # (a project's first build asks for its main file, PhiTeX's pick preselected, kept once
+          # answered; a build that stops before a page offers another main file on its card)
+          node tools/dev/mock-run.mjs test/scenarios/main-ask.json
       # (Firefox: its content scripts fetch as the page by content.fetch, whose
       # objects are the page's; a project opened, Compare with a past version and a
       # figure replaced, through that path. Chromium has no content.fetch, so the

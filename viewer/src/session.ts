@@ -279,7 +279,8 @@ export interface PreviewSink {
   /** The connection to the engine lost (with why) or back: the view dims its pages while it is lost. */
   connection?(up: boolean, why?: string): void;
   check?(r: { ok: boolean; ms: number; mismatch?: string }): void;
-  mains?(names: string[], main: string | null): void;
+  /** `ask`: no main file chosen for the project yet, the main a guess: the viewer asks which it is. */
+  mains?(names: string[], main: string | null, ask?: boolean): void;
 }
 
 export interface Options {

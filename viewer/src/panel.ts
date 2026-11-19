@@ -622,7 +622,7 @@ export class Panel {
   <div class="blamebar" id="blamebar" role="toolbar" aria-label="Blame"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -1181,6 +1181,12 @@ export class Panel {
     card.querySelector("h3")!.textContent = "The build stopped before a page could be shown";
     card.querySelector(".count")!.textContent = e.message + (e.file && e.line ? ` (${e.file}:${e.line})` : "");
     card.querySelector(".note")!.textContent = this.words.stopped;
+    // (the wrong main file is a common reason: another one a pick away, the one built selected)
+    if (this.mainFiles.names.length > 1 && this.mainFiles.main) {
+      const row = html`<div class="btns mainrow"><span>Not the main file?</span></div>`.firstElementChild as HTMLElement;
+      row.append(this.mainSelect());
+      card.append(row);
+    }
     this.reportLink(card);
     return true;
   }
@@ -3607,10 +3613,52 @@ export class Panel {
     this.msg(`${names.length} file${names.length === 1 ? "" : "s"} read ${took} · they stay in this browser`);
   }
 
-  /** The main files to pick from (Settings' Main file), and the one built. */
-  mains(names: string[], main: string | null): void {
+  /**
+   * The main files to pick from (Settings' Main file), and the one built.
+   * `ask`: the host has no main file chosen for this project yet (its first
+   * build, on a guess): a strip over the pages asks which file it is, the
+   * guess picked, until it is answered (picked, kept, or dismissed: the
+   * guess kept). With one .tex file there is nothing to ask.
+   */
+  mains(names: string[], main: string | null, ask?: boolean): void {
     this.mainFiles = { names, main };
+    if (ask !== undefined) this.mainAsk = ask;
+    this.renderMainAsk();
     if (!this.$("#settings").hidden) void this.settings(true);
+  }
+  private mainAsk = false;
+
+  /** A main-file picker: the .tex files, the one built selected; a pick is the host's (onMain) and ends the ask. */
+  private mainSelect(): HTMLSelectElement {
+    const sel = document.createElement("select");
+    sel.className = "mainsel";
+    sel.setAttribute("aria-label", "Main file");
+    const { names, main } = this.mainFiles;
+    for (const n of names) sel.add(new Option(n, n, false, n === main));
+    sel.onchange = () => this.mainAnswered(sel.value);
+    return sel;
+  }
+
+  /** The main file answered (`m`, kept for the project by the host): the ask gone, the file built if it is another. */
+  private mainAnswered(m: string): void {
+    this.mainAsk = false;
+    this.renderMainAsk();
+    this.ev.onMain(m);
+  }
+
+  /** The strip asking for the main file, while the host asks and there is more than one to pick from. */
+  private renderMainAsk(): void {
+    const el = this.$("#mainask");
+    const on = this.mainAsk && this.mainFiles.names.length > 1 && !!this.mainFiles.main;
+    el.classList.toggle("on", on);
+    this.placeStrips();
+    if (!on) return void el.replaceChildren();
+    const keep = document.createElement("button");
+    keep.type = "button";
+    keep.className = "keep";
+    keep.textContent = "Yes, build it";
+    keep.onclick = () => this.mainAnswered(this.mainFiles.main!);
+    el.replaceChildren(html`<span class="q">Main file</span>`, this.mainSelect(), keep, html`<span class="why">PhiTeX picked this one. Change it here, or later in ⚙ Settings.</span>`);
   }
   private mainFiles: { names: string[]; main: string | null } = { names: [], main: null };
 

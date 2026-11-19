@@ -2904,6 +2904,16 @@ header:active { cursor: grabbing; }
 .strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
 .stage.stale ~ .strips .banner, .approx.on { display: block; }
+/* the main file asked (a first build on a guess): over the opening's sheet too, until answered */
+.strips:has(.mainask.on) { z-index: 4; }
+.mainask { --sev: var(--ph-info); }
+.mainask.on { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.mainask .q { font-weight: 600; }
+.mainask .why { color: var(--ph-fg2); flex-basis: 100%; }
+.mainsel { font: inherit; color: var(--ph-fg); background: var(--ph-bg, transparent); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 1px 4px; max-width: 100%; }
+.mainask .keep { all: unset; cursor: pointer; padding: 2px 10px; border-radius: var(--ph-pill); background: var(--ph-accent); color: var(--ph-accent-fg); font-weight: 600; }
+.mainask .keep:focus-visible { outline: 2px solid var(--ph-fg); outline-offset: 2px; }
+.card .mainrow { align-items: center; color: var(--ph-fg2); }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
 .stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
@@ -7867,7 +7877,7 @@ var Panel = class {
   <div class="blamebar" id="blamebar" role="toolbar" aria-label="Blame"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -8353,6 +8363,11 @@ var Panel = class {
     card.querySelector("h3").textContent = "The build stopped before a page could be shown";
     card.querySelector(".count").textContent = e.message + (e.file && e.line ? ` (${e.file}:${e.line})` : "");
     card.querySelector(".note").textContent = this.words.stopped;
+    if (this.mainFiles.names.length > 1 && this.mainFiles.main) {
+      const row = html`<div class="btns mainrow"><span>Not the main file?</span></div>`.firstElementChild;
+      row.append(this.mainSelect());
+      card.append(row);
+    }
     this.reportLink(card);
     return true;
   }
@@ -10451,10 +10466,49 @@ var Panel = class {
   files(names, _skipped, took) {
     this.msg(`${names.length} file${names.length === 1 ? "" : "s"} read ${took} \xB7 they stay in this browser`);
   }
-  /** The main files to pick from (Settings' Main file), and the one built. */
-  mains(names, main) {
+  /**
+   * The main files to pick from (Settings' Main file), and the one built.
+   * `ask`: the host has no main file chosen for this project yet (its first
+   * build, on a guess): a strip over the pages asks which file it is, the
+   * guess picked, until it is answered (picked, kept, or dismissed: the
+   * guess kept). With one .tex file there is nothing to ask.
+   */
+  mains(names, main, ask2) {
     this.mainFiles = { names, main };
+    if (ask2 !== void 0) this.mainAsk = ask2;
+    this.renderMainAsk();
     if (!this.$("#settings").hidden) void this.settings(true);
+  }
+  mainAsk = false;
+  /** A main-file picker: the .tex files, the one built selected; a pick is the host's (onMain) and ends the ask. */
+  mainSelect() {
+    const sel = document.createElement("select");
+    sel.className = "mainsel";
+    sel.setAttribute("aria-label", "Main file");
+    const { names, main } = this.mainFiles;
+    for (const n of names) sel.add(new Option(n, n, false, n === main));
+    sel.onchange = () => this.mainAnswered(sel.value);
+    return sel;
+  }
+  /** The main file answered (`m`, kept for the project by the host): the ask gone, the file built if it is another. */
+  mainAnswered(m) {
+    this.mainAsk = false;
+    this.renderMainAsk();
+    this.ev.onMain(m);
+  }
+  /** The strip asking for the main file, while the host asks and there is more than one to pick from. */
+  renderMainAsk() {
+    const el = this.$("#mainask");
+    const on = this.mainAsk && this.mainFiles.names.length > 1 && !!this.mainFiles.main;
+    el.classList.toggle("on", on);
+    this.placeStrips();
+    if (!on) return void el.replaceChildren();
+    const keep = document.createElement("button");
+    keep.type = "button";
+    keep.className = "keep";
+    keep.textContent = "Yes, build it";
+    keep.onclick = () => this.mainAnswered(this.mainFiles.main);
+    el.replaceChildren(html`<span class="q">Main file</span>`, this.mainSelect(), keep, html`<span class="why">PhiTeX picked this one. Change it here, or later in ⚙ Settings.</span>`);
   }
   mainFiles = { names: [], main: null };
   /** The document's main file as the host names it, where it has no Main file to pick (the watch): the openings that show it (a prompt's, a title bar's). */
