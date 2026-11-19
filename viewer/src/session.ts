@@ -244,7 +244,8 @@ export interface PreviewSink {
   /** A repaint is on screen, `ms` after the keystroke that made it. */
   painted?(ms: number): void;
   /** A build finished in `ms` (`first`: the cold one): the timing popover's bars. A watch's host says it from its own socket. */
-  buildTime?(ms: number, first: boolean): void;
+  /** `changed`: the pages it changed, as the core counts them (undefined: a core that does not say). */
+  buildTime?(ms: number, first: boolean, changed?: number): void;
   /** Put the editor at `file`'s [from, to) (UTF-16 offsets), opening it if need be. */
   goto?(file: string, from: number, to: number, focus?: boolean): void;
   /** The editor's selection, highlighted on its pages until it changes ([] clears). */
@@ -448,8 +449,8 @@ export class PreviewSession {
       if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e as { event: string });
       // (a build's time, from every core and the watch alike: the popover's first-build and edit bars; a pass while the job's files settle is not one)
       if (ev === "settled") {
-        const b = e as { ms?: number; cold?: boolean; settling?: boolean };
-        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
+        const b = e as { ms?: number; cold?: boolean; settling?: boolean; pages_changed?: number };
+        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold, b.pages_changed);
       }
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);

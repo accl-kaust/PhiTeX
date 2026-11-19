@@ -1111,8 +1111,7 @@ export class Panel {
 
   /** The bar's status: what is running, or how the last build went and how fast. */
   private renderStatus(): void {
-    const st = this.$("#st"), text = this.$("#sttext"), more = this.$("#stmore");
-    const now = performance.now();
+        const now = performance.now();
     const running = (!!this.buildSince && now - this.buildSince > 400) || (!!this.prepSince && now - this.prepSince > 400) || !!this.pkgNow;
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t: string, m = "", err = false;
@@ -1131,19 +1130,27 @@ export class Panel {
     // (the time, errors or not: "Built with 2 errors · 42 ms")
     else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.latest() ? dur(this.latest()!.ms) : ""), (err = true);
     else (t = this.latest()?.label ?? "Built"), (m = this.latest() ? dur(this.latest()!.ms) : "");
-    text.textContent = t;
-    more.textContent = m ? `· ${m}` : "";
+    // (drawn calmly: at most four times a second, the latest, so a reader can follow it; the state below is said at once)
+    this.stLine.set({ t, m, err });
     const was = this.statusNow;
     if (was.text !== t || was.more !== m || was.err !== err || was.busy !== running) {
       this.statusNow = { text: t, more: m, err, busy: running };
       queueMicrotask(() => this.emit());
     }
-    st.classList.toggle("err", err);
     this.$("#prog").classList.toggle("on", running || (!this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden === true));
     this.$("#split").classList.toggle("busy", running);
   }
 
-  /** The status as last said (ViewState.status: a host's toolbar shows it). */
+  /** The status's words on the bar, drawn calmly (sheetline.ts's Calm); its slot is a fixed width (print.ts), so nothing beside it moves. */
+  private stLine = new Calm<{ t: string; m: string; err: boolean }>(({ t, m, err }) => {
+    this.$("#sttext").textContent = t;
+    this.$("#stmore").textContent = m ? `· ${m}` : "";
+    const st = this.$("#st");
+    st.classList.toggle("err", err);
+    st.title = `${m ? `${t} · ${m}` : t}. The last build's times`;
+  });
+
+    /** The status as last said (ViewState.status: a host's toolbar shows it). */
   private statusNow: ViewState["status"] = { text: "", more: "", err: false, busy: false };
 
   /** Packages still on their way before the first page, so a stop reads as one only once they are in. */
@@ -3412,10 +3419,14 @@ export class Panel {
   private times: { first?: number; edits: number[] } = { edits: [] };
 
   /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
-  buildTime(ms: number, first: boolean): void {
+  buildTime(ms: number, first: boolean, changed?: number): void {
     if (first) this.times = { first: ms, edits: [] };
     else this.times.edits.push(ms);
-    this.built = { ms, at: performance.now(), first };
+    const now = performance.now();
+    this.built = { ms, at: now, first, changed };
+    // (builds back to back, as typing makes them: each is its own, so "Typesetting…" says only one that runs past 400 ms, never the run of them)
+    if (this.buildSince) this.buildSince = now;
+    if (this.prepSince) this.prepSince = now;
     // (a build that changed no page paints nothing: the status and the popover say it all the same)
     this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
@@ -3423,7 +3434,7 @@ export class Panel {
   }
 
   /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
-  private built?: { ms: number; at: number; first: boolean; joined?: boolean };
+  private built?: { ms: number; at: number; first: boolean; joined?: boolean; changed?: number };
 
   /**
    * What the status and the timing popover's head say: the newest of the
@@ -3432,7 +3443,12 @@ export class Panel {
    */
   private latest(): { label: string; ms: number; first: boolean } | undefined {
     const s = this.speed, b = this.built;
-    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (b && (!s || b.at > s.at)) {
+      if (b.first || b.joined) return { label: b.first ? "First build" : "Last build", ms: b.ms, first: b.first };
+      // (said only when the core counted no page changed; one that changed pages is said by its paint, on its way)
+      if (b.changed === 0) return { label: "Built, no page changed", ms: b.ms, first: false };
+      if (!s) return { label: "Built", ms: b.ms, first: false };
+    }
     if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
     return undefined;
   }
@@ -3542,14 +3558,27 @@ export class Panel {
     if (shown) this.toast("msg", { title: t, pct: null, icon: err ? "warning" : "info", err, ms: err ? undefined : 4000 });
   }
 
-  error(t: string): void {
+  /**
+   * `t` went wrong. Before any page, a card says so; `next`: what happens now
+   * in the host's own words (its note, in place of openFailed's) and a button
+   * that tries again at once (a host whose start goes on by itself when it
+   * can: Overleaf's, at the next edit).
+   */
+  error(t: string, next?: { title?: string; note: string; again: () => void }): void {
     this.msg(t, true);
     // (before any page: a card says it stopped, and why, not "Reading" forever)
     if (!this.last && !this.pkgBusy) {
       const card = this.card();
-      card.querySelector("h3")!.textContent = "Couldn't open the project";
-      card.querySelector(".note")!.textContent = this.words.openFailed;
+      card.querySelector("h3")!.textContent = next?.title ?? "Couldn't open the project";
+      card.querySelector(".note")!.textContent = next?.note ?? this.words.openFailed;
       card.querySelector(".count")!.textContent = t;
+      if (next) {
+        const b = document.createElement("button");
+        b.className = "reportbtn";
+        b.textContent = "Try again";
+        b.onclick = () => ((b.disabled = true), next.again());
+        card.append(b);
+      }
       if (this.ev.onReport) {
         const b = document.createElement("button");
         b.className = "reportbtn";

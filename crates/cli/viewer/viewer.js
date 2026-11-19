@@ -2550,7 +2550,8 @@ header:active { cursor: grabbing; }
 /* (squeezed: its detail goes first, then its words end in an ellipsis; the leading word kept) */
 .status b { flex: 0 1 auto; min-width: 4.5ch; font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
 #stmore { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
-.bar > .status { min-width: calc(4.5ch + 12px); }
+/* (a fixed slot: its words change as builds come, the buttons after it never move; a narrow bar squeezes it, as wide as the bar, not its words) */
+.bar > .status { flex: 0 1 auto; width: calc(26ch + 12px); min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* (the count three digits wide at least, as the page box: panel.ts's nav) */
@@ -8292,7 +8293,6 @@ var Panel = class {
   }
   /** The bar's status: what is running, or how the last build went and how fast. */
   renderStatus() {
-    const st = this.$("#st"), text = this.$("#sttext"), more = this.$("#stmore");
     const now = performance.now();
     const running = !!this.buildSince && now - this.buildSince > 400 || !!this.prepSince && now - this.prepSince > 400 || !!this.pkgNow;
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
@@ -8309,17 +8309,23 @@ var Panel = class {
     else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
     else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.latest() ? dur(this.latest().ms) : "", err = true;
     else t = this.latest()?.label ?? "Built", m = this.latest() ? dur(this.latest().ms) : "";
-    text.textContent = t;
-    more.textContent = m ? `\xB7 ${m}` : "";
+    this.stLine.set({ t, m, err });
     const was = this.statusNow;
     if (was.text !== t || was.more !== m || was.err !== err || was.busy !== running) {
       this.statusNow = { text: t, more: m, err, busy: running };
       queueMicrotask(() => this.emit());
     }
-    st.classList.toggle("err", err);
     this.$("#prog").classList.toggle("on", running || !this.last && this.viewer.pages === 0 && !this.offline && this.$("#empty").hidden === true);
     this.$("#split").classList.toggle("busy", running);
   }
+  /** The status's words on the bar, drawn calmly (sheetline.ts's Calm); its slot is a fixed width (print.ts), so nothing beside it moves. */
+  stLine = new Calm(({ t, m, err }) => {
+    this.$("#sttext").textContent = t;
+    this.$("#stmore").textContent = m ? `\xB7 ${m}` : "";
+    const st = this.$("#st");
+    st.classList.toggle("err", err);
+    st.title = `${m ? `${t} \xB7 ${m}` : t}. The last build's times`;
+  });
   /** The status as last said (ViewState.status: a host's toolbar shows it). */
   statusNow = { text: "", more: "", err: false, busy: false };
   /** Packages still on their way before the first page, so a stop reads as one only once they are in. */
@@ -10284,10 +10290,13 @@ var Panel = class {
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   times = { edits: [] };
   /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
-  buildTime(ms, first) {
+  buildTime(ms, first, changed) {
     if (first) this.times = { first: ms, edits: [] };
     else this.times.edits.push(ms);
-    this.built = { ms, at: performance.now(), first };
+    const now = performance.now();
+    this.built = { ms, at: now, first, changed };
+    if (this.buildSince) this.buildSince = now;
+    if (this.prepSince) this.prepSince = now;
     this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
     this.emit();
@@ -10301,7 +10310,11 @@ var Panel = class {
    */
   latest() {
     const s = this.speed, b = this.built;
-    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (b && (!s || b.at > s.at)) {
+      if (b.first || b.joined) return { label: b.first ? "First build" : "Last build", ms: b.ms, first: b.first };
+      if (b.changed === 0) return { label: "Built, no page changed", ms: b.ms, first: false };
+      if (!s) return { label: "Built", ms: b.ms, first: false };
+    }
     if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
     return void 0;
   }
@@ -10394,13 +10407,26 @@ var Panel = class {
     if (!this.$("#m-time").hidden) this.timing();
     if (shown) this.toast("msg", { title: t, pct: null, icon: err ? "warning" : "info", err, ms: err ? void 0 : 4e3 });
   }
-  error(t) {
+  /**
+   * `t` went wrong. Before any page, a card says so; `next`: what happens now
+   * in the host's own words (its note, in place of openFailed's) and a button
+   * that tries again at once (a host whose start goes on by itself when it
+   * can: Overleaf's, at the next edit).
+   */
+  error(t, next) {
     this.msg(t, true);
     if (!this.last && !this.pkgBusy) {
       const card = this.card();
-      card.querySelector("h3").textContent = "Couldn't open the project";
-      card.querySelector(".note").textContent = this.words.openFailed;
+      card.querySelector("h3").textContent = next?.title ?? "Couldn't open the project";
+      card.querySelector(".note").textContent = next?.note ?? this.words.openFailed;
       card.querySelector(".count").textContent = t;
+      if (next) {
+        const b = document.createElement("button");
+        b.className = "reportbtn";
+        b.textContent = "Try again";
+        b.onclick = () => (b.disabled = true, next.again());
+        card.append(b);
+      }
       if (this.ev.onReport) {
         const b = document.createElement("button");
         b.className = "reportbtn";
@@ -10968,7 +10994,7 @@ var PreviewSession = class {
       if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
       if (ev === "settled") {
         const b = e;
-        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
+        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold, b.pages_changed);
       }
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);

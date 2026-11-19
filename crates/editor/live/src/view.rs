@@ -1245,6 +1245,8 @@ impl Viewer {
             .filter(|&(k, h)| pages.hashes.get(k) != Some(h))
             .map(|(k, _)| k + 1)
             .collect();
+        // (pages the build has no more: a change too, as one it drew again)
+        let gone = pages.hashes.len().saturating_sub(b.hashes.len());
         pages.pdf.clone_from(&b.pdf);
         // (a build's origins: none made, each page's when it is asked,
         // the `origins` op; never on the typing path)
@@ -1281,6 +1283,9 @@ impl Viewer {
         e.insert("event".into(), json!("settled"));
         e.insert("since_ms".into(), json!(b.since_ms));
         e.insert("ms".into(), json!(b.ms));
+        // (how many pages it changed, drawn again or gone: a viewer says
+        // "no page changed" only on a 0 here, never from when its paint came)
+        e.insert("pages_changed".into(), json!(changed.len() + gone));
         e.insert("history".into(), json!(b.history));
         e.extend(b.parts.clone());
         let settled = Value::Object(e);

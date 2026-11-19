@@ -106,7 +106,8 @@ header:active { cursor: grabbing; }
 /* (squeezed: its detail goes first, then its words end in an ellipsis; the leading word kept) */
 .status b { flex: 0 1 auto; min-width: 4.5ch; font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
 #stmore { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
-.bar > .status { min-width: calc(4.5ch + 12px); }
+/* (a fixed slot: its words change as builds come, the buttons after it never move; a narrow bar squeezes it, as wide as the bar, not its words) */
+.bar > .status { flex: 0 1 auto; width: calc(26ch + 12px); min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* (the count three digits wide at least, as the page box: panel.ts's nav) */

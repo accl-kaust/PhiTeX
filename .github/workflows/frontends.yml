@@ -198,6 +198,12 @@ jobs:
           # (the loading animation from the moment the panel shows, no page ready: the project's
           # download held, Overleaf's PDF pane laid out late; each opening, "off", gone with the page)
           node tools/dev/mock-run.mjs test/scenarios/opening.json
+          # (Overleaf's download failing once: the pane waits for Overleaf, says so in plain
+          # words, and opens on Try again; the failure in the start's errors and the trace)
+          node tools/dev/mock-run.mjs test/scenarios/zip-fail.json
+          # (the toolbar's status while builds come fast: nothing after it moves, its words at
+          # most about four times a second, never "no page changed" while pages change)
+          node tools/dev/mock-run.mjs test/scenarios/status-steady.json
       # (Firefox: its content scripts fetch as the page by content.fetch, whose
       # objects are the page's; a project opened, Compare with a past version and a
       # figure replaced, through that path. Chromium has no content.fetch, so the
