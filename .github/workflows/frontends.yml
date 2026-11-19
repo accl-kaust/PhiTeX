@@ -195,6 +195,9 @@ jobs:
           # (Blame from the project's history: the toggle beside Compare, its bars by age,
           # author and since, the edits not in the history hatched, the card on hover)
           node tools/dev/mock-run.mjs test/scenarios/blame.json
+          # (the loading animation from the moment the panel shows, no page ready: the project's
+          # download held, Overleaf's PDF pane laid out late; each opening, "off", gone with the page)
+          node tools/dev/mock-run.mjs test/scenarios/opening.json
       # (Firefox: its content scripts fetch as the page by content.fetch, whose
       # objects are the page's; a project opened, Compare with a past version and a
       # figure replaced, through that path. Chromium has no content.fetch, so the
@@ -205,6 +208,7 @@ jobs:
           firefox --version
           MINTED_WHEELS=target/minted tools/build/package.sh
           node tools/dev/fx-run.mjs test/scenarios/fx.json
+          node tools/dev/fx-run.mjs test/scenarios/fx-opening.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe
