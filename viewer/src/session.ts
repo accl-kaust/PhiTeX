@@ -8,7 +8,7 @@
 // corehost.ts), and the preview is drawn by a PreviewSink (the shadow-DOM
 // panel; in VS Code the same panel in a webview, told over messages).
 
-import { Batch, byteOffset, charOffset, textSum, type Edit } from "./edits.ts";
+import { Batch, byteOffset, charOffset, diff, textSum, type Edit } from "./edits.ts";
 
 /** One work a citation cites, as the engine read it (the `cites` op): its key, its label as the .aux has it, where its entry is typeset ([page, baseline] in the origins' points). */
 export interface CiteAnswer {
@@ -355,18 +355,7 @@ export function guessMain(files: Record<string, string>): string | null {
   return names.sort((a, b) => score(b) - score(a))[0] ?? null;
 }
 
-/** `text` replacing `old`, as the one edit of their differing middle (null: same). */
-export function diff(old: string, text: string): Edit | null {
-  if (old === text) return null;
-  let a = 0;
-  while (a < old.length && a < text.length && old[a] === text[a]) a++;
-  let z = 0;
-  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
-  // (never split a surrogate pair)
-  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
-  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
-  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
-}
+export { diff };
 
 export class PreviewSession {
   private o: Options;
@@ -1873,7 +1862,7 @@ export class PreviewSession {
     }
     const t0 = this.since.get(file) ?? this.now();
     const tSend = this.now();
-    const edits = b.take();
+    const e = b.take();
     this.files[file] = b.text;
     // (minted appearing in a project opened without it, by a paste or a
     // whole replace: opened again, so the worker loads its runner first;
@@ -1898,58 +1887,57 @@ export class PreviewSession {
         }
       }
     }
-    for (const [i, e] of edits.entries()) {
-      const last = i === edits.length - 1;
-      this.builds++;
-      // (the end of its build, if the core queues it: listened for before it is sent, so an early one is not missed)
-      let done: ((e: { event: string }) => void) | undefined;
-      const ended = last ? new Promise<{ event: string }>((res) => ((done = res), this.ended.push(res))) : null;
-      const unheard = () => (this.ended = this.ended.filter((f) => f !== done));
-      const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
-      if (!r.ok) {
-        unheard();
-        this.sink.error((typeof r.json?.error === "string" ? r.json.error : undefined) ?? r.error ?? "edit failed");
-        if (r.error?.includes("trapped")) await this.reopen();
-        return false;
-      }
-      if (!last) continue;
-      if (!r.json?.queued) unheard();
-      const tBack = this.now();
-      const j = r.json;
-      // (a core that queues the edit and says its build with `settled`:
-      // timed then, from this keystroke)
-      if (j.queued) {
-        this.queued = { t0, tSend, tBack };
-        this.setPages(j.pages);
-        // (its build waited for and its page drawn before the next round:
-        // sent at once, the next edit's build ran first, and the page's
-        // frame (core1 answers between builds) waited behind it, "waiting
-        // for the engine 1.2 s" while typing)
-        const end = await ended!;
-        if (end.event === "settled") (await this.layout(), this.queuedLatency(end as Extract<WatchEvent, { event: "settled" }>));
-        continue;
-      }
-      this.setPages(j.pages);
-      this.noteError(j);
-      this.status(this.pending);
-      const img = image(r);
-      if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
-      else if (!this.sink.layout) await this.showPage();
-      const e2e = this.now() - t0;
-      this.sink.painted?.(e2e);
-      this.sink.latency(
-        `${e2e.toFixed(0)} ms keystroke→page · core ${j.paint_ms.toFixed(1)} ms · ${this.keystrokes} edits → ${this.builds} builds`,
-        [
-          `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
-          `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " · first paint was superseded" : ""}`,
-          `keystroke→page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
-          `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
-          `batching         ${this.keystrokes} edits → ${this.builds} builds (one in flight; the rest merged)`,
-        ]
-          .filter(Boolean)
-          .join("\n"),
-      );
+    // (the batch as one change: the core builds it once; nothing when its
+    // edits undid each other)
+    if (!e) return true;
+    this.builds++;
+    // (the end of its build, if the core queues it: listened for before it is sent, so an early one is not missed)
+    let done: ((e: { event: string }) => void) | undefined;
+    const ended = new Promise<{ event: string }>((res) => ((done = res), this.ended.push(res)));
+    const unheard = () => (this.ended = this.ended.filter((f) => f !== done));
+    const r = await this.core.request({ op: "edit", file, ...e, page: this.page, dpi: this.dpi() });
+    if (!r.ok) {
+      unheard();
+      this.sink.error((typeof r.json?.error === "string" ? r.json.error : undefined) ?? r.error ?? "edit failed");
+      if (r.error?.includes("trapped")) await this.reopen();
+      return false;
     }
+    if (!r.json?.queued) unheard();
+    const tBack = this.now();
+    const j = r.json;
+    // (a core that queues the edit and says its build with `settled`:
+    // timed then, from this keystroke)
+    if (j.queued) {
+      this.queued = { t0, tSend, tBack };
+      this.setPages(j.pages);
+      // (its build waited for and its page drawn before the next round:
+      // sent at once, the next edit's build ran first, and the page's
+      // frame (core1 answers between builds) waited behind it, "waiting
+      // for the engine 1.2 s" while typing)
+      const end = await ended;
+      if (end.event === "settled") (await this.layout(), this.queuedLatency(end as Extract<WatchEvent, { event: "settled" }>));
+      return true;
+    }
+    this.setPages(j.pages);
+    this.noteError(j);
+    this.status(this.pending);
+    const img = image(r);
+    if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
+    else if (!this.sink.layout) await this.showPage();
+    const e2e = this.now() - t0;
+    this.sink.painted?.(e2e);
+    this.sink.latency(
+      `${e2e.toFixed(0)} ms keystroke→page · core ${j.paint_ms.toFixed(1)} ms · ${this.keystrokes} edits → ${this.builds} builds`,
+      [
+        `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
+        `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " · first paint was superseded" : ""}`,
+        `keystroke→page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
+        `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
+        `batching         ${this.keystrokes} edits → ${this.builds} builds (one in flight; the rest merged)`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
     return true;
   }
 

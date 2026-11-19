@@ -404,3 +404,53 @@ test("a clean rebuild opens the project's files as they are: one removed or rena
   assert.deepEqual(tex, ["main.tex", "part.tex"]);
   assert.equal(opens.at(-1)!["part.tex"], "part two\n");
 });
+
+// Issue #57: one editor transaction of 96 ranges (a paste over every line,
+// as Bad Apple's frames are given in Overleaf). Each range went as its own
+// `edit`, each awaited before the next, so the core held one at a time and
+// built each: 96 builds, the page painted row by row. One request now, the
+// core's text the editor's, its queued build waited for (`settled`) and
+// timed, one build counted.
+test("a transaction of 96 ranges reaches the core as one edit, built once", async () => {
+  let open!: (f: string, t: string) => void;
+  let change!: (f: string, es: Edit[], len?: number) => void;
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: (cb) => (open = cb), onChanges: (cb) => (change = cb) };
+  const rows = Array.from({ length: 96 }, (_, i) => `\\row{${i}}{${".".repeat(32)}}`);
+  const before = `\\begin{document}\n${rows.join("\n")}\n\\end{document}\n`;
+  let core = before;
+  let emit!: (e: unknown) => void;
+  const edits: { start: number; end: number; text: string; page: number }[] = [];
+  const request = async (r: { op: string; start: number; end: number; text: string; page: number }) => {
+    if (r.op !== "edit") return { ok: true, json: {} };
+    edits.push(r);
+    core = core.slice(0, r.start) + r.text + core.slice(r.end);
+    // (the core's answer at once, its build's end said after)
+    setTimeout(() => emit({ event: "settled", ms: 20, ran: 1, kept: 0, passes: 1 }), 1);
+    return { ok: true, json: { queued: true, pages: 1 } };
+  };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  const s = new PreviewSession(host, { request, onEvent: (cb: (e: unknown) => void) => (emit = cb) } as never, sink as never, { schedule: () => undefined });
+  const w = s as unknown as { opened: boolean; queued: unknown };
+  open("main.tex", before);
+  w.opened = true;
+  // (CodeMirror's ranges applied in order: each at its place after the ones before)
+  const es: Edit[] = [];
+  let editor = before;
+  let at = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const from = editor.indexOf(".".repeat(32), at);
+    const e = { from, to: from + 32, text: (i % 3 ? "#" : ".").repeat(32) };
+    es.push(e);
+    editor = editor.slice(0, e.from) + e.text + editor.slice(e.to);
+    at = from + 32;
+  }
+  change("main.tex", es, editor.length);
+  await s.flush();
+  assert.equal(edits.length, 1, "one edit request");
+  assert.equal(s.builds, 1, "one build");
+  assert.equal(s.keystrokes, 96);
+  assert.equal(edits[0].page, 0, "the page asked with it");
+  assert.equal(core, editor, "the core's text is the editor's");
+  assert.equal(s.text("main.tex"), editor);
+  assert.equal(w.queued, null, "its build's settled timed it");
+});

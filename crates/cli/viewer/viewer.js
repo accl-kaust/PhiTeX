@@ -3371,6 +3371,16 @@ function merge(before, a, b) {
   const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
   return { from: from2, to, text };
 }
+function diff(old, text) {
+  if (old === text) return null;
+  let a = 0;
+  while (a < old.length && a < text.length && old[a] === text[a]) a++;
+  let z = 0;
+  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
+  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
+  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
+  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
+}
 function textSum(s) {
   let h = 2166136261;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
@@ -3402,12 +3412,22 @@ var Batch = class {
     this.text = apply(this.text, e);
   }
   befores = [];
-  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
+  /**
+   * The queued edits as the core takes them (UTF-16): one change, the text
+   * before the first made the text after the last (their differing middle;
+   * one edit as it is), null when none is queued or they undo each other.
+   * Never one request each: the core builds what it holds when it steps, and
+   * a host that awaits each request's answer before the next (the Overleaf
+   * extension's port to its offscreen core) had the core hold one at a
+   * time, so a transaction of N ranges (a paste, a replace-all) was built N
+   * times, each its own page (issue #57).
+   */
   take() {
-    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
+    const first = this.befores[0];
+    const one = this.edits.length === 1 ? this.edits[0] : first === void 0 ? null : diff(first, this.text);
     this.edits = [];
     this.befores = [];
-    return out;
+    return one && { start: one.from, end: one.to, text: one.text };
   }
 };
 function charOffset(s, byte) {
@@ -10867,16 +10887,6 @@ function guessMain(files) {
   };
   return names.sort((a, b) => score(b) - score(a))[0] ?? null;
 }
-function diff(old, text) {
-  if (old === text) return null;
-  let a = 0;
-  while (a < old.length && a < text.length && old[a] === text[a]) a++;
-  let z = 0;
-  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
-  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
-  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
-  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
-}
 var PreviewSession = class {
   o;
   /** Each file's text as sent to the core (queued edits: in `batches`). */
@@ -12155,7 +12165,7 @@ var PreviewSession = class {
     }
     const t0 = this.since.get(file) ?? this.now();
     const tSend = this.now();
-    const edits = b.take();
+    const e = b.take();
     this.files[file] = b.text;
     if (!this.minted && usesMinted(b.text)) {
       this.tr("minted: open again, with its runner", {});
@@ -12174,49 +12184,46 @@ var PreviewSession = class {
         }
       }
     }
-    for (const [i, e] of edits.entries()) {
-      const last = i === edits.length - 1;
-      this.builds++;
-      let done;
-      const ended = last ? new Promise((res) => (done = res, this.ended.push(res))) : null;
-      const unheard = () => this.ended = this.ended.filter((f) => f !== done);
-      const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
-      if (!r.ok) {
-        unheard();
-        this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
-        if (r.error?.includes("trapped")) await this.reopen();
-        return false;
-      }
-      if (!last) continue;
-      if (!r.json?.queued) unheard();
-      const tBack = this.now();
-      const j = r.json;
-      if (j.queued) {
-        this.queued = { t0, tSend, tBack };
-        this.setPages(j.pages);
-        const end = await ended;
-        if (end.event === "settled") await this.layout(), this.queuedLatency(end);
-        continue;
-      }
-      this.setPages(j.pages);
-      this.noteError(j);
-      this.status(this.pending);
-      const img = image(r);
-      if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
-      else if (!this.sink.layout) await this.showPage();
-      const e2e = this.now() - t0;
-      this.sink.painted?.(e2e);
-      this.sink.latency(
-        `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 core ${j.paint_ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
-        [
-          `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
-          `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " \xB7 first paint was superseded" : ""}`,
-          `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
-          `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
-          `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
-        ].filter(Boolean).join("\n")
-      );
+    if (!e) return true;
+    this.builds++;
+    let done;
+    const ended = new Promise((res) => (done = res, this.ended.push(res)));
+    const unheard = () => this.ended = this.ended.filter((f) => f !== done);
+    const r = await this.core.request({ op: "edit", file, ...e, page: this.page, dpi: this.dpi() });
+    if (!r.ok) {
+      unheard();
+      this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
+      if (r.error?.includes("trapped")) await this.reopen();
+      return false;
     }
+    if (!r.json?.queued) unheard();
+    const tBack = this.now();
+    const j = r.json;
+    if (j.queued) {
+      this.queued = { t0, tSend, tBack };
+      this.setPages(j.pages);
+      const end = await ended;
+      if (end.event === "settled") await this.layout(), this.queuedLatency(end);
+      return true;
+    }
+    this.setPages(j.pages);
+    this.noteError(j);
+    this.status(this.pending);
+    const img = image(r);
+    if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
+    else if (!this.sink.layout) await this.showPage();
+    const e2e = this.now() - t0;
+    this.sink.painted?.(e2e);
+    this.sink.latency(
+      `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 core ${j.paint_ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
+      [
+        `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
+        `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " \xB7 first paint was superseded" : ""}`,
+        `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
+        `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
+        `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
+      ].filter(Boolean).join("\n")
+    );
     return true;
   }
   /** PhiTeX's invariant: the incremental state = a fresh build of the same text. */

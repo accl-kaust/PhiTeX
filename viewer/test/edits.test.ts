@@ -25,8 +25,8 @@ test("each keystroke after Arabic text is sent at its UTF-16 place", () => {
     b.push({ from: at + k, to: at + k, text: ch });
     editor = editor.slice(0, at + k) + ch + editor.slice(at + k);
     const sent = b.take();
-    assert.deepEqual(sent, [{ start: at + k, end: at + k, text: ch }]);
-    for (const e of sent) core = coreSplice(core, e);
+    assert.deepEqual(sent, { start: at + k, end: at + k, text: ch });
+    core = coreSplice(core, sent!);
     assert.equal(core, editor, `keystroke ${k}`);
   }
   assert.ok(core.includes("{مرحبا بالعالم سلام}\n\n\\textlang{hindi}{"), core);
@@ -49,8 +49,46 @@ test("a flush of merged and separate edits past wide characters makes the editor
   push(x + 1, x + 2, "yz");
   const a = editor.indexOf("بالعالم");
   push(a, a + "بالعالم".length, "");
-  let core = doc;
-  for (const e of b.take()) core = coreSplice(core, e);
+  const core = coreSplice(doc, b.take()!);
   assert.equal(core, editor);
   assert.equal(b.size, 0);
+  assert.equal(b.take(), null);
+});
+
+// One transaction of many ranges (a paste over every line, a replace-all):
+// one change of the text before the first to the text after the last, so
+// the core builds it once (issue #57: 96 ranges, 96 builds). Wide
+// characters at its ends are kept whole; edits that undo each other send
+// nothing.
+test("a batch of many ranges is one change, its ends never inside a surrogate pair", () => {
+  const lines = Array.from({ length: 96 }, (_, i) => `row ${i} 😀 ..........`);
+  const before = lines.join("\n");
+  const b = new Batch(before);
+  let editor = before;
+  let at = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const dots = editor.indexOf("..........", at);
+    const e = { from: dots, to: dots + 10, text: i % 2 ? "##########" : "#.#.#.#.#." };
+    b.push(e);
+    editor = editor.slice(0, e.from) + e.text + editor.slice(e.to);
+    at = dots + 10;
+  }
+  assert.equal(b.size, 96);
+  const sent = b.take()!;
+  assert.equal(coreSplice(before, sent), editor);
+  assert.equal(sent.start, before.indexOf(".........."));
+  assert.equal(sent.end, before.length);
+  // (😀 → 😃: they share their high surrogate; the change is the pair)
+  const w = new Batch("a 😀 b 😀 c");
+  w.push({ from: 2, to: 4, text: "😃" });
+  w.push({ from: 7, to: 9, text: "😃" });
+  const ws = w.take()!;
+  assert.deepEqual(ws, { start: 2, end: 9, text: "😃 b 😃" });
+  // (undone: nothing to send)
+  const u = new Batch("abc");
+  u.push({ from: 0, to: 1, text: "x" });
+  u.push({ from: 2, to: 3, text: "y" });
+  u.push({ from: 0, to: 1, text: "a" });
+  u.push({ from: 2, to: 3, text: "c" });
+  assert.equal(u.take(), null);
 });

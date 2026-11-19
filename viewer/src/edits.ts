@@ -89,7 +89,19 @@ export function merge(before: string, a: Edit, b: Edit): Edit | null {
   return { from, to, text };
 }
 
-/** Edits of one file, queued between flushes, merged as they come. */
+/** `text` replacing `old`, as the one edit of their differing middle (null: same). */
+export function diff(old: string, text: string): Edit | null {
+  if (old === text) return null;
+  let a = 0;
+  while (a < old.length && a < text.length && old[a] === text[a]) a++;
+  let z = 0;
+  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
+  // (never split a surrogate pair)
+  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
+  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
+  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
+}
+
 /**
  * A text's sum (FNV-1a over its UTF-16 code units, 32 bits): the editor's and
  * the session's copies of a file compared by it as well as by length, so an
@@ -102,6 +114,7 @@ export function textSum(s: string): number {
   return h >>> 0;
 }
 
+/** Edits of one file, queued between flushes, merged as they come. */
 export class Batch {
   private edits: Edit[] = [];
   /** The text after all of them. */
@@ -135,12 +148,22 @@ export class Batch {
 
   private befores: string[] = [];
 
-  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
-  take(): CoreEdit[] {
-    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
+  /**
+   * The queued edits as the core takes them (UTF-16): one change, the text
+   * before the first made the text after the last (their differing middle;
+   * one edit as it is), null when none is queued or they undo each other.
+   * Never one request each: the core builds what it holds when it steps, and
+   * a host that awaits each request's answer before the next (the Overleaf
+   * extension's port to its offscreen core) had the core hold one at a
+   * time, so a transaction of N ranges (a paste, a replace-all) was built N
+   * times, each its own page (issue #57).
+   */
+  take(): CoreEdit | null {
+    const first = this.befores[0];
+    const one = this.edits.length === 1 ? this.edits[0] : first === undefined ? null : diff(first, this.text);
     this.edits = [];
     this.befores = [];
-    return out;
+    return one && { start: one.from, end: one.to, text: one.text };
   }
 }
 
