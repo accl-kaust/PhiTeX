@@ -8,8 +8,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  AGE, AUTHOR_COLORS, Model, OVERFLOW, SINCE, UNCOMMITTED, ageStep, agoWords, authorColors, bibEntries, bibFiles, bibItems, byteIndex, floats,
-  historyBlame, imageNames, lineOf, lineStarts, lookOf, mapPage, matchLines, parsePorcelain, printedLines, type BlameCommit, type BlameData,
+  AGE, AGE_RAMPS, AUTHOR_COLORS, Model, OVERFLOW, UNCOMMITTED, ageStep, agoWords, authorColors, bibEntries, bibFiles, bibItems, byteIndex, floats,
+  historyBlame, imageNames, lineOf, lineStarts, linesOf, lookOf, mapPage, matchLines, parsePorcelain, printedLines, sinceTime, wordRuns, type BlameCommit, type BlameData,
 } from "../src/blame.ts";
 import type { Glyph } from "../src/sync.ts";
 
@@ -54,17 +54,44 @@ test("an author keeps one colour, chosen by the email's hash; past six authors, 
   assert.ok(!AUTHOR_COLORS.includes("#F0E442"), "no yellow");
 });
 
-test("a line's look: age ramp light and dark, uncommitted hatched, since one violet", () => {
+test("a line's look: age ramps light and dark, uncommitted hatched or hidden, authors' colours; changed since's time", () => {
   const m = new Model();
   m.add({ commits: [commit("a1", "Alice", 0.2), commit("b2", "Bob", 400)], files: {}, now: NOW });
   const colors = authorColors(["alice@example.com", "bob@example.com"]);
-  assert.deepEqual(lookOf(m, 0, "age", false, 0, colors), { color: "#5B2A86", tint: 0.22 });
-  assert.equal(lookOf(m, 0, "age", true, 0, colors)!.color, "#C7A6F0");
-  assert.equal(lookOf(m, 1, "age", false, 0, colors), null);
-  assert.deepEqual(lookOf(m, -1, "age", false, 0, colors), { color: UNCOMMITTED, tint: 0.12, hatch: true });
-  assert.equal(lookOf(m, 1, "author", false, 0, colors)!.color, colors.get("bob@example.com"));
-  assert.equal(lookOf(m, 0, "since", false, NOW - DAY, colors)!.color, SINCE[0]);
-  assert.equal(lookOf(m, 1, "since", false, NOW - DAY, colors), null);
+  const look = (o: object = {}) => ({ color: "age" as const, ages: "violet" as const, wip: "show" as const, ...o });
+  assert.deepEqual(lookOf(m, 0, look(), false, colors), { color: "#5B2A86", tint: 0.22 });
+  assert.equal(lookOf(m, 0, look(), true, colors)!.color, "#C7A6F0");
+  assert.equal(lookOf(m, 0, look({ ages: "warm" }), false, colors)!.color, AGE_RAMPS.warm.light[0]);
+  assert.equal(lookOf(m, 0, look({ ages: "grey" }), true, colors)!.color, AGE_RAMPS.grey.dark[0]);
+  assert.equal(lookOf(m, 1, look(), false, colors), null);
+  assert.deepEqual(lookOf(m, -1, look(), false, colors), { color: UNCOMMITTED, tint: 0.12, hatch: true });
+  assert.equal(lookOf(m, -1, look({ wip: "hide" }), false, colors), null);
+  assert.equal(lookOf(m, 1, look({ color: "author" }), false, colors)!.color, colors.get("bob@example.com"));
+  assert.equal(sinceTime("off"), null);
+  assert.equal(sinceTime(`${NOW - DAY}:v1-submitted`), NOW - DAY);
+});
+
+test("finer than lines: runs give each word its writer, each line its newest edit, spacing ignored or counted", () => {
+  // (Alice wrote the line; Bob changed one word in it; Carol added a space)
+  const text = "The slow  fox\nNext line\n";
+  const runs: [number, number, number][] = [[0, 4, 0], [4, 8, 1], [8, 9, 0], [9, 10, 2], [10, 25, 0]];
+  const times = [NOW - 9 * DAY, NOW - 2 * DAY, NOW - DAY];
+  const newer = (a: number, b: number) => (a < 0 ? a : b < 0 ? b : times[b] > times[a] ? b : a);
+  // (a word is its newest writer's, whole: "slow" Bob's; the space Carol's alone)
+  assert.deepEqual(wordRuns("ab cd", [[0, 1, 0], [1, 2, 1], [2, 5, 0]], newer), [[0, 2, 1], [2, 5, 0]]);
+  assert.deepEqual(linesOf(text, runs, "ignore", newer), [1, 0]);
+  assert.deepEqual(linesOf(text, runs, "count", newer), [2, 0]);
+  // (the model looks a glyph up by its byte: Word detail, "slow" is Bob's, "The" Alice's)
+  const m = new Model();
+  m.detail = "word";
+  m.add({ commits: [commit("a1", "Alice", 9), commit("b2", "Bob", 2), commit("c3", "Carol", 1)], files: { "w.tex": { text, runs } }, now: NOW });
+  assert.equal(m.of(g(0, 0, "w.tex", 5))!.c, 1);
+  assert.equal(m.of(g(0, 0, "w.tex", 1))!.c, 0);
+  assert.equal(m.of(g(0, 0, "w.tex", 15))!.line, 1);
+  // (Line detail: the line's commit, as git blame gives it)
+  const l = new Model();
+  l.add({ commits: [commit("a1", "Alice", 9), commit("b2", "Bob", 2), commit("c3", "Carol", 1)], files: { "w.tex": { text, runs } }, now: NOW });
+  assert.equal(l.of(g(0, 0, "w.tex", 1))!.c, 1);
 });
 
 test("printed lines: one baseline (within a point), split a column apart", () => {

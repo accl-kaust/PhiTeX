@@ -94,6 +94,8 @@ pub struct Em<'a> {
     /// if not, a deleted float, display or picture is commented out, not
     /// shown as a unit.
     pub show_del: bool,
+    /// An image replaced by another: beside it, under it, or not shown.
+    pub fig: crate::FigStyle,
 }
 
 impl<'a> Em<'a> {
@@ -112,6 +114,7 @@ impl<'a> Em<'a> {
             adds: Vec::new(),
             pending: Vec::new(),
             show_del: true,
+            fig: crate::FigStyle::Side,
         }
     }
 
@@ -500,18 +503,28 @@ impl<'a> Em<'a> {
             it.next().is_some_and(|t| is_image(&src[t.start..t.cend])) && it.next().is_none()
         };
         let pair = image(old, self.old) && image(new, self.new) && self.show_del;
+        // (the look's: the new image alone, or the old one under it)
+        let fig = if pair { self.fig } else { crate::FigStyle::Side };
         if pair {
             self.push("\\DIFtabularbegin ");
         }
-        if !old.is_empty() {
+        if fig == crate::FigStyle::Over {
+            self.push("\\DIFoverbegin ");
+        }
+        if !old.is_empty() && fig != crate::FigStyle::New {
             self.push(&format!("\\DIFdelbegin{fl} "));
             self.mark(old, Side::Del, ctx);
             self.push(&format!("\\DIFdelend{fl} "));
+            if fig == crate::FigStyle::Over {
+                self.push("\\DIFoverend ");
+            }
             // (deleted text right before added text with no space between
             // is set apart from it: `fooarbar` reads as one word)
-            if !new.is_empty() && old.last().is_some_and(|t| t.end == t.cend) {
+            else if !new.is_empty() && old.last().is_some_and(|t| t.end == t.cend) {
                 self.push("\\DIFchangesep ");
             }
+        } else if fig == crate::FigStyle::Over {
+            self.push("\\DIFoverend ");
         }
         if !new.is_empty() {
             self.push(&format!("\\DIFaddbegin{fl} "));

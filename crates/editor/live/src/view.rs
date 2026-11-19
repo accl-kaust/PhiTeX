@@ -74,7 +74,7 @@ pub type ReviewFn = Box<dyn Fn(&str, &Value) -> Result<Value, String> + Send + S
 /// The host's blame of the project's files named (the `blame` op, the
 /// viewer's Blame: `{commits, files, refs, now}`, docs/spec-editor-protocol.md
 /// §10) ([`Viewer::on_blame`]).
-pub type BlameFn = Box<dyn Fn(&[String]) -> Result<Value, String> + Send>;
+pub type BlameFn = Box<dyn Fn(&[String], &Value) -> Result<Value, String> + Send>;
 
 /// What a build left, for the viewer.
 pub struct Built {
@@ -244,20 +244,20 @@ pub enum Ask {
         end: usize,
         text: String,
     },
-    /// Diff version `rev` against `to` (none: the files as they are).
+    /// Diff version `rev` against `to` (none: the files as they are), in
+    /// look `look` (as [`Ask::DiffRestyle`]'s).
     DiffStart {
         rev: String,
         to: Option<String>,
+        look: [Option<String>; 7],
     },
     /// Show the diff's pages (true) or the document's.
     DiffShow(bool),
-    /// The diff's look: markup, subtype, the added and deleted colours
-    /// (none: as it is).
+    /// The diff's look: markup, subtype, the added and deleted colours,
+    /// and the viewer's own styles of added text, deleted text and a
+    /// replaced figure (each none: as it is).
     DiffRestyle {
-        markup: Option<String>,
-        subtype: Option<String>,
-        add: Option<String>,
-        del: Option<String>,
+        look: [Option<String>; 7],
     },
     DiffStop,
     /// The editor's buffer of `file` is gone (closed): the file as on
@@ -1380,6 +1380,8 @@ impl Viewer {
         let op = req.get("op").and_then(Value::as_str).unwrap_or("");
         let page = req.get("page").and_then(index);
         let text = |k: &str| req.get(k).and_then(Value::as_str).map(str::to_owned);
+        // (a diff's look: markup, subtype, colours, the viewer's styles)
+        let look = || ["markup", "subtype", "add_color", "del_color", "ins_style", "del_style", "fig_style"].map(text);
         let state = || {
             let p = lock(&s.pages);
             let d = lock(&s.diff);
@@ -1641,7 +1643,7 @@ impl Viewer {
                             .collect()
                     })
                     .unwrap_or_default();
-                match lock(&s.blame).as_ref().map(|f| f(&files)) {
+                match lock(&s.blame).as_ref().map(|f| f(&files, req)) {
                     Some(Ok(v)) => ok(v),
                     Some(Err(e)) => fail(&e),
                     None => fail("no history here"),
@@ -1652,6 +1654,7 @@ impl Viewer {
                     s.ask(Ask::DiffStart {
                         rev,
                         to: text("to"),
+                        look: look(),
                     });
                     ok(json!({}))
                 }
@@ -1662,12 +1665,7 @@ impl Viewer {
                 ok(json!({}))
             }
             "diff_restyle" => {
-                s.ask(Ask::DiffRestyle {
-                    markup: text("markup"),
-                    subtype: text("subtype"),
-                    add: text("add_color"),
-                    del: text("del_color"),
-                });
+                s.ask(Ask::DiffRestyle { look: look() });
                 ok(json!({}))
             }
             "diff_stop" => {

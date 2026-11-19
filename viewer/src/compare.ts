@@ -1,20 +1,18 @@
-// Compare with a past version: the editor's project against a version's
-// files, diffed by PhiTeX's latexdiff (diff.ts, run by the core's host: its
-// `latexdiff` op), the marked-up document typeset by a session of its own on
-// a transport of its own, so the editor's stays warm; one panel shows either
-// (gated sinks). Each edit the editor makes is diffed again, 400 ms after the
-// last, and goes in as an edit of the marked-up document. The diff bar's
-// state and keys (DiffControls) drive it. Where versions come from (Overleaf's
-// history, history.ts; a git revision) and how a file is saved are the
-// host's (CompareHost); the version picker's DOM too (overleaf/src/diffui.ts).
+// Changes' Diff where the core runs in the browser (Overleaf, VS Code's
+// builtin engine, the web demo): two versions' files diffed by PhiTeX's
+// latexdiff (diff.ts, run by the core's host: its `latexdiff` op), the
+// marked-up document typeset by a session of its own on a transport of its
+// own, so the editor's stays warm; one panel shows either (gated sinks).
+// Against the editor's text, each edit is diffed again, 400 ms after the
+// last, and goes in as an edit of the marked-up document. Where versions
+// come from (Overleaf's history, history.ts; a git revision) and how a file
+// is saved are the host's (CompareHost); the popover is changes.ts's.
 
-import { diffPlace, diffSource, type DiffMarkup, type DiffOut, type DiffSubtype } from "./diff.ts";
+import { diffPlace, diffSource, type DiffChange, type DiffMarkup, type DiffOut, type DiffSubtype } from "./diff.ts";
+import { DIFF_COLORS, type ChangesDiffLook, type ChangesRunner } from "./changes.ts";
 import { byteOffset, charOffset } from "./edits.ts";
 import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink } from "./session.ts";
-import type { DiffBar, DiffBarActions, DiffLook } from "./panel.ts";
 
-/** The default look: latexdiff's UNDERLINE and SAFE, in a calmer blue and red than xcolor's pure ones, dark enough that the dark pages (inverted) show them light. */
-export const LATEXDIFF_LOOK: DiffLook = { markup: "underline", subtype: "safe", add_color: "#1347ae", del_color: "#bb1b1b" };
 
 /**
  * A sink that paints only while `on()`: two sessions, one panel (the
@@ -46,22 +44,6 @@ export class DiffHost implements EditorHost {
   ready() {}
 }
 
-/** What the diff bar drives (DiffControls; overleaf/src/diffui.ts picks the version). */
-export interface DiffRunner<V> {
-  /** Diff the version against the editor's text: its changes; `say` while it works, `count` as edits change them. */
-  start(v: V, say: (busy: string) => void, count: (n: number) => void): Promise<{ changes: number }>;
-  /** Show the diff or the current version. */
-  show(which: "diff" | "current"): void;
-  /** Go to change `k` (1-based). */
-  goto(k: number): void;
-  download(what: "pdf" | "tex"): void;
-  /** The diff's look as the user left it. */
-  look(): Promise<DiffLook>;
-  /** The diff's look changed: kept, and diffed again with it. */
-  restyle(look: DiffLook): void;
-  stop(): void;
-}
-
 /** What a compare needs of its host. */
 export interface CompareHost<V> {
   /** The editor's session (its texts, main file and pages) and its transport (the `latexdiff` op). */
@@ -69,8 +51,8 @@ export interface CompareHost<V> {
   core: CoreTransport;
   /** Called at each of the editor's edits. */
   onChanges(cb: () => void): void;
-  /** Version `v`'s text files, by path (`say`: what it is doing, "Fetching version 42…"). */
-  files(v: V, say: (busy: string) => void): Promise<Record<string, string>>;
+  /** Version `v`'s text files, by path (`say`: what it is doing, "Fetching version 42…", `done` of `total` where it counts). */
+  files(v: V, say: (busy: string, done?: number, total?: number) => void): Promise<Record<string, string>>;
   /** A transport of its own for the marked-up document's session, connected, the project's binary files given. */
   connect(): Promise<CoreTransport & { close(): void }>;
   /** The marked-up document's sink, painting while `on()` (gate it). */
@@ -81,27 +63,37 @@ export interface CompareHost<V> {
   msg(text: string, err?: boolean, shown?: boolean): void;
   /** The marked-up document's session's options (the editor's). */
   options: Partial<Options>;
-  /** The diff's look as kept (any part not kept: LATEXDIFF_LOOK's), and keeping it. */
-  loadLook(): Promise<Partial<DiffLook> | undefined>;
-  saveLook(l: DiffLook): void;
 }
 
-type DiffJson = DiffOut;
+/** The look as phitex-diff's request takes it: UNDERLINE, the preset's colours, the viewer's styles (Hide deletions: deleted text not shown). */
+export function diffStyle(l: ChangesDiffLook, hide: boolean): { markup: DiffMarkup; subtype: DiffSubtype; add_color: string; del_color: string; ins_style: string; del_style: string; fig_style: string } {
+  const [add, del] = DIFF_COLORS[l.colors] ?? DIFF_COLORS.blue;
+  return { markup: "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
+}
 
-/** A compare: the runner the diff bar drives, and which session the panel shows. */
-export class Compare<V> implements DiffRunner<V> {
+/**
+ * A compare between two versions (`to` null: the editor's text), the
+ * marked-up document typeset by a session of its own; Changes' Diff drives
+ * it (ChangesRunner, with the host mapping its versions' ids).
+ */
+export class Compare<V> {
   /** Which the panel shows: the diff (the marked-up document's pages) or the current version. */
   showing: "diff" | "current" = "current";
-  private c: { session: PreviewSession; transport: CoreTransport & { close(): void }; base: Record<string, string>; d: DiffOut } | undefined;
+  /** Whether the diff's pages are wanted in view (Changes' Diff on): a diff typeset meanwhile shows only if so. */
+  private want = false;
+  private unopened: (() => void) | null = null;
+  private c: { session: PreviewSession; transport: CoreTransport & { close(): void }; base: Record<string, string>; neu: Record<string, string> | null; d: DiffOut } | undefined;
   private h: CompareHost<V>;
-  private counted: ((n: number) => void) | undefined;
-  private looks: DiffLook | undefined;
+  private counted: ((c: DiffChange[]) => void) | undefined;
+  private look: ChangesDiffLook = { colors: "blue", ins: "wavy", del: "strike", fig: "side" };
+  private hide = false;
 
   constructor(h: CompareHost<V>) {
     this.h = h;
     let again: ReturnType<typeof setTimeout> | undefined;
     h.onChanges(() => {
-      if (!this.c) return;
+      // (against the editor's text only: two past versions do not move)
+      if (!this.c || this.c.neu) return;
       clearTimeout(again);
       again = setTimeout(() => void this.rediff(), 400);
     });
@@ -110,21 +102,16 @@ export class Compare<V> implements DiffRunner<V> {
   /** Diffed again (an edit, a new look): the marked-up document's session given the new text. */
   private async rediff(): Promise<void> {
     const c = this.c;
-    const d = c && (await this.diffOf(c.base).catch(() => null));
+    const d = c && (await this.diffOf(c.base, c.neu).catch(() => null));
     if (!d || this.c !== c) return;
     c.d = d;
     c.session.sync("diff.tex", d.tex);
-    this.counted?.(d.changes.length);
+    this.counted?.(d.changes);
   }
 
-  async look(): Promise<DiffLook> {
-    this.looks ??= { ...LATEXDIFF_LOOK, ...(await this.h.loadLook().catch(() => undefined)) };
-    return this.looks;
-  }
-
-  restyle(l: DiffLook): void {
-    this.looks = l;
-    this.h.saveLook(l);
+  restyle(l: ChangesDiffLook, hide: boolean): void {
+    this.look = l;
+    this.hide = hide;
     void this.rediff();
   }
 
@@ -136,26 +123,37 @@ export class Compare<V> implements DiffRunner<V> {
   /** Whether the editor's session paints (its sink's gate). */
   editorShown = () => this.showing !== "diff";
 
-  private async diffOf(old: Record<string, string>): Promise<DiffJson> {
+  private async diffOf(old: Record<string, string>, neu: Record<string, string> | null): Promise<DiffOut> {
     const s = this.h.session();
-    const l = await this.look();
-    const style = { markup: l.markup as DiffMarkup, subtype: l.subtype as DiffSubtype, add_color: l.add_color, del_color: l.del_color };
-    const r = await this.h.core.request({ op: "latexdiff", req: { old, new: s.texts(), main: s.main ?? "main.tex", ...style } });
+    const r = await this.h.core.request({ op: "latexdiff", req: { old, new: neu ?? s.texts(), main: s.main ?? "main.tex", ...diffStyle(this.look, this.hide) } });
     if (!r.ok) throw new Error(r.error ?? "latexdiff failed");
     if ("error" in r.json) throw new Error(r.json.error);
-    return r.json as DiffJson;
+    return r.json as DiffOut;
   }
 
   private base(): string {
     return (this.h.session().main ?? "main.tex").replace(/\.tex$/, "").replace(/.*\//, "");
   }
 
-  async start(v: V, say: (busy: string) => void, count: (n: number) => void): Promise<{ changes: number }> {
+  /** Version `from` diffed against `to` (null: the editor's text), in `look`: its changes; `count` as edits change them. */
+  async start(from: V, to: V | null, look: ChangesDiffLook, hide: boolean, say: (busy: string, done?: number, total?: number) => void, count: (c: DiffChange[]) => void): Promise<DiffChange[]> {
     this.counted = count;
-    const old = await this.h.files(v, say);
+    this.look = look;
+    this.hide = hide;
+    const old = await this.h.files(from, say);
+    const neu = to === null ? null : await this.h.files(to, say);
     say("Comparing…");
-    const d = await this.diffOf(old);
-    this.stop();
+    const d = await this.diffOf(old, neu);
+    // (the session kept from the last compare, its marked-up text synced: no new transport, no new start)
+    if (this.c) {
+      this.c.base = old;
+      this.c.neu = neu;
+      this.c.d = d;
+      this.c.session.sync("diff.tex", d.tex);
+      this.showing = this.want ? "diff" : "current";
+      if (this.want) void this.c.session.resync();
+      return d.changes;
+    }
     const t = await this.h.connect();
     // (a jump to source from the diff's pages, a double-click or a
     // selection, is at the marked-up text: taken to the user's file
@@ -165,13 +163,15 @@ export class Compare<V> implements DiffRunner<V> {
       get: (o, k, r) => (k === "goto" ? (_f: string, from: number, to: number) => this.toSource(from, to) : Reflect.get(o, k, r)),
     });
     const s = new PreviewSession(new DiffHost({ "diff.tex": d.tex }), t, mapped, this.h.options);
-    this.c = { session: s, transport: t, base: old, d };
-    this.showing = "diff";
+    this.c = { session: s, transport: t, base: old, neu, d };
+    this.showing = this.want ? "diff" : "current";
     // (the marked-up document is another one: never the current version's pages as its "last complete render")
-    mapped.opening?.();
+    // (typeset out of view: the opening when it first comes into view)
+    this.unopened = this.want ? null : () => mapped.opening?.();
+    if (this.want) mapped.opening?.();
     say("Typesetting the diff…");
     await s.start();
-    return { changes: d.changes.length };
+    return d.changes;
   }
 
   /** [from, to) of the marked-up text (UTF-16): the editor at its source in the user's file. */
@@ -199,8 +199,12 @@ export class Compare<V> implements DiffRunner<V> {
     if (out !== null) c.session.follow("diff.tex", charOffset(c.d.tex, out));
   }
 
-  show(w: "diff" | "current"): void {
+  show(diff: boolean): void {
+    this.want = diff;
+    const w = diff && this.c ? "diff" : "current";
+    if (w === this.showing) return;
     this.showing = w;
+    if (w === "diff" && this.unopened) (this.unopened(), (this.unopened = null));
     void this.shown().resync();
   }
 
@@ -210,7 +214,7 @@ export class Compare<V> implements DiffRunner<V> {
     // (the editor at the change, in its file; the page at it, in the diff or the current version)
     const session = this.h.session();
     const t = session.text(c.new.file);
-    if (t !== undefined) {
+    if (t !== undefined && !this.c.neu) {
       const [from, to] = [charOffset(t, c.new.start), charOffset(t, c.new.end)];
       this.h.goto(c.new.file, from, to);
       if (this.showing === "current") void session.toPage(c.new.file, from);
@@ -229,125 +233,22 @@ export class Compare<V> implements DiffRunner<V> {
   stop(): void {
     this.c?.transport.close();
     this.c = undefined;
+    this.unopened = null;
     if (this.showing === "diff") {
       this.showing = "current";
       void this.h.session().resync();
     }
   }
-}
 
-/** What of the panel the diff bar uses (Panel). */
-export interface DiffPanel {
-  diffBar(d: DiffBar | null, on?: DiffBarActions): void;
-  diffSettings(look: DiffLook | null, change?: (l: DiffLook) => void, defaults?: DiffLook): void;
-}
-
-/**
- * The diff bar (Panel.diffBar) while comparing: against which version, the
- * changes and the one at, and its controls and keys: d (diff / current), n
- * and Shift+N (next / previous change), Escape (the look's popover, else
- * stop). Its ⚙: the look (Panel.diffSettings), diffed again on each pick.
- */
-export class DiffControls<V> {
-  private state: DiffBar | null = null;
-  private panel: DiffPanel;
-  private run: DiffRunner<V>;
-  private actions: DiffBarActions;
-  private lookOpen = false;
-
-  constructor(panel: DiffPanel, run: DiffRunner<V>) {
-    this.panel = panel;
-    this.run = run;
-    this.actions = {
-      prev: () => this.step(-1),
-      next: () => this.step(1),
-      toggle: () => {
-        const st = this.state;
-        if (!st || st.busy) return;
-        st.showing = st.showing === "diff" ? "current" : "diff";
-        run.show(st.showing);
-        this.bar();
-      },
-      pdf: () => run.download("pdf"),
-      tex: () => run.download("tex"),
-      settings: async () => {
-        if (this.lookOpen) return this.closeLook();
-        this.lookOpen = true;
-        panel.diffSettings(await run.look(), (l) => run.restyle(l), LATEXDIFF_LOOK);
-      },
-      close: () => this.stop(),
+  /** As Changes drives it: versions by the host's ids (`v` of one; null: the editor's text). */
+  runner(v: (id: string) => V): ChangesRunner {
+    return {
+      start: (p, look, hide, say, count) => this.start(v(p.from), p.to === null ? null : v(p.to), look, hide, say, count),
+      show: (on) => this.show(on),
+      goto: (k) => this.goto(k),
+      restyle: (l, hide) => this.restyle(l, hide),
+      stop: () => this.stop(),
+      download: (w) => void this.download(w),
     };
-  }
-
-  private closeLook(): void {
-    this.lookOpen = false;
-    this.panel.diffSettings(null);
-  }
-
-  /** A compare is on (its bar shown). */
-  get active(): boolean {
-    return !!this.state;
-  }
-
-  private bar(): void {
-    this.panel.diffBar(this.state, this.actions);
-  }
-
-  private step(d: number): void {
-    const st = this.state;
-    if (!st || st.busy || !st.changes) return;
-    st.at = ((Math.max(st.at, d > 0 ? 0 : 1) - 1 + d + st.changes) % st.changes) + 1;
-    if (st.showing === "current") this.actions.toggle!();
-    this.run.goto(st.at);
-    this.bar();
-  }
-
-  /** Compare with `v`, named `title`, `when` it was ("3 h ago · v42"). */
-  async start(v: V, title: string, when: string): Promise<void> {
-    this.state = { title, when, changes: 0, at: 0, showing: "diff", busy: "Fetching that version…" };
-    this.bar();
-    try {
-      const r = await this.run.start(
-        v,
-        (busy) => {
-          if (this.state) (this.state.busy = busy), this.bar();
-        },
-        (n) => {
-          const st = this.state;
-          if (!st || st.busy) return;
-          st.changes = n;
-          st.at = Math.min(st.at, n);
-          this.bar();
-        },
-      );
-      if (!this.state) return;
-      this.state.busy = undefined;
-      this.state.changes = r.changes;
-    } catch (err) {
-      if (!this.state) return;
-      this.state.busy = `Couldn't compare: ${(err as Error).message ?? err}`;
-    }
-    this.bar();
-  }
-
-  stop(): void {
-    this.closeLook();
-    this.state = null;
-    this.run.stop();
-    this.bar();
-  }
-
-  /** A key while comparing (not in an editor or a field): handled, or false. */
-  key(e: KeyboardEvent): boolean {
-    if (!this.state || e.ctrlKey || e.metaKey || e.altKey) return false;
-    const t = e.target as HTMLElement | null;
-    if (t?.closest?.("input, textarea, [contenteditable=true], .cm-editor")) return false;
-    if (e.key === "d" || e.key === "D") this.actions.toggle!();
-    else if (e.key === "n") this.step(1);
-    else if (e.key === "N") this.step(-1);
-    else if (e.key === "Escape") this.lookOpen ? this.closeLook() : this.stop();
-    else return false;
-    e.preventDefault();
-    return true;
   }
 }

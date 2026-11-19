@@ -8,6 +8,31 @@ run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.0 name
 milestones, not versions.
 
+## 1.0.5 (unreleased)
+
+Compare and Blame are now one thing: **± Changes** :)
+
+- **One button, one popover.** Hover ± Changes to peek at what changed,
+  click it to keep the marks on the pages. Diff and Blame sit side by side
+  in it, each with its own settings, kept for next time.
+- **Diff from anywhere to anywhere.** Pick From and To in a commit graph
+  coloured by branch: click one end and then the other, drag a range,
+  double-click a commit to see just its changes, or start from your last
+  visit, the last tag or before a merge. Changes are listed by section with
+  filters, and `]` / `[` step through them. Choose the look: colour-blind
+  safe or print colours, wavy, underlined or highlighted additions, struck
+  deletions or just a caret, changed figures side by side, overlaid or new
+  only.
+- **Blame down to the word.** See who wrote this version, by person or by
+  commit, and click one to pick out their lines. Blame by line, word or
+  character, skip a reformatting commit, keep moved text with its writer,
+  dim everything older than a tag. A merged commit's card says which branch
+  it came from, and "What this commit changed" opens its diff.
+- **Overleaf, exact.** On Overleaf every character is credited to the
+  person and edit session that typed it, read straight from the project's
+  history, with no cap on its length. The history fills in as it loads,
+  with progress you can see, and reopening a project is instant.
+
 ## 1.0.4 (2026-11-17)
 
 Compare got a lot smarter, and Blame is here :)

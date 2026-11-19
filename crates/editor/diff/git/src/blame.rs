@@ -26,29 +26,93 @@ pub struct BlameCommit {
 
 /// A file's blame: the commits it names, and each line's (0-based, as the
 /// text blamed has them), an index into `commits`, or `None`: not
-/// committed yet.
+/// committed yet. Blamed by words ([`BlameOpts::words`]), `runs` too: each
+/// word's, space's and mark's byte range of the text and its commit, in
+/// order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Blame {
     pub commits: Vec<BlameCommit>,
     pub lines: Vec<Option<usize>>,
+    pub runs: Vec<(usize, usize, Option<usize>)>,
 }
 
-/// A text's lines as keys for the diff: each line's hash, its end of line
-/// (`\n`, `\r\n`) left out, so a last line with no newline matches one with.
-fn keys(text: &[u8]) -> Vec<u64> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let body = text.strip_suffix(b"\n").unwrap_or(text);
-    body.split(|&c| c == b'\n')
-        .map(|l| {
-            let l = l.strip_suffix(b"\r").unwrap_or(l);
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            l.hash(&mut h);
-            h.finish()
-        })
-        .collect()
+/// How a blame is worked out (the viewer's Blame settings).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlameOpts {
+    /// By words (a word changed in a line is its writer's, the rest the
+    /// line's earlier writers'), not lines.
+    pub words: bool,
+    /// Spacing changed alone is no change: the text keeps its writer.
+    pub ignore_space: bool,
+    /// Text moved within the file keeps its writer (`git blame -M`).
+    pub moved: bool,
+    /// Commits skipped: what they changed goes to whoever wrote it before
+    /// (`git blame --ignore-rev`).
+    pub skip: Vec<ObjectId>,
 }
+
+/// A text's units for the diff (lines, or words: a run of letters and
+/// digits (any byte past ASCII among them), a run of spaces, or one other
+/// byte): each one's key and its byte range. Spacing ignored, a line's key
+/// is of its text with its spaces dropped, and every run of spaces one key.
+fn units(text: &[u8], words: bool, ignore_space: bool) -> (Vec<u64>, Vec<(usize, usize)>) {
+    let h = |b: &[u8]| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        b.hash(&mut h);
+        h.finish()
+    };
+    let mut keys = Vec::new();
+    let mut spans = Vec::new();
+    if !words {
+        if text.is_empty() {
+            return (keys, spans);
+        }
+        let mut at = 0;
+        let body = text.strip_suffix(b"\n").unwrap_or(text);
+        for l in body.split(|&c| c == b'\n') {
+            let end = at + l.len();
+            let l = l.strip_suffix(b"\r").unwrap_or(l);
+            keys.push(if ignore_space {
+                let squeezed: Vec<u8> = l.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
+                h(&squeezed)
+            } else {
+                h(l)
+            });
+            spans.push((at, (end + 1).min(text.len())));
+            at = end + 1;
+        }
+        return (keys, spans);
+    }
+    let class = |c: u8| {
+        if c.is_ascii_alphanumeric() || c >= 0x80 || c == b'_' || c == b'@' || c == b'\\' {
+            0
+        } else if c.is_ascii_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    let mut i = 0;
+    while i < text.len() {
+        let k = class(text[i]);
+        let mut j = i + 1;
+        if k != 2 {
+            while j < text.len() && class(text[j]) == k {
+                j += 1;
+            }
+        }
+        keys.push(if k == 1 && ignore_space { h(b" ") } else { h(&text[i..j]) });
+        spans.push((i, j));
+        i = j;
+    }
+    (keys, spans)
+}
+
+/// Whether a unit is spacing only (spacing ignored: never a change of its own).
+fn blank(text: &[u8], span: (usize, usize)) -> bool {
+    text[span.0..span.1].iter().all(u8::is_ascii_whitespace)
+}
+
 
 /// A commit with lines still to place, in the walk's queue: newest
 /// (committer time) first.
@@ -75,6 +139,7 @@ impl PartialOrd for Queued {
 struct Walk<'r> {
     repo: &'r Repo,
     path: String,
+    opts: BlameOpts,
     lines: HashMap<ObjectId, Vec<u64>>,
     commits: HashMap<ObjectId, (Option<ObjectId>, Vec<ObjectId>, i64)>,
     matched: HashMap<(ObjectId, ObjectId), HashMap<usize, usize>>,
@@ -108,7 +173,7 @@ impl Walk<'_> {
     fn keys(&mut self, blob: ObjectId) -> Result<&Vec<u64>, Error> {
         if !self.lines.contains_key(&blob) {
             let data = self.repo.repo.find_object(blob).map_err(git)?.data.clone();
-            self.lines.insert(blob, keys(&data));
+            self.lines.insert(blob, units(&data, self.opts.words, self.opts.ignore_space).0);
         }
         Ok(&self.lines[&blob])
     }
@@ -117,15 +182,105 @@ impl Walk<'_> {
     fn matched(&mut self, from: ObjectId, to: ObjectId) -> Result<&HashMap<usize, usize>, Error> {
         if !self.matched.contains_key(&(from, to)) {
             let a = self.keys(from)?.clone();
-            let b = self.keys(to)?;
-            let m = phitex_diff::myers::patience(&a, b)
+            let b = self.keys(to)?.clone();
+            let mut m: HashMap<usize, usize> = phitex_diff::myers::patience(&a, &b)
                 .into_iter()
                 .map(|(i, j)| (j, i))
                 .collect();
+            if self.opts.moved {
+                moved(&a, &b, &mut m, self.opts.words);
+            }
             self.matched.insert((from, to), m);
         }
         Ok(&self.matched[&(from, to)])
     }
+}
+
+/// Units of `b` the diff did not match, found as they are among the
+/// units of `a` it did not match either (text moved): matched there. By
+/// lines, a line of more than spaces; by words, a run of four units or
+/// more, the same run in `a`.
+fn moved(a: &[u64], b: &[u64], m: &mut HashMap<usize, usize>, words: bool) {
+    let used: std::collections::HashSet<usize> = m.values().copied().collect();
+    let mut free: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (i, k) in a.iter().enumerate() {
+        if !used.contains(&i) {
+            free.entry(*k).or_default().push(i);
+        }
+    }
+    if !words {
+        let blank = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            b"".as_slice().hash(&mut h);
+            h.finish()
+        };
+        for (j, k) in b.iter().enumerate() {
+            if m.contains_key(&j) || *k == blank {
+                continue;
+            }
+            if let Some(v) = free.get_mut(k)
+                && !v.is_empty()
+            {
+                m.insert(j, v.remove(0));
+            }
+        }
+        return;
+    }
+    let mut j = 0;
+    let mut taken: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    while j < b.len() {
+        if m.contains_key(&j) {
+            j += 1;
+            continue;
+        }
+        let mut e = j;
+        while e < b.len() && !m.contains_key(&e) {
+            e += 1;
+        }
+        // (the unmatched run b[j..e]: its longest stretch of four or more found whole in a's free units)
+        let mut s = j;
+        while s + 4 <= e {
+            let mut best: Option<(usize, usize)> = None;
+            for &i in free.get(&b[s]).map_or(&[][..], Vec::as_slice) {
+                let mut n = 0;
+                while s + n < e && i + n < a.len() && a[i + n] == b[s + n] && !used.contains(&(i + n)) && !taken.contains(&(i + n)) {
+                    n += 1;
+                }
+                if n >= 4 && best.is_none_or(|(_, bn)| n > bn) {
+                    best = Some((i, n));
+                }
+            }
+            match best {
+                Some((i, n)) => {
+                    for k in 0..n {
+                        m.insert(s + k, i + k);
+                        taken.insert(i + k);
+                    }
+                    s += n;
+                }
+                None => s += 1,
+            }
+        }
+        j = e;
+    }
+}
+
+/// Where unit `l` of a commit's text, which the diff did not match (it
+/// changed it), was in its parent's (`n` units): at the same place within
+/// the hunk the commit replaced (the units between the matched ones
+/// around it), its last one past that; none where the commit only added.
+fn same_place(pairs: &[(usize, usize)], l: usize, n: usize) -> Option<usize> {
+    // (`pairs`: the matched units, (child, parent), by child)
+    let k = pairs.partition_point(|&(c, _)| c < l);
+    let before = k.checked_sub(1).map(|i| pairs[i]);
+    let after = pairs.get(k).copied();
+    let start = before.map_or(0, |(_, p)| p + 1);
+    let end = after.map_or(n, |(_, p)| p);
+    if start >= end {
+        return None;
+    }
+    let off = l - before.map_or(0, |(c, _)| c + 1);
+    Some((start + off).min(end - 1))
 }
 
 impl Repo {
@@ -138,10 +293,23 @@ impl Repo {
     ///
     /// If the history cannot be read.
     pub fn blame(&self, path: &str, now: Option<&[u8]>) -> Result<Blame, Error> {
+        self.blame_with(path, now, &BlameOpts::default())
+    }
+
+    /// [`Repo::blame`], worked out as `opts` says: by words or lines,
+    /// spacing ignored or counted, moved text kept with its writer, some
+    /// commits skipped.
+    ///
+    /// # Errors
+    ///
+    /// If the history cannot be read.
+    #[allow(clippy::too_many_lines, reason = "one walk, as git blame's")]
+    pub fn blame_with(&self, path: &str, now: Option<&[u8]>, opts: &BlameOpts) -> Result<Blame, Error> {
         let full = phitex_diff::flatten::normalize(&format!("{}{path}", self.prefix));
         let mut w = Walk {
             repo: self,
             path: full,
+            opts: opts.clone(),
             lines: HashMap::new(),
             commits: HashMap::new(),
             matched: HashMap::new(),
@@ -151,15 +319,18 @@ impl Repo {
             Some(h) => w.commit(h)?.0,
             None => None,
         };
-        let now_keys = match (now, head_blob) {
-            (Some(t), _) => keys(t),
-            (None, Some(b)) => w.keys(b)?.clone(),
+        let now_text: Vec<u8> = match (now, head_blob) {
+            (Some(t), _) => t.to_vec(),
+            (None, Some(b)) => self.repo.find_object(b).map_err(git)?.data.clone(),
             (None, None) => Vec::new(),
         };
+        let (now_keys, now_spans) = units(&now_text, opts.words, opts.ignore_space);
         let mut out = Blame {
             commits: Vec::new(),
-            lines: vec![None; now_keys.len()],
+            lines: vec![None; if opts.words { 0 } else { now_keys.len() }],
+            runs: Vec::new(),
         };
+        let mut unit: Vec<Option<usize>> = vec![None; now_keys.len()];
         let (Some(head), Some(head_blob)) = (head, head_blob) else {
             return Ok(out);
         };
@@ -182,21 +353,35 @@ impl Repo {
             };
             let (blob, parents, _) = w.commit(id)?;
             let Some(blob) = blob else { continue };
-            for p in parents {
+            // (spacing ignored: a unit of spaces alone is never the change, its writer the text's before it)
+            let skip = opts.skip.contains(&id);
+            for (pi, p) in parents.into_iter().enumerate() {
                 if lines.is_empty() {
                     break;
                 }
                 let (pblob, _, ptime) = w.commit(p)?;
                 let Some(pblob) = pblob else { continue };
-                let passed: Vec<(usize, usize)>;
+                let mut passed: Vec<(usize, usize)>;
                 if pblob == blob {
                     passed = std::mem::take(&mut lines);
                 } else {
-                    let m = w.matched(pblob, blob)?;
+                    let m = w.matched(pblob, blob)?.clone();
                     let (to, keep): (Vec<_>, Vec<_>) =
                         lines.iter().partition(|(l, _)| m.contains_key(l));
                     passed = to.into_iter().map(|(l, f)| (m[&l], f)).collect();
                     lines = keep;
+                    // (a skipped commit: what it changed passed to its first parent, at the same place in the hunk it changed)
+                    if skip && pi == 0 && !lines.is_empty() {
+                        let n = w.keys(pblob)?.len();
+                        let mut pairs: Vec<(usize, usize)> = m.iter().map(|(&c, &p)| (c, p)).collect();
+                        pairs.sort_unstable();
+                        let (moved_on, keep): (Vec<_>, Vec<_>) = lines
+                            .iter()
+                            .map(|&(l, f)| (same_place(&pairs, l, n), l, f))
+                            .partition(|(p, _, _)| p.is_some());
+                        passed.extend(moved_on.into_iter().map(|(p, _, f)| (p.unwrap_or(0), f)));
+                        lines = keep.into_iter().map(|(_, l, f)| (l, f)).collect();
+                    }
                 }
                 if passed.is_empty() {
                     continue;
@@ -218,8 +403,37 @@ impl Repo {
                 out.commits.len() - 1
             };
             for (_, f) in lines {
-                out.lines[f] = Some(k);
+                unit[f] = Some(k);
             }
+        }
+        if opts.words {
+            // (spacing ignored: a run of spaces is its neighbours' writer's, the newer of the two)
+            if opts.ignore_space {
+                let time = |k: Option<usize>| k.map_or(i64::MAX, |k| out.commits[k].time);
+                for i in 0..unit.len() {
+                    if blank(&now_text, now_spans[i]) {
+                        let a = if i > 0 { unit[i - 1] } else { None };
+                        let b = unit.get(i + 1).copied().flatten();
+                        let best = match (i > 0, i + 1 < unit.len()) {
+                            (true, true) => if time(a) >= time(b) { a } else { b },
+                            (true, false) => a,
+                            (false, true) => b,
+                            _ => unit[i],
+                        };
+                        if unit[i].is_some() || best.is_none() {
+                            unit[i] = best.or(unit[i]);
+                        }
+                    }
+                }
+            }
+            for (i, &(a, b)) in now_spans.iter().enumerate() {
+                match out.runs.last_mut() {
+                    Some(r) if r.2 == unit[i] && r.1 == a => r.1 = b,
+                    _ => out.runs.push((a, b, unit[i])),
+                }
+            }
+        } else {
+            out.lines = unit;
         }
         Ok(out)
     }
@@ -237,10 +451,23 @@ impl Repo {
         path: &str,
         now: Option<&[u8]>,
     ) -> Result<Option<BlameCommit>, Error> {
+        self.last_change_skipping(path, now, &[])
+    }
+
+    /// [`Self::last_change`], the commits in `skip` passed over: a skipped
+    /// commit's version of the file goes to whoever made the one before it
+    /// (its first parent's), as a skipped commit's lines do.
+    pub fn last_change_skipping(
+        &self,
+        path: &str,
+        now: Option<&[u8]>,
+        skip: &[ObjectId],
+    ) -> Result<Option<BlameCommit>, Error> {
         let full = phitex_diff::flatten::normalize(&format!("{}{path}", self.prefix));
         let mut w = Walk {
             repo: self,
             path: full,
+            opts: BlameOpts::default(),
             lines: HashMap::new(),
             commits: HashMap::new(),
             matched: HashMap::new(),
@@ -249,7 +476,7 @@ impl Repo {
             return Ok(None);
         };
         let mut at = head.detach();
-        let Some(blob) = w.commit(at)?.0 else {
+        let Some(mut blob) = w.commit(at)?.0 else {
             return Ok(None);
         };
         if let Some(now) = now
@@ -261,7 +488,7 @@ impl Repo {
         loop {
             let (_, parents, _) = w.commit(at)?;
             let mut same = None;
-            for p in parents {
+            for &p in &parents {
                 if w.commit(p)?.0 == Some(blob) {
                     same = Some(p);
                     break;
@@ -269,7 +496,17 @@ impl Repo {
             }
             match same {
                 Some(p) => at = p,
-                None => return self.blame_commit(at).map(Some),
+                None => {
+                    // (skipped: on to its first parent's version, if it had one)
+                    if skip.contains(&at)
+                        && let Some(&p) = parents.first()
+                        && let Some(b) = w.commit(p)?.0
+                    {
+                        (at, blob) = (p, b);
+                        continue;
+                    }
+                    return self.blame_commit(at).map(Some);
+                }
             }
         }
     }
@@ -315,7 +552,11 @@ impl Repo {
 
 #[cfg(test)]
 mod tests {
-    use super::keys;
+    use super::units;
+
+    fn keys(t: &[u8]) -> Vec<u64> {
+        units(t, false, false).0
+    }
 
     #[test]
     fn a_last_line_with_no_newline_is_the_same_line() {
@@ -324,5 +565,15 @@ mod tests {
         assert_eq!(keys(b"").len(), 0);
         assert_eq!(keys(b"\n").len(), 1);
         assert_eq!(keys(b"a\n\nb\n").len(), 3);
+    }
+
+    #[test]
+    fn words_are_runs_of_letters_spaces_or_one_mark() {
+        let (k, s) = units(b"Hi,  there\\x", true, true);
+        assert_eq!(s, [(0, 2), (2, 3), (3, 5), (5, 12)]);
+        assert_eq!(k.len(), 4);
+        // (spacing ignored: any run of spaces is one key)
+        assert_eq!(units(b" ", true, true).0, units(b"   ", true, true).0);
+        assert_ne!(units(b" ", true, false).0, units(b"   ", true, false).0);
     }
 }

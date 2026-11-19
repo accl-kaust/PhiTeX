@@ -4,7 +4,7 @@
 //! subdirectory.
 
 use phitex_diff::{ChangeKind, Dir, Files, Options, diff};
-use phitex_git::{Error, RefKind, Repo, STAGED};
+use phitex_git::{BlameOpts, Error, RefKind, Repo, STAGED};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -342,4 +342,95 @@ fn blame() {
         "A new figure"
     );
     assert_eq!(repo.last_change("fig.png", Some(b"other")).unwrap(), None);
+    // (Dana's commit skipped: the figure as it was before, Alice's)
+    let skipped = repo
+        .last_change_skipping("fig.png", None, &[fig.id])
+        .unwrap()
+        .unwrap();
+    assert_eq!(skipped.author, "Alice");
+}
+
+/// Blame by words, spacing ignored, moved text and skipped commits (the
+/// viewer's Blame settings): a word Bob changed in Alice's line is Bob's,
+/// the rest Alice's; Carol's spacing-only edit changes no one's words;
+/// Dana's moved line keeps Alice as its writer (or is Dana's, the mover
+/// credited); Bob's commit skipped, his word goes back to Alice.
+#[test]
+fn blame_by_words_moves_and_skips() {
+    let root = fixture("blame-words");
+    let paper = root.join("paper");
+    let commit = |who: &str, msg: &str| {
+        git(&root, &["add", "-A"]);
+        git(
+            &root,
+            &[
+                "-c",
+                &format!("user.name={who}"),
+                "-c",
+                &format!("user.email={}@example.com", who.to_lowercase()),
+                "commit",
+                "-q",
+                "-m",
+                msg,
+            ],
+        );
+    };
+    write(
+        &paper.join("w.tex"),
+        "The quick brown fox jumps over the lazy dog.\nA second line, which Alice wrote too.\n",
+    );
+    commit("Alice", "Two lines");
+    write(
+        &paper.join("w.tex"),
+        "The slow brown fox jumps over the lazy dog.\nA second line, which Alice wrote too.\n",
+    );
+    commit("Bob", "quick to slow");
+    write(
+        &paper.join("w.tex"),
+        "The  slow brown fox jumps over the  lazy dog.\nA second line, which Alice wrote too.\n",
+    );
+    commit("Carol", "Spacing");
+    write(
+        &paper.join("w.tex"),
+        "A second line, which Alice wrote too.\nThe  slow brown fox jumps over the  lazy dog.\n",
+    );
+    commit("Dana", "Move the second line up");
+    let repo = Repo::discover(&paper).unwrap();
+    let text = std::fs::read(paper.join("w.tex")).unwrap();
+    let who = |b: &phitex_git::Blame, word: &str| -> Option<String> {
+        let at = text.windows(word.len()).position(|w| w == word.as_bytes()).unwrap();
+        b.runs
+            .iter()
+            .find(|r| r.0 <= at && at < r.1)
+            .and_then(|r| r.2)
+            .map(|k| b.commits[k].author.clone())
+    };
+    let words = BlameOpts { words: true, ignore_space: true, moved: true, skip: vec![] };
+    let b = repo.blame_with("w.tex", Some(&text), &words).unwrap();
+    assert_eq!(who(&b, "slow").as_deref(), Some("Bob"));
+    assert_eq!(who(&b, "brown").as_deref(), Some("Alice"));
+    assert_eq!(who(&b, "lazy").as_deref(), Some("Alice"));
+    assert_eq!(who(&b, "second").as_deref(), Some("Alice"), "moved: its writer kept");
+    // (the runs cover the text, in order)
+    assert_eq!(b.runs.first().map(|r| r.0), Some(0));
+    assert_eq!(b.runs.last().map(|r| r.1), Some(text.len()));
+    assert!(b.runs.windows(2).all(|w| w[0].1 == w[1].0));
+    // (spacing counted: Carol's spaces are hers)
+    let counted = repo.blame_with("w.tex", Some(&text), &BlameOpts { ignore_space: false, ..words.clone() }).unwrap();
+    let at = text.windows(2).position(|w| w == b"  ").unwrap();
+    let k = counted.runs.iter().find(|r| r.0 <= at && at < r.1).and_then(|r| r.2).unwrap();
+    assert_eq!(counted.commits[k].author, "Carol");
+    // (by lines: moved, each keeps its writer; the mover credited, the line the diff moved is Dana's)
+    let lines = |o: &BlameOpts| -> Vec<String> {
+        let b = repo.blame_with("w.tex", Some(&text), o).unwrap();
+        b.lines.iter().map(|l| b.commits[l.unwrap()].author.clone()).collect()
+    };
+    let by_line = BlameOpts { words: false, ignore_space: true, moved: true, skip: vec![] };
+    assert_eq!(lines(&by_line), ["Alice", "Bob"]);
+    // (of two lines swapped, the diff keeps one in place: the other is moved, the mover's)
+    assert_eq!(lines(&BlameOpts { moved: false, ..by_line.clone() }).iter().filter(|w| *w == "Dana").count(), 1);
+    // (Bob's commit skipped: his word is Alice's again)
+    let bob = b.commits.iter().find(|c| c.author == "Bob").unwrap().id;
+    let skipped = repo.blame_with("w.tex", Some(&text), &BlameOpts { skip: vec![bob], ..words.clone() }).unwrap();
+    assert_eq!(who(&skipped, "slow").as_deref(), Some("Alice"));
 }

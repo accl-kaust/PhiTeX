@@ -1259,6 +1259,33 @@ TeX run; the PDF stays byte-identical.
   disk's), `-1` its lines `HEAD` does not have; a binary file (an image)
   has its last change. The watch reads git itself (`phitex-git`, no `git`
   process); renames are not followed.
+- **Changes (built 2026-11-19).** Diff and Blame are one popover under one
+  `± Changes` button (`viewer/src/changes.ts`): hovering it peeks, a click
+  keeps it on (the marks stay, the popover back on hover), ✕, Esc or a
+  second click turns it off. Diff: From → To (a commit, a tag, your last
+  visit; the working tree), the changes listed by place with kind filters,
+  `]`/`[` through them, Hide deletions; From and To open the commit picker
+  (`viewer/src/commits.ts`: one end, the rows to the pointer aimed, the
+  other; the same again cancels; a drag; Shift-click To; a double-click a
+  commit against its first parent, the picker staying; the graph coloured
+  by branch, a first parent in its lane). Blame: who wrote this version by
+  person and by commit, each a filter; the card's "What this commit
+  changed" is Diff of that commit. Each mode's settings (⚙) are kept with
+  the viewer's.
+- **The `blame` op's options**: `{op: "blame", files, detail?: "line" |
+  "word" | "char", ws?: "ignore" | "count", moved?: "keep" | "mover",
+  skip?: [commit id]}`. Detail finer than lines answers `runs: [[from, to,
+  commit index or -1]]` per file (UTF-16 offsets into `text`) beside
+  `lines`; `ws: "ignore"` gives a run of spacing its neighbours' writer;
+  `moved: "keep"` keeps moved text its first writer's (`mover` credits the
+  move); a skipped commit's lines (and an image it changed) go to whoever
+  wrote them before, as `git blame --ignore-rev`. Overleaf answers from its
+  history-v1 changes (`/changes`), exact to the character.
+- **The diff's look**: `diff_start` and `diff_restyle` take, beside
+  `markup`, `subtype`, `add_color` and `del_color`, `ins_style` (`wavy`,
+  `line`, `mark`, `colour`), `del_style` (`strike`, `mark`, `caret`,
+  `hide`) and `fig_style` (`side`, `over`, `new`): the marked-up document
+  typeset in that look.
 - **`phitex session blame [--page N]…`** (`phitex/session/blame`
   `{pages?}` → `{commits, pages: [{page, lines: [{y, x, file, lines:
   [first, last], commit, uncommitted}]}]}`): each printed line of the last

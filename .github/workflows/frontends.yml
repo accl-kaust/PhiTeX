@@ -108,14 +108,14 @@ jobs:
       # (the watch's own viewer in headless Chrome against this binary: what
       # a person clicks, each test a bug a user reported; it ran nowhere
       # before and drifted from the product)
-      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs, blame.test.mjs)
+      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs, changes.test.mjs)
         if: ${{ !cancelled() }}
         env:
           PHITEX_BIN: ${{ github.workspace }}/bin/phitex
           CHROMIUM: google-chrome
           # (the runner has no TeX Live: TeX's files from Shelf)
           PHITEX_BROWSER_SHELF: "1"
-        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs phitex/viewer/browser/blame.test.mjs
+        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs phitex/viewer/browser/changes.test.mjs
   browsers:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -192,9 +192,17 @@ jobs:
           # (the dashboard's folders, on the mock's dashboard: the recent projects at the
           # top level, a search, a folder opened, a drag into a folder, a settings change)
           node tools/dev/mock-run.mjs test/scenarios/dashboard.json
-          # (Blame from the project's history: the toggle beside Compare, its bars by age,
-          # author and since, the edits not in the history hatched, the card on hover)
-          node tools/dev/mock-run.mjs test/scenarios/blame.json
+          # (Changes, Diff and Blame in one popover under ± Changes, on a generated history of
+          # 764 changes in 650 sessions (tools/mock/history-gen.mjs): hover peeks, a click keeps it
+          # on; the list, its filters, ] and [; the picker's rules (an end, the aim, the other end,
+          # the same again, Esc, a double-click, shift-click, a drag, Done); Diff's and Blame's
+          # settings kept; Blame exact to the character against the generator's own truth; the card's
+          # "What this version changed"; light and dark; reopened from the history kept)
+          node tools/dev/mock-run.mjs test/scenarios/changes.json
+          # (the same history read slowly (each read 700 ms late): skeletons and the progress line
+          # at once, the graph and the bars filling as pages land, usable meanwhile; a failed read
+          # said with Try again)
+          node tools/dev/mock-run.mjs test/scenarios/changes-slow.json
           # (the loading animation from the moment the panel shows, no page ready: the project's
           # download held, Overleaf's PDF pane laid out late; each opening, "off", gone with the page)
           node tools/dev/mock-run.mjs test/scenarios/opening.json
@@ -218,6 +226,8 @@ jobs:
           MINTED_WHEELS=target/minted tools/build/package.sh
           node tools/dev/fx-run.mjs test/scenarios/fx.json
           node tools/dev/fx-run.mjs test/scenarios/fx-opening.json
+          # (Changes in Firefox: its history read through content.fetch, exact to the character)
+          node tools/dev/fx-run.mjs test/scenarios/fx-changes.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe

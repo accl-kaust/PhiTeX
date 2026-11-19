@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 pub use gix::ObjectId;
 
 mod blame;
-pub use blame::{Blame, BlameCommit};
+pub use blame::{Blame, BlameCommit, BlameOpts};
 
 /// The revision that names the index: `staged` against the working tree
 /// is what `git diff` shows; `HEAD` against `staged` what `git diff

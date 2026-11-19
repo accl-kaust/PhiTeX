@@ -1684,7 +1684,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 // (Blame: the files named, as the build reads them, from the
                 // project's git history; an overlay, no build)
                 let here = root.clone();
-                v.on_blame(Box::new(move |files| crate::blame::files(&here, files)));
+                v.on_blame(Box::new(move |files, req| crate::blame::files(&here, files, &crate::blame::opts_of(req))));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {
@@ -3851,7 +3851,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             let edited = again && comparing.as_ref().is_some_and(|c| c.active);
             for a in std::mem::take(&mut diff_asks) {
                 match a {
-                    Ask::DiffStart { rev, to } => {
+                    Ask::DiffStart { rev, to, look } => {
                         // (a session kept from the last diff: this one an
                         // edit of it; else a new one, its first build a
                         // clean build that streams its pages)
@@ -3872,6 +3872,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             };
                         let started = src.and_then(|g| {
                             let g = &*g;
+                            // (the viewer's look first: the diff made once, in it)
+                            if let Some(c) = comparing.as_mut()
+                                && look.iter().any(Option::is_some)
+                            {
+                                c.look = c.look_from(&look);
+                            }
                             match comparing.as_mut() {
                                 Some(c) => c.against(g, &rev, to.as_deref(), &now, &main_rel),
                                 None => crate::compare::Compare::start(
@@ -3884,9 +3890,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                     diff_status.clone(),
                                     writing,
                                 )
-                                .map(|c| {
+                                .map(|mut c| {
                                     if ui.verbose > 0 {
                                         ui.line(&st.dim(&format!("diff: {}", c.began)));
+                                    }
+                                    if look.iter().any(Option::is_some) {
+                                        let l = c.look_from(&look);
+                                        c.restyle(l, &now, g, &main_rel);
                                     }
                                     comparing = Some(c);
                                 }),
@@ -3914,19 +3924,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         }
                     }
                     Ask::DiffShow(on) => v.diff_shown(on),
-                    Ask::DiffRestyle {
-                        markup,
-                        subtype,
-                        add,
-                        del,
-                    } => {
+                    Ask::DiffRestyle { look } => {
                         if let Some(c) = comparing.as_mut().filter(|c| c.active) {
-                            let look = c.look_from(
-                                markup.as_deref(),
-                                subtype.as_deref(),
-                                add.as_deref(),
-                                del.as_deref(),
-                            );
+                            let look = c.look_from(&look);
                             match crate::compare::Git::open(&root) {
                                 Ok(g) => {
                                     c.restyle(look, &now, &g, &main_rel);

@@ -19,12 +19,33 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use phitex_git::{Blame, BlameCommit, Repo};
+use phitex_git::{Blame, BlameCommit, BlameOpts, Repo};
 use serde_json::{Value, json};
 
-/// A file blamed before: its bytes' hash and `HEAD` then, and its blame
-/// (a commit's file blamed again only once either moves).
-type Kept = HashMap<String, (u64, String, Blame)>;
+/// A file blamed before, by its name and how: its bytes' hash and `HEAD`
+/// then, and its blame (a commit's file blamed again only once either
+/// moves).
+type Kept = HashMap<(String, String), (u64, String, Blame)>;
+
+/// How the viewer asks a blame worked out (its `blame` op's `detail`,
+/// `ws`, `moved`, `skip`): by words where it asks for words or
+/// characters (git's history gives words at best), spacing ignored unless
+/// it is counted, moved text kept with its writer unless the mover is
+/// credited, the commits skipped that name one.
+#[must_use]
+pub fn opts_of(req: &Value) -> BlameOpts {
+    let s = |k: &str| req.get(k).and_then(Value::as_str).unwrap_or("");
+    BlameOpts {
+        words: matches!(s("detail"), "word" | "char"),
+        ignore_space: s("ws") != "count",
+        moved: s("moved") != "mover",
+        skip: req
+            .get("skip")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str()?.parse().ok()).collect())
+            .unwrap_or_default(),
+    }
+}
 
 fn kept() -> &'static Mutex<Kept> {
     static K: OnceLock<Mutex<Kept>> = OnceLock::new();
@@ -104,22 +125,23 @@ impl Commits {
 
 /// File `name`'s blame as it is now (`bytes`), kept while its bytes and
 /// `HEAD` stay.
-fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8]) -> Result<Blame, String> {
+fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8], opts: &BlameOpts) -> Result<Blame, String> {
     let h = hash(bytes);
+    let key = (name.to_owned(), format!("{opts:?}"));
     if let Some((kh, khead, b)) = kept()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .get(name)
+        .get(&key)
         && *kh == h
         && khead == head
     {
         return Ok(b.clone());
     }
-    let b = repo.blame(name, Some(bytes)).map_err(|e| e.to_string())?;
+    let b = repo.blame_with(name, Some(bytes), opts).map_err(|e| e.to_string())?;
     kept()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .insert(name.to_owned(), (h, head.to_owned(), b.clone()));
+        .insert(key, (h, head.to_owned(), b.clone()));
     Ok(b)
 }
 
@@ -132,7 +154,7 @@ fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8]) -> Result<Blame, 
 /// # Errors
 ///
 /// Outside a git repository.
-pub fn files(root: &Path, files: &[String]) -> Result<Value, String> {
+pub fn files(root: &Path, files: &[String], opts: &BlameOpts) -> Result<Value, String> {
     let repo = Repo::discover(root).map_err(|e| format!("no git history here ({e})"))?;
     let head = repo
         .resolve("HEAD")
@@ -150,22 +172,24 @@ pub fn files(root: &Path, files: &[String]) -> Result<Value, String> {
         };
         if binary(name, &bytes) {
             let last = repo
-                .last_change(name, Some(&bytes))
+                .last_change_skipping(name, Some(&bytes), &opts.skip)
                 .map_err(|e| e.to_string())?;
             let k = last.as_ref().map_or(-1, |c| idx(commits.index(c)));
             out.insert(name.clone(), json!({"last": k}));
             continue;
         }
-        let b = blame_of(&repo, &head, name, &bytes)?;
-        let lines: Vec<i64> = b
-            .lines
-            .iter()
-            .map(|l| l.map_or(-1, |k| idx(commits.index(&b.commits[k]))))
-            .collect();
-        out.insert(
-            name.clone(),
-            json!({"text": String::from_utf8_lossy(&bytes), "lines": lines}),
-        );
+        let b = blame_of(&repo, &head, name, &bytes, opts)?;
+        let mut c = |k: Option<usize>| k.map_or(-1, |k| idx(commits.index(&b.commits[k])));
+        let text = String::from_utf8_lossy(&bytes);
+        if opts.words {
+            // (by words: each run's range of the text in UTF-16 units, as the viewer counts them)
+            let u16 = utf16_at(&text);
+            let runs: Vec<Value> = b.runs.iter().map(|&(a, e, k)| json!([u16(a), u16(e), c(k)])).collect();
+            out.insert(name.clone(), json!({"text": text, "runs": runs}));
+        } else {
+            let lines: Vec<i64> = b.lines.iter().map(|&l| c(l)).collect();
+            out.insert(name.clone(), json!({"text": text, "lines": lines}));
+        }
     }
     let refs: Vec<Value> = repo
         .refs()
@@ -195,6 +219,21 @@ pub fn files(root: &Path, files: &[String]) -> Result<Value, String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
     }))
+}
+
+/// A text's UTF-16 offset of each of its byte offsets (a byte inside a
+/// character: the character's).
+fn utf16_at(text: &str) -> impl Fn(usize) -> usize + '_ {
+    let mut at = vec![0usize; text.len() + 1];
+    let mut u = 0;
+    for (b, ch) in text.char_indices() {
+        for k in 0..ch.len_utf8() {
+            at[b + k] = u;
+        }
+        u += ch.len_utf16();
+    }
+    at[text.len()] = u;
+    move |b: usize| at[b.min(text.len())]
 }
 
 fn idx(k: usize) -> i64 {
@@ -276,7 +315,7 @@ pub fn pages(root: &Path, names: &[String], pages: &[Value]) -> Result<Value, St
         .map(|n| n.strip_prefix("./").unwrap_or(n).to_owned())
         .filter(|n| safe(n) && root.join(n).is_file())
         .collect();
-    let b = files(root, &wanted)?;
+    let b = files(root, &wanted, &BlameOpts::default())?;
     let commits = b["commits"].as_array().cloned().unwrap_or_default();
     let time = |k: i64| -> i64 {
         usize::try_from(k)

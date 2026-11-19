@@ -604,7 +604,8 @@ impl Side {
             toks.extend(c.toks.iter().map(|t| shifted(t, at)));
         }
         let mut em = Em::new(&base.flat.text, &text, &self.sigs, self.amsmath);
-        em.show_del = base.opts.markup.shows_deleted();
+        em.show_del = base.opts.shows_deleted();
+        em.fig = base.opts.style.map(|s| s.fig).unwrap_or_default();
         em.run(&old.toks[ta..tb], &toks, old_end, text.len());
         let nl = em.nl;
         let section = em.section.clone();

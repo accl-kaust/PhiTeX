@@ -26,7 +26,7 @@
 //! subtypes that need one (zref, atbegshi) still load it, as latexdiff
 //! does.
 
-use crate::{Color, Markup, Options, Subtype};
+use crate::{Color, DelStyle, InsStyle, Markup, Options, Style, Subtype};
 
 /// ulem's underlining, renamed: each definition on one line (every line
 /// of the preamble's extension is tagged `%DIF PREAMBLE`, after a space a
@@ -277,6 +277,55 @@ fn markup(m: Markup, add: &str, del: &str, a: &str, d: &str, driver: &str) -> Ve
     l
 }
 
+/// A colour's light band for a marker: `c` (`R G B`) 16% over white.
+fn light(c: &str) -> String {
+    c.split(' ')
+        .map(|x| {
+            let v: f64 = x.parse().unwrap_or(0.0);
+            let m = v * 0.16 + 0.84;
+            let s = format!("{m:.4}");
+            s.trim_end_matches('0').trim_end_matches('.').to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The definitions of `\DIFadd` and `\DIFdel` (`add`, `del` their names)
+/// in the viewer's own look `st`, colours `a` and `d` (`R G B`): ulem's
+/// underlines, its wave, a marker's band (a light rule of the colour as
+/// the leaders under the words, the struck line on it for deleted
+/// text), or a caret where deleted text was.
+fn styled(st: Style, add: &str, del: &str, a: &str, d: &str) -> Vec<String> {
+    let mut l: Vec<String> = ULEM.lines().map(str::to_owned).collect();
+    l.extend(COLOR.lines().map(str::to_owned));
+    l.extend(FONTS.lines().map(str::to_owned));
+    l.push(r"\protected\def\phitexdifhl#1{\leavevmode\bgroup\phitexdifmarkover{\hbox{#1}}\phitexdifon}".into());
+    let band = |c: &str| format!(r"\phitexdifpush{{{}}}\vrule width1bp height.78em depth.24em\phitexdifpop", light(c));
+    let def = |name: &str, body: String| format!("\\providecommand{{\\{name}}}[1]{{{body}}}");
+    l.push(def(
+        add,
+        match st.ins {
+            InsStyle::Wavy => format!("\\phitexdifmark{{{a}}}{{\\phitexdifuwave{{#1}}}}"),
+            InsStyle::Line => format!("\\phitexdifmark{{{a}}}{{\\phitexdifuline{{#1}}}}"),
+            InsStyle::Mark => format!("\\phitexdifmark{{{a}}}{{\\phitexdifhl{{{}}}{{#1}}}}", band(a)),
+            InsStyle::Colour => format!("\\phitexdifmark{{{a}}}{{#1}}"),
+        },
+    ));
+    l.push(def(
+        del,
+        match st.del {
+            DelStyle::Strike => format!("\\phitexdifmark{{{d}}}{{\\phitexdifsout{{#1}}}}"),
+            DelStyle::Mark => format!(
+                "\\phitexdifmark{{{d}}}{{\\phitexdifhl{{{}\\kern-1bp\\phitexdifpush{{{d}}}\\vrule width1bp height.3em depth-.22em\\phitexdifpop}}{{#1}}}}",
+                band(d)
+            ),
+            DelStyle::Caret => format!("\\phitexdifmark{{{d}}}{{\\kern.04em\\hbox{{\\lower.62ex\\hbox{{$\\scriptstyle\\wedge$}}}}\\kern.04em}}"),
+            DelStyle::Hide => String::new(),
+        },
+    ));
+    l
+}
+
 /// The definitions of `\DIFaddbegin`, … for `s`, colours `a` and `d`.
 /// `colored`: the colour definitions are there already.
 #[allow(
@@ -410,6 +459,10 @@ fn units(m: Markup, a: &str, d: &str, colored: bool) -> Vec<String> {
     l.push("\\providecommand{\\DIFtabularbegin}{\\phitexdiftabbegin}".into());
     l.push("\\providecommand{\\DIFtabularend}{\\phitexdiftabend}".into());
     l.push("\\protected\\def\\phitexdifchangesep{\\ifhmode\\hskip.2em\\relax\\fi}".into());
+    // (an image replaced, the look's overlay: the old one in no width, the new one over it)
+    l.push("\\mathchardef\\phitexdifobox=31008\\relax".into());
+    l.push("\\providecommand{\\DIFoverbegin}{\\leavevmode\\setbox\\phitexdifobox\\hbox\\bgroup}".into());
+    l.push("\\providecommand{\\DIFoverend}{\\egroup\\rlap{\\box\\phitexdifobox}}".into());
     l.push("\\providecommand{\\DIFchangesep}{\\phitexdifchangesep}".into());
     // (a deleted image: as it was where its file is still there, by its
     // name or with graphics' usual extensions; else its name, framed as
@@ -439,7 +492,10 @@ fn parts(opts: &Options, preamble: &str) -> (Vec<String>, Vec<String>) {
     };
     let m = opts.markup;
     let mut lines = vec![format!("%DIF {} PREAMBLE", m.name())];
-    let mut types = markup(m, add, del, &a, &d, opts.driver.name());
+    let mut types = match opts.style {
+        Some(st) if m == Markup::Underline => styled(st, add, del, &a, &d),
+        _ => markup(m, add, del, &a, &d, opts.driver.name()),
+    };
     // (the change bars in the added text's colour, where colours are
     // chosen: changebar's own, by xcolor)
     if m.bars() && (opts.add_color.is_some() || opts.del_color.is_some()) {
@@ -728,5 +784,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The viewer's own looks (Changes' settings): every one balanced on
+    /// each line, its added and deleted text marked as named, deleted
+    /// text hidden by Hide deletions.
+    #[test]
+    fn every_style_balances_and_marks_as_named() {
+        use crate::{DelStyle, FigStyle, InsStyle, Style};
+        for ins in [InsStyle::Wavy, InsStyle::Line, InsStyle::Mark, InsStyle::Colour] {
+            for del in [DelStyle::Strike, DelStyle::Mark, DelStyle::Caret, DelStyle::Hide] {
+                let st = Style { ins, del, fig: FigStyle::Side };
+                let o = Options { style: Some(st), ..Options::default() };
+                let p = dif_preamble(&o, "") + &dif_body(&o, "");
+                for l in p.lines().filter(|l| !l.starts_with('%')) {
+                    let depth = l.chars().fold(0i32, |d, c| match c {
+                        '{' => d + 1,
+                        '}' => d - 1,
+                        _ => d,
+                    });
+                    assert_eq!(depth, 0, "{st:?}: {l}");
+                }
+                let add = p.lines().find(|l| l.starts_with("\\providecommand{\\DIFadd}")).unwrap();
+                let dl = p.lines().find(|l| l.starts_with("\\providecommand{\\DIFdel}")).unwrap();
+                assert_eq!(add.contains("\\phitexdifuwave"), ins == InsStyle::Wavy, "{add}");
+                assert_eq!(add.contains("\\phitexdifuline"), ins == InsStyle::Line, "{add}");
+                assert_eq!(add.contains("\\phitexdifhl"), ins == InsStyle::Mark, "{add}");
+                assert_eq!(dl.contains("\\phitexdifsout"), del == DelStyle::Strike, "{dl}");
+                assert_eq!(dl.contains("\\wedge"), del == DelStyle::Caret, "{dl}");
+                assert_eq!(dl.contains("[1]{}"), del == DelStyle::Hide, "{dl}");
+                assert_eq!(o.shows_deleted(), del != DelStyle::Hide);
+                // (a marker's band: the colour 16% over white)
+                if ins == InsStyle::Mark {
+                    assert!(add.contains("0.84"), "{add}");
+                }
+            }
+        }
+        assert_eq!(Style::parse(None, None, None), None);
+        let s = Style::parse(Some("mark"), Some("caret"), Some("over")).unwrap();
+        assert_eq!(s.names(), ("mark", "caret", "over"));
+        assert_eq!(Style::parse(Some("?"), None, None).unwrap().names(), ("wavy", "strike", "side"));
     }
 }

@@ -527,7 +527,7 @@ var Viewer = class _Viewer {
         });
     }, { passive: true });
     let told = "";
-    const pick2 = () => setTimeout(() => {
+    const pick = () => setTimeout(() => {
       const rn = root.getRootNode();
       const sel = rn.getSelection?.() ?? document.getSelection();
       if (!sel || sel.isCollapsed || !sel.rangeCount) return;
@@ -560,7 +560,7 @@ var Viewer = class _Viewer {
       told = key;
       host2.selected?.(sel2);
     }, 0);
-    root.addEventListener("pointerup", pick2);
+    root.addEventListener("pointerup", pick);
     let drawing = 0;
     root.ownerDocument.addEventListener("selectionchange", () => {
       if (drawing) return;
@@ -603,10 +603,10 @@ var Viewer = class _Viewer {
       if (!(e.buttons & 1) || dragFrame) return;
       dragFrame = requestAnimationFrame(() => {
         dragFrame = 0;
-        pick2();
+        pick();
       });
     });
-    root.addEventListener("keyup", (e) => e.shiftKey && pick2());
+    root.addEventListener("keyup", (e) => e.shiftKey && pick());
     root.addEventListener("dblclick", (e) => {
       const el = e.target.closest(".slot");
       if (!el) return;
@@ -1346,8 +1346,8 @@ var Viewer = class _Viewer {
     const near = below.slice(0, 4);
     const who = aux ? /\p{L}[\p{L}'’-]+/u.exec(aux)?.[0] : void 0;
     const numbers = (t) => /^[\d\s.,;:–—-]+$/.test(t);
-    const pick2 = near.find(([l]) => _Viewer.LABEL.test(l.t)) ?? (who ? near.find(([l]) => l.t.includes(who)) : void 0) ?? near.find(([l]) => !numbers(l.t)) ?? near[0];
-    const i = pick2[1];
+    const pick = near.find(([l]) => _Viewer.LABEL.test(l.t)) ?? (who ? near.find(([l]) => l.t.includes(who)) : void 0) ?? near.find(([l]) => !numbers(l.t)) ?? near[0];
+    const i = pick[1];
     const first = lines3[i], out = [first.t], lead = first.y1 - first.y0;
     for (let j = i + 1, last = first; j < lines3.length && out.length < 8; j++) {
       const l = lines3[j];
@@ -1447,17 +1447,17 @@ var Viewer = class _Viewer {
     const v = this.scroller.getBoundingClientRect();
     const at = this.pointAt(v.left + v.width / 2, v.top + 12);
     if (!at) return null;
-    let words2 = "", far = Infinity;
+    let words3 = "", far = Infinity;
     const y = v.top + 12;
     ensureText(this.slots[at.k]?.el);
     for (const t of this.slots[at.k]?.el.querySelectorAll("text") ?? []) {
       const r = t.getBoundingClientRect();
       if (r.bottom < y - 4 || !t.textContent?.trim()) continue;
       const d = Math.abs(r.top - y);
-      if (d < far) far = d, words2 = t.textContent.trim();
+      if (d < far) far = d, words3 = t.textContent.trim();
       if (r.top > y + 120) break;
     }
-    return { k: at.k, fy: at.fy, words: words2.length > 48 ? `${words2.slice(0, 47)}\u2026` : words2 };
+    return { k: at.k, fy: at.fy, words: words3.length > 48 ? `${words3.slice(0, 47)}\u2026` : words3 };
   }
   /** The view at `t`. */
   toStop(t) {
@@ -2576,11 +2576,14 @@ header:active { cursor: grabbing; }
 #findn.none { color: var(--ph-danger); }
 /* narrower: what gives way, in order: the zoom's long label, find's box, then (560) the buttons the \u22EF menu also has, then the page box beside an open find */
 .bar > :not(.status):not(.grow) { flex: none; }
+.chg-btn { gap: 5px; padding: 0 7px; }
+.chg-btn .chg-glyph { font: 600 15px ui-monospace, "DM Mono", monospace; line-height: 1; }
+.chg-btn.on { background: var(--ph-hover); color: var(--ph-fg); box-shadow: inset 0 0 0 1px var(--ph-border); }
 .bar > .grow { flex: 1 1 0; min-width: 0; }
 @container (max-width: 820px) { #zl { display: none; } #zs { display: inline; } }
 @container (max-width: 760px) {
   /* (find open: Compare and Download step aside, to the \u22EF menu, which has them) */
-  .bar:has(.find:not([hidden])) :is(#b-compare, #pdf) { display: none; }
+  .bar:has(.find:not([hidden])) :is(#b-changes, #pdf) { display: none; }
   .bar:has(.find:not([hidden])) #x-compare.narrow:not([hidden]) { display: flex !important; }
 }
 @container (max-width: 700px) { .find input { width: 110px; } #findn { min-width: 0; } }
@@ -4005,7 +4008,7 @@ function byline(svg2, word) {
     x += adv[i];
     return g.lastElementChild;
   });
-  const paths = [...lockup.querySelectorAll("path")], A = paths.slice(0, 2), stripes = paths.slice(2, 6), words2 = paths.slice(6);
+  const paths = [...lockup.querySelectorAll("path")], A = paths.slice(0, 2), stripes = paths.slice(2, 6), words3 = paths.slice(6);
   const up = [77.59, -94], n = Math.hypot(up[0], up[1]), D = 150, from2 = [-up[0] / n * D, -up[1] / n * D];
   const trails = stripes.map(
     (s) => [0.4, 0.22, 0.1].map((op) => {
@@ -4022,8 +4025,8 @@ function byline(svg2, word) {
     return c;
   });
   const wg = document.createElementNS(NS, "g");
-  words2[0]?.before(wg);
-  words2.forEach((w) => wg.append(w));
+  words3[0]?.before(wg);
+  words3.forEach((w) => wg.append(w));
   lockup.prepend(svg`<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
   const clipped = document.createElementNS(NS, "g");
   wg.before(clipped);
@@ -4051,7 +4054,7 @@ function byline(svg2, word) {
         o.setAttribute("opacity", String(f2(t < 300 ? 0 : 1 - clamp01((t - 1050) / 300))));
       });
       A.forEach((a) => a.setAttribute("opacity", String(f2(clamp01((t - 850) / 350)))));
-      words2.forEach((w, i) => at(w, -470 * (1 - easeOutExpo((t - 800 - i * 45) / 1100)), 0));
+      words3.forEach((w, i) => at(w, -470 * (1 - easeOutExpo((t - 800 - i * 45) / 1100)), 0));
       rule.setAttribute("opacity", t < 900 ? "0" : "1");
       rule.setAttribute("transform", `translate(0 ${f2(mid)}) scale(1 ${f2(ease2((t - 900) / 300))}) translate(0 ${f2(-mid)})`);
       const sk = easeBack((t - 1e3) / 550, 2.6), cx = Number(seeds.getAttribute("x")) + sw / 2, by = mid + sh / 2;
@@ -6933,7 +6936,6 @@ var AGE = [
 ];
 var AUTHOR_COLORS = ["#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#0072B2", "#D55E00"];
 var OVERFLOW = "#8A8F98";
-var SINCE = ["#5B2A86", "#C7A6F0"];
 function ageStep(days) {
   return AGE.findIndex((a) => days < a.days);
 }
@@ -7056,6 +7058,53 @@ function bibEntries(text) {
   });
   return out;
 }
+var WORD2 = /[\p{L}\p{N}\p{M}_@\\']/u;
+function wordRuns(text, runs, newer) {
+  const at = new Int32Array(text.length);
+  for (const [a, b, c] of runs) at.fill(c, a, b);
+  for (let i = 0; i < text.length; ) {
+    if (!WORD2.test(text[i])) {
+      i++;
+      continue;
+    }
+    let j = i, c = at[i];
+    while (j < text.length && WORD2.test(text[j])) c = newer(c, at[j++]);
+    at.fill(c, i, j);
+    i = j;
+  }
+  return compress(at);
+}
+function compress(at) {
+  const out = [];
+  for (let i = 0; i < at.length; i++) {
+    const r = out.at(-1);
+    if (r && r[2] === at[i] && r[1] === i) r[1] = i + 1;
+    else out.push([i, i + 1, at[i]]);
+  }
+  return out;
+}
+function linesOf(text, runs, ws, newer) {
+  const at = new Int32Array(text.length);
+  for (const [a, b, c] of runs) at.fill(c, a, b);
+  const out = [];
+  let start = 0;
+  const end = (i) => {
+    let c, any;
+    for (let k = start; k < i; k++) {
+      any = any === void 0 ? at[k] : newer(any, at[k]);
+      if (ws === "ignore" && /\s/.test(text[k])) continue;
+      c = c === void 0 ? at[k] : newer(c, at[k]);
+    }
+    out.push(c ?? any ?? -1);
+  };
+  for (let i = 0; i < text.length; i++)
+    if (text[i] === "\n") {
+      end(i + 1);
+      start = i + 1;
+    }
+  if (start < text.length) end(text.length);
+  return out;
+}
 var Model = class {
   commits = [];
   refs = [];
@@ -7065,6 +7114,9 @@ var Model = class {
   byId = /* @__PURE__ */ new Map();
   bib = /* @__PURE__ */ new Map();
   bbls = /* @__PURE__ */ new Map();
+  /** The detail lines are looked up at, and spacing's. */
+  detail = "line";
+  ws = "ignore";
   /** `d` taken in: its commits merged with those already here by id. */
   add(d) {
     const map = d.commits.map((c) => {
@@ -7075,8 +7127,17 @@ var Model = class {
     const re = (i) => i === void 0 ? void 0 : i < 0 ? -1 : map[i] ?? -1;
     if (d.now) this.now = d.now;
     if (d.refs) this.refs = d.refs;
+    const newer = (a, b) => this.newer(a, b);
     for (const [name, f] of Object.entries(d.files)) {
-      const g = { ...f, lines: f.lines?.map((l) => re(l)), last: re(f.last) };
+      const g = { ...f, lines: f.lines?.map((l) => re(l)), runs: f.runs?.map(([a, b, c]) => [a, b, re(c)]), last: re(f.last) };
+      if (g.text !== void 0 && g.runs) {
+        g.lines ??= linesOf(g.text, g.runs, this.ws, newer);
+        if (this.detail !== "line") {
+          const runs = this.detail === "word" ? wordRuns(g.text, g.runs, newer) : g.runs;
+          const bytes = byteIndex(g.text);
+          g.br = { at: Uint32Array.from(runs, (r) => bytes[r[0]]), c: Int32Array.from(runs, (r) => r[2]) };
+        }
+      }
       if (f.text !== void 0) g.starts = lineStarts(f.text);
       this.files.set(name, g);
       if (f.text !== void 0 && /\.tex$|\.ltx$/i.test(name)) this.floats.push(...floats(name, f.text));
@@ -7126,6 +7187,15 @@ var Model = class {
     const f = this.files.get(g.file);
     if (!f?.lines || !f.starts) return null;
     const line = lineOf(f.starts, g.start);
+    if (f.br) {
+      let lo = 0, hi = f.br.at.length;
+      while (hi - lo > 1) {
+        const m = lo + hi >> 1;
+        if (f.br.at[m] <= g.start) lo = m;
+        else hi = m;
+      }
+      return { c: f.br.c[lo] ?? -1, file: g.file, line, last: line };
+    }
     return { c: f.lines[line] ?? -1, file: g.file, line, last: line };
   }
   /** The commit a float's picture is blamed on: its images' last changes, its inputs' lines, else the float's own lines but its caption's. */
@@ -7253,73 +7323,84 @@ function agoWords(t, now) {
     }
   return "just now";
 }
-function lookOf2(m, c, mode, dark, since, colors) {
-  if (c < 0) return { color: UNCOMMITTED, tint: 0.12, hatch: true };
+var BLAME_LOOK = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", tint: "hover", bars: "left", width: 4, people: "okabe", ages: "violet" };
+var AGE_RAMPS = {
+  violet: { name: "Violet", light: ["#5B2A86", "#7B4FAE", "#A07CC9", "#C9B5E2"], dark: ["#C7A6F0", "#AE8AD8", "#8E6CB8", "#6B5390"] },
+  warm: { name: "Warm", light: ["#b91c1c", "#ea580c", "#f59e0b", "#fde68a"], dark: ["#fca5a5", "#fdba74", "#fcd34d", "#a16207"] },
+  grey: { name: "Grey", light: ["#222222", "#555555", "#888888", "#bbbbbb"], dark: ["#eeeeee", "#bbbbbb", "#888888", "#555555"] }
+};
+var OVERLEAF_COLORS = ["#3e9cdb", "#e26a6a", "#43b581", "#a776d9", "#e0a030", "#2bb3b1"];
+function lookOf2(m, c, look2, dark, colors) {
+  if (c < 0) return look2.wip === "hide" ? null : { color: UNCOMMITTED, tint: 0.12, hatch: true };
   const x = m.commits[c];
   if (!x) return null;
-  if (mode === "age") {
-    const a = AGE[ageStep((m.now - x.time) / 86400)];
-    return a?.bar ? { color: a.bar[dark ? 1 : 0], tint: a.tint } : null;
+  if (look2.color === "age") {
+    const i = ageStep((m.now - x.time) / 86400);
+    const ramp = AGE_RAMPS[look2.ages] ?? AGE_RAMPS.violet;
+    const col = (dark ? ramp.dark : ramp.light)[i];
+    return col ? { color: col, tint: AGE[i].tint } : null;
   }
-  if (mode === "author") return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
-  return x.time > since ? { color: SINCE[dark ? 1 : 0], tint: 0.18 } : null;
+  return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
 }
+var sinceTime = (since) => since && since !== "off" ? Number(since.split(":")[0]) : null;
 var BLAME_CSS = `
-.blamebar { display: none; flex: none; align-items: center; gap: 6px 14px; padding: 4px 8px 4px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); font-size: 12.5px; }
-.blamebar.on { display: flex; }
-.blamebar .grp { display: inline-flex; align-items: center; gap: 6px; }
-.blamebar .lbl { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ph-fg2); }
-.blamebar .seg { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); overflow: hidden; }
-.blamebar .seg button { all: unset; cursor: pointer; padding: 2px 9px; color: var(--ph-fg); }
-.blamebar .seg button + button { border-left: 1px solid var(--ph-border); }
-.blamebar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
-.blamebar .seg button:focus-visible, .blamebar select:focus-visible, .blamebar .x:focus-visible { outline: 2px solid var(--ph-accent); outline-offset: 1px; }
-.blamebar select { font: inherit; padding: 1px 4px; border-radius: var(--ph-radius); border: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); max-width: 260px; }
-.blamebar .legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
-.blamebar .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.blamebar .lg small { color: var(--ph-fg2); font-variant-numeric: tabular-nums; font-size: inherit; }
-.blamebar .sw { width: 18px; height: 11px; border-radius: 2px; position: relative; overflow: hidden; border: 1px solid var(--ph-border); }
-.blamebar .sw i { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
-.blamebar .say { color: var(--ph-fg2); }
-.blamebar .grow { flex: 1; }
-.blamebar .x { all: unset; cursor: pointer; padding: 0 6px; color: var(--ph-fg2); border-radius: var(--ph-radius); }
-.blamebar .x:hover { background: var(--ph-hover); color: var(--ph-fg); }
 .slot .bl { position: absolute; pointer-events: none; }
-.slot .bl-bar { border-radius: 1px; width: 3px; }
-.slot .bl-bar.bl-on { width: 4px; }
+.slot .bl-bar { border-radius: 1px; }
 .slot .bl-tint { border-radius: 1px; }
 .slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
-.blcard { position: fixed; z-index: 30; width: min(320px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 8px; box-shadow: 0 6px 24px rgb(20 24 33 / 22%); padding: 9px 12px 9px 16px; font-size: 13px; line-height: 1.35; }
+.slot .bl-wait { background: repeating-linear-gradient(0deg, rgb(154 160 166 / 45%) 0 2px, transparent 2px 4px); opacity: .7; }
+.slot .bl-wash { background: rgb(255 255 255 / 62%); }
+.win.dark-pdf .slot .bl-wash, .slot.dark .bl-wash { background: rgb(20 22 26 / 58%); }
+.slot .bl-dim { opacity: .28; }
+@media (prefers-reduced-motion: no-preference) {
+  .slot .bl-in { animation: bl-in .22s ease-out both; }
+  .slot .bl-wait { animation: bl-wait 1.4s ease-in-out infinite; }
+  .slot .bl-tint { transition: opacity .12s; }
+}
+@keyframes bl-in { from { opacity: 0; } }
+@keyframes bl-wait { 50% { opacity: .3; } }
+.blcard { position: fixed; z-index: 30; width: min(300px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 10px; box-shadow: 0 10px 30px rgb(15 25 40 / 18%); padding: 10px 12px; font-size: 13px; line-height: 1.45; }
 .blcard[hidden] { display: none; }
-.blcard .strip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; border-radius: 8px 0 0 8px; }
-.blcard .sub { font-weight: 600; }
-.blcard .meta { color: var(--ph-fg2); margin-top: 3px; }
+.blcard .h { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+.blcard .av { width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; font: 700 8px system-ui, sans-serif; color: #fff; flex: none; }
+.blcard .meta { color: var(--ph-fg2); font-size: 12px; }
+.blcard .sub { margin-top: 2px; }
 .blcard code, .blcard .src { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 11.5px; }
-.blcard .src { color: var(--ph-fg2); margin-top: 6px; overflow-wrap: anywhere; }
-.blcard .acts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
-.blcard .acts button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); font-size: 12.5px; }
-.blcard .acts button:hover, .blcard .acts button:focus-visible { text-decoration: underline; }
-@media (prefers-reduced-motion: no-preference) { .slot .bl-tint { transition: opacity .12s; } }
+.blcard .src { color: var(--ph-fg2); margin-top: 4px; overflow-wrap: anywhere; }
+.blcard .via { color: var(--ph-fg2); font-size: 12px; margin-top: 4px; }
+.blcard .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.blcard .acts button { font: inherit; font-size: 12px; background: var(--ph-hover); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.blcard .acts button:hover, .blcard .acts button:focus-visible { border-color: var(--ph-accent); }
 `;
-var HATCH_SWATCH = "repeating-linear-gradient(45deg,#9AA0A6 0 1.5px,transparent 1.5px 4px)";
+var segKey = (k, s) => `${k}:${Math.round(s.x0)}:${Math.round(s.y0)}`;
 var Blame = class {
   p;
   host;
   on = false;
-  mode = "age";
-  tint = "hover";
-  /** Changed since: seconds since the epoch, and the choice's value in the list. */
-  since = null;
+  look = { ...BLAME_LOOK };
+  /** One person's lines picked out (an author key), or one commit's (an index; -1 not committed). */
+  focusP = null;
+  focusC = null;
   m = null;
   error = "";
-  busy = false;
+  busy = "";
+  progress;
   segs = /* @__PURE__ */ new Map();
+  /** Printed lines whose files are still being read: a quiet placeholder. */
+  waits = /* @__PURE__ */ new Map();
+  waiting = 0;
   colors = /* @__PURE__ */ new Map();
   hover = null;
   pinned = null;
   card;
   turn = 0;
   again;
+  /** Each line's marks first drawn when (ms): drawn again within the fade, the fade goes on where it was. */
+  drawn = /* @__PURE__ */ new Map();
+  abort;
+  listeners = [];
+  /** The last look the blame was worked out with (its host's part): another one reads again. */
+  worked = "";
   constructor(p, host2) {
     this.p = p;
     this.host = host2;
@@ -7327,7 +7408,7 @@ var Blame = class {
     this.card.className = "blcard";
     this.card.hidden = true;
     this.card.setAttribute("role", "dialog");
-    this.card.setAttribute("aria-label", "Commit");
+    this.card.setAttribute("aria-label", "Who wrote this");
     (p.stage.closest(".win") ?? p.root).append(this.card);
     p.stage.addEventListener("pointermove", (e) => this.move(e));
     const gone2 = (e, to) => !this.pinned && !(e.relatedTarget instanceof Node && to.contains(e.relatedTarget)) && this.over(null);
@@ -7336,36 +7417,71 @@ var Blame = class {
     p.stage.addEventListener("click", (e) => this.click(e));
     this.card.addEventListener("click", (e) => this.act(e));
     p.root.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && (this.pinned || this.hover)) this.pinned = null, this.over(null), e.stopPropagation();
+      if (e.key === "Escape" && (this.pinned || this.hover) && !this.card.hidden) this.pinned = null, this.over(null), e.stopPropagation();
     }, { capture: true });
-    p.bar.addEventListener("click", (e) => this.barClick(e));
-    p.bar.addEventListener("change", (e) => {
-      const t = e.target;
-      if (t.id !== "bl-since") return;
-      this.since = { t: Number(t.value.split(":")[0]), v: t.value };
-      this.draw();
-    });
   }
-  toggled = [];
-  /** `cb(on)` whenever blame is shown or hidden (a host's own toggle: Overleaf's toolbar). */
-  onToggle(cb) {
-    this.toggled.push(cb);
+  /** `f()` whenever what the popover shows changes (progress, a file read, a focus). */
+  onState(f) {
+    this.listeners.push(f);
   }
-  /** Blame shown or not (the bar's toggle). */
+  emit() {
+    for (const f of this.listeners) f();
+  }
+  /** The host's word for a commit, and whether it has hashes. */
+  get words() {
+    return { commit: this.host.words?.commit ?? "commit", hashes: this.host.words?.hashes !== false };
+  }
+  /** Blame shown or not. */
+  /** The pages read by the last load: another set of pages (shown again, a build's) read again. */
+  read = -1;
+  slots = null;
   toggle(on = !this.on) {
+    if (on === this.on) return;
     this.on = on;
-    this.p.pressed(on);
-    for (const f of this.toggled) f(on);
+    this.slots?.disconnect();
+    if (on) {
+      this.slots = new MutationObserver(() => this.on && this.pages() !== this.read && this.refresh());
+      this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    }
     if (!on) {
       this.pinned = this.hover = null;
       this.card.hidden = true;
       this.clear();
-      this.p.bar.className = "blamebar";
-      this.p.bar.replaceChildren();
+      this.drawn.clear();
       return;
     }
-    this.p.bar.className = "blamebar on";
+    if (this.m) this.draw();
     void this.load();
+  }
+  /** The look changed: drawn again, or worked out again where the host's part changed. */
+  setLook(l) {
+    this.look = { ...this.look, ...l };
+    this.colorsOf();
+    if (this.on && this.workKey() !== this.worked) void this.load();
+    else this.draw();
+    this.emit();
+  }
+  /** One person's lines, or one commit's, picked out (again: none). */
+  focus(kind, key) {
+    if (kind === "person") this.focusP = this.focusP === key ? null : key, this.focusC = null;
+    else this.focusC = this.focusC === key ? null : key, this.focusP = null;
+    this.draw();
+    this.emit();
+    if (kind === "commit" && this.focusC !== null) this.reveal(this.focusC);
+  }
+  /** The first printed line of commit `c` brought into view. */
+  reveal(c) {
+    for (const [k, segs] of this.segs) {
+      const s = segs.find((s2) => s2.c === c);
+      if (!s) continue;
+      const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
+      if (!slot) return;
+      const { h } = this.p.pageSize();
+      const r = slot.getBoundingClientRect(), box = this.p.stage.getBoundingClientRect();
+      const y = r.top + s.y0 / h * r.height;
+      if (y < box.top + 40 || y > box.bottom - 40) this.p.stage.scrollBy({ top: y - (box.top + box.height / 3), behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      return;
+    }
   }
   /** The pages changed (a build, new origins): blamed again, a moment after the last change. */
   refresh() {
@@ -7377,89 +7493,225 @@ var Blame = class {
   redraw() {
     if (this.on) this.draw();
   }
+  /** The reads stopped (the project left). */
+  stop() {
+    this.abort?.abort();
+    this.turn++;
+  }
   pages() {
     return this.p.stage.querySelectorAll(".slot").length;
   }
+  workKey() {
+    const l = this.look;
+    return JSON.stringify([l.detail, l.ws, l.moved, [...l.skip].sort()]);
+  }
+  colorsOf() {
+    const m = this.m;
+    if (!m) return;
+    const keys = m.commits.map(authorKey);
+    if (this.look.people === "overleaf") {
+      this.colors = /* @__PURE__ */ new Map();
+      for (const c of m.commits) {
+        const k = authorKey(c);
+        if (this.colors.has(k)) continue;
+        this.colors.set(k, this.host.color?.(c) ?? OVERLEAF_COLORS[fnv(k) % OVERLEAF_COLORS.length]);
+      }
+    } else this.colors = authorColors(keys);
+  }
+  /** An author's colour. */
+  colorOf(c) {
+    return this.colors.get(authorKey(c)) ?? (this.look.people === "overleaf" ? this.host.color?.(c) ?? OVERLEAF_COLORS[fnv(authorKey(c)) % OVERLEAF_COLORS.length] : authorColors([authorKey(c)]).get(authorKey(c)));
+  }
+  /**
+   * Blamed again: the pages' glyphs, then each file as it comes (the
+   * lines already known drawn at once, the others a quiet placeholder,
+   * each file's lines fading in as it lands), then the files the floats
+   * and the bibliography name. A newer load or a stop drops this one's
+   * results, never the blame drawn already.
+   */
   async load() {
     const turn = ++this.turn;
-    this.busy = true;
-    this.bar();
+    this.abort?.abort();
+    const abort = this.abort = new AbortController();
+    const opts = {
+      detail: this.look.detail,
+      ws: this.look.ws,
+      moved: this.look.moved,
+      skip: this.look.skip,
+      signal: abort.signal,
+      progress: (text, done, total) => {
+        if (turn !== this.turn) return;
+        this.busy = text;
+        this.progress = done !== void 0 && total ? [done, total] : void 0;
+        this.emit();
+      }
+    };
+    const key = this.workKey();
+    this.busy = "Reading the pages\u2026";
+    this.progress = void 0;
+    this.emit();
     try {
-      const n = this.pages();
+      const n = this.read = this.pages();
       const glyphs3 = [];
       for (let k = 0; k < n; k++) glyphs3.push(await this.host.glyphs(k));
       if (turn !== this.turn) return;
-      const files = /* @__PURE__ */ new Set();
-      for (const gs of glyphs3) for (const g of gs) if (g.file) files.add(g.file);
+      const files = [];
+      for (const gs of glyphs3) for (const g of gs) if (g.file && !files.includes(g.file)) files.push(g.file);
       const m = new Model();
-      const d = await this.host.blame([...files]);
-      if (turn !== this.turn) return;
-      if (typeof d === "string") throw new Error(d);
-      m.add(d);
+      m.detail = this.look.detail;
+      m.ws = this.look.ws;
+      m.refs = this.m?.refs ?? [];
+      const pending = new Set(files);
+      const fresh = this.worked !== key || !this.m || ![...this.segs.values()].some((x) => x.length);
+      const show = (all) => {
+        this.m = m;
+        this.worked = key;
+        this.colorsOf();
+        const size2 = this.p.pageSize();
+        this.segs.clear();
+        this.waits.clear();
+        glyphs3.forEach((gs, k) => {
+          this.segs.set(k, mapPage(gs, m, size2));
+          if (!all) this.waits.set(k, printedLines(gs).filter((l) => l.some((g) => g.file && pending.has(g.file)) && !l.some((g) => g.file && !pending.has(g.file))).map((l) => ({ x: l[0].x, y0: l[0].y - 8, y1: l[0].y + 3 })));
+        });
+        this.waiting = pending.size;
+        this.draw();
+      };
+      if (fresh) show(false);
+      let i = 0;
+      for (const file of files) {
+        this.busy = `Working out who wrote each ${this.look.detail === "line" ? "line" : this.look.detail === "word" ? "word" : "character"}\u2026 ${file}`;
+        this.progress = files.length > 1 ? [i, files.length] : this.progress;
+        this.emit();
+        const d = await this.host.blame([file], opts);
+        if (turn !== this.turn) return;
+        if (typeof d === "string") throw new Error(d);
+        m.add(d);
+        pending.delete(file);
+        i++;
+        show(false);
+      }
       const more = m.wanted();
       if (more.length) {
-        const d2 = await this.host.blame(more);
+        this.busy = "Reading the figures' and the bibliography's history\u2026";
+        this.emit();
+        const d2 = await this.host.blame(more, opts);
         if (turn !== this.turn) return;
         if (typeof d2 !== "string") m.add(d2);
       }
-      this.m = m;
       this.error = "";
-      this.colors = authorColors(m.commits.map(authorKey));
-      if (this.host.color) for (const c of m.commits) {
-        const h = this.host.color(c);
-        if (h) this.colors.set(authorKey(c), h);
-      }
-      const size2 = this.p.pageSize();
-      this.segs.clear();
-      glyphs3.forEach((gs, k) => this.segs.set(k, mapPage(gs, m, size2)));
-      if (!this.since) this.since = this.sinceChoices()[0] ?? null;
+      show(true);
     } catch (e) {
       if (turn !== this.turn) return;
-      this.m = null;
-      this.error = e.message || String(e);
+      this.error = abort.signal.aborted ? "" : e.message || String(e);
     }
-    this.busy = false;
+    this.busy = "";
+    this.progress = void 0;
+    this.waiting = 0;
+    this.waits.clear();
     this.draw();
+    this.emit();
   }
-  /** "Changed since" choices: the tags (newest first), then a day, a week, a month and three months ago, then the commits shown. */
+  /** Read again (Try again). */
+  retry() {
+    this.error = "";
+    void this.load();
+  }
+  /** "Changed since" choices: off, the tags (newest first), then a day, a week, a month and three months ago. */
   sinceChoices() {
     const m = this.m;
-    if (!m) return [];
+    const now = m?.now ?? Date.now() / 1e3;
     const out = [];
-    for (const r of [...m.refs].filter((r2) => r2.kind === "tag").sort((a, b) => b.time - a.time)) out.push({ t: r.time, v: `${r.time}:tag:${r.name}`, label: `${r.name} \xB7 ${agoWords(r.time, m.now)}` });
-    for (const [d, w] of [[1, "yesterday"], [7, "a week ago"], [30, "a month ago"], [91, "three months ago"]]) out.push({ t: m.now - d * 86400, v: `${m.now - d * 86400}:days:${d}`, label: w });
-    const word = this.host.words?.commit ?? "commit";
-    for (const c of [...m.commits].sort((a, b) => b.time - a.time).slice(0, 12)) out.push({ t: c.time, v: `${c.time}:c:${c.id}`, label: `${word} ${c.short} \xB7 ${c.subject.slice(0, 40)}` });
+    for (const r of [...m?.refs ?? []].filter((r2) => r2.kind === "tag").sort((a, b) => b.time - a.time).slice(0, 6)) out.push({ v: `${r.time}:${r.name}`, label: r.name });
+    for (const [d, w] of [[1, "Yesterday"], [7, "A week ago"], [30, "A month ago"]]) out.push({ v: `${Math.round(now - d * 86400)}:${w}`, label: w });
     return out;
   }
-  look(c) {
-    return this.m ? lookOf2(this.m, c, this.mode, this.p.dark(), this.since?.t ?? Infinity, this.colors) : null;
+  /** The commits blamed so far (skip offers them). */
+  commitsKnown() {
+    return this.m ? [...this.m.commits].sort((a, b) => b.time - a.time) : [];
+  }
+  /** What the popover shows. */
+  summary() {
+    const m = this.m;
+    const all = [...this.segs.values()].flat().filter((s) => s.c >= 0 || this.look.wip === "show");
+    const people = /* @__PURE__ */ new Map();
+    const commits = /* @__PURE__ */ new Map();
+    const dark = this.p.dark();
+    for (const s of all) {
+      const c = s.c >= 0 && m ? m.commits[s.c] : null;
+      const key = c ? authorKey(c) : "";
+      const p = people.get(key) ?? { key, name: c ? c.author || c.email : this.words.commit === "version" ? "Not saved yet" : "Not committed", color: c ? this.colorOf(c) : UNCOMMITTED, n: 0 };
+      p.n++;
+      people.set(key, p);
+      const e = commits.get(s.c) ?? { c: s.c, commit: c, n: 0, color: (m && lookOf2(m, s.c, this.look, dark, this.colors)?.color) ?? "transparent", via: c ? this.host.via?.(c) ?? null : null };
+      e.n++;
+      commits.set(s.c, e);
+    }
+    return {
+      busy: this.busy,
+      progress: this.progress,
+      error: this.error,
+      lines: all.length,
+      waiting: this.waiting,
+      people: [...people.values()].sort((a, b) => b.n - a.n),
+      commits: [...commits.values()].sort((a, b) => (a.commit ? a.commit.time : Infinity) > (b.commit ? b.commit.time : Infinity) ? -1 : 1),
+      since: this.sinceChoices()
+    };
+  }
+  shade(c) {
+    return this.m ? lookOf2(this.m, c, this.look, this.p.dark(), this.colors) : null;
+  }
+  /** Whether a line is set back: another person's or commit's picked out, or older than "changed since". */
+  dimmed(c) {
+    const m = this.m;
+    if (!m) return false;
+    const x = c >= 0 ? m.commits[c] : null;
+    if (this.focusP !== null && (x ? authorKey(x) : "") !== this.focusP) return true;
+    if (this.focusC !== null && c !== this.focusC) return true;
+    const since = sinceTime(this.look.since);
+    return since !== null && !!x && x.time <= since;
   }
   clear() {
     for (const e of this.p.stage.querySelectorAll(".slot .bl")) e.remove();
   }
-  /** The bars and tints on every page, and the bar's legend. */
+  /** The bars, tints and washes on every page; the placeholders where files are still read. */
   draw() {
     this.clear();
-    this.bar();
     if (!this.on || !this.m) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
     const focus = this.pinned ?? this.hover;
     const pct = (v, of) => `${v / of * 100}%`;
+    const bw = Math.max(1, this.look.width);
+    const seen = /* @__PURE__ */ new Map();
+    const now = performance.now();
     for (const [k, segs] of this.segs) {
       const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
       if (!slot) continue;
       const frag = document.createDocumentFragment();
+      const right = /* @__PURE__ */ new Map();
+      for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
       for (const s of segs) {
-        const lk = this.look(s.c);
+        const lk = this.shade(s.c);
+        const key = segKey(k, s);
+        const t0 = this.drawn.get(key) ?? now;
+        seen.set(key, t0);
+        const fade = now - t0 < 220 ? " bl-in" : "";
+        const delay = fade ? `${-(now - t0)}ms` : "";
+        const dim = this.dimmed(s.c);
+        if (dim) {
+          const wsh = document.createElement("div");
+          wsh.className = `bl bl-wash${fade}`;
+          Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
+          frag.append(wsh);
+        }
         if (!lk) continue;
         const lit = !!focus && focus.k === k && focus.s.para === s.para;
-        const tinted = this.tint === "all" || this.tint === "hover" && lit;
+        const tinted = !dim && (this.look.tint === "all" || this.look.tint === "hover" && lit);
         if (tinted) {
           const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
           for (const [a, b2, c] of runs) {
-            const l = this.look(c);
+            const l = this.shade(c);
             if (!l) continue;
             const t = document.createElement("div");
             t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
@@ -7468,63 +7720,20 @@ var Blame = class {
           }
         }
         const b = document.createElement("div");
-        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${lit ? " bl-on" : ""}`;
-        Object.assign(b.style, { left: pct(s.bx, w), top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color });
+        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
+        const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
+        Object.assign(b.style, { left: pct(x, w), width: `${lit ? bw + 1 : bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
+        frag.append(b);
+      }
+      for (const l of this.waits.get(k) ?? []) {
+        const b = document.createElement("div");
+        b.className = "bl bl-bar bl-wait";
+        Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
         frag.append(b);
       }
       slot.append(frag);
     }
-  }
-  /** The row under the bar: Colour by, Since (its choice), Word tint, the legend. */
-  bar() {
-    if (!this.on) return;
-    const seg = (id, cur, opts) => html`<span class="seg" role="group" id="${id}">${opts.map(([v, t]) => html`<button type="button" data-v="${v}" aria-pressed="${String(cur === v)}">${t}</button>`)}</span>`;
-    const choices = this.sinceChoices();
-    const since = this.mode === "since" ? html`<span class="grp"><span class="lbl">Since</span><select id="bl-since" aria-label="Changed since">${choices.map((c) => html`<option value="${c.v}" selected="${c.v === this.since?.v}">${c.label}</option>`)}</select></span>` : "";
-    const say = this.busy ? html`<span class="say">Reading the history…</span>` : this.error ? html`<span class="say">${this.error}</span>` : this.legend();
-    this.p.bar.replaceChildren(
-      html`<span class="grp"><span class="lbl">Colour by</span>${seg("bl-mode", this.mode, [["age", "Age"], ["author", "Author"], ["since", "Since\u2026"]])}</span>${since}<span class="grp"><span class="lbl">Word tint</span>${seg("bl-tint", this.tint, [["off", "Off"], ["hover", "Paragraph under pointer"], ["all", "All"]])}</span>${say}<span class="grow"></span><button type="button" class="x" data-a="close" title="Hide blame" aria-label="Hide blame">✕</button>`
-    );
-  }
-  /** The legend: each colour's meaning and how many printed lines have it. */
-  legend() {
-    const m = this.m;
-    if (!m) return html``;
-    const all = [...this.segs.values()].flat();
-    const dark = this.p.dark();
-    const row = (color, name, n, hatch = false) => html`<span class="lg"><span class="sw" style="${hatch ? `background:${HATCH_SWATCH}` : `background:${color}${dark ? "33" : "26"}`}"><i style="${`background:${hatch ? UNCOMMITTED : color}`}"></i></span><span>${name}</span><small>${n}</small></span>`;
-    const unc = all.filter((s) => s.c < 0).length;
-    const lines3 = (f) => all.filter((s) => s.c >= 0 && f(m.commits[s.c])).length;
-    let rows = [];
-    if (this.mode === "age") {
-      rows = [row("", "Not committed", unc, true), ...AGE.map((a, i) => row(a.bar ? a.bar[dark ? 1 : 0] : "transparent", a.name, lines3((c) => ageStep((m.now - c.time) / 86400) === i)))];
-    } else if (this.mode === "author") {
-      const who = /* @__PURE__ */ new Map();
-      for (const s of all) {
-        if (s.c < 0) continue;
-        const c = m.commits[s.c];
-        const k = authorKey(c);
-        const e = who.get(k) ?? { name: c.author || c.email, n: 0 };
-        e.n++;
-        who.set(k, e);
-      }
-      rows = [...[...who].sort((a, b) => b[1].n - a[1].n).map(([k, e]) => row(this.colors.get(k) ?? OVERFLOW, e.name, e.n)), row("", "Not committed", unc, true)];
-    } else {
-      const t = this.since?.t ?? Infinity;
-      rows = [row(SINCE[dark ? 1 : 0], "Changed since then", lines3((c) => c.time > t)), row("", "Not committed", unc, true)];
-    }
-    return html`<span class="legend" aria-label="Legend">${rows}</span>`;
-  }
-  barClick(e) {
-    const t = e.target;
-    const b = t.closest("button");
-    if (!b) return;
-    if (b.dataset.a === "close") return this.toggle(false);
-    const g = b.closest(".seg")?.id;
-    if (g === "bl-mode") this.mode = b.dataset.v;
-    else if (g === "bl-tint") this.tint = b.dataset.v;
-    else return;
-    this.draw();
+    this.drawn = seen;
   }
   /** The printed line (or picture) under a pointer, by its page's slot. */
   at(e) {
@@ -7537,7 +7746,7 @@ var Blame = class {
     const segs = this.segs.get(k) ?? [];
     const right = /* @__PURE__ */ new Map();
     for (const s2 of segs) right.set(s2.bx, Math.max(right.get(s2.bx) ?? 0, s2.x1));
-    const s = segs.find((s2) => x >= Math.min(s2.bx - 4, s2.x0) && x <= (right.get(s2.bx) ?? s2.x1) && y >= s2.y0 && y <= s2.y1);
+    const s = segs.find((s2) => x >= Math.min(s2.bx - 4, s2.x0) && x <= (right.get(s2.bx) ?? s2.x1) + 8 && y >= s2.y0 && y <= s2.y1);
     return s ? { k, s } : null;
   }
   move(e) {
@@ -7571,15 +7780,15 @@ var Blame = class {
     const m = this.m;
     if (!m) return;
     const c = a.s.c >= 0 ? m.commits[a.s.c] : null;
-    const lk = this.look(a.s.c) ?? { color: UNCOMMITTED, tint: 0 };
     const src = a.s.fig ? `${a.s.fig}` : `${a.s.file}:${a.s.l0 + 1}${a.s.l1 > a.s.l0 ? `\u2013${a.s.l1 + 1}` : ""}`;
-    const hashes = this.host.words?.hashes !== false;
-    const word = this.host.words?.commit ?? "commit";
+    const { commit: word, hashes } = this.words;
+    const color = c ? this.colorOf(c) : UNCOMMITTED;
+    const via = c ? this.host.via?.(c) ?? null : null;
     this.card.replaceChildren(
-      html`<span class="strip" style="${`background:${lk.hatch ? HATCH_SWATCH : lk.color}`}"></span><div class="sub">${c ? c.subject || "(no subject)" : "Not committed yet"}</div><div class="meta">${c ? html`${hashes ? html`<code>${c.short}</code> · ` : ""}${c.author || c.email} · ${agoWords(c.time, m.now)}` : "Your changes since the last " + word}</div><div class="src">${src}</div><div class="acts">${this.host.compare ? html`<button type="button" data-a="cmp">${c ? `Compare with before this ${word}` : `Compare with the last ${word}`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`
+      html`<div class="h"><span class="av" style="${`background:${color}`}">${c ? (c.author || c.email).trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase() : "Y"}</span>${c ? c.author || c.email : "You"}</div><div class="meta">${c ? html`${agoWords(c.time, m.now)} · <code>${c.short}</code>` : `now \xB7 not ${word === "version" ? "saved to the history" : "committed"}`}</div><div class="sub">${c ? c.subject || "(no subject)" : word === "version" ? "Typed since the last version" : "Typed since the last commit"}</div>${via ? html`<div class="via">${via}</div>` : ""}<div class="src">${src}</div><div class="acts">${this.host.compare && c ? html`<button type="button" data-a="cmp">${`What this ${word} changed`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`
     );
     this.card.hidden = false;
-    const W2 = this.card.offsetWidth || 320, H2 = this.card.offsetHeight || 120;
+    const W2 = this.card.offsetWidth || 300, H2 = this.card.offsetHeight || 120;
     const box = this.p.stage.getBoundingClientRect();
     const x = Math.max(box.left + 6, Math.min(box.right - W2 - 6, e.clientX + 14));
     const y = e.clientY + H2 + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H2 - 12) : e.clientY + 16;
@@ -7598,13 +7807,1434 @@ var Blame = class {
     const m = this.m;
     if (!a || !cur || !m) return;
     const c = cur.s.c >= 0 ? m.commits[cur.s.c] : null;
-    if (a === "cmp") return this.host.compare?.(c);
+    if (a === "cmp") {
+      this.pinned = null;
+      this.over(null);
+      return this.host.compare?.(c);
+    }
     if (a === "src") return this.host.goto(cur.s.fig && !cur.s.fig.includes(":") ? cur.s.fig : cur.s.file.replace(/:.*$/, ""), cur.s.fig ? 1 : cur.s.l0 + 1);
     if (a === "copy" && c)
       void navigator.clipboard?.writeText(c.id).then(
         () => this.p.msg(`Copied ${c.short}`),
         () => this.p.msg(`Hash: ${c.id}`)
       );
+  }
+};
+
+// viewer/src/commits.ts
+function branches(cs) {
+  const by = new Map(cs.map((c) => [c.id, c]));
+  const out = /* @__PURE__ */ new Map();
+  let next = 0;
+  for (const c of cs) {
+    if (out.has(c.id)) continue;
+    const k = next++;
+    for (let h = c.id; h && by.has(h) && !out.has(h); h = by.get(h).parents[0]) out.set(h, k);
+  }
+  return out;
+}
+function layout(cs) {
+  const col = branches(cs);
+  const colOf = (id) => col.get(id) ?? 0;
+  const edge = (a, b) => colOf(a) === 0 && colOf(b) === 0 ? 0 : colOf(a) !== 0 ? colOf(a) : colOf(b);
+  const active = [];
+  const slotCol = [];
+  const rows = [];
+  let pending = [];
+  let width = 1;
+  for (const c of cs) {
+    let lane = active.indexOf(c.id);
+    if (lane < 0) {
+      lane = active.indexOf(null);
+      if (lane < 0) lane = active.push(null) - 1;
+    }
+    if (rows.length) rows[rows.length - 1].down = pending.map(([x, s, k]) => [x, active[s] === c.id ? lane : s, k]);
+    for (let s = 0; s < active.length; s++) if (active[s] === c.id) active[s] = null, slotCol[s] = void 0;
+    const by = active.map((id) => id !== null);
+    const from2 = /* @__PURE__ */ new Map();
+    const moved = /* @__PURE__ */ new Map();
+    c.parents.forEach((p, i) => {
+      let s = active.indexOf(p);
+      if (s > lane && i === 0 && active[lane] === null) {
+        const k = slotCol[s] ?? edge(c.id, p);
+        active[s] = null;
+        slotCol[s] = void 0;
+        moved.set(s, [lane, k]);
+        s = lane;
+        active[s] = p;
+        slotCol[s] = edge(c.id, p);
+      }
+      if (s < 0) {
+        s = i === 0 && active[lane] === null ? lane : active.indexOf(null);
+        if (s < 0) s = active.push(null) - 1;
+        active[s] = p;
+        slotCol[s] = edge(c.id, p);
+      }
+      from2.set(s, [lane, edge(c.id, p)]);
+    });
+    pending = [];
+    moved.forEach(([to, k], s) => {
+      if (by[s]) pending.push([s, to, k]);
+    });
+    while (active.length && active[active.length - 1] === null) active.pop();
+    active.forEach((id, s) => {
+      if (id === null) return;
+      if (by[s] && !moved.has(s)) pending.push([s, s, slotCol[s] ?? 0]);
+      const f = from2.get(s);
+      if (f !== void 0 && !(by[s] && f[0] === s && !moved.has(s))) pending.push([f[0], s, f[1]]);
+    });
+    width = Math.max(width, lane + 1, active.length);
+    rows.push({ lane, color: colOf(c.id), down: [] });
+  }
+  if (rows.length) rows[rows.length - 1].down = pending;
+  return { rows, width };
+}
+function ago2(t, now = Date.now() / 1e3) {
+  const s = Math.max(0, now - t);
+  const units = [[31536e3, "year"], [2592e3, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
+  for (const [n, u] of units)
+    if (s >= n) {
+      const k = Math.floor(s / n);
+      return `${k} ${u}${k === 1 ? "" : "s"} ago`;
+    }
+  return "just now";
+}
+function mergedVia(cs, id) {
+  const by = new Map(cs.map((c) => [c.id, c]));
+  const main = /* @__PURE__ */ new Set();
+  for (let h = cs[0]?.id; h && by.has(h); h = by.get(h).parents[0]) main.add(h);
+  if (main.has(id) || !by.has(id)) return null;
+  for (const m of cs) {
+    if (!main.has(m.id) || m.parents.length < 2) continue;
+    const seen = /* @__PURE__ */ new Set();
+    const todo = m.parents.slice(1);
+    let found = false;
+    while (todo.length && !found) {
+      const h = todo.pop();
+      if (seen.has(h) || main.has(h) || !by.has(h)) continue;
+      seen.add(h);
+      if (h === id) found = true;
+      todo.push(...by.get(h).parents);
+    }
+    if (!found) continue;
+    const named = /Merge (?:remote-tracking )?branch '([^']+)'/.exec(m.subject)?.[1] ?? /Merge pull request #\d+ from (\S+)/.exec(m.subject)?.[1];
+    const ref = [...seen].flatMap((h) => by.get(h).refs).find((r) => r.kind === "branch" || r.kind === "remote")?.name;
+    return { merge: m, branch: named ?? ref ?? "a branch" };
+  }
+  return null;
+}
+var ROW = 40;
+var LANE = 16;
+var BRANCH_COLORS = ["var(--phc-g0, #2f6fd6)", "var(--phc-g1, #c2410c)", "var(--phc-g2, #0f8a6a)", "var(--phc-g3, #9333ea)", "var(--phc-g4, #b5700f)", "var(--phc-g5, #be185d)"];
+var bc = (k) => BRANCH_COLORS[k % BRANCH_COLORS.length];
+var COMMITS_CSS = `
+.phx-commits { overflow: auto; user-select: none; -webkit-user-select: none; padding: 2px 0 8px; }
+.phx-commits .row { display: flex; align-items: center; height: ${ROW}px; cursor: pointer; position: relative; transition: background .18s; }
+.phx-commits .row:hover { background: var(--phc-chip); }
+.phx-commits .row.inrange, .phx-commits .row.from, .phx-commits .row.to, .phx-commits .row.drag { background: var(--phc-sel); }
+.phx-commits .row::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--phc-aim); transform: scaleY(0); transform-origin: top; transition: transform .18s; }
+.phx-commits .row.aim::before { transform: none; }
+.phx-commits .row.new { animation: phc-in .2s ease-out both; }
+@keyframes phc-in { from { opacity: 0; transform: translateY(-4px); } }
+.phx-commits svg { flex: none; overflow: visible; }
+.phx-commits .t { min-width: 0; flex: 1; display: grid; padding-right: 10px; }
+.phx-commits .s { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.phx-commits .s i { color: var(--phc-muted); font-style: normal; }
+.phx-commits .m { display: flex; gap: 6px; align-items: center; font-size: 11.5px; color: var(--phc-muted); white-space: nowrap; overflow: hidden; }
+.phx-commits code { font: 500 11px ui-monospace, "DM Mono", monospace; }
+.phx-commits .endtag { font-weight: 700; font-size: 9.5px; letter-spacing: .06em; color: #fff; background: var(--phc-focus); border-radius: 4px; padding: 1px 5px; margin-right: 6px; vertical-align: 1px; }
+.phx-commits .ref { font: 600 10.5px ui-monospace, monospace; border-radius: 5px; padding: 0 5px; border: 1px solid var(--phc-line); }
+.phx-commits .ref.tag { color: #b5700f; border-color: currentColor; }
+.phx-commits .ref.head { background: var(--phc-fg); color: var(--phc-bg); border-color: var(--phc-fg); }
+.phx-commits .ref.branch, .phx-commits .ref.remote { color: var(--phc-bcol); border-color: currentColor; }
+.phx-commits .ref.mark { color: var(--phc-muted); }
+.phx-commits .av { width: 16px; height: 16px; border-radius: 50%; display: inline-grid; place-items: center; font: 700 8px system-ui, sans-serif; color: #fff; flex: none; }
+.phx-commits .note { padding: 10px 14px; color: var(--phc-muted); }
+.phx-commits .note.err { color: var(--phc-danger, #c23a2f); }
+.phx-commits .more { display: block; margin: 6px auto; border: 1px solid var(--phc-line); background: none; color: inherit; border-radius: 999px; padding: 2px 12px; cursor: pointer; font: inherit; font-size: 12px; }
+.phx-commits .skel { cursor: default; }
+.phx-commits .skel:hover { background: none; }
+.phx-commits .skel .bone { display: block; height: 9px; border-radius: 4px; background: var(--phc-chip2); margin: 3px 0; }
+.phx-commits .skel circle { fill: var(--phc-chip2); }
+.phx-commits .skel .bone, .phx-commits .skel svg { animation: phc-shimmer 1.2s ease-in-out infinite; }
+@keyframes phc-shimmer { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .phx-commits .skel .bone, .phx-commits .skel svg, .phx-commits .row.new { animation: none; } .phx-commits .row, .phx-commits .row::before { transition: none; } }
+`;
+var KINDS2 = /* @__PURE__ */ new Set(["head", "branch", "remote", "tag"]);
+var initials = (n) => (n.trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2) || "?").toUpperCase();
+var Commits = class _Commits {
+  el;
+  host;
+  commits = [];
+  more = true;
+  loading = false;
+  error = "";
+  /** The pair chosen (ids; `to` null: the working tree). */
+  from = null;
+  to = null;
+  /** A range's first end, clicked (a row; -1 the working tree), the second not yet: the rows to the pointer marked as it moves. */
+  anchor = null;
+  page = 200;
+  /** Rows drawn before (the new ones slide in). */
+  seen = /* @__PURE__ */ new Set();
+  listeners = [];
+  constructor(root, host2) {
+    this.host = host2;
+    this.el = document.createElement("div");
+    this.el.className = "phx-commits";
+    root.append(this.el);
+    this.el.addEventListener("click", (e) => this.click(e));
+    this.el.addEventListener("pointerdown", (e) => this.dragFrom(e));
+    this.el.addEventListener("pointermove", (e) => {
+      if (this.anchor === null || this.drag) return;
+      const over = this.rowAt(e.clientX, e.clientY);
+      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: true }, "aim");
+    });
+    this.el.addEventListener("pointerleave", () => this.anchor !== null && !this.drag && this.paintDrag(null, "aim"));
+    this.el.addEventListener("dblclick", (e) => {
+      const c = this.at(e.target);
+      if (!c || !c.parents.length) return;
+      this.anchor = null;
+      this.paintDrag();
+      this.choose(c.parents[0], c.id, false);
+    });
+    this.render();
+  }
+  get element() {
+    return this.el;
+  }
+  /** Called whenever the commits change (a page read). */
+  onChange(f) {
+    this.listeners.push(f);
+  }
+  /** Mark the pair shown (as the host has it: a commit id or its prefix, a ref's name, HEAD; `to` null: the working tree). */
+  mark(from2, to) {
+    this.from = from2;
+    this.to = to;
+    this.render();
+  }
+  /**
+   * The picker opened from From or To: from To, From is the first end
+   * already (the next click is To); from From, nothing is (the next click
+   * one end, then the other).
+   */
+  open(which) {
+    const fi = this.find(this.from);
+    this.anchor = which === "to" && fi >= 0 ? fi : null;
+    this.paintDrag(null, "aim");
+    this.render();
+  }
+  /** Whether a first end is clicked, the second not yet. */
+  get aiming() {
+    return this.anchor !== null;
+  }
+  /** The first end let go (Esc). */
+  cancel() {
+    this.anchor = null;
+    this.paintDrag(null, "aim");
+    this.render();
+  }
+  /** The commits: the first page now, more as asked. */
+  async load() {
+    if (this.loading || !this.more) return;
+    this.loading = true;
+    this.render();
+    const got = await this.host.load(this.commits.length, this.page);
+    this.loading = false;
+    if (typeof got === "string") {
+      this.error = got;
+      this.more = false;
+    } else {
+      const have = new Set(this.commits.map((c) => c.id));
+      this.commits.push(...got.filter((c) => !have.has(c.id)));
+      this.more = got.length > 0;
+    }
+    this.render();
+    for (const f of this.listeners) f();
+  }
+  /** The history changed (a commit made, a branch moved): read again. */
+  reload() {
+    this.commits = [];
+    this.more = true;
+    this.error = "";
+    return this.load();
+  }
+  /** Whether more commits can be read. */
+  get hasMore() {
+    return this.more;
+  }
+  /** Whether a page is being read. */
+  get busy() {
+    return this.loading;
+  }
+  choose(from2, to, done) {
+    this.from = from2;
+    this.to = to;
+    this.render();
+    this.host.marked?.(from2, to);
+    if (from2) this.host.pick(from2, to, done);
+  }
+  /** The range between two rows (-1 the working tree), whichever order: the older end From, the newer To. */
+  range(a, b) {
+    const [newer, older] = a < b ? [a, b] : [b, a];
+    if (older < 0) return;
+    this.choose(this.commits[older].id, newer < 0 ? null : this.commits[newer].id, true);
+  }
+  at(t) {
+    const row = t.closest(".row[data-i]");
+    return row ? this.commits[Number(row.dataset.i)] : void 0;
+  }
+  /** The row of revision `rev` (a commit id or its prefix, a ref's name, HEAD), else -1. */
+  find(rev) {
+    if (!rev) return -1;
+    if (rev === "HEAD") return this.commits.findIndex((c) => c.refs.some((r) => r.kind === "head"));
+    return this.commits.findIndex((c) => c.id === rev || c.id.startsWith(rev) || c.refs.some((r) => r.name === rev));
+  }
+  /** A drag across the rows: where it began (a row's index; -1 the working tree), and whether it left that row. */
+  drag = null;
+  /** A drag just chose: the click that ends it is not a click. */
+  dragged = false;
+  /** The row under a point: a commit's index, -1 the working tree's, null none. */
+  rowAt(x, y) {
+    const root = this.el.getRootNode();
+    const row = (root.elementFromPoint?.(x, y) ?? document.elementFromPoint(x, y))?.closest(".row:not(.skel)");
+    if (!row || !this.el.contains(row)) return null;
+    return row.dataset.i === void 0 ? -1 : Number(row.dataset.i);
+  }
+  dragFrom(e) {
+    if (e.button !== 0 || e.shiftKey) return;
+    const at = this.rowAt(e.clientX, e.clientY);
+    if (at === null) return;
+    e.preventDefault();
+    this.drag = { from: at, over: at, moved: false };
+    const move = (m) => {
+      const over = this.rowAt(m.clientX, m.clientY);
+      if (!this.drag || over === null || over === this.drag.over) return;
+      this.drag.over = over;
+      if (!this.drag.moved && over !== this.drag.from) this.el.setPointerCapture?.(m.pointerId);
+      this.drag.moved ||= over !== this.drag.from;
+      this.paintDrag();
+    };
+    const up = () => {
+      this.el.removeEventListener("pointermove", move);
+      this.el.removeEventListener("pointerup", up);
+      const d = this.drag;
+      this.drag = null;
+      this.paintDrag();
+      if (!d?.moved) return;
+      this.dragged = true;
+      setTimeout(() => this.dragged = false, 0);
+      this.anchor = null;
+      this.range(d.from, d.over);
+    };
+    this.el.addEventListener("pointermove", move);
+    this.el.addEventListener("pointerup", up);
+  }
+  /**
+   * The rows a drag spans, filled as it goes (`drag`), or those a second
+   * click would choose, from the first end to the pointer (`aim`: a bar at
+   * their edge only, growing as the pointer moves).
+   */
+  paintDrag(d = this.drag, kind = "drag") {
+    const [a, b] = d ? [Math.min(d.from, d.over), Math.max(d.from, d.over)] : [0, -2];
+    for (const r of this.el.querySelectorAll(".row:not(.skel)")) {
+      const i = r.dataset.i === void 0 ? -1 : Number(r.dataset.i);
+      const on = !!d?.moved && i >= a && i <= b;
+      r.classList.toggle("drag", kind === "drag" && on);
+      r.classList.toggle("aim", kind === "aim" && on);
+    }
+  }
+  click(e) {
+    if (this.dragged) return void (this.dragged = false);
+    const t = e.target;
+    if (t.closest("[data-more]")) return void this.load();
+    const row = t.closest(".row:not(.skel)");
+    if (!row || e.detail > 1) return;
+    const c = this.at(t), i = c ? this.commits.indexOf(c) : -1;
+    if (e.shiftKey) {
+      this.anchor = null;
+      if (!c) return this.choose(this.from ?? this.commits[0]?.id ?? null, null, true);
+      const fi = this.find(this.from);
+      return this.choose(fi > i ? this.commits[fi].id : c.parents[0] ?? c.id, c.id, true);
+    }
+    if (this.anchor === null || this.anchor === i) {
+      this.anchor = this.anchor === i ? null : i;
+      if (this.anchor !== null && c) {
+        this.from = c.id;
+        this.to = null;
+        this.host.marked?.(this.from, null);
+      }
+      this.render();
+      this.paintDrag(null, "aim");
+      return;
+    }
+    const a = this.anchor;
+    this.anchor = null;
+    this.paintDrag(null, "aim");
+    this.range(a, i);
+  }
+  seenMore = null;
+  render() {
+    const scroll = this.el.scrollTop;
+    this.el.replaceChildren(this.html());
+    this.el.scrollTop = scroll;
+    this.seenMore?.disconnect();
+    const more = this.el.querySelector("[data-more]");
+    if (more && typeof IntersectionObserver === "function") {
+      this.seenMore = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && void this.load());
+      this.seenMore.observe(more);
+    }
+  }
+  /** Rows shaped like the real ones while the first page is read: a lane's dot, an avatar, two lines. */
+  static skeleton(n = 6) {
+    return html`${Array.from({ length: n }, (_, i) => html`<div class="row skel" aria-hidden="true"><svg width="${2 * LANE}" height="${ROW}"><circle cx="${LANE / 2 + 4}" cy="${ROW / 2}" r="5"/></svg><span class="t"><span class="bone" style="${`width:${62 - i * 17 % 30}%`}"></span><span class="bone" style="${`width:${38 - i * 11 % 14}%`}"></span></span></div>`)}`;
+  }
+  html() {
+    if (this.error) return html`<div class="note err">${this.error}</div>`;
+    if (!this.commits.length) return this.loading || this.more ? _Commits.skeleton() : html`<div class="note">${this.host.words?.commit === "version" ? "No history yet: the project's versions show here once Overleaf has saved them" : "No commits in this repository yet"}</div>`;
+    const { rows, width } = layout(this.commits);
+    const W2 = (width + 1) * LANE;
+    const x = (l) => LANE / 2 + l * LANE + 4;
+    const fi = this.find(this.from);
+    const ti = this.to ? this.find(this.to) : -1;
+    const tree = this.from !== null && !this.to;
+    const color = (c) => this.host.color?.(c) ?? "#8a96a3";
+    const hashes = this.host.words?.hashes !== false;
+    const t = this.host.tree === void 0 ? { title: "Working tree", detail: "The files as they are, not committed" } : this.host.tree;
+    const top = t ? html`<div class="${`row${tree ? " to" : ""}`}" title="${t.detail}"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="5" fill="none" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 5}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="currentColor" stroke-opacity=".5" stroke-dasharray="2 3" stroke-width="1.6"/></svg><span class="t"><span class="s">${tree ? html`<span class="endtag">TO</span>` : ""}<i>${t.title}</i></span><span class="m">${t.detail}</span></span></div>` : "";
+    const fresh = this.seen.size > 0;
+    const lines3 = this.commits.map((c, i) => {
+      const r = rows[i];
+      const col = bc(r.color);
+      const marks = r.down.map(([a, b, k]) => svg`<path d="${`M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}`}" stroke="${bc(k)}" fill="none" stroke-width="2"/>`);
+      marks.push(c.parents.length > 1 ? svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="5.5" fill="var(--phc-bg, Canvas)" stroke="${col}" stroke-width="2.4"/>` : svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="5" fill="${col}"/>`);
+      const pills = c.refs.map((f) => html`<span class="${`ref ${KINDS2.has(f.kind) ? f.kind : "branch"}`}" style="${`--phc-bcol:${col}`}">${f.name}</span>`);
+      const lo = this.to ? ti : -1;
+      const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
+      const end = i === fi ? html`<span class="endtag">FROM</span>` : i === ti ? html`<span class="endtag">TO</span>` : "";
+      const isNew = fresh && !this.seen.has(c.id);
+      const title = `${c.subject}
+${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
+click: one end \xB7 shift-click: To \xB7 double-click: against its first parent`;
+      return html`<div class="${`row${cls}${isNew ? " new" : ""}`}" data-i="${i}" data-id="${c.id}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="t"><span class="s">${end}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}</span><span class="m">${hashes ? html`<code>${c.short}</code>` : ""}${pills}<span class="av" style="${`background:${color(c)}`}">${initials(c.author)}</span>${c.author} · ${ago2(c.time)}${c.mark ? html` · <span class="ref mark">${c.mark}</span>` : ""}</span></span></div>`;
+    });
+    for (const c of this.commits) this.seen.add(c.id);
+    const more = this.loading ? _Commits.skeleton(2) : this.more ? html`<button type="button" class="more" data-more>${`Older ${this.host.words?.commit === "version" ? "versions" : "commits"}\u2026`}</button>` : "";
+    return html`${top}${lines3}${more}`;
+  }
+};
+
+// viewer/src/changes.ts
+var DIFF_COLORS = {
+  blue: ["#1347ae", "#bb1b1b", "Blue / red"],
+  green: ["#1a7f37", "#cf222e", "Green / red"],
+  safe: ["#0072B2", "#D55E00", "Blue / orange (colour-blind safe)"],
+  mono: ["#111111", "#7a7a7a", "Black / grey (print)"]
+};
+var DIFF_LOOK = { colors: "blue", ins: "wavy", del: "strike", fig: "side" };
+var KINDS3 = ["Text", "Section", "Citation", "Table", "Figure", "Equation"];
+function words(src, n = 12) {
+  return src.replace(/%.*$/gm, " ").replace(/\\(?:cite[tp]?|ref|label|eqref|includegraphics)\*?(\[[^\]]*\])?\{[^}]*\}/g, (m) => /\\cite/.test(m) ? `[${m.replace(/.*\{|\}/g, "")}]` : " ").replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, n).join(" ");
+}
+function itemOf(c, k) {
+  const both = `${c.old_text}
+${c.new_text}`;
+  const kind = /\\(sub)*section\*?\{|\\chapter\*?\{|\\paragraph\{/.test(both) ? "Section" : /\\includegraphics|\\begin\{figure|\\begin\{tikzpicture/.test(both) ? "Figure" : /\\begin\{(tabular|table)|&.*\\\\/.test(both) ? "Table" : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) ? "Citation" : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both) ? "Equation" : "Text";
+  const img = (t) => /\\includegraphics\*?(?:\[[^\]]*\])?\{([^}]*)\}/.exec(t)?.[1];
+  let old = words(c.old_text), neu = words(c.new_text);
+  if (kind === "Figure" && (img(c.old_text) || img(c.new_text))) old = img(c.old_text) ?? old, neu = img(c.new_text) ? `${img(c.new_text)}${img(c.old_text) ? " replaced" : ""}` : neu;
+  if (kind === "Section") old = old || "", neu = neu || "";
+  return { k, kind, sec: c.section ?? c.new.file ?? c.old.file, old: c.kind === "add" ? "" : old, neu: c.kind === "del" ? "" : neu, file: c.new.file, at: c.new.start, end: c.new.end, oldAt: c.old.start, oldEnd: c.old.end };
+}
+var CHANGES_CSS = `
+${COMMITS_CSS}
+.chg-pop { --phc-bg: var(--ph-menu, var(--ph-bar)); --phc-fg: var(--ph-fg); --phc-muted: var(--ph-fg2); --phc-line: var(--ph-border);
+  --phc-chip: var(--ph-hover); --phc-chip2: color-mix(in srgb, var(--ph-fg) 12%, var(--phc-bg)); --phc-focus: var(--ph-link, var(--ph-accent));
+  --phc-sel: color-mix(in srgb, var(--phc-focus) 13%, transparent); --phc-aim: color-mix(in srgb, var(--phc-focus) 60%, transparent);
+  --phc-danger: var(--ph-danger, #c23a2f);
+  position: fixed; z-index: 40; width: min(var(--chg-w, 380px), calc(100vw - 16px)); max-height: min(640px, calc(100vh - 70px)); display: flex; flex-direction: column;
+  background: var(--phc-bg); color: var(--phc-fg); border: 1px solid var(--phc-line); border-radius: 12px; box-shadow: 0 10px 30px rgb(15 25 40 / 22%);
+  font: 13px/1.4 var(--ph-font, "Noto Sans", system-ui, sans-serif); transform-origin: top right; transition: opacity .15s, transform .15s; }
+.chg-pop[hidden] { display: flex; opacity: 0; transform: scale(.97); pointer-events: none; visibility: hidden; }
+.chg-pop::before { content: ""; position: absolute; top: -6px; right: var(--chg-arrow, 40px); width: 10px; height: 10px; background: var(--phc-bg); border-left: 1px solid var(--phc-line); border-top: 1px solid var(--phc-line); transform: rotate(45deg); }
+.chg-pop > * { flex: none; }
+.chg-pop > .body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.chg-pop button { font: inherit; color: inherit; }
+.chg-pop button:focus-visible, .chg-pop input:focus-visible, .chg-pop [tabindex]:focus-visible { outline: 2px solid var(--phc-focus); outline-offset: 1px; }
+.chg-pop .ph { padding: 10px 12px 12px; display: grid; gap: 10px; border-bottom: 1px solid var(--phc-line); }
+.chg-pop .ttl { display: grid; grid-template-columns: 40px 1fr 28px 28px; align-items: center; gap: 4px; }
+.chg-pop .ttl h2 { margin: 0; font-size: 14px; text-align: center; grid-column: 2; }
+.chg-pop .pin { font-weight: 600; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); }
+.chg-pop .ib2 { border: 0; background: transparent; color: var(--phc-muted); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 15px; display: grid; place-items: center; }
+.chg-pop .ib2:hover, .chg-pop .ib2[aria-pressed="true"] { background: var(--phc-chip); color: var(--phc-fg); }
+.chg-pop .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--phc-chip); border-radius: 8px; padding: 2px; }
+.chg-pop .seg button { font-size: 12.5px; font-weight: 600; border: 0; background: transparent; color: var(--phc-muted); padding: 6px 8px; border-radius: 6px; cursor: pointer; transition: background .15s, color .15s; }
+.chg-pop .seg button[aria-pressed="true"] { background: var(--phc-bg); color: var(--phc-fg); box-shadow: 0 1px 2px rgb(0 0 0 / 18%); }
+.chg-pop .seg.small button { font-weight: 500; font-size: 12px; padding: 4px 6px; }
+.chg-pop .ends { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); align-items: end; gap: 6px; }
+.chg-pop .ends .arrow { text-align: center; color: var(--phc-muted); padding-bottom: 14px; }
+.chg-pop .end { display: grid; gap: 3px; min-width: 0; }
+.chg-pop .lab { font-weight: 600; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--phc-muted); }
+.chg-pop .field { display: flex; align-items: center; gap: 6px; border: 1px solid var(--phc-line); background: var(--phc-chip); border-radius: 7px; padding: 5px 6px 5px 8px; min-width: 0; cursor: pointer; height: 46px; transition: border-color .15s, box-shadow .15s; text-align: left; }
+.chg-pop .field:hover { border-color: var(--phc-focus); }
+.chg-pop .field.picking { border-color: var(--phc-focus); box-shadow: 0 0 0 2px var(--phc-sel); }
+.chg-pop .field .tx { display: grid; min-width: 0; flex: 1; }
+.chg-pop .field .tx b { font-weight: 500; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chg-pop .field .tx code { font: 500 11px ui-monospace, "DM Mono", monospace; color: var(--phc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chg-pop .field.flash .tx { animation: chg-flash .25s ease-out; }
+@keyframes chg-flash { from { opacity: .2; transform: translateY(3px); } }
+.chg-pop .field .clr { border: 0; background: transparent; color: var(--phc-muted); width: 20px; height: 20px; border-radius: 4px; cursor: pointer; flex: none; }
+.chg-pop .field .clr:hover { background: var(--phc-chip2); color: var(--phc-fg); }
+.chg-pop .sub { font-size: 12px; color: var(--phc-muted); margin: 0; text-align: center; }
+/* (the progress line floats over the bottom of the list: the rows under the pointer never move as it comes and goes) */
+.chg-pop .prog { position: absolute; z-index: 3; left: 8px; right: 8px; bottom: 8px; padding: 6px 10px 7px; border: 1px solid var(--phc-line); border-radius: 8px; background: var(--phc-bg); box-shadow: 0 4px 14px rgb(15 25 40 / 16%); font-size: 12px; color: var(--phc-muted); display: grid; gap: 5px; }
+.chg-pop:has(> .foot) .prog { bottom: 44px; }
+.chg-pop .prog:not(.err) { pointer-events: none; }
+.chg-pop:has(> .prog:not([hidden])) > .body { padding-bottom: 48px; }
+.chg-pop .prog[hidden] { display: none; }
+.chg-pop .track { height: 3px; border-radius: 2px; background: var(--phc-chip2); overflow: hidden; position: relative; }
+.chg-pop .track i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ph-progress, var(--phc-focus)); border-radius: 2px; transition: width .2s; }
+.chg-pop .track.ind i { width: 30%; animation: chg-ind 1.2s ease-in-out infinite; }
+@keyframes chg-ind { from { left: -30%; } to { left: 100%; } }
+.chg-pop .prog.err { color: var(--phc-danger); }
+.chg-pop .prog .again { justify-self: start; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 1px 10px; cursor: pointer; font-size: 12px; color: var(--phc-fg); }
+.chg-pop .foot { border-top: 1px solid var(--phc-line); padding: 6px 10px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; font-size: 12px; color: var(--phc-muted); }
+.chg-pop .foot .r { justify-self: end; }
+.chg-pop .nav { display: inline-flex; gap: 2px; align-items: center; }
+.chg-pop .nav button { border: 0; background: transparent; width: 28px; height: 26px; border-radius: 6px; cursor: pointer; font-size: 15px; color: var(--phc-fg); }
+.chg-pop .nav button:hover { background: var(--phc-chip); }
+.chg-pop .nav button:disabled { opacity: .35; cursor: default; }
+.chg-pop .toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.chg-pop .pickhead { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+.chg-pop .pickhead b { font-size: 13px; }
+.chg-pop .done { border: 1px solid var(--phc-line); background: var(--phc-chip); border-radius: 7px; padding: 4px 12px; cursor: pointer; font-size: 12.5px; font-weight: 600; }
+.chg-pop .quick { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 12px 10px; border-bottom: 1px solid var(--phc-line); }
+.chg-pop .qb { font-size: 12px; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.chg-pop .qb:hover { border-color: var(--phc-focus); }
+.chg-pop .hint { padding: 8px 12px; font-size: 12px; color: var(--phc-muted); border-bottom: 1px solid var(--phc-line); min-height: 34px; }
+.chg-pop .hint b { color: var(--phc-fg); font-weight: 600; }
+.chg-pop .filters { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--phc-line); overflow-x: auto; scrollbar-width: none; }
+.chg-pop .fchip { font-size: 12px; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 2px 9px; cursor: pointer; display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; flex: none; transition: opacity .15s; }
+.chg-pop .fchip[aria-pressed="false"] { opacity: .45; }
+.chg-pop .fchip small { color: var(--phc-muted); font-size: inherit; }
+.chg-pop .grp { padding: 10px 12px 2px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); display: flex; justify-content: space-between; gap: 8px; }
+.chg-pop .grp span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chg-pop .citem { display: grid; grid-template-columns: 60px minmax(0, 1fr); gap: 2px 8px; width: 100%; text-align: left; border: 0; border-left: 3px solid transparent; background: transparent; padding: 7px 12px 7px 9px; cursor: pointer; transition: background .15s; }
+.chg-pop .citem.new { animation: phc-in .2s ease-out both; }
+.chg-pop .citem:hover { background: var(--phc-chip); }
+.chg-pop .citem.cur { background: var(--phc-sel); border-left-color: var(--phc-focus); }
+.chg-pop .citem .k { font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--phc-muted); padding-top: 3px; }
+.chg-pop .citem .w { min-width: 0; overflow-wrap: anywhere; }
+.chg-pop .citem .w small { color: var(--phc-muted); display: flex; gap: 5px; align-items: center; flex-wrap: wrap; font-size: 11.5px; }
+.chg-pop .citem del { color: var(--chg-del, #bb1b1b); }
+.chg-pop .citem ins { color: var(--chg-add, #1347ae); text-decoration: none; }
+.chg-pop .hidedel .citem del { display: none; }
+.chg-pop .av { width: 16px; height: 16px; border-radius: 50%; display: inline-grid; place-items: center; font: 700 8px system-ui, sans-serif; color: #fff; flex: none; }
+.chg-pop .av.sm { width: 13px; height: 13px; font-size: 6px; }
+.chg-pop .refp { font: 600 10.5px ui-monospace, monospace; border-radius: 5px; padding: 0 5px; border: 1px solid currentColor; color: var(--phc-g1, #c2410c); }
+.chg-pop .empty { padding: 22px 14px; color: var(--phc-muted); text-align: center; }
+.chg-pop .empty b { display: block; color: var(--phc-fg); font-weight: 600; margin-bottom: 4px; }
+.chg-pop .skrow { display: grid; grid-template-columns: 60px 1fr; gap: 8px; padding: 9px 12px; }
+.chg-pop .bone { display: block; height: 9px; border-radius: 4px; background: var(--phc-chip2); margin: 3px 0; animation: phc-shimmer 1.2s ease-in-out infinite; }
+.chg-pop .sec { padding: 10px 12px; border-bottom: 1px solid var(--phc-line); display: grid; gap: 8px; }
+.chg-pop .sec:last-child { border-bottom: 0; }
+.chg-pop .sec h3 { margin: 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); display: flex; justify-content: space-between; }
+.chg-pop .prow, .chg-pop .crow { display: grid; gap: 8px; align-items: center; border: 0; background: transparent; text-align: left; padding: 5px 4px; border-radius: 6px; cursor: pointer; grid-template-columns: auto minmax(0, 1fr) auto; width: 100%; transition: background .15s; }
+.chg-pop .prow:hover, .chg-pop .crow:hover { background: var(--phc-chip); }
+.chg-pop .prow.sel, .chg-pop .crow.sel { background: var(--phc-sel); }
+.chg-pop .prow .nm { display: grid; gap: 3px; min-width: 0; font-size: 13px; }
+.chg-pop .bar6 { height: 6px; border-radius: 3px; background: var(--phc-chip2); overflow: hidden; }
+.chg-pop .bar6 i { display: block; height: 100%; transition: width .25s; }
+.chg-pop .ct { font: 500 12px ui-monospace, monospace; color: var(--phc-muted); font-variant-numeric: tabular-nums; }
+.chg-pop .crow .s { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.chg-pop .crow small { color: var(--phc-muted); font-size: 11.5px; }
+.chg-pop .crow code { font: 500 11px ui-monospace, monospace; }
+.chg-pop .sw { width: 4px; height: 28px; border-radius: 2px; }
+.chg-pop .sw.hatch { background: repeating-linear-gradient(0deg, #99a3ad 0 3px, transparent 3px 6px) !important; }
+.chg-pop .ramp { display: flex; gap: 4px; align-items: center; font-size: 11px; color: var(--phc-muted); justify-content: center; }
+.chg-pop .ramp i { width: 26px; height: 8px; border-radius: 2px; display: inline-block; }
+.chg-pop .set { padding: 4px 12px 12px; display: grid; gap: 12px; }
+.chg-pop .set h3 { margin: 10px 0 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); }
+.chg-pop .opt2 { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 13px; }
+.chg-pop .note2 { margin: -6px 0 0 120px; font-size: 12px; color: var(--phc-muted); }
+.chg-pop .swatches { display: flex; gap: 6px; flex-wrap: wrap; }
+.chg-pop .swb { border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 8px; padding: 4px 8px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; font-size: 12px; }
+.chg-pop .swb[aria-pressed="true"] { border-color: var(--phc-focus); box-shadow: 0 0 0 2px var(--phc-sel); }
+.chg-pop .swb i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.chg-pop .skips { display: grid; gap: 4px; font-size: 12px; max-height: 150px; overflow: auto; }
+.chg-pop .skips code { font: 500 11px ui-monospace, monospace; color: var(--phc-muted); }
+.chg-pop .skips small { color: var(--phc-muted); }
+.chg-pop .skips label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
+.chg-pop .skips label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chg-pop .preview { border: 1px solid var(--phc-line); border-radius: 8px; padding: 10px 12px; background: #fff; color: #111; font: 15px/1.5 "STIX Two Text", "Latin Modern Roman", "Times New Roman", serif; }
+.chg-pop .preview .ins { color: var(--chg-add); }
+.chg-pop .preview .dl { color: var(--chg-del); }
+.chg-pop .preview.i-wavy .ins { text-decoration: underline wavy 1px; text-underline-offset: 3px; }
+.chg-pop .preview.i-line .ins { text-decoration: underline 1.5px; text-underline-offset: 3px; }
+.chg-pop .preview.i-mark .ins { background: color-mix(in srgb, var(--chg-add) 16%, transparent); border-radius: 2px; }
+.chg-pop .preview.d-strike .dl { text-decoration: line-through; }
+.chg-pop .preview.d-mark .dl { text-decoration: line-through; background: color-mix(in srgb, var(--chg-del) 14%, transparent); border-radius: 2px; }
+.chg-pop .preview.d-caret .dl { font-size: 0; }
+.chg-pop .preview.d-caret .dl::after { content: "\u2038"; font-size: 15px; color: var(--chg-del); font-weight: 700; }
+.chg-pop .reset { justify-self: center; border: 0; background: transparent; color: var(--phc-focus); cursor: pointer; font-size: 12px; }
+.chg-pop .grip { position: absolute; left: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 3; }
+@media (prefers-reduced-motion: reduce) { .chg-pop, .chg-pop * { transition: none !important; animation: none !important; } }
+`;
+var CHANGES_BUTTON_CSS = `
+.chg-badge { font: 600 11px ui-monospace, monospace; background: var(--ph-link, var(--ph-accent)); color: #fff; border-radius: 999px; padding: 0 6px; line-height: 16px; display: inline-block; min-width: 8px; text-align: center; }
+.chg-badge:empty { display: none; }
+.chg-badge.tick { animation: chg-tick .2s ease-out; }
+@keyframes chg-tick { from { transform: scale(1.35); } }
+@media (prefers-reduced-motion: reduce) { .chg-badge.tick { animation: none; } }
+`;
+function hashColor(key) {
+  let h = 2166136261;
+  for (const b of new TextEncoder().encode(key.toLowerCase())) h = Math.imul(h ^ b, 16777619) >>> 0;
+  return AUTHOR_COLORS[h % AUTHOR_COLORS.length];
+}
+var reduced3 = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+var Changes = class {
+  p;
+  host;
+  blame;
+  el;
+  /** Kept on (the marks stay with the popover closed). */
+  on = false;
+  /** The popover shown. */
+  open = false;
+  mode;
+  look;
+  hide;
+  kinds;
+  settings = false;
+  /** The picker shown, opened from which field. */
+  pick = null;
+  pair = null;
+  /** The pair whose diff is shown (its changes), and the diff's state. */
+  ran = null;
+  items = [];
+  busy = "";
+  prog;
+  error = "";
+  cur = -1;
+  graph = null;
+  anchors = [];
+  /** What the pointer is over, as its enters and leaves say (the popover, a button): it closes once over none. */
+  over = /* @__PURE__ */ new Set();
+  badges = [];
+  hideT;
+  showT;
+  attrAbort;
+  histProgress = null;
+  seenItems = /* @__PURE__ */ new Set();
+  lastCount = -1;
+  width = null;
+  dragging = false;
+  constructor(p, host2, blame2) {
+    this.p = p;
+    this.host = host2;
+    this.blame = blame2;
+    this.mode = host2.diff ? "diff" : "blame";
+    this.look = { ...DIFF_LOOK };
+    this.hide = false;
+    this.kinds = new Set(KINDS3);
+    const box = document.createElement("div");
+    box.id = "chg";
+    const shadow = box.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = CHANGES_CSS;
+    this.el = document.createElement("div");
+    this.el.className = "chg-pop";
+    this.el.hidden = true;
+    this.el.setAttribute("role", "dialog");
+    this.el.setAttribute("aria-label", "Changes");
+    shadow.append(style, this.el);
+    p.win.append(box);
+    this.el.addEventListener("pointerenter", () => (this.over.add(this.el), this.stay()));
+    this.el.addEventListener("pointerleave", () => (this.over.delete(this.el), this.soon()));
+    blame2?.onState(() => this.mode === "blame" && this.open && this.render());
+    host2.onProgress?.((text, done, total) => {
+      this.histProgress = text ? { text, done, total } : null;
+      if (this.open) this.renderProg();
+    });
+    p.root.addEventListener("keydown", (e) => this.key(e));
+    document.addEventListener("keydown", (e) => {
+      if (e.composedPath().includes(p.win)) return;
+      this.key(e);
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (!this.open || this.on || this.busyNow()) return;
+      if (e.composedPath().some((n) => n === this.el || this.anchors.includes(n))) return;
+      this.setOpen(false);
+    });
+    addEventListener("resize", () => this.open && this.place());
+    this.applyColors();
+    this.kept(p.prefs());
+  }
+  /** The settings as kept (the panel's prefs, read once loaded). */
+  kept(k) {
+    if (!k) return;
+    if (k.mode) this.mode = k.mode === "blame" && this.blame ? "blame" : this.host.diff ? "diff" : "blame";
+    this.look = { ...DIFF_LOOK, ...k.diff };
+    this.hide = !!k.hide;
+    this.kinds = new Set(k.kinds?.length ? k.kinds : KINDS3);
+    if (this.blame && k.blame) this.blame.look = { ...BLAME_LOOK, ...k.blame, skip: [...k.blame.skip ?? []] };
+    this.applyColors();
+    if (this.open) this.render();
+  }
+  /** The look kept. */
+  save() {
+    this.p.savePrefs({ mode: this.mode, diff: this.look, blame: this.blame?.look ?? BLAME_LOOK, hide: this.hide, kinds: [...this.kinds] });
+  }
+  /**
+   * A ± Changes button (the panel's, a host's own): hovering it peeks, a
+   * click keeps it on; `badge` the count of changes beside it.
+   */
+  attach(btn, badge2) {
+    const was = this.anchor && !this.anchor.isConnected;
+    for (const a of this.anchors) if (!a.isConnected && this.over.delete(a)) this.over.add(btn);
+    this.anchors = [...this.anchors.filter((a) => a.isConnected), btn];
+    this.badges = [...this.badges.filter((b) => b.isConnected), ...badge2 ? [badge2] : []];
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.setAttribute("aria-pressed", String(this.on));
+    btn.classList.toggle("on", this.on);
+    btn.classList.toggle("active", this.on);
+    if (was) {
+      this.anchor = btn;
+      if (this.open) this.place();
+    }
+    this.badge();
+    btn.addEventListener("pointerenter", () => {
+      this.over.add(btn);
+      this.stay();
+      if (!this.open) this.showT = setTimeout(() => this.setOpen(true, btn), 120);
+    });
+    btn.addEventListener("pointerleave", () => (this.over.delete(btn), this.soon()));
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearTimeout(this.showT);
+      if (this.on) this.off();
+      else this.setOn(true, btn);
+    });
+  }
+  /** Whether the popover must stay: the picker, the settings, a first end, a drag. */
+  busyNow() {
+    return !!this.pick || this.settings || this.dragging || !!this.graph?.aiming;
+  }
+  soon() {
+    clearTimeout(this.showT);
+    clearTimeout(this.hideT);
+    this.hideT = setTimeout(() => {
+      if (!this.busyNow() && !this.over.size) this.setOpen(false);
+    }, 350);
+  }
+  stay() {
+    clearTimeout(this.hideT);
+  }
+  anchor = null;
+  /** The popover shown or hidden; shown, the marks of its mode on the pages; hidden and not on, none. */
+  setOpen(v, at) {
+    if (at) this.anchor = at;
+    if (v === this.open) return;
+    this.open = v;
+    this.el.hidden = !v;
+    if (v) {
+      this.place();
+      this.render();
+      this.marks(true);
+    } else {
+      this.over.delete(this.el);
+      this.pick = null;
+      this.settings = false;
+      this.graph?.cancel();
+      if (!this.on) this.marks(false);
+    }
+  }
+  /** Kept on (the marks stay), or not. */
+  setOn(v, at) {
+    this.on = v;
+    for (const a of this.anchors) {
+      a.setAttribute("aria-pressed", String(v));
+      a.classList.toggle("on", v);
+      a.classList.toggle("active", v);
+    }
+    if (v && this.open) this.render();
+    else if (v) this.setOpen(true, at);
+    else this.setOpen(false);
+  }
+  /** Turned off: ✕, Esc, a second click on the button. */
+  off() {
+    this.pick = null;
+    this.settings = false;
+    this.setOn(false);
+    this.marks(false);
+  }
+  /** The marks of the mode shown on the pages (`v`), or none. */
+  marks(v) {
+    const diff2 = v && this.mode === "diff";
+    const blame2 = v && this.mode === "blame";
+    this.host.diff?.show(diff2 && !!this.ran);
+    this.blame?.toggle(blame2);
+    if (diff2) this.ensureDiff();
+  }
+  /** Placed under its button, its arrow at the button's middle; within the window. */
+  place() {
+    const a = this.anchor ?? this.anchors[0];
+    if (!a) return;
+    const r = a.getBoundingClientRect();
+    const w = Math.min(this.width ?? 380, innerWidth - 16);
+    this.el.style.setProperty("--chg-w", `${w}px`);
+    const left = Math.max(8, Math.min(innerWidth - w - 8, r.right - w + 10));
+    const top = r.bottom + 8;
+    this.el.style.left = `${left}px`;
+    this.el.style.top = `${top}px`;
+    this.el.style.setProperty("--chg-arrow", `${Math.max(14, Math.min(w - 24, left + w - (r.left + r.width / 2) - 5))}px`);
+    const at = this.el.getBoundingClientRect();
+    if (at.width && (Math.abs(at.left - left) > 0.5 || Math.abs(at.top - top) > 0.5)) {
+      this.el.style.left = `${2 * left - at.left}px`;
+      this.el.style.top = `${2 * top - at.top}px`;
+    }
+  }
+  key(e) {
+    if (!this.open && !this.on) return;
+    const t = e.composedPath()[0];
+    if (t?.closest?.("input:not([type=checkbox]), textarea, [contenteditable=true], .cm-editor")) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "Escape") {
+      if (!this.open) return;
+      if (this.pick && this.graph?.aiming && this.pick === "from") this.graph.cancel(), this.refreshHint();
+      else if (this.pick) this.pick = null, this.render();
+      else if (this.settings) this.settings = false, this.render();
+      else this.off();
+      e.preventDefault();
+      e.stopPropagation();
+    } else if ((e.key === "]" || e.key === "[") && this.mode === "diff") {
+      this.step(e.key === "]" ? 1 : -1);
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
+  // ---- the diff ----
+  /** The changes the filters let through. */
+  shown() {
+    return this.items.filter((c) => this.kinds.has(c.kind));
+  }
+  /** A pair to compare when none is chosen yet: the last visit, else the last tag, else the last commit, against the working tree. */
+  async defaultPair() {
+    const g = this.ensureGraph();
+    if (!g.commits.length && g.hasMore) await g.load();
+    const cs = g.commits;
+    if (!cs.length) return null;
+    const visit2 = this.host.lastVisit?.();
+    if (visit2 && g.find(visit2) > 0) return { from: cs[g.find(visit2)].id, to: null };
+    if (this.host.words?.commit === "version") {
+      const tag = cs.findIndex((c) => c.refs.some((r) => r.kind === "tag"));
+      if (tag > 0) return { from: cs[tag].id, to: null };
+      const far = await this.farTag();
+      return { from: far ? far.id : cs[0].parents[0] ?? cs[0].id, to: null };
+    }
+    return { from: cs[0].id, to: null };
+  }
+  farKnown = null;
+  far = null;
+  /** The host's newest tag, older than the graph has read (named in the fields at once; the graph reads on to it). */
+  farTag() {
+    this.far ??= (this.host.lastTag?.() ?? Promise.resolve(null)).then((t) => {
+      if (t) this.labels.set(t.id, t.name);
+      this.farKnown = t;
+      if (this.open && this.pick) this.render();
+      return t;
+    }).catch(() => null);
+    return this.far;
+  }
+  /** The diff of the pair chosen, started once Diff shows. */
+  ensureDiff() {
+    if (!this.host.diff || this.ran || this.busy) return;
+    if (this.pair) return void this.run(this.pair);
+    this.busy = "Reading the history\u2026";
+    this.renderSoon();
+    void this.defaultPair().then((p) => {
+      this.busy = "";
+      if (!p) return this.render();
+      if (!this.pair) this.choose(p, false);
+    });
+  }
+  ensureGraph() {
+    if (this.graph) return this.graph;
+    const holder = document.createElement("div");
+    this.graph = new Commits(holder, {
+      load: (skip, limit) => this.host.log(skip, limit),
+      pick: (from2, to, done) => this.choose({ from: from2, to }, done),
+      marked: () => this.renderHead(),
+      color: (c) => this.host.color?.(c.author, c.email ?? "") ?? hashColor(c.email || c.author),
+      tree: this.host.tree,
+      words: this.host.words
+    });
+    this.graph.onChange(() => {
+      if (this.pair) this.graph.mark(this.pair.from, this.pair.to);
+      if (this.open) this.renderHead();
+    });
+    return this.graph;
+  }
+  /** A pair chosen: the diff run; `done` closes the picker. */
+  choose(p, done) {
+    this.pair = p;
+    this.graph?.mark(p.from, p.to);
+    if (done) this.pick = null;
+    this.flashFields();
+    void this.run(p);
+    this.render();
+  }
+  turn = 0;
+  async run(p) {
+    const r = this.host.diff;
+    if (!r) return;
+    const turn = ++this.turn;
+    this.attrAbort?.abort();
+    this.ran = p;
+    this.items = [];
+    this.cur = -1;
+    this.error = "";
+    this.busy = "Reading the two versions\u2026";
+    this.prog = void 0;
+    r.show((this.open || this.on) && this.mode === "diff");
+    this.render();
+    if (p.to !== null && p.from === p.to) {
+      this.busy = "";
+      return this.render();
+    }
+    try {
+      const got = await r.start(
+        p,
+        this.look,
+        this.hide,
+        (busy2, done, total) => {
+          if (turn !== this.turn) return;
+          this.busy = busy2;
+          this.prog = done !== void 0 && total ? [done, total] : void 0;
+          this.renderProg();
+        },
+        (changes2) => {
+          if (turn !== this.turn) return;
+          this.setItems(changes2);
+        }
+      );
+      if (turn !== this.turn) return;
+      this.busy = "";
+      this.setItems(got);
+      r.show(this.open || this.on ? this.mode === "diff" : false);
+    } catch (e) {
+      if (turn !== this.turn) return;
+      this.busy = "";
+      this.error = `Couldn't compare: ${e.message ?? e}`;
+      this.render();
+    }
+  }
+  /** The diff's changes as the list's items, their authors filled in as the host knows them. */
+  setItems(changes2) {
+    const old = new Map(this.items.map((i) => [`${i.file}:${i.old}:${i.neu}`, i.who]));
+    this.items = changes2.map((c, i) => {
+      const it = itemOf(c, i + 1);
+      it.who = old.get(`${it.file}:${it.old}:${it.neu}`);
+      return it;
+    });
+    this.cur = Math.min(this.cur, this.shown().length - 1);
+    this.render();
+    const p = this.ran;
+    if (p && this.host.attribute && this.items.length) {
+      this.attrAbort?.abort();
+      const a = this.attrAbort = new AbortController();
+      void this.host.attribute(this.items, p, () => !a.signal.aborted && this.open && this.mode === "diff" && !this.pick && !this.settings && this.renderBody(), a.signal).catch(() => void 0);
+    }
+  }
+  /** Change `d` steps on (‹ › and ] [): the diff's pages shown at it. */
+  step(d) {
+    const v = this.shown();
+    if (!v.length) return;
+    this.cur = this.cur < 0 ? d > 0 ? 0 : v.length - 1 : (this.cur + d + v.length) % v.length;
+    this.pick = null;
+    if (this.host.diff && this.ran) {
+      this.host.diff.show(true);
+      this.host.diff.goto(v[this.cur].k);
+    }
+    this.render();
+    this.el.querySelector(".citem.cur")?.scrollIntoView({ block: "nearest", behavior: reduced3() ? "auto" : "smooth" });
+  }
+  /** Ends the history does not list, named by the host ("What git has staged", "Proposal 3"). */
+  labels = /* @__PURE__ */ new Map();
+  /** Diff `p` shown and kept on (the host's own ask: a review's changes), its ends named by `names` where the history does not list them. */
+  show(p, names = {}) {
+    if (names.from) this.labels.set(p.from, names.from);
+    if (names.to && p.to) this.labels.set(p.to, names.to);
+    this.mode = "diff";
+    this.settings = false;
+    this.blame?.toggle(false);
+    this.choose(p, true);
+    this.setOn(true);
+    this.marks(true);
+    this.render();
+  }
+  /** What `c` changed: Diff against its first parent (Blame's card). */
+  diffCommit(c) {
+    const g = this.ensureGraph();
+    this.mode = "diff";
+    this.settings = false;
+    this.blame?.toggle(false);
+    const id = c ? c.rev ?? c.id : null;
+    const at = id ? g.find(id) : -1;
+    const parent = c && id ? c.parent ?? (at >= 0 ? g.commits[at].parents[0] : void 0) ?? this.host.firstParentOf?.(id) ?? null : null;
+    if (c && id && parent) {
+      this.choose({ from: parent, to: id }, true);
+      if (at < 0)
+        void (async () => {
+          while (g.find(id) < 0 && g.hasMore && this.pair?.to === id) await g.load();
+          this.renderHead();
+        })();
+    } else if (!c && g.commits[0]) this.choose({ from: g.commits[0].id, to: null }, true);
+    this.setOn(true);
+    this.save();
+    this.marks(true);
+    this.render();
+  }
+  /** The diff's colours on the list and the preview. */
+  applyColors() {
+    const [a, d] = DIFF_COLORS[this.look.colors] ?? DIFF_COLORS.blue;
+    this.el.style.setProperty("--chg-add", a);
+    this.el.style.setProperty("--chg-del", d);
+  }
+  /** The words of a version: its subject (a tag's name) and its short hash. */
+  name(id) {
+    if (id === null) return { b: this.host.tree?.title ?? "Working tree", k: "as it is now" };
+    const g = this.graph;
+    const i = g ? g.find(id) : -1;
+    const c = i >= 0 ? g.commits[i] : null;
+    if (!c) return { b: this.labels.get(id) ?? id.slice(0, 12), k: this.labels.has(id) ? "" : "not in the history read" };
+    const tag = c.refs.find((r) => r.kind === "tag");
+    const hashes = this.host.words?.hashes !== false;
+    return { b: tag ? tag.name : c.subject, k: `${c.short} \xB7 ${agoWords(c.time, Date.now() / 1e3)}${hashes ? "" : ` \xB7 ${c.author}`}` };
+  }
+  flashFields() {
+    if (reduced3()) return;
+    for (const f of this.el.querySelectorAll(".field")) {
+      f.classList.remove("flash");
+      void f.offsetWidth;
+      f.classList.add("flash");
+    }
+  }
+  // ---- drawing ----
+  soonT;
+  renderSoon() {
+    clearTimeout(this.soonT);
+    this.soonT = setTimeout(() => this.open && this.render(), 0);
+  }
+  /** The count beside ± Changes (Diff's changes), ticking as it changes. */
+  badge() {
+    const n = this.mode === "diff" && this.ran ? this.shown().length : -1;
+    for (const b of this.badges) {
+      b.textContent = n > 0 && (this.open || this.on) ? String(n) : "";
+      if (n !== this.lastCount && n >= 0 && !reduced3()) {
+        b.classList.remove("tick");
+        void b.offsetWidth;
+        b.classList.add("tick");
+      }
+    }
+    this.lastCount = n;
+  }
+  render() {
+    if (!this.open) return this.badge();
+    const keep = this.el.querySelector(".body")?.scrollTop ?? 0;
+    const was = this.el.dataset.view;
+    const view = this.settings ? `set-${this.mode}` : `${this.mode}${this.pick ? "-pick" : ""}`;
+    this.el.dataset.view = view;
+    this.el.replaceChildren(html`<div class="grip" title="Drag to resize"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.foot()}`);
+    this.renderProg();
+    this.renderBody();
+    const body = this.el.querySelector(".body");
+    if (was === view) body.scrollTop = keep;
+    this.wire();
+    this.badge();
+  }
+  /** Just the head's fields (a first end clicked). */
+  renderHead() {
+    if (!this.open) return;
+    const ph = this.el.querySelector(".ph");
+    if (!ph) return this.render();
+    ph.replaceWith(this.head());
+    this.wire();
+  }
+  head() {
+    const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}">Blame</button></div>`;
+    const pin = html`<span class="pin" title="${this.on ? "Kept on: click \xB1 Changes or \u2715 to turn it off" : "Peeking: click \xB1 Changes to keep it on"}">${this.on ? "on" : "peek"}</span>`;
+    const ttl = html`<div class="ttl">${pin}<h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-pressed="${String(this.settings)}" aria-label="${this.mode === "blame" ? "Blame settings" : "Diff settings"}" title="Settings">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Turn Changes off" title="Turn off (Esc)">✕</button></div>`;
+    let below;
+    if (this.settings) below = html`<p class="sub">${this.mode === "blame" ? "Blame settings" : "Diff settings"}</p>`;
+    else if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
+    else {
+      const p = this.pair;
+      const f = p ? this.name(p.from) : null, t = this.name(p ? p.to : null);
+      const field2 = (which, n, clear) => html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k}</code>` : html`<b style="opacity:.7">Choose…</b><code>a commit, a tag, your last visit</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Clear From" : "To the working tree"}">×</button>` : html`<span aria-hidden="true">▾</span>`}</div></div>`;
+      below = html`<div class="ends">${field2("from", f, !!p)}<span class="arrow">→</span>${field2("to", t, !!p?.to)}</div>`;
+    }
+    return html`<div class="ph">${ttl}${seg}${below}</div>`;
+  }
+  /** The progress line: the history's read, the diff's, the blame's; or an error with Try again. */
+  renderProg() {
+    const el = this.el.querySelector(".prog");
+    if (!el) return;
+    let text = "", prog, err = "", again = null;
+    const b = this.mode === "blame" ? this.blame?.summary() : null;
+    if (this.mode === "blame" && b) {
+      if (b.error) err = b.error, again = () => this.blame.retry();
+      else if (b.busy) text = this.histProgress?.text && /history/i.test(this.histProgress.text) ? this.histProgress.text : b.busy, prog = this.histProgress?.total && /history/i.test(this.histProgress.text) ? [this.histProgress.done ?? 0, this.histProgress.total] : b.progress;
+    } else if (this.mode === "diff" && !this.settings) {
+      if (this.error) err = this.error, again = () => this.ran && this.run(this.ran);
+      else if (this.busy) text = this.histProgress && /history/i.test(this.busy) ? this.histProgress.text : this.busy, prog = this.prog ?? (this.histProgress?.total ? [this.histProgress.done ?? 0, this.histProgress.total] : void 0);
+      else if (this.pick && this.histProgress) text = this.histProgress.text, prog = this.histProgress.total ? [this.histProgress.done ?? 0, this.histProgress.total] : void 0;
+    }
+    el.hidden = !text && !err;
+    el.className = `prog${err ? " err" : ""}`;
+    el.setAttribute("role", err ? "alert" : "status");
+    if (err) {
+      el.replaceChildren(html`<span>${err}</span><button type="button" class="again">Try again</button>`);
+      el.querySelector(".again").onclick = () => again?.();
+      return;
+    }
+    if (!text) return el.replaceChildren();
+    el.replaceChildren(html`<span>${text}</span><span class="${`track${prog ? "" : " ind"}`}" role="progressbar" aria-valuemin="0" aria-valuemax="${prog ? String(prog[1]) : null}" aria-valuenow="${prog ? String(prog[0]) : null}"><i style="${prog ? `width:${Math.min(100, 100 * prog[0] / Math.max(1, prog[1]))}%` : null}"></i></span>`);
+  }
+  renderBody() {
+    const body = this.el.querySelector(".body");
+    if (!body) return;
+    const keep = body.scrollTop;
+    if (this.settings) body.replaceChildren(this.mode === "blame" ? this.blameSettings() : this.diffSettings());
+    else if (this.mode === "blame") body.replaceChildren(this.blameBody());
+    else if (this.pick) {
+      body.replaceChildren(this.pickerHead());
+      const g = this.ensureGraph();
+      body.append(g.element);
+      g.render();
+      if (!g.commits.length && g.hasMore && !g.busy) void g.load();
+    } else body.replaceChildren(this.list());
+    body.scrollTop = keep;
+    this.wireBody();
+    this.badge();
+  }
+  foot() {
+    if (this.settings || this.mode !== "diff") return html``;
+    const n = this.shown().length;
+    const say = this.busy && !this.items.length ? "\u2026" : this.cur < 0 ? `${n} change${n === 1 ? "" : "s"}` : `${this.cur + 1} of ${n}`;
+    return html`<div class="foot"><label class="toggle"><input type="checkbox" id="chg-hide" checked="${this.hide}"> Hide deletions</label><span aria-live="polite">${say}</span><span class="r nav"><button type="button" id="chg-prev" aria-label="Previous change ([)" title="Previous change ([)" disabled="${!n}">‹</button><button type="button" id="chg-next" aria-label="Next change (])" title="Next change (])" disabled="${!n}">›</button></span></div>`;
+  }
+  pickerHead() {
+    const w = this.pick;
+    const g = this.ensureGraph();
+    const cs = g.commits;
+    const q = [];
+    if (w === "from") {
+      const visit2 = this.host.lastVisit?.();
+      if (visit2 && g.find(visit2) >= 0) q.push([cs[g.find(visit2)].id, "Your last visit"]);
+      const tag = cs.find((c) => c.refs.some((r) => r.kind === "tag"));
+      const far = this.farKnown;
+      if (!tag && !far) void this.farTag();
+      if (tag) q.push([tag.id, `The last ${this.host.words?.commit === "version" ? "label" : "tag"} \xB7 ${tag.refs.find((r) => r.kind === "tag").name}`]);
+      else if (far) q.push([far.id, `The last ${this.host.words?.commit === "version" ? "label" : "tag"} \xB7 ${far.name}`]);
+      const merge2 = cs.find((c) => c.parents.length > 1);
+      if (merge2) q.push([merge2.parents[0], "Before the merge"]);
+      if (cs[0] && !q.length) q.push([cs[0].id, this.host.words?.commit === "version" ? "The last version" : "Last commit \xB7 HEAD"]);
+    } else {
+      if (this.host.tree !== null) q.push([null, "Working tree"]);
+      else q.push([null, "Your edits now"]);
+      if (cs[0]) q.push([cs[0].id, this.host.words?.commit === "version" ? "The last version" : "Last commit \xB7 HEAD"]);
+    }
+    const hint = g.aiming ? html`<b>Now click the other end</b> (the ${this.host.tree === null ? "editor's text" : "working tree"} for now). The same ${this.host.words?.commit ?? "commit"} again cancels.` : html`Click one end, then the other. Drag for a range. <b>Shift</b>-click: To. Double-click: one ${this.host.words?.commit ?? "commit"}'s changes.`;
+    return html`<div class="pickhead"><b>${w === "from" ? "Compare from\u2026" : "\u2026up to"}</b><button type="button" class="done" id="chg-done">Done</button></div><div class="quick">${q.map(([h, l]) => html`<button type="button" class="qb" data-q="${h ?? ""}">${l}</button>`)}</div><div class="hint" id="chg-hint">${hint}</div>`;
+  }
+  /** A list's skeleton: rows shaped like the changes'. */
+  skeleton(n = 5) {
+    return html`${Array.from({ length: n }, (_, i) => html`<div class="skrow" aria-hidden="true"><span class="bone" style="width:70%"></span><span><span class="bone" style="${`width:${80 - i * 13 % 35}%`}"></span><span class="bone" style="${`width:${40 - i * 7 % 15}%`}"></span></span></div>`)}`;
+  }
+  list() {
+    const all = this.items;
+    const n = this.shown().length;
+    const chips = KINDS3.map((k) => {
+      const m = all.filter((c) => c.kind === k).length;
+      return m ? html`<button type="button" class="fchip" data-k="${k}" aria-pressed="${String(this.kinds.has(k))}">${k} <small>${m}</small></button>` : "";
+    });
+    const filters = all.length ? html`<div class="filters" role="group" aria-label="Kinds of change">${chips}</div>` : html``;
+    if (!this.ran && !this.busy) {
+      const g = this.graph;
+      if (g && !g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${this.host.words?.commit === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
+      return html`<div class="empty"><b>Choose where to compare from</b>Click From: a ${this.host.words?.commit ?? "commit"}, a ${this.host.words?.commit === "version" ? "label" : "tag"}, your last visit.</div>`;
+    }
+    if (!all.length && this.busy) return this.skeleton();
+    if (!all.length && this.error) return html``;
+    if (!all.length) return html`<div class="empty"><b>Nothing between these two points</b>The two versions have the same text.</div>`;
+    if (!n) return html`${filters}<div class="empty">No changes match these filters.</div>`;
+    const groups = /* @__PURE__ */ new Map();
+    this.shown().forEach((c, i) => (groups.get(c.sec) ?? groups.set(c.sec, []).get(c.sec)).push([c, i]));
+    const seen = this.seenItems;
+    const fresh = seen.size > 0;
+    const rows = [...groups].map(([s, arr]) => html`<div class="grp"><span>${s}</span><span>${arr.length}</span></div>${arr.map(([c, i]) => {
+      const key = `${c.file}:${c.old}:${c.neu}`;
+      const isNew = fresh && !seen.has(key);
+      seen.add(key);
+      const who = c.who;
+      const col = who?.color ?? (who ? hashColor(who.name) : UNCOMMITTED);
+      const by = who ? html`<span class="av sm" style="${`background:${col}`}">${initials(who.name)}</span>${who.name}${who.time ? ` \xB7 ${agoWords(who.time, Date.now() / 1e3)}` : ""}${who.short ? html` · <code>${who.short}</code>` : ""}${who.via ? html` · <span class="refp">via merge</span>` : ""}${c.wip ? this.host.words?.commit === "version" ? " \xB7 and yours, not saved yet" : " \xB7 and yours, not committed" : ""}` : c.wip ? html`<span class="av sm" style="${`background:${UNCOMMITTED}`}">Y</span>${this.host.words?.commit === "version" ? "You \xB7 not saved yet" : "You \xB7 not committed"}` : html`<span>${c.file}</span>`;
+      return html`<button type="button" class="${`citem${i === this.cur ? " cur" : ""}${isNew ? " new" : ""}`}" data-i="${i}"><span class="k">${c.kind}</span><span class="w"><div>${c.old ? html`<del>${c.old}</del> ` : ""}${c.neu ? html`<ins>${c.neu}</ins>` : ""}</div><small>${by}</small></span></button>`;
+    })}`);
+    return html`${filters}${rows}`;
+  }
+  blameBody() {
+    const b = this.blame;
+    if (!b) return html`<div class="empty">Blame needs the project's history.</div>`;
+    const s = b.summary();
+    const L = b.look;
+    const ramp = AGE_RAMPS[L.ages] ?? AGE_RAMPS.violet;
+    const colour = html`<div class="sec"><h3>Colour lines by</h3><div class="seg small" role="group"><button type="button" data-col="author" aria-pressed="${String(L.color === "author")}">Author</button><button type="button" data-col="age" aria-pressed="${String(L.color === "age")}">Age</button></div>${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}</div>`;
+    if (!s.lines && (s.busy || s.waiting)) return html`${colour}<div class="sec"><h3>Who wrote this version</h3>${this.skeleton(3)}</div>`;
+    if (!s.lines && s.error) return colour;
+    if (!s.lines) return html`${colour}<div class="empty"><b>Nothing to blame yet</b>The pages show here once they are built.</div>`;
+    const word = b.words.commit;
+    const people = s.people.map((p) => html`<button type="button" class="${`prow${b.focusP === p.key ? " sel" : ""}`}" data-p="${p.key}" aria-pressed="${String(b.focusP === p.key)}"><span class="av" style="${`background:${p.color}`}">${p.key ? initials(p.name) : "Y"}</span><span class="nm"><span>${p.name}</span><span class="bar6"><i style="${`width:${Math.round(100 * p.n / s.lines)}%;background:${p.color}`}"></i></span></span><span class="ct">${p.n}</span></button>`);
+    const commits = s.commits.map((c) => {
+      const x = c.commit;
+      return html`<button type="button" class="${`crow${b.focusC === c.c ? " sel" : ""}`}" data-c="${String(c.c)}" aria-pressed="${String(b.focusC === c.c)}"><span class="${`sw${x ? "" : " hatch"}`}" style="${`background:${c.color}`}"></span><span style="min-width:0"><div class="s">${x ? x.subject || "(no subject)" : word === "version" ? "Not saved to the history yet" : "Not committed"}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1e3)} · <code>${x.short}</code>${c.via ? html` · <span class="refp">${c.via.replace(/^On (\S+),.*/, "$1")}</span>` : ""}` : "You \xB7 now"}</small></span><span class="ct">${c.n}</span></button>`;
+    });
+    const more = s.waiting ? html`<small style="color:var(--phc-muted)">${`${s.waiting} file${s.waiting === 1 ? "" : "s"} still being read`}</small>` : "";
+    return html`${colour}<div class="sec"><h3><span>Who wrote this version · ${s.lines} lines</span></h3>${people}${more}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${commits}</div>`;
+  }
+  segOf(key, cur, opts) {
+    return html`<div class="seg small" role="group">${opts.map(([v, l]) => html`<button type="button" data-look="${key}" data-v="${String(v)}" aria-pressed="${String(cur === v)}">${l}</button>`)}</div>`;
+  }
+  diffSettings() {
+    const L = this.look;
+    return html`<div class="set">
+      <h3>Colours</h3>
+      <div class="opt2"><span>Added / deleted</span><div class="swatches">${Object.entries(DIFF_COLORS).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
+      <h3>Styles</h3>
+      <div class="opt2"><span>Added text</span>${this.segOf("ins", L.ins, [["wavy", "Wavy"], ["line", "Underline"], ["mark", "Marker"], ["colour", "Colour"]])}</div>
+      <div class="opt2"><span>Deleted text</span>${this.segOf("del", L.del, [["strike", "Struck"], ["mark", "Marker"], ["caret", "Caret only"]])}</div>
+      <div class="opt2"><span>Changed figure</span>${this.segOf("fig", L.fig, [["side", "Side by side"], ["over", "Overlay"], ["new", "New only"]])}</div>
+      <div class="${`preview i-${L.ins} d-${L.del}`}">We show it <span class="dl">cuts the wait</span> <span class="ins">keeps every edit under 50 ms</span>.</div>
+      <button type="button" class="reset" data-reset="diff">Reset to defaults</button></div>`;
+  }
+  blameSettings() {
+    const b = this.blame;
+    const L = b.look;
+    const word = b.words.commit;
+    const hashes = b.words.hashes !== false;
+    const detailNote = L.detail === "line" ? "Each line takes the newest edit in it, as git blame does." : L.detail === "word" ? "Each word keeps who typed it: a word someone changed in another's sentence is theirs." : word === "version" ? "Exact to the character, from Overleaf's history." : "Each character as git's history gives it: words at best.";
+    const known2 = b.commitsKnown();
+    const skips = [.../* @__PURE__ */ new Set([...L.skip, ...known2.map((c) => c.id)])].slice(0, 40).map((id) => {
+      const c = known2.find((x) => x.id === id);
+      return html`<label><input type="checkbox" data-skip="${id}" checked="${L.skip.includes(id)}"><span>${c ? html`<code>${c.short}</code> ${c.subject}${hashes ? "" : ` \xB7 ${c.author}`}` : id.slice(0, 10)}</span></label>`;
+    });
+    const since = b.summary().since;
+    const sinceSel = html`<select id="chg-since" aria-label="Changed since"><option value="off" selected="${L.since === "off"}">Off</option>${since.map((s) => html`<option value="${s.v}" selected="${L.since === s.v}">${s.label}</option>`)}${L.since !== "off" && !since.some((s) => s.v === L.since) ? html`<option value="${L.since}" selected>${L.since.split(":").slice(1).join(":")}</option>` : ""}</select>`;
+    const sw = (key, cur, opts) => html`<div class="swatches">${opts.map(([k, cols, name]) => html`<button type="button" class="swb" data-look="${key}" data-v="${k}" aria-pressed="${String(cur === k)}" title="${name}" aria-label="${name}">${cols.slice(0, 4).map((c) => html`<i style="${`background:${c}`}"></i>`)}</button>`)}</div>`;
+    return html`<div class="set">
+      <h3>What counts as a change</h3>
+      <div class="opt2"><span>Detail</span>${this.segOf("detail", L.detail, [["line", "Line"], ["word", "Word"], ["char", "Character"]])}</div>
+      <p class="note2">${detailNote}</p>
+      <div class="opt2"><span>Spacing-only edits</span>${this.segOf("ws", L.ws, [["ignore", "Ignore"], ["count", "Count"]])}</div>
+      <div class="opt2"><span>Moved text</span>${this.segOf("moved", L.moved, [["keep", "Keep its writer"], ["mover", "Credit the mover"]])}</div>
+      <div class="opt2"><span>${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Show hatched"], ["hide", "Hide"]])}</div>
+      <div class="opt2" style="align-items:start"><span>Skip ${word}s</span><div class="skips">${skips.length ? skips : html`<small>None blamed yet</small>`}<small>A skipped ${word}'s lines go to whoever wrote them before (a reformat, a spell-check)</small></div></div>
+      <h3>Pick out</h3>
+      <div class="opt2"><span>Changed since</span>${sinceSel}</div>
+      <div class="opt2"><span>Tint the text</span>${this.segOf("tint", L.tint, [["off", "Off"], ["hover", "Paragraph under pointer"], ["all", "Everywhere"]])}</div>
+      <h3>Look</h3>
+      <div class="opt2"><span>Bars</span>${this.segOf("bars", L.bars, [["left", "Left margin"], ["right", "Right margin"]])}</div>
+      <div class="opt2"><span>Bar width</span>${this.segOf("width", L.width, [[2, "Thin"], [4, "Medium"], [7, "Wide"]])}</div>
+      <div class="opt2"><span>People</span>${sw("people", L.people, [["okabe", AUTHOR_COLORS, "Okabe\u2013Ito"], ["overleaf", OVERLEAF_COLORS, "Overleaf's collaborator colours"]])}</div>
+      <div class="opt2"><span>Age</span>${sw("ages", L.ages, Object.entries(AGE_RAMPS).map(([k, v]) => [k, v.light, v.name]))}</div>
+      <button type="button" class="reset" data-reset="blame">Reset to defaults</button></div>`;
+  }
+  wire() {
+    const $ = (s) => this.el.querySelector(s);
+    $("#chg-x").onclick = () => this.off();
+    $("#chg-gear").onclick = () => {
+      this.settings = !this.settings;
+      this.pick = null;
+      this.render();
+    };
+    for (const b of this.el.querySelectorAll(".ph [data-m]"))
+      b.onclick = () => {
+        if (this.mode === b.dataset.m) return;
+        this.mode = b.dataset.m;
+        this.settings = false;
+        this.pick = null;
+        this.cur = -1;
+        this.save();
+        this.marks(true);
+        this.render();
+      };
+    const field2 = (which) => {
+      const f = $(`#chg-${which}`);
+      if (!f) return;
+      const go = () => {
+        this.pick = this.pick === which ? null : which;
+        const g = this.ensureGraph();
+        if (this.pick) g.open(which);
+        this.render();
+      };
+      f.onclick = (e) => !e.target.closest(".clr") && go();
+      f.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), go());
+    };
+    field2("from");
+    field2("to");
+    for (const b of this.el.querySelectorAll("[data-clr]"))
+      b.onclick = (e) => {
+        e.stopPropagation();
+        if (b.dataset.clr === "from") {
+          this.pair = null;
+          this.ran = null;
+          this.items = [];
+          this.host.diff?.stop();
+          this.graph?.mark(null, null);
+          this.render();
+        } else if (this.pair) this.choose({ from: this.pair.from, to: null }, false);
+      };
+    const hide = $("#chg-hide");
+    if (hide)
+      hide.onchange = () => {
+        this.hide = hide.checked;
+        this.save();
+        if (this.ran) this.host.diff?.restyle(this.look, this.hide);
+        this.el.querySelector(".body")?.classList.toggle("hidedel", this.hide);
+      };
+    const prev = $("#chg-prev"), next = $("#chg-next");
+    if (prev) prev.onclick = () => this.step(-1);
+    if (next) next.onclick = () => this.step(1);
+    const grip = $(".grip");
+    if (grip)
+      grip.onpointerdown = (e) => {
+        grip.setPointerCapture(e.pointerId);
+        this.dragging = true;
+        const right = this.el.getBoundingClientRect().right;
+        grip.onpointermove = (m) => {
+          this.width = Math.max(320, Math.min(640, right - m.clientX));
+          this.el.style.setProperty("--chg-w", `${this.width}px`);
+          this.el.style.left = `${right - this.width}px`;
+        };
+        grip.onpointerup = () => (grip.onpointermove = null, this.dragging = false);
+      };
+  }
+  wireBody() {
+    const body = this.el.querySelector(".body");
+    if (!body) return;
+    const $ = (s) => body.querySelector(s);
+    const done = $("#chg-done");
+    if (done) done.onclick = () => (this.pick = null, this.graph?.cancel(), this.render());
+    for (const q of body.querySelectorAll(".qb"))
+      q.onclick = () => {
+        const h = q.dataset.q || null;
+        const p = this.pair;
+        if (this.pick === "from") {
+          if (!h) return;
+          const g2 = this.ensureGraph();
+          const keepTo = p?.to && g2.find(p.to) >= 0 && g2.find(p.to) < g2.find(h) ? p.to : null;
+          this.choose({ from: h, to: keepTo }, true);
+        } else {
+          const from2 = p?.from ?? this.ensureGraph().commits[1]?.id ?? this.ensureGraph().commits[0]?.id;
+          if (from2) this.choose({ from: h === from2 ? this.ensureGraph().commits[this.ensureGraph().find(from2)]?.parents[0] ?? from2 : from2, to: h }, true);
+        }
+      };
+    for (const c of body.querySelectorAll(".fchip[data-k]"))
+      c.onclick = () => {
+        const k = c.dataset.k;
+        this.kinds.has(k) ? this.kinds.delete(k) : this.kinds.add(k);
+        this.cur = -1;
+        this.save();
+        this.render();
+      };
+    for (const c of body.querySelectorAll(".citem"))
+      c.onclick = () => {
+        this.cur = Number(c.dataset.i);
+        const it = this.shown()[this.cur];
+        if (it && this.host.diff && this.ran) {
+          this.host.diff.show(true);
+          this.host.diff.goto(it.k);
+        }
+        this.render();
+      };
+    const b = this.blame;
+    for (const x of body.querySelectorAll("[data-col]"))
+      x.onclick = () => {
+        b?.setLook({ color: x.dataset.col });
+        this.save();
+      };
+    for (const x of body.querySelectorAll(".prow")) x.onclick = () => b?.focus("person", x.dataset.p ?? "");
+    for (const x of body.querySelectorAll(".crow")) x.onclick = () => b?.focus("commit", Number(x.dataset.c));
+    for (const x of body.querySelectorAll("[data-look]"))
+      x.onclick = () => {
+        const k = x.dataset.look, v = x.dataset.v;
+        if (this.mode === "blame" && b) b.setLook({ [k]: k === "width" ? Number(v) : v });
+        else {
+          this.look = { ...this.look, [k]: v };
+          this.applyColors();
+          if (this.ran) this.host.diff?.restyle(this.look, this.hide);
+        }
+        this.save();
+        this.render();
+      };
+    for (const x of body.querySelectorAll("[data-skip]"))
+      x.onchange = () => {
+        if (!b) return;
+        const skip = new Set(b.look.skip);
+        x.checked ? skip.add(x.dataset.skip) : skip.delete(x.dataset.skip);
+        b.setLook({ skip: [...skip] });
+        this.save();
+      };
+    const since = $("#chg-since");
+    if (since)
+      since.onchange = () => {
+        b?.setLook({ since: since.value });
+        this.save();
+      };
+    for (const x of body.querySelectorAll("[data-reset]"))
+      x.onclick = () => {
+        if (x.dataset.reset === "blame") b?.setLook({ ...BLAME_LOOK, skip: [] });
+        else {
+          this.look = { ...DIFF_LOOK };
+          this.applyColors();
+          if (this.ran) this.host.diff?.restyle(this.look, this.hide);
+        }
+        this.save();
+        this.render();
+      };
+    const g = this.graph;
+    if (this.pick && g) {
+      g.element.onpointerup = () => setTimeout(() => this.open && this.pick && this.refreshHint(), 0);
+    }
+  }
+  refreshHint() {
+    const h = this.el.querySelector("#chg-hint");
+    if (!h || !this.pick) return;
+    const fresh = this.pickerHead();
+    const nh = fresh.querySelector("#chg-hint");
+    if (nh) h.replaceWith(nh);
+    this.renderHead();
+  }
+  /** A merged commit's words for Blame's card ("On lina/related-work, merged into main (5d0a7e3)"), from the graph read so far. */
+  via(id) {
+    const g = this.graph;
+    if (!g?.commits.length) return null;
+    const m = mergedVia(g.commits, id);
+    if (!m) return null;
+    const main = g.commits[0]?.refs.find((r) => r.kind === "branch")?.name ?? "main";
+    return `On ${m.branch}, merged into ${main} (${m.merge.short})`;
+  }
+  /** The graph read (Blame's merges need it): its first page. */
+  readHistory() {
+    const g = this.ensureGraph();
+    if (!g.commits.length && g.hasMore && !g.busy) void g.load();
+  }
+  /** The history changed (a commit, a new version): read again. */
+  historyChanged() {
+    if (!this.graph) return;
+    void this.graph.reload();
   }
 };
 
@@ -7751,11 +9381,11 @@ var TIPS = [
     demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon2("bolt", 11)}12 ms</span></div>`
   },
   {
-    id: "compare",
-    at: "#b-compare",
-    title: "Compare versions",
+    id: "changes",
+    at: "#b-changes",
+    title: "Changes",
     fresh: true,
-    text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
+    text: "Hover \xB1 Changes to see what changed since an earlier version, marked on the pages; switch to Blame to see who wrote each line. Click it to keep the marks on.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
     demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`
   },
@@ -7810,6 +9440,7 @@ var Panel = class {
   speed;
   debugOn = false;
   ev;
+  ownChanges = false;
   /** A page that came while text in the shown one was selected: shown once the selection ends. */
   viewer;
   /** The host's look, and whether the panel has a bar of its own (VS Code, the watch, floating). */
@@ -7828,7 +9459,7 @@ var Panel = class {
     this.root = host2.attachShadow({ mode: "open" });
     const item2 = (id, name, label, sub = "", cls = "") => html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame ? BLAME_CSS : "");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame || opts.changes ? BLAME_CSS + CHANGES_BUTTON_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -7838,8 +9469,7 @@ var Panel = class {
     <span class="grow"></span>
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
-    <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
-    <button type="button" class="ib wide" id="b-blame" title="Blame: who last changed each line, from the history" aria-label="Blame" aria-pressed="false" hidden><span class="icon">history</span></button>
+    <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what (hover to peek, click to keep on)" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
@@ -7850,7 +9480,7 @@ var Panel = class {
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
       <button type="button" role="menuitem" id="r-rebuild"><span class="check"></span><span>Rebuild<span class="desc">Build again with the files as they are</span></span></button>
       <hr><button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
-      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
+      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Changes…<span class="desc">What changed since an earlier version, and who wrote what</span></span></button>
       <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
     <div class="menu timing" id="m-time" role="dialog" aria-label="Timing" hidden style="left:6px;top:calc(100% + 4px)"></div>
@@ -7863,8 +9493,7 @@ var Panel = class {
       ${item2("x-contents", "toc", "Contents", "t")}
       ${item2("x-review", "rate_review", "Notes and changes", "m")}
       ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
-      ${item2("x-compare", "compare", "Compare\u2026", "", "narrow")}
-      ${item2("x-blame", "history", "Blame", "", "narrow")}
+      ${item2("x-compare", "compare", "Changes\u2026", "", "narrow")}
       <hr>
       ${item2("x-settings", "tips", "Settings\u2026")}
       ${item2("x-tips", "tips", "What's new")}
@@ -7874,7 +9503,6 @@ var Panel = class {
     <div class="tip" id="tip" role="dialog" aria-live="polite" hidden></div>
   </div>
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
-  <div class="blamebar" id="blamebar" role="toolbar" aria-label="Blame"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
@@ -7904,13 +9532,15 @@ var Panel = class {
     (document.body ?? document.documentElement).append(host2);
     this.win = this.$(".win");
     const offer = (sel, on) => this.root.querySelectorAll(sel).forEach((e) => e.hidden = !on);
-    offer(".if-compare, #b-compare, #x-compare", !!ev.onCompare);
+    const changes2 = !!(opts.changes || opts.blame);
+    this.ownChanges = !!opts.ownChangesButton;
+    offer(".if-compare, #x-compare", changes2);
+    offer("#b-changes", changes2 && !opts.ownChangesButton);
     offer(".if-cache", !!ev.onClearCache);
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#x-review, #b-review", !!opts.review);
-    offer("#x-blame, #b-blame", !!opts.blame);
     offer("#b-find, #x-find", !!ev.onFind);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -7928,7 +9558,7 @@ var Panel = class {
     this.$("#go").onclick = () => this.rebuild();
     this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
     this.$("#r-clean").onclick = () => (this.menu(null), this.clean());
-    this.$("#r-compare").onclick = this.$("#b-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), ev.onCompare?.());
+    this.$("#r-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), this.changes?.setOn(true));
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
@@ -7990,7 +9620,7 @@ var Panel = class {
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape") return;
+      if (e.key !== "Escape" || this.changes?.open) return;
       const open = this.root.querySelector(".dialog:not([hidden])");
       if (open) open.hidden = true;
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
@@ -8033,14 +9663,20 @@ var Panel = class {
     });
     this.extras(opts);
     if (opts.blame) {
-      const b = this.$("#b-blame");
-      const bl = this.blame = new Blame(
-        { root: this.root, stage: this.$("#stage"), bar: this.$("#blamebar"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), pressed: (on) => b.setAttribute("aria-pressed", String(on)) },
-        opts.blame
-      );
-      b.onclick = this.$("#x-blame").onclick = () => (this.menu(null), bl.toggle());
+      const host3 = { ...opts.blame, compare: opts.changes?.diff ? (c) => this.changes?.diffCommit(c) : opts.blame.compare, via: opts.blame.via ?? ((c) => this.changes?.via(c.id) ?? null) };
+      const bl = this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true) }, host3);
       let dark = this.sheetDark();
       new MutationObserver(() => dark !== this.sheetDark() && (dark = this.sheetDark(), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+    }
+    if (opts.changes || opts.blame) {
+      const host3 = opts.changes ?? { log: async () => "No history here" };
+      this.changes = new Changes(
+        { win: this.win, root: this.root, prefs: () => this.prefs.changes, savePrefs: (c) => (this.prefs.changes = c, this.save()), msg: (t, err) => this.msg(t, !!err, true) },
+        host3,
+        this.blame ?? null
+      );
+      if (!opts.ownChangesButton) this.changes.attach(this.$("#b-changes"), this.$("#chg-n"));
+      if (this.blame && opts.changes) this.blame.onState(() => this.blame?.on && this.changes?.readHistory());
     }
     if (opts.review) {
       const rv = this.review = new Review(
@@ -8087,6 +9723,7 @@ var Panel = class {
       if (this.prefs.zoom !== zoomOf(this.prefs.zoom)) this.prefs.zoom = zoomOf(this.prefs.zoom), this.save();
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
+      this.changes?.kept(this.prefs.changes);
       this.linksShown();
       this.marginApply();
     });
@@ -8095,8 +9732,10 @@ var Panel = class {
   menus = [];
   /** Notes and changes (opts.review). */
   review;
-  /** Blame over the pages (opts.blame): its toggle is the bar's, or the host's (Overleaf's toolbar). */
+  /** Blame over the pages (opts.blame): shown by Changes' Blame. */
   blame;
+  /** Changes (opts.changes): the ± Changes popover; a host's own button attaches to it. */
+  changes;
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   menu(m) {
     for (const [b, el] of this.menus) {
@@ -8469,8 +10108,8 @@ var Panel = class {
   /** The review's notes and pending changes (review.ts), beside the scrollbar too. */
   noteMarks = [];
   /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
-  diffMarks(changes) {
-    this.changeMarks = changes.map((c) => ({ ...c, cls: "change" }));
+  diffMarks(changes2) {
+    this.changeMarks = changes2.map((c) => ({ ...c, cls: "change" }));
     this.drawScrollMarks();
   }
   /**
@@ -9255,6 +10894,7 @@ var Panel = class {
       "keydown",
       (e) => {
         if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
+        if (e.key === "Escape" && this.changes?.open) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
         } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
@@ -10080,7 +11720,7 @@ var Panel = class {
   tips(which, asked = false) {
     if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
     const seen = [...this.seenIds];
-    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
+    const offered = TIPS.filter((t) => !(t.id === "changes" && (!this.changes || this.ownChanges)) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }
@@ -10663,11 +12303,11 @@ function culpritTip(p, click = "click to go there") {
 function glyphs2(json, path) {
   if (!json?.n || !json.file || !json.start || !json.end || !json.synth || !json.x || !json.y) return [];
   const files = json.files.map(path);
-  const words2 = (b64) => {
+  const words3 = (b64) => {
     const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     return new DataView(b.buffer);
   };
-  const [file, start, end, synth, x, y] = [json.file, json.start, json.end, json.synth, json.x, json.y].map(words2);
+  const [file, start, end, synth, x, y] = [json.file, json.start, json.end, json.synth, json.x, json.y].map(words3);
   const out = [];
   for (let i = 0; i < json.n; i++) {
     const f = file.getUint32(4 * i, true);
@@ -10701,9 +12341,9 @@ function widths(all) {
   widthsOf.set(all, next);
   return next;
 }
-var linesOf = /* @__PURE__ */ new WeakMap();
+var linesOf2 = /* @__PURE__ */ new WeakMap();
 function lines2(all) {
-  let out = linesOf.get(all);
+  let out = linesOf2.get(all);
   if (out) return out;
   out = /* @__PURE__ */ new Map();
   const recent = [];
@@ -10719,7 +12359,7 @@ function lines2(all) {
     cur.x = Math.max(cur.x, g.x);
     out.set(g, cur.id);
   }
-  linesOf.set(all, out);
+  linesOf2.set(all, out);
   return out;
 }
 var LINE_GAP2 = 40;
@@ -12506,401 +14146,6 @@ function textLayer(lines3, w, h) {
   return svg2;
 }
 
-// viewer/src/compare.ts
-var LATEXDIFF_LOOK = { markup: "underline", subtype: "safe", add_color: "#1347ae", del_color: "#bb1b1b" };
-var DiffControls = class {
-  state = null;
-  panel;
-  run;
-  actions;
-  lookOpen = false;
-  constructor(panel2, run) {
-    this.panel = panel2;
-    this.run = run;
-    this.actions = {
-      prev: () => this.step(-1),
-      next: () => this.step(1),
-      toggle: () => {
-        const st = this.state;
-        if (!st || st.busy) return;
-        st.showing = st.showing === "diff" ? "current" : "diff";
-        run.show(st.showing);
-        this.bar();
-      },
-      pdf: () => run.download("pdf"),
-      tex: () => run.download("tex"),
-      settings: async () => {
-        if (this.lookOpen) return this.closeLook();
-        this.lookOpen = true;
-        panel2.diffSettings(await run.look(), (l) => run.restyle(l), LATEXDIFF_LOOK);
-      },
-      close: () => this.stop()
-    };
-  }
-  closeLook() {
-    this.lookOpen = false;
-    this.panel.diffSettings(null);
-  }
-  /** A compare is on (its bar shown). */
-  get active() {
-    return !!this.state;
-  }
-  bar() {
-    this.panel.diffBar(this.state, this.actions);
-  }
-  step(d) {
-    const st = this.state;
-    if (!st || st.busy || !st.changes) return;
-    st.at = (Math.max(st.at, d > 0 ? 0 : 1) - 1 + d + st.changes) % st.changes + 1;
-    if (st.showing === "current") this.actions.toggle();
-    this.run.goto(st.at);
-    this.bar();
-  }
-  /** Compare with `v`, named `title`, `when` it was ("3 h ago · v42"). */
-  async start(v, title, when) {
-    this.state = { title, when, changes: 0, at: 0, showing: "diff", busy: "Fetching that version\u2026" };
-    this.bar();
-    try {
-      const r = await this.run.start(
-        v,
-        (busy2) => {
-          if (this.state) this.state.busy = busy2, this.bar();
-        },
-        (n) => {
-          const st = this.state;
-          if (!st || st.busy) return;
-          st.changes = n;
-          st.at = Math.min(st.at, n);
-          this.bar();
-        }
-      );
-      if (!this.state) return;
-      this.state.busy = void 0;
-      this.state.changes = r.changes;
-    } catch (err) {
-      if (!this.state) return;
-      this.state.busy = `Couldn't compare: ${err.message ?? err}`;
-    }
-    this.bar();
-  }
-  stop() {
-    this.closeLook();
-    this.state = null;
-    this.run.stop();
-    this.bar();
-  }
-  /** A key while comparing (not in an editor or a field): handled, or false. */
-  key(e) {
-    if (!this.state || e.ctrlKey || e.metaKey || e.altKey) return false;
-    const t = e.target;
-    if (t?.closest?.("input, textarea, [contenteditable=true], .cm-editor")) return false;
-    if (e.key === "d" || e.key === "D") this.actions.toggle();
-    else if (e.key === "n") this.step(1);
-    else if (e.key === "N") this.step(-1);
-    else if (e.key === "Escape") this.lookOpen ? this.closeLook() : this.stop();
-    else return false;
-    e.preventDefault();
-    return true;
-  }
-};
-
-// viewer/src/commits.ts
-function layout(cs) {
-  const active = [];
-  const rows = [];
-  let pending = [];
-  let width = 1;
-  for (const c of cs) {
-    let lane = active.indexOf(c.id);
-    if (lane < 0) {
-      lane = active.indexOf(null);
-      if (lane < 0) lane = active.push(null) - 1;
-    }
-    if (rows.length) rows[rows.length - 1].down = pending.map(([x, s]) => [x, active[s] === c.id ? lane : s]);
-    for (let s = 0; s < active.length; s++) if (active[s] === c.id) active[s] = null;
-    const by = active.map((id) => id !== null);
-    const from2 = /* @__PURE__ */ new Map();
-    c.parents.forEach((p, i) => {
-      let s = active.indexOf(p);
-      if (s < 0) {
-        s = i === 0 && active[lane] === null ? lane : active.indexOf(null);
-        if (s < 0) s = active.push(null) - 1;
-        active[s] = p;
-      }
-      from2.set(s, lane);
-    });
-    while (active.length && active[active.length - 1] === null) active.pop();
-    pending = [];
-    active.forEach((id, s) => {
-      if (id === null) return;
-      if (by[s]) pending.push([s, s]);
-      const f = from2.get(s);
-      if (f !== void 0 && !(by[s] && f === s)) pending.push([f, s]);
-    });
-    width = Math.max(width, lane + 1, active.length);
-    rows.push({ lane, down: [] });
-  }
-  if (rows.length) rows[rows.length - 1].down = pending;
-  return { rows, width };
-}
-function ago2(t, now = Date.now() / 1e3) {
-  const s = Math.max(0, now - t);
-  const units = [[31536e3, "year"], [2592e3, "month"], [86400, "day"], [3600, "hour"], [60, "minute"]];
-  for (const [n, u] of units)
-    if (s >= n) {
-      const k = Math.floor(s / n);
-      return `${k} ${u}${k === 1 ? "" : "s"} ago`;
-    }
-  return "just now";
-}
-var ROW = 24;
-var LANE = 12;
-var COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
-var COMMITS_CSS = `
-.phx-commits { font: 12px system-ui, sans-serif; overflow: auto; user-select: none; -webkit-user-select: none; }
-.phx-commits .row.drag { background: rgba(62,99,221,.12); }
-.phx-commits .row { display: flex; align-items: center; height: ${ROW}px; cursor: pointer; white-space: nowrap; }
-.phx-commits .row:hover { background: rgba(127,127,127,.12); }
-.phx-commits .row.inrange { background: rgba(62,99,221,.10); }
-.phx-commits .row.from, .phx-commits .row.to { background: rgba(62,99,221,.22); }
-.phx-commits .row.drag { background: rgba(62,99,221,.16); }
-.phx-commits .row.aim { box-shadow: inset 3px 0 0 rgba(62,99,221,.55); }
-.phx-commits svg { flex: none; overflow: visible; }
-.phx-commits .txt { overflow: hidden; text-overflow: ellipsis; padding-left: 4px; }
-.phx-commits .sha { font: 11px ui-monospace, monospace; opacity: .65; margin-right: 6px; }
-.phx-commits .who { opacity: .65; margin-left: 6px; }
-.phx-commits .pill { display: inline-block; padding: 0 6px; margin-right: 4px; border-radius: 999px; font-size: 10.5px; line-height: 16px; }
-.phx-commits .pill.head { background: #3e63dd; color: #fff; }
-.phx-commits .pill.branch { background: rgba(48,164,108,.2); color: #18794e; }
-.phx-commits .pill.remote { background: rgba(127,127,127,.18); }
-.phx-commits .pill.tag { background: rgba(245,165,36,.25); color: #915930; }
-.phx-commits .end { font-size: 10px; font-weight: 600; color: #3e63dd; margin-right: 4px; }
-.phx-commits .note { padding: 6px 10px; opacity: .7; }
-.phx-commits .note.err { color: #e5484d; opacity: 1; }
-.phx-commits button { font: inherit; border: 1px solid rgba(127,127,127,.4); background: none; color: inherit; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
-`;
-var KINDS2 = /* @__PURE__ */ new Set(["head", "branch", "remote", "tag"]);
-var Commits = class {
-  el;
-  host;
-  commits = [];
-  more = true;
-  loading = false;
-  error = "";
-  /** The pair chosen (ids; `to` null: the working tree). */
-  from = null;
-  to = null;
-  /** A range's first end, clicked (a row; -1 the working tree), the second not yet: the rows to the pointer marked as it moves. */
-  anchor = null;
-  page = 200;
-  constructor(root, host2) {
-    this.host = host2;
-    this.el = document.createElement("div");
-    this.el.className = "phx-commits";
-    root.append(this.el);
-    this.el.addEventListener("click", (e) => this.click(e));
-    this.el.addEventListener("pointerdown", (e) => this.dragFrom(e));
-    this.el.addEventListener("pointermove", (e) => {
-      if (this.anchor === null || this.drag) return;
-      const over = this.rowAt(e.clientX, e.clientY);
-      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor }, "aim");
-    });
-    this.el.addEventListener("pointerleave", () => this.anchor !== null && !this.drag && this.paintDrag(null, "aim"));
-    this.el.addEventListener("dblclick", (e) => {
-      this.anchor = null;
-      this.paintDrag();
-      const c = this.at(e.target);
-      if (c && c.parents.length) this.choose(c.parents[0], c.id);
-    });
-    this.render();
-  }
-  get element() {
-    return this.el;
-  }
-  /** Mark the pair shown (as the host has it: a revision, a commit id or its prefix; `to` null: the working tree). */
-  mark(from2, to) {
-    this.from = from2;
-    this.to = to;
-    this.render();
-  }
-  /** The commits: the first page now, more as asked. */
-  async load() {
-    if (this.loading || !this.more) return;
-    this.loading = true;
-    this.render();
-    const got = await this.host.load(this.commits.length, this.page);
-    this.loading = false;
-    if (typeof got === "string") {
-      this.error = got;
-      this.more = false;
-    } else {
-      this.commits.push(...got);
-      this.more = got.length === this.page;
-    }
-    this.render();
-  }
-  /** The history changed (a commit made, a branch moved): read again. */
-  reload() {
-    this.commits = [];
-    this.more = true;
-    this.error = "";
-    return this.load();
-  }
-  /** Mark a pair: nothing compared until it is confirmed (run). */
-  choose(from2, to) {
-    this.from = from2;
-    this.to = to;
-    this.render();
-    const word = (rev, none) => {
-      if (!rev) return none;
-      const c = this.commits[this.find(rev)];
-      return c ? `${c.short} ${c.subject}` : rev.slice(0, 7);
-    };
-    this.host.marked?.(from2, to, { from: word(from2, ""), to: word(to, "the working tree") });
-  }
-  /** An end cleared (the host's ×): From, none marked; To, the working tree again. */
-  clear(end) {
-    this.anchor = null;
-    this.paintDrag();
-    if (end === "from") this.choose(null, null);
-    else this.choose(this.from, null);
-  }
-  /** The range between two rows (-1 the working tree), whichever order: the older end From, the newer To. */
-  range(a, b) {
-    const [newer, older] = a < b ? [a, b] : [b, a];
-    if (older < 0) return;
-    this.choose(this.commits[older].id, newer < 0 ? null : this.commits[newer].id);
-  }
-  /** The pair marked, compared (the host's Compare, Enter); false if no From is marked yet. */
-  run() {
-    if (!this.from) return false;
-    this.host.pick(this.from, this.to);
-    return true;
-  }
-  at(t) {
-    const row = t.closest(".row[data-i]");
-    return row ? this.commits[Number(row.dataset.i)] : void 0;
-  }
-  /** The row of revision `rev` (a commit id or its prefix, a ref's name, HEAD), else -1. */
-  find(rev) {
-    if (!rev) return -1;
-    if (rev === "HEAD") return this.commits.findIndex((c) => c.refs.some((r) => r.kind === "head"));
-    return this.commits.findIndex((c) => c.id.startsWith(rev) || c.refs.some((r) => r.name === rev));
-  }
-  /** A drag across the rows: where it began (a row's index; -1 the working tree), and whether it left that row. */
-  drag = null;
-  /** A drag just chose: the click that ends it is not a click. */
-  dragged = false;
-  /** The row under a point: a commit's index, -1 the working tree's, null none. */
-  rowAt(x, y) {
-    const root = this.el.getRootNode();
-    const row = (root.elementFromPoint?.(x, y) ?? document.elementFromPoint(x, y))?.closest(".row");
-    if (!row || !this.el.contains(row)) return null;
-    return row.dataset.i === void 0 ? -1 : Number(row.dataset.i);
-  }
-  dragFrom(e) {
-    if (e.button !== 0) return;
-    const at = this.rowAt(e.clientX, e.clientY);
-    if (at === null) return;
-    e.preventDefault();
-    this.drag = { from: at, over: at, moved: false };
-    const move = (m) => {
-      const over = this.rowAt(m.clientX, m.clientY);
-      if (!this.drag || over === null || over === this.drag.over) return;
-      this.drag.over = over;
-      if (!this.drag.moved && over !== this.drag.from) this.el.setPointerCapture(m.pointerId);
-      this.drag.moved ||= over !== this.drag.from;
-      this.paintDrag();
-    };
-    const up = () => {
-      this.el.removeEventListener("pointermove", move);
-      this.el.removeEventListener("pointerup", up);
-      const d = this.drag;
-      this.drag = null;
-      this.paintDrag();
-      if (!d?.moved) return;
-      this.dragged = true;
-      this.anchor = null;
-      this.range(d.from, d.over);
-    };
-    this.el.addEventListener("pointermove", move);
-    this.el.addEventListener("pointerup", up);
-  }
-  /**
-   * The rows a drag spans, marked as it goes (`drag`: filled, a range being chosen), or
-   * those a second click would choose, from the first end to the pointer (`aim`: a bar at
-   * their edge only). Filled as a drag's were, they read as a range chosen: with From
-   * clicked and To the working tree already, a pointer passing over the rows seemed to
-   * have selected them.
-   */
-  paintDrag(d = this.drag, kind = "drag") {
-    const [a, b] = d ? [Math.min(d.from, d.over), Math.max(d.from, d.over)] : [0, -2];
-    for (const r of this.el.querySelectorAll(".row")) {
-      const i = r.dataset.i === void 0 ? -1 : Number(r.dataset.i);
-      const on = !!d?.moved && i >= a && i <= b;
-      r.classList.toggle("drag", kind === "drag" && on);
-      r.classList.toggle("aim", kind === "aim" && on);
-    }
-  }
-  click(e) {
-    if (this.dragged) return void (this.dragged = false);
-    const t = e.target;
-    if (t.closest("[data-more]")) return void this.load();
-    const row = t.closest(".row");
-    if (!row || e.detail > 1) return;
-    const c = this.at(t), i = c ? this.commits.indexOf(c) : -1;
-    if (e.shiftKey) {
-      this.anchor = null;
-      if (!c) return this.choose(this.from ?? "HEAD", null);
-      const fi = this.find(this.from);
-      const from2 = fi > i ? this.commits[fi].id : c.parents[0] ?? c.id;
-      return this.choose(from2, c.id);
-    }
-    if (this.anchor === null || this.anchor === i) {
-      this.anchor = this.anchor === i ? null : i;
-      if (this.anchor !== null && c) this.choose(c.id, null);
-      this.paintDrag();
-      return;
-    }
-    const a = this.anchor;
-    this.anchor = null;
-    this.paintDrag();
-    this.range(a, i);
-  }
-  render() {
-    const scroll = this.el.scrollTop;
-    this.el.replaceChildren(this.html());
-    this.el.scrollTop = scroll;
-  }
-  html() {
-    if (this.error) return html`<div class="note err">${this.error}</div>`;
-    if (!this.commits.length) return html`<div class="note">${this.loading ? "reading the history\u2026" : "no commits"}</div>`;
-    const { rows, width } = layout(this.commits);
-    const W2 = (width + 1) * LANE;
-    const x = (l) => LANE / 2 + l * LANE + 2;
-    const fi = this.find(this.from);
-    const ti = this.to ? this.find(this.to) : -1;
-    const tree = this.from !== null && !this.to;
-    const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: To, the files as they are"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
-    const lines3 = this.commits.map((c, i) => {
-      const r = rows[i];
-      const col = COLORS[r.lane % COLORS.length];
-      const marks = r.down.map(([a, b]) => svg`<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
-      marks.push(c.parents.length > 1 ? svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => html`<span class="pill ${KINDS2.has(f.kind) ? f.kind : "branch"}">${f.name}</span>`);
-      const lo = this.to ? ti : -1;
-      const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
-      const end = i === fi ? html`<span class="end">FROM</span>` : i === ti ? html`<span class="end">TO</span>` : "";
-      const title = `${c.subject}
-${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
-click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
-      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago2(c.time)}</span></span></div>`;
-    });
-    const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
-    return html`${top}${lines3}${more}`;
-  }
-};
-
 // crates/cli/viewer/cli.ts
 var Socket = class {
   ws;
@@ -13145,19 +14390,134 @@ var review = {
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),
   showChanges(on, git, proposal) {
-    if (!on) return controls.stop();
-    if (proposal) return void controls.start({ from: "now", to: `proposal:${proposal}` }, `Proposal ${proposal}`, "against your files as they are");
-    void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
+    if (!on) return panel.changes?.off();
+    if (proposal) return panel.changes?.show({ from: "now", to: `proposal:${proposal}` }, { from: "Your files as they are", to: `Proposal ${proposal}` });
+    panel.changes?.show({ from: git ? "staged" : "baseline", to: null }, { from: git ? "What git has staged" : "The accepted text" });
   }
 };
 var blame = {
-  async blame(files) {
-    const r = await sock.request({ op: "blame", files });
+  async blame(files, o) {
+    const r = await sock.request({ op: "blame", files, ...o ? { detail: o.detail, ws: o.ws, moved: o.moved, skip: o.skip } : {} });
     return r.ok ? r.json : r.error ?? "no history here";
   },
   glyphs: (k) => session.pageGlyphs(k),
-  goto: (file, line) => source(file, line),
-  compare: (c) => void controls.start({ from: c ? `${c.id}^` : "HEAD", to: null }, c ? `Before ${c.short}` : "The last commit", c ? c.subject : "against your changes")
+  goto: (file, line) => source(file, line)
+};
+var diffState = {};
+var diffWait;
+var counted;
+var ask = async (op) => {
+  const r = await sock.request(op);
+  if (!r.ok) throw new Error(r.error ?? "the watch refused");
+};
+var save = (name) => {
+  const a = document.createElement("a");
+  a.href = new URL(name, location.href).href;
+  a.download = name;
+  a.click();
+};
+var lookFields = (l, hide) => {
+  const [add, del] = { blue: ["#1347ae", "#bb1b1b"], green: ["#1a7f37", "#cf222e"], safe: ["#0072B2", "#D55E00"], mono: ["#111111", "#7a7a7a"] }[l.colors] ?? ["#1347ae", "#bb1b1b"];
+  return { markup: "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
+};
+var goes = 0;
+var wanted;
+var words2 = (src) => src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
+var gotoChange = async (k) => {
+  const go = ++goes;
+  wanted = void 0;
+  const c = (diffState.changes ?? [])[k - 1];
+  if (!c) return;
+  if (typeof c.page !== "number" && diffState.built === false) {
+    wanted = k;
+    return void panel.msg(`Change ${k}: the diff is being typeset, its page shown once it is`, false, true);
+  }
+  const q = words2(c.new_text || "") || words2(c.old_text || "");
+  const hits = q ? await pages.find(q) : [];
+  if (go !== goes) return;
+  if (typeof c.page === "number") {
+    const y = c.y ?? 0;
+    const near = hits.filter((h) => h.k === c.page).sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
+    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
+  }
+  if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
+  panel.reveal(hits.slice(0, 1));
+};
+var runner = {
+  async start(p, look2, hide, say, count) {
+    counted = count;
+    say("Diffing\u2026");
+    const got = new Promise((ok) => diffWait = ok);
+    await ask({ op: "diff_start", rev: p.from, ...p.to ? { to: p.to } : {}, ...lookFields(look2, hide) });
+    say("Typesetting the diff\u2026");
+    const d = await got;
+    if (d.error) throw new Error(d.error);
+    return d.changes ?? [];
+  },
+  show: (on) => void ask({ op: "diff_show", which: on ? "diff" : "current" }).catch(() => void 0),
+  // (change k found in the diff's pages by its words, MuPDF's text: no SyncTeX here)
+  goto: (k) => void gotoChange(k),
+  download: (what) => save(`diff.${what}`),
+  restyle: (l, hide) => void ask({ op: "diff_restyle", ...lookFields(l, hide) }).catch(() => void 0),
+  stop: () => (wanted = void 0, panel.diffMarks([]), void ask({ op: "diff_stop" }).catch(() => void 0))
+};
+var VISIT = `phitex.visit.${location.pathname}`;
+var visit = null;
+var noteVisit = (head) => {
+  try {
+    const was = JSON.parse(localStorage.getItem(VISIT) ?? "null");
+    const now = Date.now();
+    const next = !was ? { cur: head, prev: null, at: now } : now - was.at > 30 * 6e4 && was.cur !== head ? { cur: head, prev: was.cur, at: now } : { ...was, at: was.cur === head ? was.at : now, cur: head };
+    visit = next.prev;
+    localStorage.setItem(VISIT, JSON.stringify(next));
+  } catch {
+  }
+};
+var changes = {
+  async log(skip, limit) {
+    const r = await sock.request({ op: "diff_log", skip, limit });
+    if (!r.ok) return r.error ?? "No git repository here";
+    const cs = r.json?.commits ?? [];
+    if (!skip && cs[0]) noteVisit(cs[0].id);
+    for (const c of cs) if (visit && c.id === visit) c.mark = "your last visit";
+    return cs;
+  },
+  lastVisit: () => visit,
+  diff: runner,
+  /**
+   * Who made each change, where git can tell: against the working tree,
+   * the commit that last changed its line (the watch's blame); a line not
+   * committed is the user's. Between two commits, none (each change's
+   * commit is not worked out).
+   */
+  async attribute(items, p, update, signal) {
+    if (p.to !== null) return;
+    const files = [...new Set(items.filter((i) => i.neu).map((i) => i.file))];
+    for (const f of files) {
+      if (signal.aborted) return;
+      const r = await sock.request({ op: "blame", files: [f] });
+      if (!r.ok || signal.aborted) continue;
+      const d = r.json;
+      const b = d.files[f];
+      if (!b?.text || !b.lines) continue;
+      const starts = [0];
+      const enc = new TextEncoder().encode(b.text);
+      enc.forEach((c, i) => c === 10 && starts.push(i + 1));
+      for (const it of items) {
+        if (it.file !== f || !it.neu || it.at === void 0) continue;
+        let lo = 0;
+        while (lo + 1 < starts.length && starts[lo + 1] <= it.at) lo++;
+        const k = b.lines[lo];
+        if (k === void 0) continue;
+        if (k < 0) it.wip = true;
+        else {
+          const c = d.commits[k];
+          it.who = { name: c.author || c.email, time: c.time, short: c.short, via: panel.changes?.via(c.id) ?? null };
+        }
+      }
+      update();
+    }
+  }
 };
 var panel = new Panel(
   {
@@ -13179,7 +14539,6 @@ var panel = new Panel(
     onClean: () => void sock.request({ op: "cold" }),
     // (the watch builds again from the files on disk, as `r` in its terminal)
     onRebuild: () => void sock.request({ op: "rebuild" }),
-    onCompare: () => openPick(),
     onLog: () => session.log(),
     onBoxes: (file, start, end) => session.boxesOf(file, start, end),
     onClearCache: () => void clearCache(),
@@ -13237,6 +14596,7 @@ var panel = new Panel(
     outline: true,
     review,
     blame,
+    changes,
     keys: true,
     header: true,
     footer: false,
@@ -13325,184 +14685,17 @@ var session = new PreviewSession(host, pages, panel, {
     select: (file, start, end) => void sock.request({ op: "select", file, start, end })
   }
 });
-var diffState = {};
-var diffWait;
-var counted;
 sock.onEvent((e) => {
   if (e.event !== "diff") return;
-  diffState = e.diff ?? {};
-  const placed = (diffState.changes ?? []).map((c, i) => typeof c.page === "number" ? { k: c.page, y: c.y ?? 0, title: `Change ${i + 1}: ${words(c.new_text || "") || words(c.old_text || "")}` } : null).filter((c) => !!c);
+  diffState = e.diff ?? (e.error ? { error: String(e.error) } : {});
+  const placed = (diffState.changes ?? []).map((c, i) => typeof c.page === "number" ? { k: c.page, y: c.y ?? 0, title: `Change ${i + 1}: ${words2(c.new_text || "") || words2(c.old_text || "")}` } : null).filter((c) => !!c);
   panel.diffMarks(diffState.shown === false ? [] : placed);
-  const n = diffState.changes?.length;
-  if (n === void 0) return;
+  if (diffState.error && diffWait) return void (diffWait(diffState), diffWait = void 0);
+  if (diffState.changes === void 0) return;
   if (diffWait) diffWait(diffState), diffWait = void 0;
-  else counted?.(n);
+  else counted?.(diffState.changes);
   if (diffState.built && wanted !== void 0) void gotoChange(wanted);
 });
-var ask = async (op) => {
-  const r = await sock.request(op);
-  if (!r.ok) throw new Error(r.error ?? "the watch refused");
-};
-var save = (name) => {
-  const a = document.createElement("a");
-  a.href = new URL(name, location.href).href;
-  a.download = name;
-  a.click();
-};
-var goes = 0;
-var wanted;
-var words = (src) => src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
-var gotoChange = async (k) => {
-  const go = ++goes;
-  wanted = void 0;
-  const c = (diffState.changes ?? [])[k - 1];
-  if (!c) return;
-  if (typeof c.page !== "number" && diffState.built === false) {
-    wanted = k;
-    return void panel.msg(`Change ${k}: the diff is being typeset, its page shown once it is`, false, true);
-  }
-  const q = words(c.new_text || "") || words(c.old_text || "");
-  const hits = q ? await pages.find(q) : [];
-  if (go !== goes) return;
-  if (typeof c.page === "number") {
-    const y = c.y ?? 0;
-    const near = hits.filter((h) => h.k === c.page).sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
-    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
-  }
-  if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
-  panel.reveal(hits.slice(0, 1));
-};
-var runner = {
-  async start(v, say, count) {
-    counted = count;
-    say("Diffing\u2026");
-    const got = new Promise((ok) => diffWait = ok);
-    await ask({ op: "diff_start", rev: v.from, ...v.to ? { to: v.to } : {} });
-    say("Typesetting the diff\u2026");
-    const d = await got;
-    return { changes: d.changes?.length ?? 0 };
-  },
-  show: (which) => void ask({ op: "diff_show", which }),
-  // (change k found in the diff's pages by its words, MuPDF's text: no
-  // SyncTeX here; the match after the last one gone to, else the first)
-  goto: (k) => void gotoChange(k),
-  download: (what) => save(`diff.${what}`),
-  look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
-  restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => (wanted = void 0, panel.diffMarks([]), void ask({ op: "diff_stop" }))
-};
-var controls = new DiffControls(panel, runner);
-addEventListener("keydown", (e) => controls.key(e));
-document.head.append(Object.assign(document.createElement("style"), {
-  textContent: COMMITS_CSS + `
-#phx-pick, #phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
-  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
-@media (prefers-color-scheme: dark) {
-  #phx-pick, #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
-}
-#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
-#phx-pick[hidden] { display: none; }
-/* (the title and Close on one line, the hint under them; the commits scroll in their own box below, never under the header) */
-#phx-pick header { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
-#phx-pick header b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
-#phx-pick .phx-commits { flex: 1; min-height: 0; }
-#phx-pick header .close { grid-row: 1; grid-column: 2; }
-#phx-pick .ends { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; min-width: 0; }
-#phx-pick .ends .end { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; }
-#phx-pick .ends .end.set, #phx-pick .ends .end.t { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
-#phx-pick .ends i { font-style: normal; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
-#phx-pick .ends .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#phx-pick .ends .f:not(.set) .v { color: var(--fg2); }
-#phx-pick .ends .x { all: unset; cursor: pointer; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; color: var(--fg2); font-size: 14px; }
-#phx-pick .ends .x[hidden] { display: none; }
-#phx-pick .ends .x:hover { background: var(--hover); color: var(--fg); }
-#phx-pick .ends .arrow { color: var(--fg2); }
-#phx-pick .ask { order: 2; flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg); transition: background .2s; }
-#phx-pick .ask.asking { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
-#phx-pick .ask .q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); }
-#phx-pick .ask.asking .q { color: var(--fg); font-weight: 600; }
-#phx-pick .ask .no { display: none; }
-#phx-pick .ask.asking .no { display: inline-block; }
-#phx-pick .ask .yes:disabled { opacity: .45; cursor: default; }
-#phx-pick .ask button { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 9999px; padding: 2px 12px; cursor: pointer; font: inherit; }
-#phx-pick .ask .yes { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
-#phx-pick .ask.nudge { animation: phx-nudge .35s; }
-@keyframes phx-nudge { 0%, 100% { transform: none; } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
-#phx-pick header button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
-#phx-pick header button:hover { background: var(--hover); }
-`
-}));
-var pick;
-var graph;
-var marked = "";
-var compared = "";
-var closePick = (ask2 = true) => {
-  if (!pick || pick.hidden) return;
-  const bar2 = pick.querySelector(".ask");
-  if (ask2 && marked && marked !== compared && !bar2.classList.contains("asking")) {
-    bar2.classList.add("asking");
-    bar2.classList.remove("nudge");
-    void bar2.offsetWidth;
-    bar2.classList.add("nudge");
-    bar2.querySelector(".yes").focus();
-    return;
-  }
-  bar2.classList.remove("asking", "nudge");
-  pick.hidden = true;
-};
-function openPick() {
-  if (pick && !pick.hidden) return closePick();
-  if (!pick) {
-    pick = document.createElement("div");
-    pick.id = "phx-pick";
-    pick.innerHTML = `<header><b>Compare with an earlier version</b><button type="button" class="close">Close</button><div class="ends"><span class="end f"><i>From</i><span class="v">click a commit</span><button type="button" class="x" data-end="from" aria-label="Clear From" hidden>\xD7</button></span><span class="arrow">\u2192</span><span class="end t"><i>To</i><span class="v">the working tree</span><button type="button" class="x" data-end="to" aria-label="To the working tree" hidden>\xD7</button></span></div><small>Click one end, then the other (or drag between them) \xB7 Double-click: a commit's own changes</small></header><div class="ask"><span class="q">Choose From and To</span><button type="button" class="no">Don't compare</button><button type="button" class="yes" disabled>Compare</button></div>`;
-    pick.querySelector(".close").onclick = () => closePick();
-    for (const x of pick.querySelectorAll(".ends .x")) x.onclick = () => graph?.clear(x.dataset.end);
-    const ask2 = pick.querySelector(".ask");
-    ask2.querySelector(".yes").onclick = () => graph?.run();
-    ask2.querySelector(".no").onclick = () => closePick(false);
-    document.body.append(pick);
-    graph = new Commits(pick, {
-      load: async (skip, limit) => {
-        const r = await sock.request({ op: "diff_log", skip, limit });
-        return r.ok ? r.json?.commits ?? [] : r.error ?? "no git repository here";
-      },
-      marked: (from2, to, w) => {
-        marked = from2 ? `${from2}..${to ?? ""}` : "";
-        const f = pick.querySelector(".ends .f"), t = pick.querySelector(".ends .t");
-        f.querySelector(".v").textContent = from2 ? w.from : "click a commit";
-        f.classList.toggle("set", !!from2);
-        f.querySelector(".x").hidden = !from2;
-        t.querySelector(".v").textContent = w.to;
-        t.querySelector(".x").hidden = !to;
-        ask2.querySelector(".q").textContent = from2 ? `Compare ${w.from.split(" ")[0]} \u2192 ${to ? w.to.split(" ")[0] : "the working tree"}${marked === compared ? " (shown now)" : ""}` : "Choose From and To";
-        ask2.querySelector(".yes").disabled = !from2;
-        if (!from2) ask2.classList.remove("asking");
-      },
-      pick: (from2, to) => {
-        compared = `${from2}..${to ?? ""}`;
-        const q = pick.querySelector(".ask .q");
-        if (!q.textContent.endsWith(" (shown now)")) q.textContent += " (shown now)";
-        closePick(false);
-        const short = (id) => id.slice(0, 7);
-        void controls.start({ from: from2, to }, short(from2), to ? `to ${short(to)}` : "working tree");
-      }
-    });
-    void graph.load();
-  }
-  pick.hidden = false;
-  pick.querySelector(".ask").classList.remove("asking", "nudge");
-}
-addEventListener("pointerdown", (e) => {
-  if (!pick || pick.hidden || e.composedPath().some((n) => n === pick || n.id === "b-compare")) return;
-  closePick();
-}, { capture: true });
-addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && pick && !pick.hidden) closePick(), e.stopImmediatePropagation();
-  else if (e.key === "Enter" && pick && !pick.hidden && !e.target?.closest?.("button") && graph?.run()) e.preventDefault(), e.stopImmediatePropagation();
-}, { capture: true });
 var printFrame;
 var printPdf = async () => {
   const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" }).catch(() => void 0);

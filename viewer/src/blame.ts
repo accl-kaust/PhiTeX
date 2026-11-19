@@ -29,6 +29,10 @@ export interface BlameCommit {
   email: string;
   time: number;
   subject: string;
+  /** Its first parent (the version before it), where the host knows it: "What this commit changed" diffs against it. */
+  parent?: string;
+  /** The version "What this commit changed" diffs to, where it is not `id` (Overleaf: a session's, its author's commit being one of several in it). */
+  rev?: string;
 }
 
 /**
@@ -39,8 +43,31 @@ export interface BlameCommit {
 export interface BlameFile {
   text?: string;
   lines?: number[];
+  /**
+   * Finer than lines, where the host has it (Overleaf's history, to the
+   * character; git, to the word): runs [from, to) of `text` (UTF-16
+   * offsets), each with its commit index (-1 not committed), in order,
+   * covering the text. Lines are derived from them where `lines` is absent.
+   */
+  runs?: [number, number, number][];
   last?: number;
   error?: string;
+}
+
+/** What a blame is worked out with: the host's part of the look (BlameLook). */
+export interface BlameOpts {
+  /** Line: each line its newest edit, as git blame does; Word: each word its writer; Char: each character. */
+  detail: "line" | "word" | "char";
+  /** Edits of spacing only: ignored (the text keeps its writer) or counted. */
+  ws: "ignore" | "count";
+  /** Text moved: keeps its writer, or is the mover's. */
+  moved: "keep" | "mover";
+  /** Commits skipped: their lines go to whoever wrote them before (git's --ignore-rev). */
+  skip: string[];
+  /** Said while it works ("Reading history… 340 of ~1,200 edits"): `done` of `total` where it is known. */
+  progress?(text: string, done?: number, total?: number): void;
+  /** Aborted when the reads are no longer wanted (the project left). */
+  signal?: AbortSignal;
 }
 
 /** A tag or a branch, for "changed since". */
@@ -48,6 +75,8 @@ export interface BlameRef {
   name: string;
   kind: "tag" | "branch" | string;
   time: number;
+  /** The commit it names, where the host says. */
+  id?: string;
 }
 
 /** The host's answer (the `blame` op's, docs/spec-editor-protocol.md §10). */
@@ -61,13 +90,15 @@ export interface BlameData {
 
 /** What blame needs of its host. */
 export interface BlameHost {
-  /** Files `files` (project paths, as the glyph origins name them) blamed, or why not ("no git history here"). */
-  blame(files: string[]): Promise<BlameData | string>;
+  /** Files `files` (project paths, as the glyph origins name them) blamed, worked out with `opts`, or why not ("no git history here"). */
+  blame(files: string[], opts?: BlameOpts): Promise<BlameData | string>;
+  /** Commit `c`'s branch, where it was merged into main: "On lina/related-work, merged into main (5d0a7e3)"; null: on main. */
+  via?(c: BlameCommit): string | null;
   /** Page `k`'s glyphs (the session's). */
   glyphs(k: number): Promise<Glyph[]>;
   /** The editor at `file`'s `line` (from 1). */
   goto(file: string, line: number): void;
-  /** Compare with the version before `c` (null: text not committed, against the last commit): the host's Compare. Absent: not offered. */
+  /** What `c` changed (null: text not committed, against the last commit): Changes' Diff of it. Absent: not offered. */
   compare?(c: BlameCommit | null): void;
   /** An author's colour where the host gives them one (Overleaf's collaborators); null: by the hash of the email. */
   color?(c: BlameCommit): string | null;
@@ -75,20 +106,6 @@ export interface BlameHost {
   words?: { commit?: string; hashes?: boolean };
 }
 
-/** The panel's part blame draws in. */
-export interface BlamePanel {
-  root: ShadowRoot;
-  stage: HTMLElement;
-  /** The row under the bar (the mode, the tint, the legend). */
-  bar: HTMLElement;
-  /** The pages' size in points (one size for all). */
-  pageSize(): { w: number; h: number };
-  /** Whether the pages are drawn dark (the dark PDF). */
-  dark(): boolean;
-  msg(t: string, err?: boolean): void;
-  /** The toggle's state shown (the bar's button). */
-  pressed(on: boolean): void;
-}
 
 // ---- colours ----
 
@@ -278,16 +295,86 @@ export function bibEntries(text: string): Map<string, [number, number]> {
   return out;
 }
 
+/** Whether a UTF-16 unit is part of a word (letters, digits, marks; a TeX command's letters too). */
+const WORD = /[\p{L}\p{N}\p{M}_@\\']/u;
+
+/**
+ * Runs at word detail: each word (`WORD`'s characters in a row) takes its
+ * newest writer, as a whole; spaces and punctuation keep their own.
+ * `newer(a, b)`: the newer of two commits.
+ */
+export function wordRuns(text: string, runs: [number, number, number][], newer: (a: number, b: number) => number): [number, number, number][] {
+  const at = new Int32Array(text.length);
+  for (const [a, b, c] of runs) at.fill(c, a, b);
+  for (let i = 0; i < text.length; ) {
+    if (!WORD.test(text[i])) {
+      i++;
+      continue;
+    }
+    let j = i, c = at[i];
+    while (j < text.length && WORD.test(text[j])) c = newer(c, at[j++]);
+    at.fill(c, i, j);
+    i = j;
+  }
+  return compress(at);
+}
+
+/** Per-unit commits as runs. */
+function compress(at: Int32Array): [number, number, number][] {
+  const out: [number, number, number][] = [];
+  for (let i = 0; i < at.length; i++) {
+    const r = out.at(-1);
+    if (r && r[2] === at[i] && r[1] === i) r[1] = i + 1;
+    else out.push([i, i + 1, at[i]]);
+  }
+  return out;
+}
+
+/**
+ * Each line's commit from runs: its newest writer, as git blame says it;
+ * spacing ignored (`ws`), the newest of its other characters (a line of
+ * spaces only: of all of them). A line ends at its newline, which is
+ * counted with it.
+ */
+export function linesOf(text: string, runs: [number, number, number][], ws: "ignore" | "count", newer: (a: number, b: number) => number): number[] {
+  const at = new Int32Array(text.length);
+  for (const [a, b, c] of runs) at.fill(c, a, b);
+  const out: number[] = [];
+  let start = 0;
+  const end = (i: number) => {
+    let c: number | undefined, any: number | undefined;
+    for (let k = start; k < i; k++) {
+      any = any === undefined ? at[k] : newer(any, at[k]);
+      if (ws === "ignore" && /\s/.test(text[k])) continue;
+      c = c === undefined ? at[k] : newer(c, at[k]);
+    }
+    out.push(c ?? any ?? -1);
+  };
+  for (let i = 0; i < text.length; i++)
+    if (text[i] === "\n") {
+      end(i + 1);
+      start = i + 1;
+    }
+  if (start < text.length) end(text.length);
+  return out;
+}
+
+/** A file made ready to look up: its line starts, and its runs in bytes (where the detail is finer than lines). */
+type Ready = BlameFile & { starts?: number[]; br?: { at: Uint32Array; c: Int32Array } };
+
 /** A blame's files made ready to look up: each text's line starts, floats, and the bibliography's keys. */
 export class Model {
   commits: BlameCommit[] = [];
   refs: BlameRef[] = [];
   now = Date.now() / 1000;
-  files = new Map<string, BlameFile & { starts?: number[] }>();
+  files = new Map<string, Ready>();
   floats: Float[] = [];
   private byId = new Map<string, number>();
   private bib = new Map<string, { file: string; lines: [number, number] }>();
   private bbls = new Map<string, [number, string][]>();
+  /** The detail lines are looked up at, and spacing's. */
+  detail: BlameOpts["detail"] = "line";
+  ws: BlameOpts["ws"] = "ignore";
 
   /** `d` taken in: its commits merged with those already here by id. */
   add(d: BlameData): void {
@@ -299,8 +386,17 @@ export class Model {
     const re = (i: number | undefined) => (i === undefined ? undefined : i < 0 ? -1 : (map[i] ?? -1));
     if (d.now) this.now = d.now;
     if (d.refs) this.refs = d.refs;
+    const newer = (a: number, b: number) => this.newer(a, b);
     for (const [name, f] of Object.entries(d.files)) {
-      const g: BlameFile & { starts?: number[] } = { ...f, lines: f.lines?.map((l) => re(l)!), last: re(f.last) };
+      const g: Ready = { ...f, lines: f.lines?.map((l) => re(l)!), runs: f.runs?.map(([a, b, c]) => [a, b, re(c)!] as [number, number, number]), last: re(f.last) };
+      if (g.text !== undefined && g.runs) {
+        g.lines ??= linesOf(g.text, g.runs, this.ws, newer);
+        if (this.detail !== "line") {
+          const runs = this.detail === "word" ? wordRuns(g.text, g.runs, newer) : g.runs;
+          const bytes = byteIndex(g.text);
+          g.br = { at: Uint32Array.from(runs, (r) => bytes[r[0]]), c: Int32Array.from(runs, (r) => r[2]) };
+        }
+      }
       if (f.text !== undefined) g.starts = lineStarts(f.text);
       this.files.set(name, g);
       if (f.text !== undefined && /\.tex$|\.ltx$/i.test(name)) this.floats.push(...floats(name, f.text));
@@ -355,6 +451,16 @@ export class Model {
     const f = this.files.get(g.file);
     if (!f?.lines || !f.starts) return null;
     const line = lineOf(f.starts, g.start);
+    if (f.br) {
+      // (finer than lines: the run the glyph's byte is in)
+      let lo = 0, hi = f.br.at.length;
+      while (hi - lo > 1) {
+        const m = (lo + hi) >> 1;
+        if (f.br.at[m] <= g.start) lo = m;
+        else hi = m;
+      }
+      return { c: f.br.c[lo] ?? -1, file: g.file, line, last: line };
+    }
     return { c: f.lines[line] ?? -1, file: g.file, line, last: line };
   }
 
@@ -638,81 +744,140 @@ export function agoWords(t: number, now: number): string {
   return "just now";
 }
 
-export type BlameMode = "age" | "author" | "since";
-export type BlameTint = "off" | "hover" | "all";
-
-/** A line's look: its bar's colour, the tint's weight, hatched (not committed); null: no bar (older than six months, not changed since). */
-export function lookOf(m: Model, c: number, mode: BlameMode, dark: boolean, since: number, colors: Map<string, string>): { color: string; tint: number; hatch?: boolean } | null {
-  if (c < 0) return { color: UNCOMMITTED, tint: 0.12, hatch: true };
-  const x = m.commits[c];
-  if (!x) return null;
-  if (mode === "age") {
-    const a = AGE[ageStep((m.now - x.time) / 86400)];
-    return a?.bar ? { color: a.bar[dark ? 1 : 0], tint: a.tint } : null;
-  }
-  if (mode === "author") return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
-  return x.time > since ? { color: SINCE[dark ? 1 : 0], tint: 0.18 } : null;
+/** Blame's look, the popover's settings (kept as the viewer's other settings are). */
+export interface BlameLook extends Omit<BlameOpts, "progress" | "signal"> {
+  /** What the bars' colours say: who wrote the line, or how old it is. */
+  color: "author" | "age";
+  /** Text not committed: hatched, or not marked. */
+  wip: "show" | "hide";
+  /** Lines older than this dimmed: "off", or "SECONDS:label" (a tag's time, a date). */
+  since: string;
+  /** The words tinted: off, the paragraph under the pointer, everywhere. */
+  tint: "off" | "hover" | "all";
+  bars: "left" | "right";
+  /** The bars' width, px. */
+  width: number;
+  people: "okabe" | "overleaf";
+  ages: "violet" | "warm" | "grey";
 }
 
+export const BLAME_LOOK: BlameLook = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", tint: "hover", bars: "left", width: 4, people: "okabe", ages: "violet" };
+
+/** The age ramps, newest first, light pages' and dark pages' (Under a day, a week, a month, six months; older: none). */
+export const AGE_RAMPS: Record<BlameLook["ages"], { name: string; light: string[]; dark: string[] }> = {
+  violet: { name: "Violet", light: ["#5B2A86", "#7B4FAE", "#A07CC9", "#C9B5E2"], dark: ["#C7A6F0", "#AE8AD8", "#8E6CB8", "#6B5390"] },
+  warm: { name: "Warm", light: ["#b91c1c", "#ea580c", "#f59e0b", "#fde68a"], dark: ["#fca5a5", "#fdba74", "#fcd34d", "#a16207"] },
+  grey: { name: "Grey", light: ["#222222", "#555555", "#888888", "#bbbbbb"], dark: ["#eeeeee", "#bbbbbb", "#888888", "#555555"] },
+};
+/** Overleaf's collaborator colours, as a fixed palette (by the hash of the email) where the host has none of its own. */
+export const OVERLEAF_COLORS = ["#3e9cdb", "#e26a6a", "#43b581", "#a776d9", "#e0a030", "#2bb3b1"];
+
+/** A line's look: its bar's colour, the tint's weight, hatched (not committed); null: no bar (older than six months by age, not committed and hidden). */
+export function lookOf(m: Model, c: number, look: Pick<BlameLook, "color" | "ages" | "wip">, dark: boolean, colors: Map<string, string>): { color: string; tint: number; hatch?: boolean } | null {
+  if (c < 0) return look.wip === "hide" ? null : { color: UNCOMMITTED, tint: 0.12, hatch: true };
+  const x = m.commits[c];
+  if (!x) return null;
+  if (look.color === "age") {
+    const i = ageStep((m.now - x.time) / 86400);
+    const ramp = AGE_RAMPS[look.ages] ?? AGE_RAMPS.violet;
+    const col = (dark ? ramp.dark : ramp.light)[i];
+    return col ? { color: col, tint: AGE[i].tint } : null;
+  }
+  return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
+}
+
+/** The time "changed since" names (seconds), or null: off. */
+export const sinceTime = (since: string): number | null => (since && since !== "off" ? Number(since.split(":")[0]) : null);
+
 export const BLAME_CSS = `
-.blamebar { display: none; flex: none; align-items: center; gap: 6px 14px; padding: 4px 8px 4px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); font-size: 12.5px; }
-.blamebar.on { display: flex; }
-.blamebar .grp { display: inline-flex; align-items: center; gap: 6px; }
-.blamebar .lbl { font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ph-fg2); }
-.blamebar .seg { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); overflow: hidden; }
-.blamebar .seg button { all: unset; cursor: pointer; padding: 2px 9px; color: var(--ph-fg); }
-.blamebar .seg button + button { border-left: 1px solid var(--ph-border); }
-.blamebar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
-.blamebar .seg button:focus-visible, .blamebar select:focus-visible, .blamebar .x:focus-visible { outline: 2px solid var(--ph-accent); outline-offset: 1px; }
-.blamebar select { font: inherit; padding: 1px 4px; border-radius: var(--ph-radius); border: 1px solid var(--ph-border); background: var(--ph-bar); color: var(--ph-fg); max-width: 260px; }
-.blamebar .legend { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
-.blamebar .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.blamebar .lg small { color: var(--ph-fg2); font-variant-numeric: tabular-nums; font-size: inherit; }
-.blamebar .sw { width: 18px; height: 11px; border-radius: 2px; position: relative; overflow: hidden; border: 1px solid var(--ph-border); }
-.blamebar .sw i { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
-.blamebar .say { color: var(--ph-fg2); }
-.blamebar .grow { flex: 1; }
-.blamebar .x { all: unset; cursor: pointer; padding: 0 6px; color: var(--ph-fg2); border-radius: var(--ph-radius); }
-.blamebar .x:hover { background: var(--ph-hover); color: var(--ph-fg); }
 .slot .bl { position: absolute; pointer-events: none; }
-.slot .bl-bar { border-radius: 1px; width: 3px; }
-.slot .bl-bar.bl-on { width: 4px; }
+.slot .bl-bar { border-radius: 1px; }
 .slot .bl-tint { border-radius: 1px; }
 .slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
-.blcard { position: fixed; z-index: 30; width: min(320px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 8px; box-shadow: 0 6px 24px rgb(20 24 33 / 22%); padding: 9px 12px 9px 16px; font-size: 13px; line-height: 1.35; }
+.slot .bl-wait { background: repeating-linear-gradient(0deg, rgb(154 160 166 / 45%) 0 2px, transparent 2px 4px); opacity: .7; }
+.slot .bl-wash { background: rgb(255 255 255 / 62%); }
+.win.dark-pdf .slot .bl-wash, .slot.dark .bl-wash { background: rgb(20 22 26 / 58%); }
+.slot .bl-dim { opacity: .28; }
+@media (prefers-reduced-motion: no-preference) {
+  .slot .bl-in { animation: bl-in .22s ease-out both; }
+  .slot .bl-wait { animation: bl-wait 1.4s ease-in-out infinite; }
+  .slot .bl-tint { transition: opacity .12s; }
+}
+@keyframes bl-in { from { opacity: 0; } }
+@keyframes bl-wait { 50% { opacity: .3; } }
+.blcard { position: fixed; z-index: 30; width: min(300px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 10px; box-shadow: 0 10px 30px rgb(15 25 40 / 18%); padding: 10px 12px; font-size: 13px; line-height: 1.45; }
 .blcard[hidden] { display: none; }
-.blcard .strip { position: absolute; left: 0; top: 0; bottom: 0; width: 5px; border-radius: 8px 0 0 8px; }
-.blcard .sub { font-weight: 600; }
-.blcard .meta { color: var(--ph-fg2); margin-top: 3px; }
+.blcard .h { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+.blcard .av { width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; font: 700 8px system-ui, sans-serif; color: #fff; flex: none; }
+.blcard .meta { color: var(--ph-fg2); font-size: 12px; }
+.blcard .sub { margin-top: 2px; }
 .blcard code, .blcard .src { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 11.5px; }
-.blcard .src { color: var(--ph-fg2); margin-top: 6px; overflow-wrap: anywhere; }
-.blcard .acts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; }
-.blcard .acts button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); font-size: 12.5px; }
-.blcard .acts button:hover, .blcard .acts button:focus-visible { text-decoration: underline; }
-@media (prefers-reduced-motion: no-preference) { .slot .bl-tint { transition: opacity .12s; } }
+.blcard .src { color: var(--ph-fg2); margin-top: 4px; overflow-wrap: anywhere; }
+.blcard .via { color: var(--ph-fg2); font-size: 12px; margin-top: 4px; }
+.blcard .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.blcard .acts button { font: inherit; font-size: 12px; background: var(--ph-hover); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+.blcard .acts button:hover, .blcard .acts button:focus-visible { border-color: var(--ph-accent); }
 `;
 
-const HATCH_SWATCH = "repeating-linear-gradient(45deg,#9AA0A6 0 1.5px,transparent 1.5px 4px)";
+/** The panel's part blame draws in. */
+export interface BlamePanel {
+  root: ShadowRoot;
+  stage: HTMLElement;
+  /** The pages' size in points (one size for all). */
+  pageSize(): { w: number; h: number };
+  /** Whether the pages are drawn dark (the dark PDF). */
+  dark(): boolean;
+  msg(t: string, err?: boolean): void;
+}
 
-/** Blame over the pages: its bar's state, the pages' marks, the card. */
+/** What the popover shows of a blame: its progress, who wrote the paper as it is, and the commits that still own lines. */
+export interface BlameSummary {
+  /** What it is doing ("Working out who wrote each word… main.tex"), "" when done. */
+  busy: string;
+  /** `done` of `total`, where the total is known. */
+  progress?: [number, number];
+  error: string;
+  /** Printed lines blamed so far, and files still to come. */
+  lines: number;
+  waiting: number;
+  people: { key: string; name: string; color: string; n: number }[];
+  commits: { c: number; commit: BlameCommit | null; n: number; color: string; via: string | null }[];
+  /** The tags and the dates "changed since" offers. */
+  since: { v: string; label: string }[];
+}
+
+/** A printed line's key on its page (the same line drawn again is not new). */
+const segKey = (k: number, s: Seg) => `${k}:${Math.round(s.x0)}:${Math.round(s.y0)}`;
+
+/** Blame over the pages: its state, the pages' marks, the card. Its controls are the Changes popover's (changes.ts). */
 export class Blame {
   private p: BlamePanel;
   private host: BlameHost;
   on = false;
-  mode: BlameMode = "age";
-  tint: BlameTint = "hover";
-  /** Changed since: seconds since the epoch, and the choice's value in the list. */
-  private since: { t: number; v: string } | null = null;
+  look: BlameLook = { ...BLAME_LOOK };
+  /** One person's lines picked out (an author key), or one commit's (an index; -1 not committed). */
+  focusP: string | null = null;
+  focusC: number | null = null;
   private m: Model | null = null;
   private error = "";
-  private busy = false;
+  private busy = "";
+  private progress: [number, number] | undefined;
   private segs = new Map<number, Seg[]>();
+  /** Printed lines whose files are still being read: a quiet placeholder. */
+  private waits = new Map<number, { x: number; y0: number; y1: number }[]>();
+  private waiting = 0;
   private colors = new Map<string, string>();
   private hover: { k: number; s: Seg } | null = null;
   private pinned: { k: number; s: Seg } | null = null;
   private card: HTMLElement;
   private turn = 0;
   private again: ReturnType<typeof setTimeout> | undefined;
+  /** Each line's marks first drawn when (ms): drawn again within the fade, the fade goes on where it was. */
+  private drawn = new Map<string, number>();
+  private abort: AbortController | undefined;
+  private listeners: (() => void)[] = [];
+  /** The last look the blame was worked out with (its host's part): another one reads again. */
+  private worked = "";
 
   constructor(p: BlamePanel, host: BlameHost) {
     this.p = p;
@@ -721,7 +886,7 @@ export class Blame {
     this.card.className = "blcard";
     this.card.hidden = true;
     this.card.setAttribute("role", "dialog");
-    this.card.setAttribute("aria-label", "Commit");
+    this.card.setAttribute("aria-label", "Who wrote this");
     // (in the panel's window, so the host's tokens (--ph-*) colour it)
     (p.stage.closest(".win") ?? p.root).append(this.card);
     p.stage.addEventListener("pointermove", (e) => this.move(e));
@@ -732,39 +897,80 @@ export class Blame {
     p.stage.addEventListener("click", (e) => this.click(e));
     this.card.addEventListener("click", (e) => this.act(e));
     p.root.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key === "Escape" && (this.pinned || this.hover)) (this.pinned = null), this.over(null), e.stopPropagation();
+      if ((e as KeyboardEvent).key === "Escape" && (this.pinned || this.hover) && !this.card.hidden) (this.pinned = null), this.over(null), e.stopPropagation();
     }, { capture: true });
-    p.bar.addEventListener("click", (e) => this.barClick(e));
-    p.bar.addEventListener("change", (e) => {
-      const t = e.target as HTMLSelectElement;
-      if (t.id !== "bl-since") return;
-      this.since = { t: Number(t.value.split(":")[0]), v: t.value };
-      this.draw();
-    });
   }
 
-  private toggled: ((on: boolean) => void)[] = [];
-
-  /** `cb(on)` whenever blame is shown or hidden (a host's own toggle: Overleaf's toolbar). */
-  onToggle(cb: (on: boolean) => void): void {
-    this.toggled.push(cb);
+  /** `f()` whenever what the popover shows changes (progress, a file read, a focus). */
+  onState(f: () => void): void {
+    this.listeners.push(f);
   }
 
-  /** Blame shown or not (the bar's toggle). */
+  private emit(): void {
+    for (const f of this.listeners) f();
+  }
+
+  /** The host's word for a commit, and whether it has hashes. */
+  get words(): { commit: string; hashes: boolean } {
+    return { commit: this.host.words?.commit ?? "commit", hashes: this.host.words?.hashes !== false };
+  }
+
+  /** Blame shown or not. */
+  /** The pages read by the last load: another set of pages (shown again, a build's) read again. */
+  private read = -1;
+  private slots: MutationObserver | null = null;
+
   toggle(on = !this.on): void {
+    if (on === this.on) return;
     this.on = on;
-    this.p.pressed(on);
-    for (const f of this.toggled) f(on);
+    this.slots?.disconnect();
+    if (on) {
+      this.slots = new MutationObserver(() => this.on && this.pages() !== this.read && this.refresh());
+      this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    }
     if (!on) {
       this.pinned = this.hover = null;
       this.card.hidden = true;
       this.clear();
-      this.p.bar.className = "blamebar";
-      this.p.bar.replaceChildren();
+      this.drawn.clear();
       return;
     }
-    this.p.bar.className = "blamebar on";
+    // (a blame already worked out with this look: drawn at once, read again in the background)
+    if (this.m) this.draw();
     void this.load();
+  }
+
+  /** The look changed: drawn again, or worked out again where the host's part changed. */
+  setLook(l: Partial<BlameLook>): void {
+    this.look = { ...this.look, ...l };
+    this.colorsOf();
+    if (this.on && this.workKey() !== this.worked) void this.load();
+    else this.draw();
+    this.emit();
+  }
+
+  /** One person's lines, or one commit's, picked out (again: none). */
+  focus(kind: "person" | "commit", key: string | number | null): void {
+    if (kind === "person") (this.focusP = this.focusP === key ? null : (key as string | null)), (this.focusC = null);
+    else (this.focusC = this.focusC === key ? null : (key as number | null)), (this.focusP = null);
+    this.draw();
+    this.emit();
+    if (kind === "commit" && this.focusC !== null) this.reveal(this.focusC);
+  }
+
+  /** The first printed line of commit `c` brought into view. */
+  private reveal(c: number): void {
+    for (const [k, segs] of this.segs) {
+      const s = segs.find((s) => s.c === c);
+      if (!s) continue;
+      const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
+      if (!slot) return;
+      const { h } = this.p.pageSize();
+      const r = slot.getBoundingClientRect(), box = this.p.stage.getBoundingClientRect();
+      const y = r.top + (s.y0 / h) * r.height;
+      if (y < box.top + 40 || y > box.bottom - 40) this.p.stage.scrollBy({ top: y - (box.top + box.height / 3), behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      return;
+    }
   }
 
   /** The pages changed (a build, new origins): blamed again, a moment after the last change. */
@@ -779,94 +985,242 @@ export class Blame {
     if (this.on) this.draw();
   }
 
+  /** The reads stopped (the project left). */
+  stop(): void {
+    this.abort?.abort();
+    this.turn++;
+  }
+
   private pages(): number {
     return this.p.stage.querySelectorAll(".slot").length;
   }
 
+  private workKey(): string {
+    const l = this.look;
+    return JSON.stringify([l.detail, l.ws, l.moved, [...l.skip].sort()]);
+  }
+
+  private colorsOf(): void {
+    const m = this.m;
+    if (!m) return;
+    const keys = m.commits.map(authorKey);
+    if (this.look.people === "overleaf") {
+      this.colors = new Map();
+      for (const c of m.commits) {
+        const k = authorKey(c);
+        if (this.colors.has(k)) continue;
+        this.colors.set(k, this.host.color?.(c) ?? OVERLEAF_COLORS[fnv(k) % OVERLEAF_COLORS.length]);
+      }
+    } else this.colors = authorColors(keys);
+  }
+
+  /** An author's colour. */
+  colorOf(c: BlameCommit): string {
+    return this.colors.get(authorKey(c)) ?? (this.look.people === "overleaf" ? (this.host.color?.(c) ?? OVERLEAF_COLORS[fnv(authorKey(c)) % OVERLEAF_COLORS.length]) : authorColors([authorKey(c)]).get(authorKey(c))!);
+  }
+
+  /**
+   * Blamed again: the pages' glyphs, then each file as it comes (the
+   * lines already known drawn at once, the others a quiet placeholder,
+   * each file's lines fading in as it lands), then the files the floats
+   * and the bibliography name. A newer load or a stop drops this one's
+   * results, never the blame drawn already.
+   */
   private async load(): Promise<void> {
     const turn = ++this.turn;
-    this.busy = true;
-    this.bar();
+    this.abort?.abort();
+    const abort = (this.abort = new AbortController());
+    const opts: BlameOpts = {
+      detail: this.look.detail,
+      ws: this.look.ws,
+      moved: this.look.moved,
+      skip: this.look.skip,
+      signal: abort.signal,
+      progress: (text, done, total) => {
+        if (turn !== this.turn) return;
+        this.busy = text;
+        this.progress = done !== undefined && total ? [done, total] : undefined;
+        this.emit();
+      },
+    };
+    const key = this.workKey();
+    this.busy = "Reading the pages…";
+    this.progress = undefined;
+    this.emit();
     try {
-      const n = this.pages();
+      const n = (this.read = this.pages());
       const glyphs: Glyph[][] = [];
       for (let k = 0; k < n; k++) glyphs.push(await this.host.glyphs(k));
       if (turn !== this.turn) return;
-      const files = new Set<string>();
-      for (const gs of glyphs) for (const g of gs) if (g.file) files.add(g.file);
+      // (the files in the order the pages show them)
+      const files: string[] = [];
+      for (const gs of glyphs) for (const g of gs) if (g.file && !files.includes(g.file)) files.push(g.file);
       const m = new Model();
-      const d = await this.host.blame([...files]);
-      if (turn !== this.turn) return;
-      if (typeof d === "string") throw new Error(d);
-      m.add(d);
+      m.detail = this.look.detail;
+      m.ws = this.look.ws;
+      // (the tags known already, till the new answer brings its own: "Changed since" keeps its choices)
+      m.refs = this.m?.refs ?? [];
+      const pending = new Set(files);
+      // (the blame already drawn stays until the new one has its first file; a new look's starts clean)
+      const fresh = this.worked !== key || !this.m || ![...this.segs.values()].some((x) => x.length);
+      const show = (all: boolean) => {
+        this.m = m;
+        this.worked = key;
+        this.colorsOf();
+        const size = this.p.pageSize();
+        this.segs.clear();
+        this.waits.clear();
+        glyphs.forEach((gs, k) => {
+          this.segs.set(k, mapPage(gs, m, size));
+          if (!all) this.waits.set(k, printedLines(gs).filter((l) => l.some((g) => g.file && pending.has(g.file)) && !l.some((g) => g.file && !pending.has(g.file))).map((l) => ({ x: l[0].x, y0: l[0].y - 8, y1: l[0].y + 3 })));
+        });
+        this.waiting = pending.size;
+        this.draw();
+      };
+      if (fresh) show(false);
+      let i = 0;
+      for (const file of files) {
+        this.busy = `Working out who wrote each ${this.look.detail === "line" ? "line" : this.look.detail === "word" ? "word" : "character"}… ${file}`;
+        this.progress = files.length > 1 ? [i, files.length] : this.progress;
+        this.emit();
+        const d = await this.host.blame([file], opts);
+        if (turn !== this.turn) return;
+        if (typeof d === "string") throw new Error(d);
+        m.add(d);
+        pending.delete(file);
+        i++;
+        show(false);
+      }
       const more = m.wanted();
       if (more.length) {
-        const d2 = await this.host.blame(more);
+        this.busy = "Reading the figures' and the bibliography's history…";
+        this.emit();
+        const d2 = await this.host.blame(more, opts);
         if (turn !== this.turn) return;
         if (typeof d2 !== "string") m.add(d2);
       }
-      this.m = m;
       this.error = "";
-      this.colors = authorColors(m.commits.map(authorKey));
-      if (this.host.color) for (const c of m.commits) {
-        const h = this.host.color(c);
-        if (h) this.colors.set(authorKey(c), h);
-      }
-      const size = this.p.pageSize();
-      this.segs.clear();
-      glyphs.forEach((gs, k) => this.segs.set(k, mapPage(gs, m, size)));
-      if (!this.since) this.since = this.sinceChoices()[0] ?? null;
+      show(true);
     } catch (e) {
       if (turn !== this.turn) return;
-      this.m = null;
-      this.error = (e as Error).message || String(e);
+      this.error = abort.signal.aborted ? "" : (e as Error).message || String(e);
     }
-    this.busy = false;
+    this.busy = "";
+    this.progress = undefined;
+    this.waiting = 0;
+    this.waits.clear();
     this.draw();
+    this.emit();
   }
 
-  /** "Changed since" choices: the tags (newest first), then a day, a week, a month and three months ago, then the commits shown. */
-  sinceChoices(): { t: number; v: string; label: string }[] {
+  /** Read again (Try again). */
+  retry(): void {
+    this.error = "";
+    void this.load();
+  }
+
+  /** "Changed since" choices: off, the tags (newest first), then a day, a week, a month and three months ago. */
+  sinceChoices(): { v: string; label: string }[] {
     const m = this.m;
-    if (!m) return [];
-    const out: { t: number; v: string; label: string }[] = [];
-    for (const r of [...m.refs].filter((r) => r.kind === "tag").sort((a, b) => b.time - a.time)) out.push({ t: r.time, v: `${r.time}:tag:${r.name}`, label: `${r.name} · ${agoWords(r.time, m.now)}` });
-    for (const [d, w] of [[1, "yesterday"], [7, "a week ago"], [30, "a month ago"], [91, "three months ago"]] as [number, string][]) out.push({ t: m.now - d * 86400, v: `${m.now - d * 86400}:days:${d}`, label: w });
-    const word = this.host.words?.commit ?? "commit";
-    for (const c of [...m.commits].sort((a, b) => b.time - a.time).slice(0, 12)) out.push({ t: c.time, v: `${c.time}:c:${c.id}`, label: `${word} ${c.short} · ${c.subject.slice(0, 40)}` });
+    const now = m?.now ?? Date.now() / 1000;
+    const out: { v: string; label: string }[] = [];
+    for (const r of [...(m?.refs ?? [])].filter((r) => r.kind === "tag").sort((a, b) => b.time - a.time).slice(0, 6)) out.push({ v: `${r.time}:${r.name}`, label: r.name });
+    for (const [d, w] of [[1, "Yesterday"], [7, "A week ago"], [30, "A month ago"]] as [number, string][]) out.push({ v: `${Math.round(now - d * 86400)}:${w}`, label: w });
     return out;
   }
 
-  private look(c: number) {
-    return this.m ? lookOf(this.m, c, this.mode, this.p.dark(), this.since?.t ?? Infinity, this.colors) : null;
+  /** The commits blamed so far (skip offers them). */
+  commitsKnown(): BlameCommit[] {
+    return this.m ? [...this.m.commits].sort((a, b) => b.time - a.time) : [];
+  }
+
+  /** What the popover shows. */
+  summary(): BlameSummary {
+    const m = this.m;
+    const all = [...this.segs.values()].flat().filter((s) => s.c >= 0 || this.look.wip === "show");
+    const people = new Map<string, { key: string; name: string; color: string; n: number }>();
+    const commits = new Map<number, { c: number; commit: BlameCommit | null; n: number; color: string; via: string | null }>();
+    const dark = this.p.dark();
+    for (const s of all) {
+      const c = s.c >= 0 && m ? m.commits[s.c] : null;
+      const key = c ? authorKey(c) : "";
+      const p = people.get(key) ?? { key, name: c ? c.author || c.email : this.words.commit === "version" ? "Not saved yet" : "Not committed", color: c ? this.colorOf(c) : UNCOMMITTED, n: 0 };
+      p.n++;
+      people.set(key, p);
+      const e = commits.get(s.c) ?? { c: s.c, commit: c, n: 0, color: (m && lookOf(m, s.c, this.look, dark, this.colors)?.color) ?? "transparent", via: c ? (this.host.via?.(c) ?? null) : null };
+      e.n++;
+      commits.set(s.c, e);
+    }
+    return {
+      busy: this.busy,
+      progress: this.progress,
+      error: this.error,
+      lines: all.length,
+      waiting: this.waiting,
+      people: [...people.values()].sort((a, b) => b.n - a.n),
+      commits: [...commits.values()].sort((a, b) => (a.commit ? a.commit.time : Infinity) > (b.commit ? b.commit.time : Infinity) ? -1 : 1),
+      since: this.sinceChoices(),
+    };
+  }
+
+  private shade(c: number): { color: string; tint: number; hatch?: boolean } | null {
+    return this.m ? lookOf(this.m, c, this.look, this.p.dark(), this.colors) : null;
+  }
+
+  /** Whether a line is set back: another person's or commit's picked out, or older than "changed since". */
+  private dimmed(c: number): boolean {
+    const m = this.m;
+    if (!m) return false;
+    const x = c >= 0 ? m.commits[c] : null;
+    if (this.focusP !== null && (x ? authorKey(x) : "") !== this.focusP) return true;
+    if (this.focusC !== null && c !== this.focusC) return true;
+    const since = sinceTime(this.look.since);
+    return since !== null && !!x && x.time <= since;
   }
 
   private clear(): void {
     for (const e of this.p.stage.querySelectorAll(".slot .bl")) e.remove();
   }
 
-  /** The bars and tints on every page, and the bar's legend. */
+  /** The bars, tints and washes on every page; the placeholders where files are still read. */
   private draw(): void {
     this.clear();
-    this.bar();
     if (!this.on || !this.m) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
     const focus = this.pinned ?? this.hover;
     const pct = (v: number, of: number) => `${(v / of) * 100}%`;
+    const bw = Math.max(1, this.look.width);
+    const seen = new Map<string, number>();
+    const now = performance.now();
     for (const [k, segs] of this.segs) {
       const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
       if (!slot) continue;
       const frag = document.createDocumentFragment();
+      // (each column's right edge: a right margin's bars there)
+      const right = new Map<number, number>();
+      for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
       for (const s of segs) {
-        const lk = this.look(s.c);
+        const lk = this.shade(s.c);
+        const key = segKey(k, s);
+        const t0 = this.drawn.get(key) ?? now;
+        seen.set(key, t0);
+        const fade = now - t0 < 220 ? " bl-in" : "";
+        const delay = fade ? `${-(now - t0)}ms` : "";
+        const dim = this.dimmed(s.c);
+        if (dim) {
+          const wsh = document.createElement("div");
+          wsh.className = `bl bl-wash${fade}`;
+          Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
+          frag.append(wsh);
+        }
         if (!lk) continue;
         const lit = !!focus && focus.k === k && focus.s.para === s.para;
-        const tinted = this.tint === "all" || (this.tint === "hover" && lit);
+        const tinted = !dim && (this.look.tint === "all" || (this.look.tint === "hover" && lit));
         if (tinted) {
           const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
           for (const [a, b, c] of runs) {
-            const l = this.look(c);
+            const l = this.shade(c);
             if (!l) continue;
             const t = document.createElement("div");
             t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
@@ -875,68 +1229,20 @@ export class Blame {
           }
         }
         const b = document.createElement("div");
-        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${lit ? " bl-on" : ""}`;
-        Object.assign(b.style, { left: pct(s.bx, w), top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color });
+        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
+        const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
+        Object.assign(b.style, { left: pct(x, w), width: `${lit ? bw + 1 : bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
+        frag.append(b);
+      }
+      for (const l of this.waits.get(k) ?? []) {
+        const b = document.createElement("div");
+        b.className = "bl bl-bar bl-wait";
+        Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
         frag.append(b);
       }
       slot.append(frag);
     }
-  }
-
-  /** The row under the bar: Colour by, Since (its choice), Word tint, the legend. */
-  private bar(): void {
-    if (!this.on) return;
-    const seg = (id: string, cur: string, opts: [string, string][]) =>
-      html`<span class="seg" role="group" id="${id}">${opts.map(([v, t]) => html`<button type="button" data-v="${v}" aria-pressed="${String(cur === v)}">${t}</button>`)}</span>`;
-    const choices = this.sinceChoices();
-    const since = this.mode === "since" ? html`<span class="grp"><span class="lbl">Since</span><select id="bl-since" aria-label="Changed since">${choices.map((c) => html`<option value="${c.v}" selected="${c.v === this.since?.v}">${c.label}</option>`)}</select></span>` : "";
-    const say = this.busy ? html`<span class="say">Reading the history…</span>` : this.error ? html`<span class="say">${this.error}</span>` : this.legend();
-    this.p.bar.replaceChildren(
-      html`<span class="grp"><span class="lbl">Colour by</span>${seg("bl-mode", this.mode, [["age", "Age"], ["author", "Author"], ["since", "Since…"]])}</span>${since}<span class="grp"><span class="lbl">Word tint</span>${seg("bl-tint", this.tint, [["off", "Off"], ["hover", "Paragraph under pointer"], ["all", "All"]])}</span>${say}<span class="grow"></span><button type="button" class="x" data-a="close" title="Hide blame" aria-label="Hide blame">✕</button>`,
-    );
-  }
-
-  /** The legend: each colour's meaning and how many printed lines have it. */
-  private legend(): DocumentFragment {
-    const m = this.m;
-    if (!m) return html``;
-    const all = [...this.segs.values()].flat();
-    const dark = this.p.dark();
-    const row = (color: string, name: string, n: number, hatch = false) =>
-      html`<span class="lg"><span class="sw" style="${hatch ? `background:${HATCH_SWATCH}` : `background:${color}${dark ? "33" : "26"}`}"><i style="${`background:${hatch ? UNCOMMITTED : color}`}"></i></span><span>${name}</span><small>${n}</small></span>`;
-    const unc = all.filter((s) => s.c < 0).length;
-    const lines = (f: (c: BlameCommit) => boolean) => all.filter((s) => s.c >= 0 && f(m.commits[s.c])).length;
-    let rows: DocumentFragment[] = [];
-    if (this.mode === "age") {
-      rows = [row("", "Not committed", unc, true), ...AGE.map((a, i) => row(a.bar ? a.bar[dark ? 1 : 0] : "transparent", a.name, lines((c) => ageStep((m.now - c.time) / 86400) === i)))];
-    } else if (this.mode === "author") {
-      const who = new Map<string, { name: string; n: number }>();
-      for (const s of all) {
-        if (s.c < 0) continue;
-        const c = m.commits[s.c];
-        const k = authorKey(c);
-        const e = who.get(k) ?? { name: c.author || c.email, n: 0 };
-        e.n++;
-        who.set(k, e);
-      }
-      rows = [...[...who].sort((a, b) => b[1].n - a[1].n).map(([k, e]) => row(this.colors.get(k) ?? OVERFLOW, e.name, e.n)), row("", "Not committed", unc, true)];
-    } else {
-      const t = this.since?.t ?? Infinity;
-      rows = [row(SINCE[dark ? 1 : 0], "Changed since then", lines((c) => c.time > t)), row("", "Not committed", unc, true)];
-    }
-    return html`<span class="legend" aria-label="Legend">${rows}</span>`;
-  }
-
-  private barClick(e: Event): void {
-    const t = e.target as HTMLElement;
-    const b = t.closest<HTMLElement>("button");
-    if (!b) return;
-    if (b.dataset.a === "close") return this.toggle(false);
-    const g = b.closest<HTMLElement>(".seg")?.id;
-    if (g === "bl-mode") this.mode = b.dataset.v as BlameMode;
-    else if (g === "bl-tint") this.tint = b.dataset.v as BlameTint;
-    else return;
-    this.draw();
+    this.drawn = seen;
   }
 
   /** The printed line (or picture) under a pointer, by its page's slot. */
@@ -947,12 +1253,11 @@ export class Blame {
     const r = slot.getBoundingClientRect();
     const { w, h } = this.p.pageSize();
     const x = ((e.clientX - r.left) / r.width) * w, y = ((e.clientY - r.top) / r.height) * h;
-    // (a line anywhere across its column: from its bar to the column's right edge, the
-    // rightmost of the column's lines, wherever its own glyphs end)
+    // (a line anywhere across its column: from its bar to the column's right edge)
     const segs = this.segs.get(k) ?? [];
     const right = new Map<number, number>();
     for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
-    const s = segs.find((s) => x >= Math.min(s.bx - 4, s.x0) && x <= (right.get(s.bx) ?? s.x1) && y >= s.y0 && y <= s.y1);
+    const s = segs.find((s) => x >= Math.min(s.bx - 4, s.x0) && x <= (right.get(s.bx) ?? s.x1) + 8 && y >= s.y0 && y <= s.y1);
     return s ? { k, s } : null;
   }
 
@@ -990,18 +1295,17 @@ export class Blame {
     const m = this.m;
     if (!m) return;
     const c = a.s.c >= 0 ? m.commits[a.s.c] : null;
-    const lk = this.look(a.s.c) ?? { color: UNCOMMITTED, tint: 0 };
     const src = a.s.fig ? `${a.s.fig}` : `${a.s.file}:${a.s.l0 + 1}${a.s.l1 > a.s.l0 ? `–${a.s.l1 + 1}` : ""}`;
-    const hashes = this.host.words?.hashes !== false;
-    const word = this.host.words?.commit ?? "commit";
+    const { commit: word, hashes } = this.words;
+    const color = c ? this.colorOf(c) : UNCOMMITTED;
+    const via = c ? (this.host.via?.(c) ?? null) : null;
     this.card.replaceChildren(
-      html`<span class="strip" style="${`background:${lk.hatch ? HATCH_SWATCH : lk.color}`}"></span><div class="sub">${c ? c.subject || "(no subject)" : "Not committed yet"}</div><div class="meta">${c ? html`${hashes ? html`<code>${c.short}</code> · ` : ""}${c.author || c.email} · ${agoWords(c.time, m.now)}` : "Your changes since the last " + word}</div><div class="src">${src}</div><div class="acts">${this.host.compare ? html`<button type="button" data-a="cmp">${c ? `Compare with before this ${word}` : `Compare with the last ${word}`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`,
+      html`<div class="h"><span class="av" style="${`background:${color}`}">${c ? (c.author || c.email).trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase() : "Y"}</span>${c ? c.author || c.email : "You"}</div><div class="meta">${c ? html`${agoWords(c.time, m.now)} · <code>${c.short}</code>` : `now · not ${word === "version" ? "saved to the history" : "committed"}`}</div><div class="sub">${c ? c.subject || "(no subject)" : word === "version" ? "Typed since the last version" : "Typed since the last commit"}</div>${via ? html`<div class="via">${via}</div>` : ""}<div class="src">${src}</div><div class="acts">${this.host.compare && c ? html`<button type="button" data-a="cmp">${`What this ${word} changed`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`,
     );
     this.card.hidden = false;
-    // (near the pointer, inside the pages' box (a pane's, in a host's page); placed, then moved by
-    // where it landed: a fixed box is placed in its containing block, which a host's transform or
-    // containment makes its pane, not the window)
-    const W = this.card.offsetWidth || 320, H = this.card.offsetHeight || 120;
+    // (near the pointer, inside the pages' box; placed, then moved by where it landed: a fixed box is
+    // placed in its containing block, which a host's transform or containment makes its pane)
+    const W = this.card.offsetWidth || 300, H = this.card.offsetHeight || 120;
     const box = this.p.stage.getBoundingClientRect();
     const x = Math.max(box.left + 6, Math.min(box.right - W - 6, e.clientX + 14));
     const y = e.clientY + H + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H - 12) : e.clientY + 16;
@@ -1021,7 +1325,11 @@ export class Blame {
     const m = this.m;
     if (!a || !cur || !m) return;
     const c = cur.s.c >= 0 ? m.commits[cur.s.c] : null;
-    if (a === "cmp") return this.host.compare?.(c);
+    if (a === "cmp") {
+      this.pinned = null;
+      this.over(null);
+      return this.host.compare?.(c);
+    }
     if (a === "src") return this.host.goto(cur.s.fig && !cur.s.fig.includes(":") ? cur.s.fig : cur.s.file.replace(/:.*$/, ""), cur.s.fig ? 1 : cur.s.l0 + 1);
     if (a === "copy" && c)
       void navigator.clipboard?.writeText(c.id).then(

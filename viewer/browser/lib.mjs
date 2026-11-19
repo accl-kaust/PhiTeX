@@ -209,7 +209,8 @@ export class Tab {
   }
   /** An expression over `$`, an element by selector, in the panel's shadow root or the page. */
   q(body) {
-    return this.js(`(() => { const R = document.querySelector("phitex-preview")?.shadowRoot; const $ = (s) => R?.querySelector(s) ?? document.querySelector(s); const $$ = (s) => [...(R?.querySelectorAll(s) ?? []), ...document.querySelectorAll(s)]; return (${body}); })()`);
+    // (Changes' popover is in a shadow root of its own, #chg's, inside the panel's)
+    return this.js(`(() => { const R = document.querySelector("phitex-preview")?.shadowRoot; const C = R?.querySelector("#chg")?.shadowRoot; const $ = (s) => R?.querySelector(s) ?? C?.querySelector(s) ?? document.querySelector(s); const $$ = (s) => [...(R?.querySelectorAll(s) ?? []), ...(C?.querySelectorAll(s) ?? []), ...document.querySelectorAll(s)]; return (${body}); })()`);
   }
   async until(body, what = body, ms = 60000) {
     const end = Date.now() + ms;

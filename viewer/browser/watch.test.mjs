@@ -96,15 +96,19 @@ test("a .bib edited while watching is read again (item 17)", async () => {
   await w.stop();
 });
 
-/** Compare with the last commit (the picker's first row, From; To the working tree): its `n` changes counted in the diff bar. */
+/**
+ * ± Changes kept on, Diff: the last commit (one end, the picker's first row) against the
+ * working tree (the other, its row above), its `n` changes counted in the popover's footer.
+ */
 async function compareWith(t, n) {
-  await t.click("#b-compare");
-  await t.until(`$$("#phx-pick .row").length > 0`, "the commits");
-  // (the picker marks a range: the commit clicked is From, To the working tree; then Compare)
-  await t.click("#phx-pick .row[data-i='0']");
-  await t.until(`!$("#phx-pick .ask .yes").disabled`, "the pair marked");
-  await t.click("#phx-pick .ask .yes");
-  await t.until(`/${n} changes/.test($("#diffbar").innerText)`, "the diff", 120000);
+  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
+  await t.click("#b-changes");
+  await t.until(`!$(".chg-pop").hidden`, "the popover");
+  await t.click("#chg-from");
+  await t.until(`$$(".phx-commits .row[data-i]").length > 0`, "the commits");
+  await t.click(".phx-commits .row[data-i='0']");
+  await t.click(".phx-commits .row:not([data-i]):not(.skel)");
+  await t.until(`$(".chg-pop .foot [aria-live]")?.textContent === "${n} changes"`, "the diff", 120000);
 }
 
 /**
@@ -114,14 +118,14 @@ async function compareWith(t, n) {
  */
 async function nextChange(t, pressed = async () => {}) {
   await t.q(`$$(".mark.fnd.cur").forEach((m) => (m.dataset.was = "")) ?? 1`);
-  await t.click("#diffbar button[data-a='next']");
+  await t.click("#chg-next");
   await pressed();
   const k = await t.until(`(() => { const m = $$(".mark.fnd.cur").find((m) => m.dataset.was === undefined); return m ? +m.closest(".slot").dataset.k + 1 : 0; })()`, "the change marked on its page", 120000);
   await t.until(`+$("#pgin").value === ${k}`, `page ${k} in view, the change's`);
   return k;
 }
 
-test("Next change goes to the page of that change; the style popover floats over the pages (items 24, 22)", async () => {
+test("Next change goes to the page of that change; Diff's settings float over the pages (items 24, 22)", async () => {
   const para = (i, w) => `Paragraph ${i} ${w} ` + "lorem ipsum dolor sit amet ".repeat(30) + "\n\n";
   const body = (w) => Array.from({ length: 30 }, (_, i) => para(i, i % 10 === 0 ? w : "same")).join("");
   const dir = project({ "main.tex": doc(body("alpha")) });
@@ -136,11 +140,12 @@ test("Next change goes to the page of that change; the style popover floats over
   const pages = [];
   for (let i = 0; i < 3; i++) pages.push(await nextChange(t));
   assert.ok(pages[0] < pages[1] && pages[1] < pages[2], `each change on its own page, further on: ${pages}`);
-  await t.click("#diffbar button[data-a='settings']");
-  const box = await t.q(`(() => { const b = $("#diffset").getBoundingClientRect(), s = $("#stage").getBoundingClientRect(); return { pos: getComputedStyle($("#diffset")).position, w: b.width, stage: s.width }; })()`);
-  assert.equal(box.pos, "absolute", "a popover, not a column beside the pages");
-  await t.click("#diffset button[data-bars]");
-  await t.until(`$("#diffset button[data-bars]").getAttribute("aria-checked") === "true"`, "the change bars on");
+  await t.click("#chg-gear");
+  const box = await t.q(`(() => { const b = $(".chg-pop").getBoundingClientRect(), s = $("#stage").getBoundingClientRect(); return { pos: getComputedStyle($(".chg-pop")).position, over: b.left > s.left && b.right <= s.right + 1 }; })()`);
+  assert.deepEqual(box, { pos: "fixed", over: true }, "a popover over the pages, not a column beside them");
+  // (a look chosen: its preview at once, the diff typeset again in it)
+  await t.click(`[data-look="ins"][data-v="mark"]`);
+  await t.until(`$(".chg-pop .preview").classList.contains("i-mark")`, "the marker look");
   await w.stop();
 });
 

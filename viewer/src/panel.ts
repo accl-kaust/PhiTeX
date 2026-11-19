@@ -34,6 +34,7 @@ import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 import { BLAME_CSS, Blame, type BlameHost } from "./blame.ts";
+import { CHANGES_BUTTON_CSS, Changes, type ChangesHost, type ChangesPrefs } from "./changes.ts";
 import type { PageSel } from "./sync.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -296,8 +297,12 @@ export interface PanelOptions {
   footer?: boolean;
   /** Notes on the pages and the agent's changes under review (review.ts): where the host keeps them (the watch). */
   review?: ReviewHost;
-  /** Blame over the pages (blame.ts): the host's history (git, Overleaf's). Absent: no Blame toggle. */
+  /** Blame over the pages (blame.ts): the host's history (git, Overleaf's). */
   blame?: BlameHost;
+  /** Changes (changes.ts): Diff and Blame as one popover under ± Changes; the host's history and diff. Absent with no blame: not offered. */
+  changes?: ChangesHost;
+  /** The ± Changes button is the host's own (Overleaf's toolbar: it calls changes.attach): none in the panel's bar. */
+  ownChangesButton?: boolean;
 }
 
 /** Where the panel keeps its preferences (chrome.storage.local in the extension). */
@@ -335,6 +340,8 @@ export interface PanelPrefs {
   waspText: "body" | "all";
   /** The highlight's scroll margin, % of the view's height (0 to 45): Viewer.margin. */
   margin: number;
+  /** Changes' mode and settings (changes.ts). */
+  changes?: Partial<ChangesPrefs>;
 }
 
 const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
@@ -503,8 +510,8 @@ const TIPS: { id: string; at: string; title: string; text: string; demo: () => D
     demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
   },
   {
-    id: "compare", at: "#b-compare", title: "Compare versions", fresh: true,
-    text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
+    id: "changes", at: "#b-changes", title: "Changes", fresh: true,
+    text: "Hover ± Changes to see what changed since an earlier version, marked on the pages; switch to Blame to see who wrote each line. Click it to keep the marks on.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
     demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
   },
@@ -551,6 +558,7 @@ export class Panel {
   private speed?: { ms: number; at: number; first?: boolean };
   private debugOn = false;
   private ev!: PanelEvents;
+  private ownChanges = false;
   /** A page that came while text in the shown one was selected: shown once the selection ends. */
   private viewer!: Viewer;
   /** The host's look, and whether the panel has a bar of its own (VS Code, the watch, floating). */
@@ -573,7 +581,7 @@ export class Panel {
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
       html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame ? BLAME_CSS : "");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame || opts.changes ? BLAME_CSS + CHANGES_BUTTON_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -583,8 +591,7 @@ export class Panel {
     <span class="grow"></span>
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
-    <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
-    <button type="button" class="ib wide" id="b-blame" title="Blame: who last changed each line, from the history" aria-label="Blame" aria-pressed="false" hidden><span class="icon">history</span></button>
+    <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what (hover to peek, click to keep on)" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
@@ -595,7 +602,7 @@ export class Panel {
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
       <button type="button" role="menuitem" id="r-rebuild"><span class="check"></span><span>Rebuild<span class="desc">Build again with the files as they are</span></span></button>
       <hr><button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
-      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
+      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Changes…<span class="desc">What changed since an earlier version, and who wrote what</span></span></button>
       <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
     <div class="menu timing" id="m-time" role="dialog" aria-label="Timing" hidden style="left:6px;top:calc(100% + 4px)"></div>
@@ -608,8 +615,7 @@ export class Panel {
       ${item("x-contents", "toc", "Contents", "t")}
       ${item("x-review", "rate_review", "Notes and changes", "m")}
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
-      ${item("x-compare", "compare", "Compare…", "", "narrow")}
-      ${item("x-blame", "history", "Blame", "", "narrow")}
+      ${item("x-compare", "compare", "Changes…", "", "narrow")}
       <hr>
       ${item("x-settings", "tips", "Settings…")}
       ${item("x-tips", "tips", "What's new")}
@@ -619,7 +625,6 @@ export class Panel {
     <div class="tip" id="tip" role="dialog" aria-live="polite" hidden></div>
   </div>
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
-  <div class="blamebar" id="blamebar" role="toolbar" aria-label="Blame"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
     <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
@@ -652,13 +657,15 @@ export class Panel {
     this.win = this.$(".win");
     // (what the host doesn't handle, not offered)
     const offer = (sel: string, on: boolean) => this.root.querySelectorAll<HTMLElement>(sel).forEach((e) => (e.hidden = !on));
-    offer(".if-compare, #b-compare, #x-compare", !!ev.onCompare);
+    const changes = !!(opts.changes || opts.blame);
+    this.ownChanges = !!opts.ownChangesButton;
+    offer(".if-compare, #x-compare", changes);
+    offer("#b-changes", changes && !opts.ownChangesButton);
     offer(".if-cache", !!ev.onClearCache);
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#x-review, #b-review", !!opts.review);
-    offer("#x-blame, #b-blame", !!opts.blame);
     offer("#b-find, #x-find", !!ev.onFind);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -677,7 +684,7 @@ export class Panel {
     this.$("#go").onclick = () => this.rebuild();
     this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
     this.$("#r-clean").onclick = () => (this.menu(null), this.clean());
-    this.$("#r-compare").onclick = this.$("#b-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), ev.onCompare?.());
+    this.$("#r-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), this.changes?.setOn(true));
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
@@ -743,7 +750,7 @@ export class Panel {
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key !== "Escape") return;
+      if ((e as KeyboardEvent).key !== "Escape" || this.changes?.open) return;
       const open = this.root.querySelector<HTMLElement>(".dialog:not([hidden])");
       if (open) open.hidden = true;
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
@@ -787,15 +794,23 @@ export class Panel {
     });
     this.extras(opts);
     if (opts.blame) {
-      const b = this.$("#b-blame");
-      const bl = (this.blame = new Blame(
-        { root: this.root, stage: this.$("#stage"), bar: this.$("#blamebar"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), pressed: (on) => b.setAttribute("aria-pressed", String(on)) },
-        opts.blame,
-      ));
-      b.onclick = this.$("#x-blame").onclick = () => (this.menu(null), bl.toggle());
+      // (Blame's "What this commit changed" is Changes' Diff of it; a merged commit's branch from Changes' graph)
+      const host: BlameHost = { ...opts.blame, compare: opts.changes?.diff ? (c) => this.changes?.diffCommit(c) : opts.blame.compare, via: opts.blame.via ?? ((c) => this.changes?.via(c.id) ?? null) };
+      const bl = (this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true) }, host));
       // (the pages drawn dark or light again: the bars' colours with them)
       let dark = this.sheetDark();
       new MutationObserver(() => dark !== this.sheetDark() && ((dark = this.sheetDark()), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+    }
+    if (opts.changes || opts.blame) {
+      const host: ChangesHost = opts.changes ?? { log: async () => "No history here" };
+      this.changes = new Changes(
+        { win: this.win, root: this.root, prefs: () => this.prefs.changes, savePrefs: (c) => ((this.prefs.changes = c), this.save()), msg: (t, err) => this.msg(t, !!err, true) },
+        host,
+        this.blame ?? null,
+      );
+      if (!opts.ownChangesButton) this.changes.attach(this.$("#b-changes"), this.$("#chg-n"));
+      // (Blame's merges and parents: the history's first page read once Blame shows)
+      if (this.blame && opts.changes) this.blame.onState(() => this.blame?.on && this.changes?.readHistory());
     }
     if (opts.review) {
       const rv = (this.review = new Review(
@@ -850,6 +865,8 @@ export class Panel {
       // (a size saved while hidden, by an older version)
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
+      // (Changes' settings, as kept)
+      this.changes?.kept(this.prefs.changes);
       this.linksShown();
       this.marginApply();
     });
@@ -859,8 +876,10 @@ export class Panel {
   private menus: [string, string][] = [];
   /** Notes and changes (opts.review). */
   review?: Review;
-  /** Blame over the pages (opts.blame): its toggle is the bar's, or the host's (Overleaf's toolbar). */
+  /** Blame over the pages (opts.blame): shown by Changes' Blame. */
   blame?: Blame;
+  /** Changes (opts.changes): the ± Changes popover; a host's own button attaches to it. */
+  changes?: Changes;
 
   /** Open the menu `m` (closing the others; open already: closed), or close all (null). */
   private menu(m: string | null): void {
@@ -2229,6 +2248,8 @@ export class Panel {
       "keydown",
       (e) => {
         if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
+        // (Changes' popover open: Esc is its own (a first end let go, the picker or the settings closed, then off))
+        if (e.key === "Escape" && this.changes?.open) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
           /* (the list closed, else the highlights cleared) */
         } else if (e.key === "e") this.diagnostics();
@@ -3175,7 +3196,7 @@ export class Panel {
     if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
     const seen = [...this.seenIds];
     // (Overleaf's welcome callout says "as you type" already: not twice)
-    const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
+    const offered = TIPS.filter((t) => !(t.id === "changes" && (!this.changes || this.ownChanges)) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }

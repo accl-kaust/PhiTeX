@@ -103,6 +103,11 @@ pub struct Look {
     pub subtype: String,
     pub add_color: String,
     pub del_color: String,
+    /// The viewer's own styles (Changes' settings): added text, deleted
+    /// text, a replaced figure ([`phitex_diff::Style`]); none: the markup's.
+    pub ins: Option<String>,
+    pub dels: Option<String>,
+    pub fig: Option<String>,
 }
 
 impl Default for Look {
@@ -114,6 +119,9 @@ impl Default for Look {
             // pages)
             add_color: "#1347ae".into(),
             del_color: "#bb1b1b".into(),
+            ins: None,
+            dels: None,
+            fig: None,
         }
     }
 }
@@ -125,12 +133,13 @@ impl Look {
             subtype: Subtype::parse(&self.subtype).unwrap_or_default(),
             add_color: Color::parse(&self.add_color).ok(),
             del_color: Color::parse(&self.del_color).ok(),
+            style: phitex_diff::Style::parse(self.ins.as_deref(), self.dels.as_deref(), self.fig.as_deref()),
             ..phitex_diff::Options::default()
         }
     }
 
     fn json(&self) -> Value {
-        json!({"markup": self.markup, "subtype": self.subtype, "add_color": self.add_color, "del_color": self.del_color})
+        json!({"markup": self.markup, "subtype": self.subtype, "add_color": self.add_color, "del_color": self.del_color, "ins_style": self.ins, "del_style": self.dels, "fig_style": self.fig})
     }
 }
 
@@ -153,7 +162,7 @@ pub struct Compare {
     /// The other side (none: the files as they are, diffed at each edit).
     pub to: Option<String>,
     pub label: String,
-    look: Look,
+    pub look: Look,
     old: Flat,
     live: Live,
     session: Session,
@@ -768,19 +777,17 @@ impl Compare {
     }
 
     /// The look the viewer asked for, from its fields (the rest kept).
-    pub fn look_from(
-        &self,
-        markup: Option<&str>,
-        subtype: Option<&str>,
-        add: Option<&str>,
-        del: Option<&str>,
-    ) -> Look {
+    pub fn look_from(&self, f: &[Option<String>; 7]) -> Look {
         let l = &self.look;
+        let or = |k: usize, d: &str| f[k].as_deref().unwrap_or(d).to_owned();
         Look {
-            markup: markup.unwrap_or(&l.markup).to_owned(),
-            subtype: subtype.unwrap_or(&l.subtype).to_owned(),
-            add_color: add.unwrap_or(&l.add_color).to_owned(),
-            del_color: del.unwrap_or(&l.del_color).to_owned(),
+            markup: or(0, &l.markup),
+            subtype: or(1, &l.subtype),
+            add_color: or(2, &l.add_color),
+            del_color: or(3, &l.del_color),
+            ins: f[4].clone().or_else(|| l.ins.clone()),
+            dels: f[5].clone().or_else(|| l.dels.clone()),
+            fig: f[6].clone().or_else(|| l.fig.clone()),
         }
     }
 }
@@ -909,12 +916,7 @@ pub fn agent(
     }
     let c = slot.as_mut().ok_or("no diff")?;
     if look.iter().any(Option::is_some) {
-        let l = c.look_from(
-            look[0].as_deref(),
-            look[1].as_deref(),
-            look[2].as_deref(),
-            look[3].as_deref(),
-        );
+        let l = c.look_from(&[look[0].clone(), look[1].clone(), look[2].clone(), look[3].clone(), None, None, None]);
         c.restyle(l, &now, src.as_ref(), main);
     }
     c.build();
@@ -1019,6 +1021,9 @@ mod tests {
             subtype: "color".into(),
             add_color: "#00aa00".into(),
             del_color: "red".into(),
+            ins: None,
+            dels: None,
+            fig: None,
         }
         .options();
         assert_eq!(o.markup, Markup::Cfont);

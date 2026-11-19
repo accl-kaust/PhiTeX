@@ -3,7 +3,8 @@
 //! `ph_out`. Request: `{"old": {path: text}, "new": {path: text}, "main":
 //! "main.tex", "markup": latexdiff's --type ("underline", "cfont", …),
 //! "subtype": its --subtype ("safe", "color", "marker", …), "add_color",
-//! "del_color": an xcolor name or "#RRGGBB"}`.
+//! "del_color": an xcolor name or "#RRGGBB", "ins_style", "del_style",
+//! "fig_style": the viewer's own look, phitex-diff's `Style`}`.
 //! Reply: `{"tex": "…", "changes": [{kind, old: {file, start, end}, new:
 //! {…}, old_text, new_text, section, out: [start, end]}], "files": [path],
 //! "map": [[out, len, file, src]], "split": {"texts": [text], "runs":
@@ -69,6 +70,8 @@ fn answer(req: &[u8]) -> Value {
             .unwrap_or_default(),
         add_color,
         del_color,
+        // (the viewer's own look: "ins_style", "del_style", "fig_style")
+        style: phitex_diff::Style::parse(r["ins_style"].as_str(), r["del_style"].as_str(), r["fig_style"].as_str()),
         ..Options::default()
     };
     let main = r["main"].as_str().unwrap_or("main.tex");

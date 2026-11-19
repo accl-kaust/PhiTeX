@@ -21,9 +21,10 @@ import { html } from "../../../viewer/src/html.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
 import { composeLine, search, type Hit, type TextLine } from "../../../viewer/src/text.ts";
 import { Strips, type Frame, type StripSource } from "../../../viewer/src/strips.ts";
-import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
-import type { DiffLook, SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
-import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
+import type { SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
+import type { Commit } from "../../../viewer/src/commits.ts";
+import type { ChangeItem, ChangesDiffLook, ChangesHost, ChangesRunner, Pair } from "../../../viewer/src/changes.ts";
+import type { DiffChange } from "../../../viewer/src/diff.ts";
 import type { ReviewHost, ReviewState } from "../../../viewer/src/review.ts";
 import type { BlameData, BlameHost } from "../../../viewer/src/blame.ts";
 
@@ -370,9 +371,9 @@ const review: ReviewHost = {
   spot: (k, x, y) => session.spotOf(k, x, y),
   goto: (file, line) => source(file, line),
   showChanges(on, git, proposal) {
-    if (!on) return controls.stop();
-    if (proposal) return void controls.start({ from: "now", to: `proposal:${proposal}` }, `Proposal ${proposal}`, "against your files as they are");
-    void controls.start({ from: git ? "staged" : "baseline", to: null }, "Changes to review", git ? "against what git has staged" : "against the accepted text");
+    if (!on) return panel.changes?.off();
+    if (proposal) return panel.changes?.show({ from: "now", to: `proposal:${proposal}` }, { from: "Your files as they are", to: `Proposal ${proposal}` });
+    panel.changes?.show({ from: git ? "staged" : "baseline", to: null }, { from: git ? "What git has staged" : "The accepted text" });
   },
 };
 
@@ -383,13 +384,157 @@ const review: ReviewHost = {
  * the watch's Compare against the commit's parent.
  */
 const blame: BlameHost = {
-  async blame(files) {
-    const r = await sock.request({ op: "blame", files });
+  async blame(files, o) {
+    const r = await sock.request({ op: "blame", files, ...(o ? { detail: o.detail, ws: o.ws, moved: o.moved, skip: o.skip } : {}) });
     return r.ok ? (r.json as unknown as BlameData) : (r.error ?? "no history here");
   },
   glyphs: (k) => session.pageGlyphs(k),
   goto: (file, line) => source(file, line),
-  compare: (c) => void controls.start({ from: c ? `${c.id}^` : "HEAD", to: null }, c ? `Before ${c.short}` : "The last commit", c ? c.subject : "against your changes"),
+};
+
+// ---- Changes: the history (`diff_log`), the diff (the watch's diff ops, view.rs), the last visit ----
+
+/** The watch's diff state (the `diff` op's answer, the `diff` event's). */
+type DiffState = { shown?: boolean; base?: string; to?: string; label?: string; changes?: (DiffChange & { page?: number; y?: number })[]; built?: boolean; error?: string };
+
+let diffState: DiffState = {};
+let diffWait: ((d: DiffState) => void) | undefined;
+let counted: ((c: DiffChange[]) => void) | undefined;
+const ask = async (op: object) => {
+  const r = await sock.request(op);
+  if (!r.ok) throw new Error(r.error ?? "the watch refused");
+};
+/** A file the watch serves (the diff's PDF or .tex), saved by the browser. */
+const save = (name: string) => {
+  const a = document.createElement("a");
+  a.href = new URL(name, location.href).href;
+  a.download = name;
+  a.click();
+};
+/** The look as the watch's diff ops take it. */
+const lookFields = (l: ChangesDiffLook, hide: boolean) => {
+  const [add, del] = { blue: ["#1347ae", "#bb1b1b"], green: ["#1a7f37", "#cf222e"], safe: ["#0072B2", "#D55E00"], mono: ["#111111", "#7a7a7a"] }[l.colors] ?? ["#1347ae", "#bb1b1b"];
+  return { markup: "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
+};
+/** The changes gone to (the last one's answer alone is shown), and the one to go to once the diff is built. */
+let goes = 0;
+let wanted: number | undefined;
+/** A change's first words as the page shows them: its source without commands, braces and math marks. */
+const words = (src: string) =>
+  src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
+/**
+ * Change k shown: on the page the watch placed it (its first glyph's page
+ * and height on the diff's pages), its words marked there, the match
+ * nearest that height; a change with no place (none of its glyphs shown:
+ * a deletion hidden) found by its words alone, the first match.
+ */
+const gotoChange = async (k: number) => {
+  const go = ++goes;
+  wanted = undefined;
+  const c = (diffState.changes ?? [])[k - 1];
+  if (!c) return;
+  // (the diff still being typeset: its changes known, their places not yet; gone to when they are)
+  if (typeof c.page !== "number" && diffState.built === false) {
+    wanted = k;
+    return void panel.msg(`Change ${k}: the diff is being typeset, its page shown once it is`, false, true);
+  }
+  const q = words(c.new_text || "") || words(c.old_text || "");
+  const hits = q ? await pages.find(q) : [];
+  if (go !== goes) return;
+  if (typeof c.page === "number") {
+    const y = c.y ?? 0;
+    const near = hits
+      .filter((h) => h.k === c.page)
+      .sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
+    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
+  }
+  if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
+  panel.reveal(hits.slice(0, 1));
+};
+
+const runner: ChangesRunner = {
+  async start(p, look, hide, say, count) {
+    counted = count;
+    say("Diffing…");
+    const got = new Promise<DiffState>((ok) => (diffWait = ok));
+    await ask({ op: "diff_start", rev: p.from, ...(p.to ? { to: p.to } : {}), ...lookFields(look, hide) });
+    say("Typesetting the diff…");
+    const d = await got;
+    if (d.error) throw new Error(d.error);
+    return d.changes ?? [];
+  },
+  show: (on) => void ask({ op: "diff_show", which: on ? "diff" : "current" }).catch(() => undefined),
+  // (change k found in the diff's pages by its words, MuPDF's text: no SyncTeX here)
+  goto: (k) => void gotoChange(k),
+  download: (what) => save(`diff.${what}`),
+  restyle: (l, hide) => void ask({ op: "diff_restyle", ...lookFields(l, hide) }).catch(() => undefined),
+  stop: () => ((wanted = undefined), panel.diffMarks([]), void ask({ op: "diff_stop" }).catch(() => undefined)),
+};
+
+/**
+ * Your last visit: the commit HEAD was at when this document was last
+ * opened here (more than half an hour ago), kept in this browser by the
+ * page's address.
+ */
+const VISIT = `phitex.visit.${location.pathname}`;
+let visit: string | null = null;
+const noteVisit = (head: string) => {
+  try {
+    const was = JSON.parse(localStorage.getItem(VISIT) ?? "null") as { cur: string; prev: string | null; at: number } | null;
+    const now = Date.now();
+    const next = !was ? { cur: head, prev: null, at: now } : now - was.at > 30 * 60e3 && was.cur !== head ? { cur: head, prev: was.cur, at: now } : { ...was, at: was.cur === head ? was.at : now, cur: head };
+    visit = next.prev;
+    localStorage.setItem(VISIT, JSON.stringify(next));
+  } catch {
+    /* (no storage: no last visit) */
+  }
+};
+
+const changes: ChangesHost = {
+  async log(skip, limit) {
+    const r = await sock.request({ op: "diff_log", skip, limit });
+    if (!r.ok) return r.error ?? "No git repository here";
+    const cs = (r.json?.commits ?? []) as Commit[];
+    if (!skip && cs[0]) noteVisit(cs[0].id);
+    for (const c of cs) if (visit && c.id === visit) c.mark = "your last visit";
+    return cs;
+  },
+  lastVisit: () => visit,
+  diff: runner,
+  /**
+   * Who made each change, where git can tell: against the working tree,
+   * the commit that last changed its line (the watch's blame); a line not
+   * committed is the user's. Between two commits, none (each change's
+   * commit is not worked out).
+   */
+  async attribute(items: ChangeItem[], p: Pair, update, signal) {
+    if (p.to !== null) return;
+    const files = [...new Set(items.filter((i) => i.neu).map((i) => i.file))];
+    for (const f of files) {
+      if (signal.aborted) return;
+      const r = await sock.request({ op: "blame", files: [f] });
+      if (!r.ok || signal.aborted) continue;
+      const d = r.json as unknown as BlameData;
+      const b = d.files[f];
+      if (!b?.text || !b.lines) continue;
+      const starts = [0];
+      const enc = new TextEncoder().encode(b.text);
+      enc.forEach((c, i) => c === 10 && starts.push(i + 1));
+      for (const it of items) {
+        if (it.file !== f || !it.neu || it.at === undefined) continue;
+        let lo = 0;
+        while (lo + 1 < starts.length && starts[lo + 1] <= it.at) lo++;
+        const k = b.lines[lo];
+        if (k === undefined) continue;
+        if (k < 0) it.wip = true;
+        else {
+          const c = d.commits[k];
+          it.who = { name: c.author || c.email, time: c.time, short: c.short, via: panel.changes?.via(c.id) ?? null };
+        }
+      }
+      update();
+    }
+  },
 };
 
 const panel = new Panel(
@@ -410,7 +555,6 @@ const panel = new Panel(
     onClean: () => void sock.request({ op: "cold" }),
     // (the watch builds again from the files on disk, as `r` in its terminal)
     onRebuild: () => void sock.request({ op: "rebuild" }),
-    onCompare: () => openPick(),
     onLog: (): Promise<string | null> => session.log(),
     onBoxes: (file, start, end): Promise<{ k: number; boxes: [number, number, number, number][] }[]> => session.boxesOf(file, start, end),
     onClearCache: () => void clearCache(),
@@ -470,6 +614,7 @@ const panel = new Panel(
     outline: true,
     review,
     blame,
+    changes,
     keys: true,
     header: true,
     footer: false,
@@ -566,221 +711,23 @@ const session = new PreviewSession(host, pages, panel, {
   },
 });
 
-// ---- The diff against a past version (the watch's diff ops, view.rs) ----
+// ---- The diff's events: its changes, their places, its build ----
 
-/** Two versions: `from` a revision, `to` another (null: the files as they are). */
-type Pair = { from: string; to: string | null };
-/** The watch's diff state (the `diff` op's answer, the `diff` event's). */
-type DiffState = { shown?: boolean; base?: string; to?: string; label?: string; changes?: unknown[]; look?: Partial<DiffLook>; built?: boolean };
-
-let diffState: DiffState = {};
-let diffWait: ((d: DiffState) => void) | undefined;
-let counted: ((n: number) => void) | undefined;
 sock.onEvent((e: any) => {
   if (e.event !== "diff") return;
-  diffState = e.diff ?? {};
+  diffState = e.diff ?? (e.error ? { error: String(e.error) } : {});
   // (the changes along the scrollbar while the diff is shown: where the watch placed them)
-  const placed = ((diffState.changes ?? []) as { page?: number; y?: number; new_text?: string; old_text?: string }[])
+  const placed = (diffState.changes ?? [])
     .map((c, i) => (typeof c.page === "number" ? { k: c.page, y: c.y ?? 0, title: `Change ${i + 1}: ${words(c.new_text || "") || words(c.old_text || "")}` } : null))
     .filter((c): c is { k: number; y: number; title: string } => !!c);
   panel.diffMarks(diffState.shown === false ? [] : placed);
-  const n = diffState.changes?.length;
-  if (n === undefined) return;
+  if (diffState.error && diffWait) return void (diffWait(diffState), (diffWait = undefined));
+  if (diffState.changes === undefined) return;
   if (diffWait) (diffWait(diffState), (diffWait = undefined));
-  else counted?.(n);
+  else counted?.(diffState.changes);
   // (a change gone to while the diff was typeset: there now, placed)
   if (diffState.built && wanted !== undefined) void gotoChange(wanted);
 });
-const ask = async (op: object) => {
-  const r = await sock.request(op);
-  if (!r.ok) throw new Error(r.error ?? "the watch refused");
-};
-/** A file the watch serves (the diff's PDF or .tex), saved by the browser. */
-const save = (name: string) => {
-  const a = document.createElement("a");
-  a.href = new URL(name, location.href).href;
-  a.download = name;
-  a.click();
-};
-
-/** The changes gone to (the last one's answer alone is shown), and the one to go to once the diff is built. */
-let goes = 0;
-let wanted: number | undefined;
-
-/** A change's first words as the page shows them: its source without commands, braces and math marks. */
-const words = (src: string) =>
-  src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
-/**
- * Change k shown: on the page the watch placed it (its first glyph's page
- * and height on the diff's pages), its words marked there, the match
- * nearest that height; a change with no place (none of its glyphs shown:
- * a deletion hidden) found by its words alone, the first match.
- */
-const gotoChange = async (k: number) => {
-  const go = ++goes;
-  wanted = undefined;
-  const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number; y?: number } | undefined;
-  if (!c) return;
-  // (the diff still being typeset: its changes known, their places not yet,
-  // its pages not all there; gone to when they are, the diff event that
-  // says it is built)
-  if (typeof c.page !== "number" && diffState.built === false) {
-    wanted = k;
-    return void panel.msg(`Change ${k}: the diff is being typeset, its page shown once it is`, false, true);
-  }
-  const q = words(c.new_text || "") || words(c.old_text || "");
-  const hits = q ? await pages.find(q) : [];
-  // (another change gone to meanwhile: that one shown, not this one after it)
-  if (go !== goes) return;
-  if (typeof c.page === "number") {
-    const y = c.y ?? 0;
-    const near = hits
-      .filter((h) => h.k === c.page)
-      .sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
-    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
-  }
-  if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
-  panel.reveal(hits.slice(0, 1));
-};
-
-const runner: DiffRunner<Pair> = {
-  async start(v, say, count) {
-    counted = count;
-    say("Diffing…");
-    const got = new Promise<DiffState>((ok) => (diffWait = ok));
-    await ask({ op: "diff_start", rev: v.from, ...(v.to ? { to: v.to } : {}) });
-    say("Typesetting the diff…");
-    const d = await got;
-    return { changes: d.changes?.length ?? 0 };
-  },
-  show: (which) => void ask({ op: "diff_show", which }),
-  // (change k found in the diff's pages by its words, MuPDF's text: no
-  // SyncTeX here; the match after the last one gone to, else the first)
-  goto: (k) => void gotoChange(k),
-  download: (what) => save(`diff.${what}`),
-  look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
-  restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => ((wanted = undefined), panel.diffMarks([]), void ask({ op: "diff_stop" })),
-};
-const controls = new DiffControls(panel, runner);
-addEventListener("keydown", (e) => controls.key(e));
-
-// (the versions to compare: a commit graph in a popover under the header's Compare)
-document.head.append(Object.assign(document.createElement("style"), {
-  textContent: COMMITS_CSS + `
-#phx-pick, #phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
-  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
-@media (prefers-color-scheme: dark) {
-  #phx-pick, #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
-}
-#phx-pick { position: fixed; z-index: 20; top: 44px; right: 12px; width: min(560px, calc(100vw - 24px)); max-height: 70vh; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
-#phx-pick[hidden] { display: none; }
-/* (the title and Close on one line, the hint under them; the commits scroll in their own box below, never under the header) */
-#phx-pick header { flex: none; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--bg); }
-#phx-pick header b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
-#phx-pick .phx-commits { flex: 1; min-height: 0; }
-#phx-pick header .close { grid-row: 1; grid-column: 2; }
-#phx-pick .ends { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; min-width: 0; }
-#phx-pick .ends .end { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; }
-#phx-pick .ends .end.set, #phx-pick .ends .end.t { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
-#phx-pick .ends i { font-style: normal; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
-#phx-pick .ends .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#phx-pick .ends .f:not(.set) .v { color: var(--fg2); }
-#phx-pick .ends .x { all: unset; cursor: pointer; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; color: var(--fg2); font-size: 14px; }
-#phx-pick .ends .x[hidden] { display: none; }
-#phx-pick .ends .x:hover { background: var(--hover); color: var(--fg); }
-#phx-pick .ends .arrow { color: var(--fg2); }
-#phx-pick .ask { order: 2; flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg); transition: background .2s; }
-#phx-pick .ask.asking { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
-#phx-pick .ask .q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); }
-#phx-pick .ask.asking .q { color: var(--fg); font-weight: 600; }
-#phx-pick .ask .no { display: none; }
-#phx-pick .ask.asking .no { display: inline-block; }
-#phx-pick .ask .yes:disabled { opacity: .45; cursor: default; }
-#phx-pick .ask button { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 9999px; padding: 2px 12px; cursor: pointer; font: inherit; }
-#phx-pick .ask .yes { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
-#phx-pick .ask.nudge { animation: phx-nudge .35s; }
-@keyframes phx-nudge { 0%, 100% { transform: none; } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
-#phx-pick header button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
-#phx-pick header button:hover { background: var(--hover); }
-`,
-}));
-let pick: HTMLElement | undefined;
-let graph: Commits | undefined;
-/** The pair marked ("from..to", to "" the working tree), "" none; and the pair last compared. A pair
- * marked and not compared is asked about whenever the picker goes, reopened or not. */
-let marked = "", compared = "";
-const closePick = (ask = true) => {
-  if (!pick || pick.hidden) return;
-  // (a pair marked, not compared: Compare it? the foot's bar lit, the picker kept; asked
-  // already, a second Esc or click outside is "Don't compare", the pair kept for next time)
-  const bar = pick.querySelector<HTMLElement>(".ask")!;
-  if (ask && marked && marked !== compared && !bar.classList.contains("asking")) {
-    bar.classList.add("asking");
-    bar.classList.remove("nudge");
-    void bar.offsetWidth;
-    bar.classList.add("nudge");
-    bar.querySelector<HTMLButtonElement>(".yes")!.focus();
-    return;
-  }
-  bar.classList.remove("asking", "nudge");
-  pick.hidden = true;
-};
-/** Compare (the panel's menu, its icon): the commit graph, or why there is none (not a git repository). */
-function openPick(): void {
-  if (pick && !pick.hidden) return closePick();
-  if (!pick) {
-    pick = document.createElement("div");
-    pick.id = "phx-pick";
-    pick.innerHTML = `<header><b>Compare with an earlier version</b><button type="button" class="close">Close</button><div class="ends"><span class="end f"><i>From</i><span class="v">click a commit</span><button type="button" class="x" data-end="from" aria-label="Clear From" hidden>×</button></span><span class="arrow">→</span><span class="end t"><i>To</i><span class="v">the working tree</span><button type="button" class="x" data-end="to" aria-label="To the working tree" hidden>×</button></span></div><small>Click one end, then the other (or drag between them) · Double-click: a commit's own changes</small></header><div class="ask"><span class="q">Choose From and To</span><button type="button" class="no">Don't compare</button><button type="button" class="yes" disabled>Compare</button></div>`;
-    pick.querySelector<HTMLButtonElement>(".close")!.onclick = () => closePick();
-    for (const x of pick.querySelectorAll<HTMLButtonElement>(".ends .x")) x.onclick = () => graph?.clear(x.dataset.end as "from" | "to");
-    const ask = pick.querySelector<HTMLElement>(".ask")!;
-    ask.querySelector<HTMLButtonElement>(".yes")!.onclick = () => graph?.run();
-    ask.querySelector<HTMLButtonElement>(".no")!.onclick = () => closePick(false);
-    document.body.append(pick);
-    graph = new Commits(pick, {
-      load: async (skip, limit) => {
-        const r = await sock.request({ op: "diff_log", skip, limit });
-        return r.ok ? ((r.json?.commits ?? []) as Commit[]) : (r.error ?? "no git repository here");
-      },
-      marked: (from, to, w) => {
-        marked = from ? `${from}..${to ?? ""}` : "";
-        const f = pick!.querySelector<HTMLElement>(".ends .f")!, t = pick!.querySelector<HTMLElement>(".ends .t")!;
-        f.querySelector(".v")!.textContent = from ? w.from : "click a commit";
-        f.classList.toggle("set", !!from);
-        f.querySelector<HTMLElement>(".x")!.hidden = !from;
-        t.querySelector(".v")!.textContent = w.to;
-        t.querySelector<HTMLElement>(".x")!.hidden = !to;
-        ask.querySelector(".q")!.textContent = from ? `Compare ${w.from.split(" ")[0]} → ${to ? w.to.split(" ")[0] : "the working tree"}${marked === compared ? " (shown now)" : ""}` : "Choose From and To";
-        ask.querySelector<HTMLButtonElement>(".yes")!.disabled = !from;
-        if (!from) ask.classList.remove("asking");
-      },
-      pick: (from, to) => {
-        compared = `${from}..${to ?? ""}`;
-        const q = pick!.querySelector(".ask .q")!;
-        if (!q.textContent!.endsWith(" (shown now)")) q.textContent += " (shown now)";
-        closePick(false);
-        const short = (id: string) => id.slice(0, 7);
-        void controls.start({ from, to }, short(from), to ? `to ${short(to)}` : "working tree");
-      },
-    });
-    void graph.load();
-  }
-  pick.hidden = false;
-  pick.querySelector<HTMLElement>(".ask")!.classList.remove("asking", "nudge");
-}
-// (a click outside the picker: it goes, or asks first if a pair is marked; the Compare button's own click toggles it)
-addEventListener("pointerdown", (e) => {
-  if (!pick || pick.hidden || e.composedPath().some((n) => n === pick || (n as Element).id === "b-compare")) return;
-  closePick();
-}, { capture: true });
-addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && pick && !pick.hidden) (closePick(), e.stopImmediatePropagation());
-  else if (e.key === "Enter" && pick && !pick.hidden && !(e.target as Element)?.closest?.("button") && graph?.run()) (e.preventDefault(), e.stopImmediatePropagation());
-}, { capture: true });
 
 // ---- Printing: the PDF, not this page ----
 // (Ctrl+P here printed the page itself: the toolbar and the pages'

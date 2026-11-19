@@ -132,11 +132,14 @@ header:active { cursor: grabbing; }
 #findn.none { color: var(--ph-danger); }
 /* narrower: what gives way, in order: the zoom's long label, find's box, then (560) the buttons the ⋯ menu also has, then the page box beside an open find */
 .bar > :not(.status):not(.grow) { flex: none; }
+.chg-btn { gap: 5px; padding: 0 7px; }
+.chg-btn .chg-glyph { font: 600 15px ui-monospace, "DM Mono", monospace; line-height: 1; }
+.chg-btn.on { background: var(--ph-hover); color: var(--ph-fg); box-shadow: inset 0 0 0 1px var(--ph-border); }
 .bar > .grow { flex: 1 1 0; min-width: 0; }
 @container (max-width: 820px) { #zl { display: none; } #zs { display: inline; } }
 @container (max-width: 760px) {
   /* (find open: Compare and Download step aside, to the ⋯ menu, which has them) */
-  .bar:has(.find:not([hidden])) :is(#b-compare, #pdf) { display: none; }
+  .bar:has(.find:not([hidden])) :is(#b-changes, #pdf) { display: none; }
   .bar:has(.find:not([hidden])) #x-compare.narrow:not([hidden]) { display: flex !important; }
 }
 @container (max-width: 700px) { .find input { width: 110px; } #findn { min-width: 0; } }

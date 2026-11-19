@@ -376,9 +376,117 @@ impl Color {
     }
 }
 
+/// How added text is marked in the viewer's own look ([`Style`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InsStyle {
+    /// Coloured and wavy-underlined.
+    #[default]
+    Wavy,
+    /// Coloured and underlined.
+    Line,
+    /// Coloured, on a light band of its colour (a marker's).
+    Mark,
+    /// Coloured only.
+    Colour,
+}
+
+/// How deleted text is marked in the viewer's own look ([`Style`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DelStyle {
+    /// Coloured and struck out.
+    #[default]
+    Strike,
+    /// Coloured and struck out on a light band of its colour.
+    Mark,
+    /// A caret where it was, the text not shown.
+    Caret,
+    /// Not shown at all (Hide deletions).
+    Hide,
+}
+
+/// How an image replaced by another is shown in the viewer's own look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FigStyle {
+    /// The old one, framed dashed, beside the new one.
+    #[default]
+    Side,
+    /// The old one under the new one, in the same place.
+    Over,
+    /// The new one alone.
+    New,
+}
+
+/// The viewer's own look (its Changes settings), over latexdiff's
+/// UNDERLINE type: how added and deleted text are marked, and an image
+/// replaced. Absent: the type's own look.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Style {
+    pub ins: InsStyle,
+    pub del: DelStyle,
+    pub fig: FigStyle,
+}
+
+impl Style {
+    /// The look the viewer names (`wavy`, `line`, `mark`, `colour`;
+    /// `strike`, `mark`, `caret`, `hide`; `side`, `over`, `new`); none
+    /// where all three are absent, a name not known the default's.
+    #[must_use]
+    pub fn parse(ins: Option<&str>, del: Option<&str>, fig: Option<&str>) -> Option<Style> {
+        if ins.is_none() && del.is_none() && fig.is_none() {
+            return None;
+        }
+        Some(Style {
+            ins: match ins.unwrap_or("") {
+                "line" | "underline" => InsStyle::Line,
+                "mark" | "marker" => InsStyle::Mark,
+                "colour" | "color" => InsStyle::Colour,
+                _ => InsStyle::Wavy,
+            },
+            del: match del.unwrap_or("") {
+                "mark" | "marker" => DelStyle::Mark,
+                "caret" => DelStyle::Caret,
+                "hide" | "none" => DelStyle::Hide,
+                _ => DelStyle::Strike,
+            },
+            fig: match fig.unwrap_or("") {
+                "over" | "overlay" => FigStyle::Over,
+                "new" => FigStyle::New,
+                _ => FigStyle::Side,
+            },
+        })
+    }
+
+    /// The names [`Style::parse`] takes: (ins, del, fig).
+    #[must_use]
+    pub fn names(self) -> (&'static str, &'static str, &'static str) {
+        (
+            match self.ins {
+                InsStyle::Wavy => "wavy",
+                InsStyle::Line => "line",
+                InsStyle::Mark => "mark",
+                InsStyle::Colour => "colour",
+            },
+            match self.del {
+                DelStyle::Strike => "strike",
+                DelStyle::Mark => "mark",
+                DelStyle::Caret => "caret",
+                DelStyle::Hide => "hide",
+            },
+            match self.fig {
+                FigStyle::Side => "side",
+                FigStyle::Over => "over",
+                FigStyle::New => "new",
+            },
+        )
+    }
+}
+
 /// What to diff, and how.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    /// The viewer's own look over the markup (it is UNDERLINE's then):
+    /// added and deleted text's marks, an image replaced.
+    pub style: Option<Style>,
     pub markup: Markup,
     pub subtype: Subtype,
     /// The colors of added and deleted text, where the type or subtype
@@ -397,6 +505,13 @@ pub struct Options {
 }
 
 impl Options {
+    /// Whether deleted text is shown: the markup's, and not hidden by the
+    /// viewer's look.
+    #[must_use]
+    pub fn shows_deleted(&self) -> bool {
+        self.markup.shows_deleted() && self.style.is_none_or(|s| s.del != DelStyle::Hide)
+    }
+
     /// The latexdiff command line that marks up as these options do (for
     /// comparisons; the colors have no latexdiff option).
     #[must_use]
@@ -868,7 +983,8 @@ impl Baseline {
         let new_toks = read(&new.text, nb);
         let amsmath = loads(preamble, &["amsmath", "mathtools"]);
         let mut em = emit::Em::new(old_text, &new.text, &sigs, amsmath);
-        em.show_del = self.opts.markup.shows_deleted();
+        em.show_del = self.opts.shows_deleted();
+        em.fig = self.opts.style.map(|s| s.fig).unwrap_or_default();
         let (h, head) = self.head(new, nb);
         em.out.push_str(&h);
         em.body(&old_toks, &new_toks, ob.end, nb.end);
