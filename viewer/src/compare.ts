@@ -68,7 +68,8 @@ export interface CompareHost<V> {
 /** The look as phitex-diff's request takes it: UNDERLINE, the preset's colours, the viewer's styles (Hide deletions: deleted text not shown). */
 export function diffStyle(l: ChangesDiffLook, hide: boolean): { markup: DiffMarkup; subtype: DiffSubtype; add_color: string; del_color: string; ins_style: string; del_style: string; fig_style: string } {
   const [add, del] = DIFF_COLORS[l.colors] ?? DIFF_COLORS.blue;
-  return { markup: "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
+  // (change bars: latexdiff's classic marks with them, underlined and struck)
+  return { markup: l.bars ? "culinechbar" : "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
 }
 
 /**

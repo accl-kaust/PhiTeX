@@ -1679,12 +1679,25 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         let text = std::fs::read(p).ok()?;
                         Some(json!({"text": String::from_utf8_lossy(&text)}))
                     }
+                    // (the history's head, git's HEAD: Blame asks again once it moved)
+                    "head" => crate::blame::head(&here).map(|h| json!({"head": h})),
                     _ => None,
                 }));
                 // (Blame: the files named, as the build reads them, from the
                 // project's git history; an overlay, no build)
+                // (asked with no files: the project's sources, the main file and what it inputs; no page needed)
                 let here = root.clone();
-                v.on_blame(Box::new(move |files, req| crate::blame::files(&here, files, &crate::blame::opts_of(req))));
+                let main = main_rel.clone();
+                v.on_blame(Box::new(move |files, req| {
+                    let all;
+                    let files = if files.is_empty() {
+                        all = crate::blame::sources(&here, &main);
+                        &all[..]
+                    } else {
+                        files
+                    };
+                    crate::blame::files(&here, files, &crate::blame::opts_of(req))
+                }));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {

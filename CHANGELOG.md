@@ -12,9 +12,11 @@ milestones, not versions.
 
 Compare and Blame are now one thing: **± Changes** :)
 
-- **One button, one popover.** Hover ± Changes to peek at what changed,
-  click it to keep the marks on the pages. Diff and Blame sit side by side
-  in it, each with its own settings, kept for next time.
+- **One button, one popover.** Click ± Changes to open it and again (or
+  ✕, or Esc) to close it; it stays open while you work on the pages beside
+  it, and nothing is read until you pick a version or switch to Blame.
+  Diff and Blame sit side by side in it, each with its look right under
+  the list (and in Settings), kept for next time.
 - **Diff from anywhere to anywhere.** Pick From and To in a commit graph
   coloured by branch: click one end and then the other, drag a range,
   double-click a commit to see just its changes, or start from your last
@@ -24,7 +26,9 @@ Compare and Blame are now one thing: **± Changes** :)
   deletions or just a caret, changed figures side by side, overlaid or new
   only.
 - **Blame down to the word.** See who wrote this version, by person or by
-  commit, and click one to pick out their lines. Blame by line, word or
+  commit, and click one to pick out their lines. It works from the sources
+  and the history, so it is ready before the first page is, and new pages
+  get their bars as they arrive. Blame by line, word or
   character, skip a reformatting commit, keep moved text with its writer,
   dim everything older than a tag. A merged commit's card says which branch
   it came from, and "What this commit changed" opens its diff.

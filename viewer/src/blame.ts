@@ -86,6 +86,8 @@ export interface BlameData {
   refs?: BlameRef[];
   /** The host's clock, seconds since the epoch (ages are from it). */
   now?: number;
+  /** The history's head it was worked out at (git's HEAD), where the host has one. */
+  head?: string;
 }
 
 /** What blame needs of its host. */
@@ -94,8 +96,18 @@ export interface BlameHost {
   blame(files: string[], opts?: BlameOpts): Promise<BlameData | string>;
   /** Commit `c`'s branch, where it was merged into main: "On lina/related-work, merged into main (5d0a7e3)"; null: on main. */
   via?(c: BlameCommit): string | null;
-  /** Page `k`'s glyphs (the session's). */
+  /** Page `k`'s glyphs (the session's): the pages are where the blame is drawn, never what it is worked out from. */
   glyphs(k: number): Promise<Glyph[]>;
+  /**
+   * The project's sources to blame: the main file and what it inputs, else
+   * every .tex and .bib (sourceFiles). Absent: the host picks them itself,
+   * asked with no files (the watch's blame op).
+   */
+  sources?(): string[] | Promise<string[]>;
+  /** A file's text as the editor (or the disk) has it now, where the host knows it: a file blamed again only once it changed. */
+  text?(file: string): string | undefined | Promise<string | undefined>;
+  /** The history's head now (git's HEAD): moved since the blame, every file blamed again. */
+  head?(): Promise<string | null>;
   /** The editor at `file`'s `line` (from 1). */
   goto(file: string, line: number): void;
   /** What `c` changed (null: text not committed, against the last commit): Changes' Diff of it. Absent: not offered. */
@@ -359,8 +371,40 @@ export function linesOf(text: string, runs: [number, number, number][], ws: "ign
   return out;
 }
 
+/**
+ * The project's sources: the main file and everything it inputs (\\input,
+ * \\include, \\subfile, \\import, \\bibliography, \\addbibresource), in
+ * the order they come, followed from each input; without a main file, every
+ * .tex and .bib. `names` the project's files, `text` a file's text.
+ */
+export function sourceFiles(main: string | null | undefined, names: string[], text: (f: string) => string | undefined): string[] {
+  const has = new Set(names);
+  if (!main || !has.has(main)) return names.filter((n) => /\.(tex|ltx|bib)$/i.test(n));
+  const find = (n: string, ext: string): string | null => {
+    const s = n.trim().replace(/^\.\//, "");
+    for (const c of [s, `${s}${ext}`]) if (has.has(c)) return c;
+    return null;
+  };
+  const out: string[] = [];
+  const todo = [main];
+  while (todo.length) {
+    const f = todo.shift()!;
+    if (out.includes(f)) continue;
+    out.push(f);
+    const t = (text(f) ?? "").replace(/(^|[^\\])%.*$/gm, "$1");
+    for (const m of t.matchAll(/\\(input|include|subfile|subfileinclude|bibliography|addbibresource|import\*?\{([^}]*)\})\s*(?:\[[^\]]*\])?\{([^}]+)\}/g)) {
+      const bib = m[1] === "bibliography" || m[1] === "addbibresource";
+      for (const n of bib ? m[3].split(",") : [m[3]]) {
+        const x = find(m[2] !== undefined ? `${m[2]}${n}` : n, bib ? ".bib" : ".tex");
+        if (x && !out.includes(x) && !todo.includes(x)) todo.push(x);
+      }
+    }
+  }
+  return out;
+}
+
 /** A file made ready to look up: its line starts, and its runs in bytes (where the detail is finer than lines). */
-type Ready = BlameFile & { starts?: number[]; br?: { at: Uint32Array; c: Int32Array } };
+type Ready = BlameFile & { starts?: number[]; br?: { at: Uint32Array; c: Int32Array }; units?: [number, number, number][] };
 
 /** A blame's files made ready to look up: each text's line starts, floats, and the bibliography's keys. */
 export class Model {
@@ -376,7 +420,7 @@ export class Model {
   detail: BlameOpts["detail"] = "line";
   ws: BlameOpts["ws"] = "ignore";
 
-  /** `d` taken in: its commits merged with those already here by id. */
+  /** `d` taken in: its commits merged with those already here by id; a file blamed again replaces its own. */
   add(d: BlameData): void {
     const map = d.commits.map((c) => {
       let k = this.byId.get(c.id);
@@ -388,11 +432,17 @@ export class Model {
     if (d.refs) this.refs = d.refs;
     const newer = (a: number, b: number) => this.newer(a, b);
     for (const [name, f] of Object.entries(d.files)) {
+      if (this.files.has(name)) {
+        this.floats = this.floats.filter((x) => x.file !== name);
+        this.bbls.delete(name);
+        for (const [k, e] of this.bib) if (e.file === name) this.bib.delete(k);
+      }
       const g: Ready = { ...f, lines: f.lines?.map((l) => re(l)!), runs: f.runs?.map(([a, b, c]) => [a, b, re(c)!] as [number, number, number]), last: re(f.last) };
       if (g.text !== undefined && g.runs) {
         g.lines ??= linesOf(g.text, g.runs, this.ws, newer);
         if (this.detail !== "line") {
           const runs = this.detail === "word" ? wordRuns(g.text, g.runs, newer) : g.runs;
+          g.units = runs;
           const bytes = byteIndex(g.text);
           g.br = { at: Uint32Array.from(runs, (r) => bytes[r[0]]), c: Int32Array.from(runs, (r) => r[2]) };
         }
@@ -417,6 +467,31 @@ export class Model {
     for (const t of texts) bibFiles(t).forEach((n) => out.add(n));
     for (const n of this.files.keys()) out.delete(n);
     return [...out];
+  }
+
+  /**
+   * Who wrote the sources, counted in the detail's units: lines (not blank
+   * ones), words, or characters (not spacing); each commit's count. A
+   * .bbl is the build's, not a source: not counted; nor an image (no text).
+   */
+  counts(): Map<number, number> {
+    const out = new Map<number, number>();
+    const add = (c: number, n: number) => n && out.set(c, (out.get(c) ?? 0) + n);
+    for (const [name, f] of this.files) {
+      if (f.text === undefined || f.error || /\.bbl$/i.test(name)) continue;
+      const t = f.text;
+      if (this.detail === "line" || !f.units) {
+        const ls = f.lines ?? [];
+        const starts = f.starts ?? lineStarts(t);
+        ls.forEach((c, i) => {
+          const a = starts[i] ?? 0, b = starts[i + 1] ?? t.length;
+          if (/\S/.test(t.slice(a, b))) add(c, 1);
+        });
+      } else if (this.detail === "word") {
+        for (const [a, b, c] of f.units) add(c, (t.slice(a, b).match(/[\p{L}\p{N}_]+/gu) ?? []).length);
+      } else for (const [a, b, c] of f.units) add(c, t.slice(a, b).replace(/\s+/g, "").length);
+    }
+    return out;
   }
 
   time(c: number): number {
@@ -828,6 +903,8 @@ export interface BlamePanel {
   /** Whether the pages are drawn dark (the dark PDF). */
   dark(): boolean;
   msg(t: string, err?: boolean): void;
+  /** A box the card keeps clear of (Changes' popover, open beside the pages), or null. */
+  avoid?(): DOMRect | null;
 }
 
 /** What the popover shows of a blame: its progress, who wrote the paper as it is, and the commits that still own lines. */
@@ -837,8 +914,9 @@ export interface BlameSummary {
   /** `done` of `total`, where the total is known. */
   progress?: [number, number];
   error: string;
-  /** Printed lines blamed so far, and files still to come. */
+  /** The sources' units blamed so far (lines, words or characters: `unit`), and files still to come. */
   lines: number;
+  unit: "lines" | "words" | "characters";
   waiting: number;
   people: { key: string; name: string; color: string; n: number }[];
   commits: { c: number; commit: BlameCommit | null; n: number; color: string; via: string | null }[];
@@ -865,13 +943,14 @@ export class Blame {
   private segs = new Map<number, Seg[]>();
   /** Printed lines whose files are still being read: a quiet placeholder. */
   private waits = new Map<number, { x: number; y0: number; y1: number }[]>();
-  private waiting = 0;
   private colors = new Map<string, string>();
   private hover: { k: number; s: Seg } | null = null;
   private pinned: { k: number; s: Seg } | null = null;
   private card: HTMLElement;
   private turn = 0;
   private again: ReturnType<typeof setTimeout> | undefined;
+  /** The history's head the blame was worked out at (the host's, where it says). */
+  private head: string | undefined;
   /** Each line's marks first drawn when (ms): drawn again within the fade, the fade goes on where it was. */
   private drawn = new Map<string, number>();
   private abort: AbortController | undefined;
@@ -906,46 +985,58 @@ export class Blame {
     this.listeners.push(f);
   }
 
-  private emit(): void {
-    for (const f of this.listeners) f();
-  }
-
   /** The host's word for a commit, and whether it has hashes. */
   get words(): { commit: string; hashes: boolean } {
     return { commit: this.host.words?.commit ?? "commit", hashes: this.host.words?.hashes !== false };
   }
 
-  /** Blame shown or not. */
-  /** The pages read by the last load: another set of pages (shown again, a build's) read again. */
-  private read = -1;
+  /** Each page's glyphs the segments were mapped from (the session's own array: the same one, the page unchanged). */
+  private mapped = new Map<number, Glyph[]>();
+  /** Each page's lookup for the pointer: its segments by their top, each column's right edge. */
+  private index = new Map<number, { rows: Seg[]; right: Map<number, number> }>();
   private slots: MutationObserver | null = null;
+  /** Files still being worked out (a quiet placeholder on their lines), in the first blame only. */
+  private pending = new Set<string>();
+  /** The summary as last emitted: emitted again only when it changes. */
+  private said = "";
+  private sum: BlameSummary | null = null;
+  /** Each file's text the blame was worked out on: blamed again only once it changed. */
+  private texts = new Map<string, string>();
 
+  /**
+   * Blame shown or not. Shown, what is known is drawn at once and the
+   * sources are read again quietly (only what changed is blamed again); the
+   * first time, the sources are blamed from the history: no page needed.
+   */
   toggle(on = !this.on): void {
     if (on === this.on) return;
     this.on = on;
     this.slots?.disconnect();
-    if (on) {
-      this.slots = new MutationObserver(() => this.on && this.pages() !== this.read && this.refresh());
-      this.slots.observe(this.p.stage, { childList: true, subtree: true });
-    }
     if (!on) {
       this.pinned = this.hover = null;
       this.card.hidden = true;
+      clearTimeout(this.dwell);
       this.clear();
       this.drawn.clear();
+      this.mapped.clear();
       return;
     }
-    // (a blame already worked out with this look: drawn at once, read again in the background)
-    if (this.m) this.draw();
-    void this.load();
+    // (pages come and go (a build streaming, a page drawn again): each mapped as it comes, no blame again)
+    this.slots = new MutationObserver(() => this.pagesSoon());
+    this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    if (this.m && this.worked === this.workKey()) {
+      void this.mapPages();
+      this.checkTexts(true);
+    } else void this.work();
   }
 
   /** The look changed: drawn again, or worked out again where the host's part changed. */
   setLook(l: Partial<BlameLook>): void {
     this.look = { ...this.look, ...l };
     this.colorsOf();
-    if (this.on && this.workKey() !== this.worked) void this.load();
-    else this.draw();
+    this.sum = null;
+    if (this.on && this.workKey() !== this.worked) void this.work();
+    else this.drawAll();
     this.emit();
   }
 
@@ -953,8 +1044,8 @@ export class Blame {
   focus(kind: "person" | "commit", key: string | number | null): void {
     if (kind === "person") (this.focusP = this.focusP === key ? null : (key as string | null)), (this.focusC = null);
     else (this.focusC = this.focusC === key ? null : (key as number | null)), (this.focusP = null);
-    this.draw();
-    this.emit();
+    this.drawAll();
+    this.emit(true);
     if (kind === "commit" && this.focusC !== null) this.reveal(this.focusC);
   }
 
@@ -963,7 +1054,7 @@ export class Blame {
     for (const [k, segs] of this.segs) {
       const s = segs.find((s) => s.c === c);
       if (!s) continue;
-      const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
+      const slot = this.slot(k);
       if (!slot) return;
       const { h } = this.p.pageSize();
       const r = slot.getBoundingClientRect(), box = this.p.stage.getBoundingClientRect();
@@ -973,16 +1064,50 @@ export class Blame {
     }
   }
 
-  /** The pages changed (a build, new origins): blamed again, a moment after the last change. */
+  /**
+   * A build done, new origins: the pages mapped again (no blame), and the
+   * files whose text changed blamed again, each alone, once typing pauses.
+   */
   refresh(): void {
     if (!this.on) return;
+    this.pagesSoon();
+    this.checkTexts(false);
+  }
+
+  /**
+   * The files whose text is not the one blamed, or every file once the
+   * history moved (the host's head): blamed again, quietly, each alone. A
+   * host that can say neither: every file asked again (its answer applied
+   * only where it differs). `now`: at once (Blame shown again), else once
+   * typing pauses.
+   */
+  private checkTexts(now: boolean): void {
+    if (!this.m || !this.on) return;
     clearTimeout(this.again);
-    this.again = setTimeout(() => void this.load(), 300);
+    this.again = setTimeout(() => void this.recheck(), now ? 0 : 700);
+  }
+
+  private async recheck(): Promise<void> {
+    if (!this.on || !this.m) return;
+    const turn = this.turn, files = [...this.texts.keys()];
+    let changed = files;
+    if (this.host.text) {
+      const host = this.host;
+      const texts = await Promise.all(files.map((f) => Promise.resolve(host.text!(f)).catch(() => undefined)));
+      changed = files.filter((f, i) => texts[i] !== undefined && texts[i] !== this.texts.get(f));
+      // (the history moved (a commit): every file, its lines' writers may have)
+      if (this.head !== undefined && host.head) {
+        const h = await host.head().catch(() => null);
+        if (h !== null && h !== this.head) changed = files;
+      }
+    }
+    if (turn !== this.turn || !this.on || !this.m) return;
+    if (changed.length) void this.work(changed, true);
   }
 
   /** The pages drawn again (a new look: dark pages). */
   redraw(): void {
-    if (this.on) this.draw();
+    if (this.on) this.drawAll();
   }
 
   /** The reads stopped (the project left). */
@@ -991,8 +1116,8 @@ export class Blame {
     this.turn++;
   }
 
-  private pages(): number {
-    return this.p.stage.querySelectorAll(".slot").length;
+  private slot(k: number): HTMLElement | null {
+    return this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
   }
 
   private workKey(): string {
@@ -1019,104 +1144,152 @@ export class Blame {
     return this.colors.get(authorKey(c)) ?? (this.look.people === "overleaf" ? (this.host.color?.(c) ?? OVERLEAF_COLORS[fnv(authorKey(c)) % OVERLEAF_COLORS.length]) : authorColors([authorKey(c)]).get(authorKey(c))!);
   }
 
+  /** The files to blame: the host's sources; none known (a host without them): those the pages show. */
+  private async sourceList(): Promise<string[] | null> {
+    if (!this.host.sources) return null;
+    const s = await this.host.sources();
+    if (s.length) return s;
+    const out: string[] = [];
+    for (let k = 0, n = this.p.stage.querySelectorAll(".slot").length; k < n; k++) for (const g of await this.host.glyphs(k)) if (g.file && !out.includes(g.file)) out.push(g.file);
+    return out;
+  }
+
   /**
-   * Blamed again: the pages' glyphs, then each file as it comes (the
-   * lines already known drawn at once, the others a quiet placeholder,
-   * each file's lines fading in as it lands), then the files the floats
-   * and the bibliography name. A newer load or a stop drops this one's
-   * results, never the blame drawn already.
+   * Blamed from the sources and the history, no page needed: each file as
+   * it comes, the people and the commits counted from the sources. `only`:
+   * just those files, into the blame known (an edit; shown again: `quiet`,
+   * no progress said, the lists changed only if their numbers do). A newer
+   * work or a stop drops this one's results, never the blame drawn already.
    */
-  private async load(): Promise<void> {
+  private async work(only?: string[], quiet = false): Promise<void> {
     const turn = ++this.turn;
     this.abort?.abort();
     const abort = (this.abort = new AbortController());
+    const say = (text: string, progress?: [number, number]) => {
+      if (quiet || turn !== this.turn) return;
+      this.busy = text;
+      this.progress = progress;
+      this.emit(true);
+    };
     const opts: BlameOpts = {
       detail: this.look.detail,
       ws: this.look.ws,
       moved: this.look.moved,
       skip: this.look.skip,
       signal: abort.signal,
-      progress: (text, done, total) => {
-        if (turn !== this.turn) return;
-        this.busy = text;
-        this.progress = done !== undefined && total ? [done, total] : undefined;
-        this.emit();
-      },
+      progress: (text, done, total) => say(text, done !== undefined && total ? [done, total] : undefined),
     };
     const key = this.workKey();
-    this.busy = "Reading the pages…";
-    this.progress = undefined;
-    this.emit();
+    const fresh = !only || !this.m || this.worked !== key;
+    const unit = this.look.detail === "line" ? "line" : this.look.detail === "word" ? "word" : "character";
+    say("Reading the history…");
     try {
-      const n = (this.read = this.pages());
-      const glyphs: Glyph[][] = [];
-      for (let k = 0; k < n; k++) glyphs.push(await this.host.glyphs(k));
-      if (turn !== this.turn) return;
-      // (the files in the order the pages show them)
-      const files: string[] = [];
-      for (const gs of glyphs) for (const g of gs) if (g.file && !files.includes(g.file)) files.push(g.file);
-      const m = new Model();
-      m.detail = this.look.detail;
-      m.ws = this.look.ws;
-      // (the tags known already, till the new answer brings its own: "Changed since" keeps its choices)
-      m.refs = this.m?.refs ?? [];
-      const pending = new Set(files);
-      // (the blame already drawn stays until the new one has its first file; a new look's starts clean)
-      const fresh = this.worked !== key || !this.m || ![...this.segs.values()].some((x) => x.length);
-      const show = (all: boolean) => {
-        this.m = m;
-        this.worked = key;
-        this.colorsOf();
-        const size = this.p.pageSize();
-        this.segs.clear();
-        this.waits.clear();
-        glyphs.forEach((gs, k) => {
-          this.segs.set(k, mapPage(gs, m, size));
-          if (!all) this.waits.set(k, printedLines(gs).filter((l) => l.some((g) => g.file && pending.has(g.file)) && !l.some((g) => g.file && !pending.has(g.file))).map((l) => ({ x: l[0].x, y0: l[0].y - 8, y1: l[0].y + 3 })));
-        });
-        this.waiting = pending.size;
-        this.draw();
+      const m = fresh ? new Model() : this.m!;
+      if (fresh) {
+        m.detail = this.look.detail;
+        m.ws = this.look.ws;
+        // (the tags known already, till the new answer brings its own: "Changed since" keeps its choices)
+        m.refs = this.m?.refs ?? [];
+      }
+      const take = (d: BlameData) => {
+        m.add(d);
+        for (const [f, x] of Object.entries(d.files)) if (x.text !== undefined) this.texts.set(f, x.text);
+        if (d.head !== undefined) this.head = d.head;
+        if (fresh || this.m !== m) (this.m = m), (this.worked = key), this.colorsOf();
+        this.sum = null;
       };
-      if (fresh) show(false);
-      let i = 0;
-      for (const file of files) {
-        this.busy = `Working out who wrote each ${this.look.detail === "line" ? "line" : this.look.detail === "word" ? "word" : "character"}… ${file}`;
-        this.progress = files.length > 1 ? [i, files.length] : this.progress;
-        this.emit();
-        const d = await this.host.blame([file], opts);
+      let files = only ?? (await this.sourceList());
+      if (turn !== this.turn) return;
+      if (files === null) {
+        // (the host picks the sources: asked with none)
+        say(`Working out who wrote each ${unit}…`);
+        const d = await this.host.blame([], opts);
         if (turn !== this.turn) return;
         if (typeof d === "string") throw new Error(d);
-        m.add(d);
-        pending.delete(file);
-        i++;
-        show(false);
+        take(d);
+        files = Object.keys(d.files);
+      } else {
+        if (fresh) (this.pending = new Set(files)), void this.mapPages();
+        if (fresh && this.m !== m && this.m) this.texts.clear();
+        let i = 0;
+        for (const file of files) {
+          say(`Working out who wrote each ${unit}… ${file}`, files.length > 1 ? [i, files.length] : undefined);
+          const d = await this.host.blame([file], opts);
+          if (turn !== this.turn) return;
+          if (typeof d === "string") throw new Error(d);
+          take(d);
+          this.pending.delete(file);
+          i++;
+          // (each file's lines on the pages as it lands; the lists as they grow)
+          void this.mapPages();
+          this.emit();
+        }
       }
       const more = m.wanted();
       if (more.length) {
-        this.busy = "Reading the figures' and the bibliography's history…";
-        this.emit();
+        say("Reading the figures' and the bibliography's history…");
         const d2 = await this.host.blame(more, opts);
         if (turn !== this.turn) return;
-        if (typeof d2 !== "string") m.add(d2);
+        if (typeof d2 !== "string") take(d2);
       }
+      if (!this.m) (this.m = m), (this.worked = key);
       this.error = "";
-      show(true);
     } catch (e) {
       if (turn !== this.turn) return;
-      this.error = abort.signal.aborted ? "" : (e as Error).message || String(e);
+      if (!quiet) this.error = abort.signal.aborted ? "" : (e as Error).message || String(e);
     }
     this.busy = "";
     this.progress = undefined;
-    this.waiting = 0;
-    this.waits.clear();
-    this.draw();
-    this.emit();
+    this.pending.clear();
+    await this.mapPages(true);
+    this.emit(true);
   }
 
   /** Read again (Try again). */
   retry(): void {
     this.error = "";
-    void this.load();
+    void this.work();
+  }
+
+  private pagesT: ReturnType<typeof setTimeout> | undefined;
+  /** The pages changed: mapped again a moment after the last change (one pass for a stream of them). */
+  private pagesSoon(): void {
+    if (!this.on || (!this.m && !this.pending.size)) return;
+    clearTimeout(this.pagesT);
+    this.pagesT = setTimeout(() => void this.mapPages(), 80);
+  }
+
+  /**
+   * The blame known mapped onto each page shown: a page whose glyphs are
+   * the ones mapped already is left as it is; a new or changed one gets its
+   * bars (no blame again). `all`: every page (the blame changed).
+   */
+  private async mapPages(all = false): Promise<void> {
+    // (no blame yet, its files being worked out: their lines' quiet placeholders only)
+    const m = this.m;
+    if (!this.on || (!m && !this.pending.size)) return;
+    const size = this.p.pageSize();
+    const ks = [...this.p.stage.querySelectorAll<HTMLElement>(".slot")].map((s) => Number(s.dataset.k));
+    const live = new Set(ks);
+    for (const k of [...this.segs.keys()]) if (!live.has(k)) (this.segs.delete(k), this.index.delete(k), this.mapped.delete(k));
+    for (const k of ks) {
+      const gs = await this.host.glyphs(k).catch(() => [] as Glyph[]);
+      if (!this.on || this.m !== m) return;
+      if (!all && m && this.mapped.get(k) === gs && this.slot(k)?.querySelector(".bl")) continue;
+      if (m) this.mapped.set(k, gs);
+      const segs = m ? mapPage(gs, m, size) : [];
+      this.segs.set(k, segs);
+      this.waits.set(k, this.pending.size ? printedLines(gs).filter((l) => l.some((g) => g.file && this.pending.has(g.file)) && !l.some((g) => g.file && !this.pending.has(g.file))).map((l) => ({ x: l[0].x, y0: l[0].y - 8, y1: l[0].y + 3 })) : []);
+      this.indexPage(k, segs);
+      this.drawPage(k);
+    }
+  }
+
+  /** Page `k`'s lookup: its segments by top, and each column's right edge (a line hit anywhere across its column). */
+  private indexPage(k: number, segs: Seg[]): void {
+    const right = new Map<number, number>();
+    for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
+    this.index.set(k, { rows: [...segs].sort((a, b) => a.y0 - b.y0), right });
   }
 
   /** "Changed since" choices: off, the tags (newest first), then a day, a week, a month and three months ago. */
@@ -1134,33 +1307,45 @@ export class Blame {
     return this.m ? [...this.m.commits].sort((a, b) => b.time - a.time) : [];
   }
 
-  /** What the popover shows. */
+  /** `f()` called when what the popover shows changed (`force`: progress or a focus, said even if the counts are the same). */
+  private emit(force = false): void {
+    const s = this.summary();
+    const sig = JSON.stringify([s.busy, s.error, s.lines, s.unit, s.waiting, s.people.map((p) => [p.key, p.n, p.color]), s.commits.map((c) => [c.c, c.n, c.color]), this.focusP, this.focusC, this.look.color]);
+    if (!force && sig === this.said) return;
+    this.said = sig;
+    for (const f of this.listeners) f();
+  }
+
+  /** What the popover shows: who wrote the sources as they are, counted in the detail's units; the pages are not needed. */
   summary(): BlameSummary {
     const m = this.m;
-    const all = [...this.segs.values()].flat().filter((s) => s.c >= 0 || this.look.wip === "show");
-    const people = new Map<string, { key: string; name: string; color: string; n: number }>();
-    const commits = new Map<number, { c: number; commit: BlameCommit | null; n: number; color: string; via: string | null }>();
-    const dark = this.p.dark();
-    for (const s of all) {
-      const c = s.c >= 0 && m ? m.commits[s.c] : null;
-      const key = c ? authorKey(c) : "";
-      const p = people.get(key) ?? { key, name: c ? c.author || c.email : this.words.commit === "version" ? "Not saved yet" : "Not committed", color: c ? this.colorOf(c) : UNCOMMITTED, n: 0 };
-      p.n++;
-      people.set(key, p);
-      const e = commits.get(s.c) ?? { c: s.c, commit: c, n: 0, color: (m && lookOf(m, s.c, this.look, dark, this.colors)?.color) ?? "transparent", via: c ? (this.host.via?.(c) ?? null) : null };
-      e.n++;
-      commits.set(s.c, e);
+    const unit: BlameSummary["unit"] = this.look.detail === "line" ? "lines" : this.look.detail === "word" ? "words" : "characters";
+    const base = { busy: this.busy, progress: this.progress, error: this.error, waiting: this.pending.size, unit, since: this.sinceChoices() };
+    if (!m) return { ...base, lines: 0, people: [], commits: [] };
+    if (!this.sum || this.sum.unit !== unit) {
+      const counts = m.counts();
+      const people = new Map<string, { key: string; name: string; color: string; n: number }>();
+      const commits = new Map<number, { c: number; commit: BlameCommit | null; n: number; color: string; via: string | null }>();
+      const dark = this.p.dark();
+      let total = 0;
+      for (const [k, n] of counts) {
+        if (k < 0 && this.look.wip !== "show") continue;
+        total += n;
+        const c = k >= 0 ? m.commits[k] : null;
+        const key = c ? authorKey(c) : "";
+        const p = people.get(key) ?? { key, name: c ? c.author || c.email : this.words.commit === "version" ? "Not saved yet" : "Not committed", color: c ? this.colorOf(c) : UNCOMMITTED, n: 0 };
+        p.n += n;
+        people.set(key, p);
+        commits.set(k, { c: k, commit: c, n, color: lookOf(m, k, this.look, dark, this.colors)?.color ?? "transparent", via: c ? (this.host.via?.(c) ?? null) : null });
+      }
+      this.sum = {
+        ...base,
+        lines: total,
+        people: [...people.values()].sort((a, b) => b.n - a.n),
+        commits: [...commits.values()].sort((a, b) => ((a.commit ? a.commit.time : Infinity) > (b.commit ? b.commit.time : Infinity) ? -1 : 1)),
+      };
     }
-    return {
-      busy: this.busy,
-      progress: this.progress,
-      error: this.error,
-      lines: all.length,
-      waiting: this.waiting,
-      people: [...people.values()].sort((a, b) => b.n - a.n),
-      commits: [...commits.values()].sort((a, b) => (a.commit ? a.commit.time : Infinity) > (b.commit ? b.commit.time : Infinity) ? -1 : 1),
-      since: this.sinceChoices(),
-    };
+    return { ...this.sum, ...base };
   }
 
   private shade(c: number): { color: string; tint: number; hatch?: boolean } | null {
@@ -1182,98 +1367,170 @@ export class Blame {
     for (const e of this.p.stage.querySelectorAll(".slot .bl")) e.remove();
   }
 
-  /** The bars, tints and washes on every page; the placeholders where files are still read. */
-  private draw(): void {
-    this.clear();
-    if (!this.on || !this.m) return;
-    const { w, h } = this.p.pageSize();
-    const dark = this.p.dark();
-    const focus = this.pinned ?? this.hover;
-    const pct = (v: number, of: number) => `${(v / of) * 100}%`;
-    const bw = Math.max(1, this.look.width);
-    const seen = new Map<string, number>();
-    const now = performance.now();
-    for (const [k, segs] of this.segs) {
-      const slot = this.p.stage.querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
-      if (!slot) continue;
-      const frag = document.createDocumentFragment();
-      // (each column's right edge: a right margin's bars there)
-      const right = new Map<number, number>();
-      for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
-      for (const s of segs) {
-        const lk = this.shade(s.c);
-        const key = segKey(k, s);
-        const t0 = this.drawn.get(key) ?? now;
-        seen.set(key, t0);
-        const fade = now - t0 < 220 ? " bl-in" : "";
-        const delay = fade ? `${-(now - t0)}ms` : "";
-        const dim = this.dimmed(s.c);
-        if (dim) {
-          const wsh = document.createElement("div");
-          wsh.className = `bl bl-wash${fade}`;
-          Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
-          frag.append(wsh);
-        }
-        if (!lk) continue;
-        const lit = !!focus && focus.k === k && focus.s.para === s.para;
-        const tinted = !dim && (this.look.tint === "all" || (this.look.tint === "hover" && lit));
-        if (tinted) {
-          const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
-          for (const [a, b, c] of runs) {
-            const l = this.shade(c);
-            if (!l) continue;
-            const t = document.createElement("div");
-            t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
-            Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
-            frag.append(t);
-          }
-        }
-        const b = document.createElement("div");
-        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
-        const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
-        Object.assign(b.style, { left: pct(x, w), width: `${lit ? bw + 1 : bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
-        frag.append(b);
-      }
-      for (const l of this.waits.get(k) ?? []) {
-        const b = document.createElement("div");
-        b.className = "bl bl-bar bl-wait";
-        Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
-        frag.append(b);
-      }
-      slot.append(frag);
-    }
-    this.drawn = seen;
+  /** Every page drawn again (a look, a focus). */
+  private drawAll(): void {
+    if (!this.on || !this.m) return this.clear();
+    for (const k of this.segs.keys()) this.drawPage(k);
   }
 
-  /** The printed line (or picture) under a pointer, by its page's slot. */
-  private at(e: MouseEvent): { k: number; s: Seg } | null {
-    const slot = (e.target as HTMLElement).closest?.<HTMLElement>(".slot");
+  /** Page `k`'s bars, washes and tints (the hover's tint apart: drawn alone as the pointer moves). */
+  private drawPage(k: number): void {
+    const slot = this.slot(k);
+    if (!slot) return;
+    for (const e of slot.querySelectorAll(".bl")) e.remove();
+    const segs = this.segs.get(k);
+    if (!this.on || (!this.m && !this.waits.get(k)?.length) || !segs) return;
+    const { w, h } = this.p.pageSize();
+    const dark = this.p.dark();
+    const pct = (v: number, of: number) => `${(v / of) * 100}%`;
+    const bw = Math.max(1, this.look.width);
+    const now = performance.now();
+    const frag = document.createDocumentFragment();
+    const right = this.index.get(k)?.right ?? new Map<number, number>();
+    for (const s of segs) {
+      const lk = this.shade(s.c);
+      const key = segKey(k, s);
+      const t0 = this.drawn.get(key) ?? now;
+      this.drawn.set(key, t0);
+      const fade = now - t0 < 220 ? " bl-in" : "";
+      const delay = fade ? `${-(now - t0)}ms` : "";
+      const dim = this.dimmed(s.c);
+      if (dim) {
+        const wsh = document.createElement("div");
+        wsh.className = `bl bl-wash${fade}`;
+        Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
+        frag.append(wsh);
+      }
+      if (!lk) continue;
+      if (!dim && this.look.tint === "all") frag.append(...this.tints(s, w, h, dark));
+      const b = document.createElement("div");
+      b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
+      const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
+      Object.assign(b.style, { left: pct(x, w), width: `${bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
+      frag.append(b);
+    }
+    for (const l of this.waits.get(k) ?? []) {
+      const b = document.createElement("div");
+      b.className = "bl bl-bar bl-wait";
+      Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
+      frag.append(b);
+    }
+    slot.append(frag);
+    if ((this.pinned ?? this.hover)?.k === k) this.drawHover();
+  }
+
+  /** A line's tint over its words, by writer. */
+  private tints(s: Seg, w: number, h: number, dark: boolean, cls = "bl-tint"): HTMLElement[] {
+    const pct = (v: number, of: number) => `${(v / of) * 100}%`;
+    const out: HTMLElement[] = [];
+    const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
+    for (const [a, b, c] of runs) {
+      const l = this.shade(c);
+      if (!l) continue;
+      const t = document.createElement("div");
+      t.className = `bl ${cls}${l.hatch ? " bl-hatch" : ""}`;
+      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
+      out.push(t);
+    }
+    return out;
+  }
+
+  /** The paragraph under the pointer tinted ("under the pointer"), alone: the rest of the page left as it is. */
+  private drawHover(): void {
+    for (const e of this.p.stage.querySelectorAll(".slot .bl-htint")) e.remove();
+    const f = this.pinned ?? this.hover;
+    if (!f || !this.on || this.look.tint !== "hover") return;
+    const slot = this.slot(f.k);
+    if (!slot) return;
+    const { w, h } = this.p.pageSize();
+    const dark = this.p.dark();
+    const frag = document.createDocumentFragment();
+    for (const s of this.segs.get(f.k) ?? []) if (s.para === f.s.para && !this.dimmed(s.c)) frag.append(...this.tints(s, w, h, dark, "bl-tint bl-htint"));
+    slot.append(frag);
+  }
+
+  /** Each page's box, read once after a scroll or a resize (not on every pointer move). */
+  private rects = new Map<number, DOMRect>();
+  private rectsFresh = false;
+  private watching = false;
+
+  private rectOf(slot: HTMLElement, k: number): DOMRect {
+    if (!this.watching) {
+      this.watching = true;
+      const stale = () => ((this.rectsFresh = false), this.rects.clear());
+      this.p.stage.addEventListener("scroll", stale, { passive: true, capture: true });
+      addEventListener("resize", stale, { passive: true });
+      new MutationObserver(stale).observe(this.p.stage, { attributes: true, attributeFilter: ["style", "class"], subtree: false });
+    }
+    let r = this.rectsFresh ? this.rects.get(k) : undefined;
+    if (!r) {
+      r = slot.getBoundingClientRect();
+      this.rects.set(k, r);
+      this.rectsFresh = true;
+    }
+    return r;
+  }
+
+  /** The printed line (or picture) under a point, by its page's slot: a binary search by its top, then its column. */
+  private atPoint(target: EventTarget | null, cx: number, cy: number): { k: number; s: Seg } | null {
+    const slot = (target as HTMLElement | null)?.closest?.<HTMLElement>(".slot");
     if (!slot) return null;
     const k = Number(slot.dataset.k);
-    const r = slot.getBoundingClientRect();
+    const ix = this.index.get(k);
+    if (!ix) return null;
+    const r = this.rectOf(slot, k);
     const { w, h } = this.p.pageSize();
-    const x = ((e.clientX - r.left) / r.width) * w, y = ((e.clientY - r.top) / r.height) * h;
-    // (a line anywhere across its column: from its bar to the column's right edge)
-    const segs = this.segs.get(k) ?? [];
-    const right = new Map<number, number>();
-    for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
-    const s = segs.find((s) => x >= Math.min(s.bx - 4, s.x0) && x <= (right.get(s.bx) ?? s.x1) + 8 && y >= s.y0 && y <= s.y1);
-    return s ? { k, s } : null;
+    const x = ((cx - r.left) / r.width) * w, y = ((cy - r.top) / r.height) * h;
+    const rows = ix.rows;
+    // (the last segment starting above the point, then back over those it may still be inside)
+    let lo = 0, hi = rows.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (rows[m].y0 <= y) lo = m + 1;
+      else hi = m;
+    }
+    for (let i = lo - 1; i >= 0 && i >= lo - 40; i--) {
+      const s = rows[i];
+      if (y <= s.y1 && x >= Math.min(s.bx - 4, s.x0) && x <= (ix.right.get(s.bx) ?? s.x1) + 8) return { k, s };
+    }
+    return null;
   }
+
+  private at(e: MouseEvent): { k: number; s: Seg } | null {
+    return this.atPoint(e.target, e.clientX, e.clientY);
+  }
+
+  /** The pointer's last place, hit-tested once a frame at most. */
+  private moved: { t: EventTarget | null; x: number; y: number } | null = null;
+  private frame = 0;
+  private dwell: ReturnType<typeof setTimeout> | undefined;
 
   private move(e: PointerEvent): void {
     if (!this.on || this.pinned) return;
-    const a = this.at(e);
-    if (a?.s === this.hover?.s) return;
-    this.over(a, e);
+    this.moved = { t: e.target, x: e.clientX, y: e.clientY };
+    if (this.frame) return;
+    this.frame = requestAnimationFrame(() => {
+      this.frame = 0;
+      const p = this.moved;
+      if (!p || !this.on || this.pinned) return;
+      const a = this.atPoint(p.t, p.x, p.y);
+      if (a?.s === this.hover?.s) return;
+      this.over(a, p.x, p.y);
+    });
   }
 
-  private over(a: { k: number; s: Seg } | null, e?: MouseEvent): void {
+  /** The line under the pointer changed: its paragraph's tint (only when that changes), the card after a short dwell. */
+  private over(a: { k: number; s: Seg } | null, x?: number, y?: number): void {
     const was = this.hover;
     this.hover = a;
+    clearTimeout(this.dwell);
     if (!a) this.card.hidden = true;
-    else if (e) this.show(a, e);
-    if (was?.s.para !== a?.s.para || was?.k !== a?.k) this.draw();
+    else if (x !== undefined && y !== undefined) {
+      // (a card already up follows at once; a first one waits a moment: the pointer just passing shows none)
+      if (!this.card.hidden) this.show(a, x, y);
+      else this.dwell = setTimeout(() => this.hover === a && this.show(a, x, y), 180);
+    }
+    if (was?.s.para !== a?.s.para || was?.k !== a?.k) this.drawHover();
   }
 
   private click(e: MouseEvent): void {
@@ -1286,37 +1543,63 @@ export class Blame {
     }
     this.pinned = a;
     this.hover = a;
-    this.show(a, e);
-    this.draw();
+    clearTimeout(this.dwell);
+    this.show(a, e.clientX, e.clientY);
+    this.drawHover();
   }
 
-  /** The card for line `a`, near the pointer. */
-  private show(a: { k: number; s: Seg }, e: MouseEvent): void {
+  /** What the card shows now (its line's commit and source): drawn again only when that changes. */
+  private cardFor = "";
+
+  /** The card for line `a`, near the pointer: its words drawn only when its line's commit or source changes. */
+  private show(a: { k: number; s: Seg }, px: number, py: number): void {
     const m = this.m;
     if (!m) return;
     const c = a.s.c >= 0 ? m.commits[a.s.c] : null;
     const src = a.s.fig ? `${a.s.fig}` : `${a.s.file}:${a.s.l0 + 1}${a.s.l1 > a.s.l0 ? `–${a.s.l1 + 1}` : ""}`;
-    const { commit: word, hashes } = this.words;
-    const color = c ? this.colorOf(c) : UNCOMMITTED;
-    const via = c ? (this.host.via?.(c) ?? null) : null;
-    this.card.replaceChildren(
-      html`<div class="h"><span class="av" style="${`background:${color}`}">${c ? (c.author || c.email).trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase() : "Y"}</span>${c ? c.author || c.email : "You"}</div><div class="meta">${c ? html`${agoWords(c.time, m.now)} · <code>${c.short}</code>` : `now · not ${word === "version" ? "saved to the history" : "committed"}`}</div><div class="sub">${c ? c.subject || "(no subject)" : word === "version" ? "Typed since the last version" : "Typed since the last commit"}</div>${via ? html`<div class="via">${via}</div>` : ""}<div class="src">${src}</div><div class="acts">${this.host.compare && c ? html`<button type="button" data-a="cmp">${`What this ${word} changed`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`,
-    );
-    this.card.hidden = false;
+    const id = `${a.s.c}|${src}`;
+    if (id !== this.cardFor || this.card.hidden) {
+      this.cardFor = id;
+      const { commit: word, hashes } = this.words;
+      const color = c ? this.colorOf(c) : UNCOMMITTED;
+      const via = c ? (this.host.via?.(c) ?? null) : null;
+      this.card.replaceChildren(
+        html`<div class="h"><span class="av" style="${`background:${color}`}">${c ? (c.author || c.email).trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase() : "Y"}</span>${c ? c.author || c.email : "You"}</div><div class="meta">${c ? html`${agoWords(c.time, m.now)} · <code>${c.short}</code>` : `now · not ${word === "version" ? "saved to the history" : "committed"}`}</div><div class="sub">${c ? c.subject || "(no subject)" : word === "version" ? "Typed since the last version" : "Typed since the last commit"}</div>${via ? html`<div class="via">${via}</div>` : ""}<div class="src">${src}</div><div class="acts">${this.host.compare && c ? html`<button type="button" data-a="cmp" title="${`Diff of this ${word} against the one before it`}">${`What this ${word} changed`}</button>` : ""}<button type="button" data-a="src" title="The editor at this line">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy" title="Copy the full hash">Copy hash</button>` : ""}</div>`,
+      );
+      this.card.hidden = false;
+      this.cardSize = [this.card.offsetWidth || 300, this.card.offsetHeight || 120];
+      this.stageBox = this.p.stage.getBoundingClientRect();
+      this.avoidBox = this.p.avoid?.() ?? null;
+    }
     // (near the pointer, inside the pages' box; placed, then moved by where it landed: a fixed box is
     // placed in its containing block, which a host's transform or containment makes its pane)
-    const W = this.card.offsetWidth || 300, H = this.card.offsetHeight || 120;
-    const box = this.p.stage.getBoundingClientRect();
-    const x = Math.max(box.left + 6, Math.min(box.right - W - 6, e.clientX + 14));
-    const y = e.clientY + H + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H - 12) : e.clientY + 16;
-    this.card.style.left = `${x}px`;
-    this.card.style.top = `${y}px`;
-    const at = this.card.getBoundingClientRect();
-    if (Math.abs(at.left - x) > 0.5 || Math.abs(at.top - y) > 0.5) {
-      this.card.style.left = `${2 * x - at.left}px`;
-      this.card.style.top = `${2 * y - at.top}px`;
+    const [W, H] = this.cardSize;
+    const box = this.stageBox ?? this.p.stage.getBoundingClientRect();
+    let x = Math.max(box.left + 6, Math.min(box.right - W - 6, px + 14));
+    let y = py + H + 20 > box.bottom ? Math.max(box.top + 6, py - H - 12) : py + 16;
+    // (never over Changes' popover: left of the pointer, else under the popover, else under the pointer)
+    const v = this.avoidBox, over = (l: number, t: number) => !!v && l < v.right && l + W > v.left && t < v.bottom && t + H > v.top;
+    if (v && over(x, y)) {
+      const tries: [number, number][] = [[px - 14 - W, y], [x, v.bottom + 8], [x, py + 16]];
+      const fit = tries.find(([l, t]) => l >= box.left + 6 && t + H <= box.bottom && !over(l, t));
+      if (fit) [x, y] = fit;
+    }
+    this.card.style.left = `${x + this.cardShift[0]}px`;
+    this.card.style.top = `${y + this.cardShift[1]}px`;
+    if (!this.cardPlaced) {
+      this.cardPlaced = true;
+      const at = this.card.getBoundingClientRect();
+      this.cardShift = [x - at.left + this.cardShift[0], y - at.top + this.cardShift[1]];
+      this.card.style.left = `${x + this.cardShift[0]}px`;
+      this.card.style.top = `${y + this.cardShift[1]}px`;
     }
   }
+  private cardSize: [number, number] = [300, 120];
+  private avoidBox: DOMRect | null = null;
+  private stageBox: DOMRect | null = null;
+  /** Where a fixed box lands against where it was put (its containing block's offset), measured once. */
+  private cardShift: [number, number] = [0, 0];
+  private cardPlaced = false;
 
   private act(e: Event): void {
     e.stopPropagation();

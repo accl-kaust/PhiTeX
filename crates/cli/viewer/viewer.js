@@ -7117,7 +7117,7 @@ var Model = class {
   /** The detail lines are looked up at, and spacing's. */
   detail = "line";
   ws = "ignore";
-  /** `d` taken in: its commits merged with those already here by id. */
+  /** `d` taken in: its commits merged with those already here by id; a file blamed again replaces its own. */
   add(d) {
     const map = d.commits.map((c) => {
       let k = this.byId.get(c.id);
@@ -7129,11 +7129,17 @@ var Model = class {
     if (d.refs) this.refs = d.refs;
     const newer = (a, b) => this.newer(a, b);
     for (const [name, f] of Object.entries(d.files)) {
+      if (this.files.has(name)) {
+        this.floats = this.floats.filter((x) => x.file !== name);
+        this.bbls.delete(name);
+        for (const [k, e] of this.bib) if (e.file === name) this.bib.delete(k);
+      }
       const g = { ...f, lines: f.lines?.map((l) => re(l)), runs: f.runs?.map(([a, b, c]) => [a, b, re(c)]), last: re(f.last) };
       if (g.text !== void 0 && g.runs) {
         g.lines ??= linesOf(g.text, g.runs, this.ws, newer);
         if (this.detail !== "line") {
           const runs = this.detail === "word" ? wordRuns(g.text, g.runs, newer) : g.runs;
+          g.units = runs;
           const bytes = byteIndex(g.text);
           g.br = { at: Uint32Array.from(runs, (r) => bytes[r[0]]), c: Int32Array.from(runs, (r) => r[2]) };
         }
@@ -7157,6 +7163,30 @@ var Model = class {
     for (const t of texts) bibFiles(t).forEach((n) => out.add(n));
     for (const n of this.files.keys()) out.delete(n);
     return [...out];
+  }
+  /**
+   * Who wrote the sources, counted in the detail's units: lines (not blank
+   * ones), words, or characters (not spacing); each commit's count. A
+   * .bbl is the build's, not a source: not counted; nor an image (no text).
+   */
+  counts() {
+    const out = /* @__PURE__ */ new Map();
+    const add = (c, n) => n && out.set(c, (out.get(c) ?? 0) + n);
+    for (const [name, f] of this.files) {
+      if (f.text === void 0 || f.error || /\.bbl$/i.test(name)) continue;
+      const t = f.text;
+      if (this.detail === "line" || !f.units) {
+        const ls = f.lines ?? [];
+        const starts = f.starts ?? lineStarts(t);
+        ls.forEach((c, i) => {
+          const a = starts[i] ?? 0, b = starts[i + 1] ?? t.length;
+          if (/\S/.test(t.slice(a, b))) add(c, 1);
+        });
+      } else if (this.detail === "word") {
+        for (const [a, b, c] of f.units) add(c, (t.slice(a, b).match(/[\p{L}\p{N}_]+/gu) ?? []).length);
+      } else for (const [a, b, c] of f.units) add(c, t.slice(a, b).replace(/\s+/g, "").length);
+    }
+    return out;
   }
   time(c) {
     return c < 0 ? Infinity : this.commits[c]?.time ?? -Infinity;
@@ -7388,13 +7418,14 @@ var Blame = class {
   segs = /* @__PURE__ */ new Map();
   /** Printed lines whose files are still being read: a quiet placeholder. */
   waits = /* @__PURE__ */ new Map();
-  waiting = 0;
   colors = /* @__PURE__ */ new Map();
   hover = null;
   pinned = null;
   card;
   turn = 0;
   again;
+  /** The history's head the blame was worked out at (the host's, where it says). */
+  head;
   /** Each line's marks first drawn when (ms): drawn again within the fade, the fade goes on where it was. */
   drawn = /* @__PURE__ */ new Map();
   abort;
@@ -7424,49 +7455,62 @@ var Blame = class {
   onState(f) {
     this.listeners.push(f);
   }
-  emit() {
-    for (const f of this.listeners) f();
-  }
   /** The host's word for a commit, and whether it has hashes. */
   get words() {
     return { commit: this.host.words?.commit ?? "commit", hashes: this.host.words?.hashes !== false };
   }
-  /** Blame shown or not. */
-  /** The pages read by the last load: another set of pages (shown again, a build's) read again. */
-  read = -1;
+  /** Each page's glyphs the segments were mapped from (the session's own array: the same one, the page unchanged). */
+  mapped = /* @__PURE__ */ new Map();
+  /** Each page's lookup for the pointer: its segments by their top, each column's right edge. */
+  index = /* @__PURE__ */ new Map();
   slots = null;
+  /** Files still being worked out (a quiet placeholder on their lines), in the first blame only. */
+  pending = /* @__PURE__ */ new Set();
+  /** The summary as last emitted: emitted again only when it changes. */
+  said = "";
+  sum = null;
+  /** Each file's text the blame was worked out on: blamed again only once it changed. */
+  texts = /* @__PURE__ */ new Map();
+  /**
+   * Blame shown or not. Shown, what is known is drawn at once and the
+   * sources are read again quietly (only what changed is blamed again); the
+   * first time, the sources are blamed from the history: no page needed.
+   */
   toggle(on = !this.on) {
     if (on === this.on) return;
     this.on = on;
     this.slots?.disconnect();
-    if (on) {
-      this.slots = new MutationObserver(() => this.on && this.pages() !== this.read && this.refresh());
-      this.slots.observe(this.p.stage, { childList: true, subtree: true });
-    }
     if (!on) {
       this.pinned = this.hover = null;
       this.card.hidden = true;
+      clearTimeout(this.dwell);
       this.clear();
       this.drawn.clear();
+      this.mapped.clear();
       return;
     }
-    if (this.m) this.draw();
-    void this.load();
+    this.slots = new MutationObserver(() => this.pagesSoon());
+    this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    if (this.m && this.worked === this.workKey()) {
+      void this.mapPages();
+      this.checkTexts(true);
+    } else void this.work();
   }
   /** The look changed: drawn again, or worked out again where the host's part changed. */
   setLook(l) {
     this.look = { ...this.look, ...l };
     this.colorsOf();
-    if (this.on && this.workKey() !== this.worked) void this.load();
-    else this.draw();
+    this.sum = null;
+    if (this.on && this.workKey() !== this.worked) void this.work();
+    else this.drawAll();
     this.emit();
   }
   /** One person's lines, or one commit's, picked out (again: none). */
   focus(kind, key) {
     if (kind === "person") this.focusP = this.focusP === key ? null : key, this.focusC = null;
     else this.focusC = this.focusC === key ? null : key, this.focusP = null;
-    this.draw();
-    this.emit();
+    this.drawAll();
+    this.emit(true);
     if (kind === "commit" && this.focusC !== null) this.reveal(this.focusC);
   }
   /** The first printed line of commit `c` brought into view. */
@@ -7474,7 +7518,7 @@ var Blame = class {
     for (const [k, segs] of this.segs) {
       const s = segs.find((s2) => s2.c === c);
       if (!s) continue;
-      const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
+      const slot = this.slot(k);
       if (!slot) return;
       const { h } = this.p.pageSize();
       const r = slot.getBoundingClientRect(), box = this.p.stage.getBoundingClientRect();
@@ -7483,23 +7527,54 @@ var Blame = class {
       return;
     }
   }
-  /** The pages changed (a build, new origins): blamed again, a moment after the last change. */
+  /**
+   * A build done, new origins: the pages mapped again (no blame), and the
+   * files whose text changed blamed again, each alone, once typing pauses.
+   */
   refresh() {
     if (!this.on) return;
+    this.pagesSoon();
+    this.checkTexts(false);
+  }
+  /**
+   * The files whose text is not the one blamed, or every file once the
+   * history moved (the host's head): blamed again, quietly, each alone. A
+   * host that can say neither: every file asked again (its answer applied
+   * only where it differs). `now`: at once (Blame shown again), else once
+   * typing pauses.
+   */
+  checkTexts(now) {
+    if (!this.m || !this.on) return;
     clearTimeout(this.again);
-    this.again = setTimeout(() => void this.load(), 300);
+    this.again = setTimeout(() => void this.recheck(), now ? 0 : 700);
+  }
+  async recheck() {
+    if (!this.on || !this.m) return;
+    const turn = this.turn, files = [...this.texts.keys()];
+    let changed = files;
+    if (this.host.text) {
+      const host2 = this.host;
+      const texts = await Promise.all(files.map((f) => Promise.resolve(host2.text(f)).catch(() => void 0)));
+      changed = files.filter((f, i) => texts[i] !== void 0 && texts[i] !== this.texts.get(f));
+      if (this.head !== void 0 && host2.head) {
+        const h = await host2.head().catch(() => null);
+        if (h !== null && h !== this.head) changed = files;
+      }
+    }
+    if (turn !== this.turn || !this.on || !this.m) return;
+    if (changed.length) void this.work(changed, true);
   }
   /** The pages drawn again (a new look: dark pages). */
   redraw() {
-    if (this.on) this.draw();
+    if (this.on) this.drawAll();
   }
   /** The reads stopped (the project left). */
   stop() {
     this.abort?.abort();
     this.turn++;
   }
-  pages() {
-    return this.p.stage.querySelectorAll(".slot").length;
+  slot(k) {
+    return this.p.stage.querySelector(`.slot[data-k="${k}"]`);
   }
   workKey() {
     const l = this.look;
@@ -7522,100 +7597,143 @@ var Blame = class {
   colorOf(c) {
     return this.colors.get(authorKey(c)) ?? (this.look.people === "overleaf" ? this.host.color?.(c) ?? OVERLEAF_COLORS[fnv(authorKey(c)) % OVERLEAF_COLORS.length] : authorColors([authorKey(c)]).get(authorKey(c)));
   }
+  /** The files to blame: the host's sources; none known (a host without them): those the pages show. */
+  async sourceList() {
+    if (!this.host.sources) return null;
+    const s = await this.host.sources();
+    if (s.length) return s;
+    const out = [];
+    for (let k = 0, n = this.p.stage.querySelectorAll(".slot").length; k < n; k++) for (const g of await this.host.glyphs(k)) if (g.file && !out.includes(g.file)) out.push(g.file);
+    return out;
+  }
   /**
-   * Blamed again: the pages' glyphs, then each file as it comes (the
-   * lines already known drawn at once, the others a quiet placeholder,
-   * each file's lines fading in as it lands), then the files the floats
-   * and the bibliography name. A newer load or a stop drops this one's
-   * results, never the blame drawn already.
+   * Blamed from the sources and the history, no page needed: each file as
+   * it comes, the people and the commits counted from the sources. `only`:
+   * just those files, into the blame known (an edit; shown again: `quiet`,
+   * no progress said, the lists changed only if their numbers do). A newer
+   * work or a stop drops this one's results, never the blame drawn already.
    */
-  async load() {
+  async work(only, quiet = false) {
     const turn = ++this.turn;
     this.abort?.abort();
     const abort = this.abort = new AbortController();
+    const say = (text, progress) => {
+      if (quiet || turn !== this.turn) return;
+      this.busy = text;
+      this.progress = progress;
+      this.emit(true);
+    };
     const opts = {
       detail: this.look.detail,
       ws: this.look.ws,
       moved: this.look.moved,
       skip: this.look.skip,
       signal: abort.signal,
-      progress: (text, done, total) => {
-        if (turn !== this.turn) return;
-        this.busy = text;
-        this.progress = done !== void 0 && total ? [done, total] : void 0;
-        this.emit();
-      }
+      progress: (text, done, total) => say(text, done !== void 0 && total ? [done, total] : void 0)
     };
     const key = this.workKey();
-    this.busy = "Reading the pages\u2026";
-    this.progress = void 0;
-    this.emit();
+    const fresh = !only || !this.m || this.worked !== key;
+    const unit = this.look.detail === "line" ? "line" : this.look.detail === "word" ? "word" : "character";
+    say("Reading the history\u2026");
     try {
-      const n = this.read = this.pages();
-      const glyphs3 = [];
-      for (let k = 0; k < n; k++) glyphs3.push(await this.host.glyphs(k));
-      if (turn !== this.turn) return;
-      const files = [];
-      for (const gs of glyphs3) for (const g of gs) if (g.file && !files.includes(g.file)) files.push(g.file);
-      const m = new Model();
-      m.detail = this.look.detail;
-      m.ws = this.look.ws;
-      m.refs = this.m?.refs ?? [];
-      const pending = new Set(files);
-      const fresh = this.worked !== key || !this.m || ![...this.segs.values()].some((x) => x.length);
-      const show = (all) => {
-        this.m = m;
-        this.worked = key;
-        this.colorsOf();
-        const size2 = this.p.pageSize();
-        this.segs.clear();
-        this.waits.clear();
-        glyphs3.forEach((gs, k) => {
-          this.segs.set(k, mapPage(gs, m, size2));
-          if (!all) this.waits.set(k, printedLines(gs).filter((l) => l.some((g) => g.file && pending.has(g.file)) && !l.some((g) => g.file && !pending.has(g.file))).map((l) => ({ x: l[0].x, y0: l[0].y - 8, y1: l[0].y + 3 })));
-        });
-        this.waiting = pending.size;
-        this.draw();
+      const m = fresh ? new Model() : this.m;
+      if (fresh) {
+        m.detail = this.look.detail;
+        m.ws = this.look.ws;
+        m.refs = this.m?.refs ?? [];
+      }
+      const take = (d) => {
+        m.add(d);
+        for (const [f, x] of Object.entries(d.files)) if (x.text !== void 0) this.texts.set(f, x.text);
+        if (d.head !== void 0) this.head = d.head;
+        if (fresh || this.m !== m) this.m = m, this.worked = key, this.colorsOf();
+        this.sum = null;
       };
-      if (fresh) show(false);
-      let i = 0;
-      for (const file of files) {
-        this.busy = `Working out who wrote each ${this.look.detail === "line" ? "line" : this.look.detail === "word" ? "word" : "character"}\u2026 ${file}`;
-        this.progress = files.length > 1 ? [i, files.length] : this.progress;
-        this.emit();
-        const d = await this.host.blame([file], opts);
+      let files = only ?? await this.sourceList();
+      if (turn !== this.turn) return;
+      if (files === null) {
+        say(`Working out who wrote each ${unit}\u2026`);
+        const d = await this.host.blame([], opts);
         if (turn !== this.turn) return;
         if (typeof d === "string") throw new Error(d);
-        m.add(d);
-        pending.delete(file);
-        i++;
-        show(false);
+        take(d);
+        files = Object.keys(d.files);
+      } else {
+        if (fresh) this.pending = new Set(files), void this.mapPages();
+        if (fresh && this.m !== m && this.m) this.texts.clear();
+        let i = 0;
+        for (const file of files) {
+          say(`Working out who wrote each ${unit}\u2026 ${file}`, files.length > 1 ? [i, files.length] : void 0);
+          const d = await this.host.blame([file], opts);
+          if (turn !== this.turn) return;
+          if (typeof d === "string") throw new Error(d);
+          take(d);
+          this.pending.delete(file);
+          i++;
+          void this.mapPages();
+          this.emit();
+        }
       }
       const more = m.wanted();
       if (more.length) {
-        this.busy = "Reading the figures' and the bibliography's history\u2026";
-        this.emit();
+        say("Reading the figures' and the bibliography's history\u2026");
         const d2 = await this.host.blame(more, opts);
         if (turn !== this.turn) return;
-        if (typeof d2 !== "string") m.add(d2);
+        if (typeof d2 !== "string") take(d2);
       }
+      if (!this.m) this.m = m, this.worked = key;
       this.error = "";
-      show(true);
     } catch (e) {
       if (turn !== this.turn) return;
-      this.error = abort.signal.aborted ? "" : e.message || String(e);
+      if (!quiet) this.error = abort.signal.aborted ? "" : e.message || String(e);
     }
     this.busy = "";
     this.progress = void 0;
-    this.waiting = 0;
-    this.waits.clear();
-    this.draw();
-    this.emit();
+    this.pending.clear();
+    await this.mapPages(true);
+    this.emit(true);
   }
   /** Read again (Try again). */
   retry() {
     this.error = "";
-    void this.load();
+    void this.work();
+  }
+  pagesT;
+  /** The pages changed: mapped again a moment after the last change (one pass for a stream of them). */
+  pagesSoon() {
+    if (!this.on || !this.m && !this.pending.size) return;
+    clearTimeout(this.pagesT);
+    this.pagesT = setTimeout(() => void this.mapPages(), 80);
+  }
+  /**
+   * The blame known mapped onto each page shown: a page whose glyphs are
+   * the ones mapped already is left as it is; a new or changed one gets its
+   * bars (no blame again). `all`: every page (the blame changed).
+   */
+  async mapPages(all = false) {
+    const m = this.m;
+    if (!this.on || !m && !this.pending.size) return;
+    const size2 = this.p.pageSize();
+    const ks = [...this.p.stage.querySelectorAll(".slot")].map((s) => Number(s.dataset.k));
+    const live = new Set(ks);
+    for (const k of [...this.segs.keys()]) if (!live.has(k)) this.segs.delete(k), this.index.delete(k), this.mapped.delete(k);
+    for (const k of ks) {
+      const gs = await this.host.glyphs(k).catch(() => []);
+      if (!this.on || this.m !== m) return;
+      if (!all && m && this.mapped.get(k) === gs && this.slot(k)?.querySelector(".bl")) continue;
+      if (m) this.mapped.set(k, gs);
+      const segs = m ? mapPage(gs, m, size2) : [];
+      this.segs.set(k, segs);
+      this.waits.set(k, this.pending.size ? printedLines(gs).filter((l) => l.some((g) => g.file && this.pending.has(g.file)) && !l.some((g) => g.file && !this.pending.has(g.file))).map((l) => ({ x: l[0].x, y0: l[0].y - 8, y1: l[0].y + 3 })) : []);
+      this.indexPage(k, segs);
+      this.drawPage(k);
+    }
+  }
+  /** Page `k`'s lookup: its segments by top, and each column's right edge (a line hit anywhere across its column). */
+  indexPage(k, segs) {
+    const right = /* @__PURE__ */ new Map();
+    for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
+    this.index.set(k, { rows: [...segs].sort((a, b) => a.y0 - b.y0), right });
   }
   /** "Changed since" choices: off, the tags (newest first), then a day, a week, a month and three months ago. */
   sinceChoices() {
@@ -7630,33 +7748,44 @@ var Blame = class {
   commitsKnown() {
     return this.m ? [...this.m.commits].sort((a, b) => b.time - a.time) : [];
   }
-  /** What the popover shows. */
+  /** `f()` called when what the popover shows changed (`force`: progress or a focus, said even if the counts are the same). */
+  emit(force = false) {
+    const s = this.summary();
+    const sig = JSON.stringify([s.busy, s.error, s.lines, s.unit, s.waiting, s.people.map((p) => [p.key, p.n, p.color]), s.commits.map((c) => [c.c, c.n, c.color]), this.focusP, this.focusC, this.look.color]);
+    if (!force && sig === this.said) return;
+    this.said = sig;
+    for (const f of this.listeners) f();
+  }
+  /** What the popover shows: who wrote the sources as they are, counted in the detail's units; the pages are not needed. */
   summary() {
     const m = this.m;
-    const all = [...this.segs.values()].flat().filter((s) => s.c >= 0 || this.look.wip === "show");
-    const people = /* @__PURE__ */ new Map();
-    const commits = /* @__PURE__ */ new Map();
-    const dark = this.p.dark();
-    for (const s of all) {
-      const c = s.c >= 0 && m ? m.commits[s.c] : null;
-      const key = c ? authorKey(c) : "";
-      const p = people.get(key) ?? { key, name: c ? c.author || c.email : this.words.commit === "version" ? "Not saved yet" : "Not committed", color: c ? this.colorOf(c) : UNCOMMITTED, n: 0 };
-      p.n++;
-      people.set(key, p);
-      const e = commits.get(s.c) ?? { c: s.c, commit: c, n: 0, color: (m && lookOf2(m, s.c, this.look, dark, this.colors)?.color) ?? "transparent", via: c ? this.host.via?.(c) ?? null : null };
-      e.n++;
-      commits.set(s.c, e);
+    const unit = this.look.detail === "line" ? "lines" : this.look.detail === "word" ? "words" : "characters";
+    const base = { busy: this.busy, progress: this.progress, error: this.error, waiting: this.pending.size, unit, since: this.sinceChoices() };
+    if (!m) return { ...base, lines: 0, people: [], commits: [] };
+    if (!this.sum || this.sum.unit !== unit) {
+      const counts = m.counts();
+      const people = /* @__PURE__ */ new Map();
+      const commits = /* @__PURE__ */ new Map();
+      const dark = this.p.dark();
+      let total = 0;
+      for (const [k, n] of counts) {
+        if (k < 0 && this.look.wip !== "show") continue;
+        total += n;
+        const c = k >= 0 ? m.commits[k] : null;
+        const key = c ? authorKey(c) : "";
+        const p = people.get(key) ?? { key, name: c ? c.author || c.email : this.words.commit === "version" ? "Not saved yet" : "Not committed", color: c ? this.colorOf(c) : UNCOMMITTED, n: 0 };
+        p.n += n;
+        people.set(key, p);
+        commits.set(k, { c: k, commit: c, n, color: lookOf2(m, k, this.look, dark, this.colors)?.color ?? "transparent", via: c ? this.host.via?.(c) ?? null : null });
+      }
+      this.sum = {
+        ...base,
+        lines: total,
+        people: [...people.values()].sort((a, b) => b.n - a.n),
+        commits: [...commits.values()].sort((a, b) => (a.commit ? a.commit.time : Infinity) > (b.commit ? b.commit.time : Infinity) ? -1 : 1)
+      };
     }
-    return {
-      busy: this.busy,
-      progress: this.progress,
-      error: this.error,
-      lines: all.length,
-      waiting: this.waiting,
-      people: [...people.values()].sort((a, b) => b.n - a.n),
-      commits: [...commits.values()].sort((a, b) => (a.commit ? a.commit.time : Infinity) > (b.commit ? b.commit.time : Infinity) ? -1 : 1),
-      since: this.sinceChoices()
-    };
+    return { ...this.sum, ...base };
   }
   shade(c) {
     return this.m ? lookOf2(this.m, c, this.look, this.p.dark(), this.colors) : null;
@@ -7674,93 +7803,158 @@ var Blame = class {
   clear() {
     for (const e of this.p.stage.querySelectorAll(".slot .bl")) e.remove();
   }
-  /** The bars, tints and washes on every page; the placeholders where files are still read. */
-  draw() {
-    this.clear();
-    if (!this.on || !this.m) return;
+  /** Every page drawn again (a look, a focus). */
+  drawAll() {
+    if (!this.on || !this.m) return this.clear();
+    for (const k of this.segs.keys()) this.drawPage(k);
+  }
+  /** Page `k`'s bars, washes and tints (the hover's tint apart: drawn alone as the pointer moves). */
+  drawPage(k) {
+    const slot = this.slot(k);
+    if (!slot) return;
+    for (const e of slot.querySelectorAll(".bl")) e.remove();
+    const segs = this.segs.get(k);
+    if (!this.on || !this.m && !this.waits.get(k)?.length || !segs) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
-    const focus = this.pinned ?? this.hover;
     const pct = (v, of) => `${v / of * 100}%`;
     const bw = Math.max(1, this.look.width);
-    const seen = /* @__PURE__ */ new Map();
     const now = performance.now();
-    for (const [k, segs] of this.segs) {
-      const slot = this.p.stage.querySelector(`.slot[data-k="${k}"]`);
-      if (!slot) continue;
-      const frag = document.createDocumentFragment();
-      const right = /* @__PURE__ */ new Map();
-      for (const s of segs) right.set(s.bx, Math.max(right.get(s.bx) ?? 0, s.x1));
-      for (const s of segs) {
-        const lk = this.shade(s.c);
-        const key = segKey(k, s);
-        const t0 = this.drawn.get(key) ?? now;
-        seen.set(key, t0);
-        const fade = now - t0 < 220 ? " bl-in" : "";
-        const delay = fade ? `${-(now - t0)}ms` : "";
-        const dim = this.dimmed(s.c);
-        if (dim) {
-          const wsh = document.createElement("div");
-          wsh.className = `bl bl-wash${fade}`;
-          Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
-          frag.append(wsh);
-        }
-        if (!lk) continue;
-        const lit = !!focus && focus.k === k && focus.s.para === s.para;
-        const tinted = !dim && (this.look.tint === "all" || this.look.tint === "hover" && lit);
-        if (tinted) {
-          const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
-          for (const [a, b2, c] of runs) {
-            const l = this.shade(c);
-            if (!l) continue;
-            const t = document.createElement("div");
-            t.className = `bl bl-tint${l.hatch ? " bl-hatch" : ""}`;
-            Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b2 - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
-            frag.append(t);
-          }
-        }
-        const b = document.createElement("div");
-        b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
-        const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
-        Object.assign(b.style, { left: pct(x, w), width: `${lit ? bw + 1 : bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
-        frag.append(b);
+    const frag = document.createDocumentFragment();
+    const right = this.index.get(k)?.right ?? /* @__PURE__ */ new Map();
+    for (const s of segs) {
+      const lk = this.shade(s.c);
+      const key = segKey(k, s);
+      const t0 = this.drawn.get(key) ?? now;
+      this.drawn.set(key, t0);
+      const fade = now - t0 < 220 ? " bl-in" : "";
+      const delay = fade ? `${-(now - t0)}ms` : "";
+      const dim = this.dimmed(s.c);
+      if (dim) {
+        const wsh = document.createElement("div");
+        wsh.className = `bl bl-wash${fade}`;
+        Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
+        frag.append(wsh);
       }
-      for (const l of this.waits.get(k) ?? []) {
-        const b = document.createElement("div");
-        b.className = "bl bl-bar bl-wait";
-        Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
-        frag.append(b);
-      }
-      slot.append(frag);
+      if (!lk) continue;
+      if (!dim && this.look.tint === "all") frag.append(...this.tints(s, w, h, dark));
+      const b = document.createElement("div");
+      b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
+      const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
+      Object.assign(b.style, { left: pct(x, w), width: `${bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
+      frag.append(b);
     }
-    this.drawn = seen;
+    for (const l of this.waits.get(k) ?? []) {
+      const b = document.createElement("div");
+      b.className = "bl bl-bar bl-wait";
+      Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
+      frag.append(b);
+    }
+    slot.append(frag);
+    if ((this.pinned ?? this.hover)?.k === k) this.drawHover();
   }
-  /** The printed line (or picture) under a pointer, by its page's slot. */
-  at(e) {
-    const slot = e.target.closest?.(".slot");
+  /** A line's tint over its words, by writer. */
+  tints(s, w, h, dark, cls = "bl-tint") {
+    const pct = (v, of) => `${v / of * 100}%`;
+    const out = [];
+    const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
+    for (const [a, b, c] of runs) {
+      const l = this.shade(c);
+      if (!l) continue;
+      const t = document.createElement("div");
+      t.className = `bl ${cls}${l.hatch ? " bl-hatch" : ""}`;
+      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
+      out.push(t);
+    }
+    return out;
+  }
+  /** The paragraph under the pointer tinted ("under the pointer"), alone: the rest of the page left as it is. */
+  drawHover() {
+    for (const e of this.p.stage.querySelectorAll(".slot .bl-htint")) e.remove();
+    const f = this.pinned ?? this.hover;
+    if (!f || !this.on || this.look.tint !== "hover") return;
+    const slot = this.slot(f.k);
+    if (!slot) return;
+    const { w, h } = this.p.pageSize();
+    const dark = this.p.dark();
+    const frag = document.createDocumentFragment();
+    for (const s of this.segs.get(f.k) ?? []) if (s.para === f.s.para && !this.dimmed(s.c)) frag.append(...this.tints(s, w, h, dark, "bl-tint bl-htint"));
+    slot.append(frag);
+  }
+  /** Each page's box, read once after a scroll or a resize (not on every pointer move). */
+  rects = /* @__PURE__ */ new Map();
+  rectsFresh = false;
+  watching = false;
+  rectOf(slot, k) {
+    if (!this.watching) {
+      this.watching = true;
+      const stale = () => (this.rectsFresh = false, this.rects.clear());
+      this.p.stage.addEventListener("scroll", stale, { passive: true, capture: true });
+      addEventListener("resize", stale, { passive: true });
+      new MutationObserver(stale).observe(this.p.stage, { attributes: true, attributeFilter: ["style", "class"], subtree: false });
+    }
+    let r = this.rectsFresh ? this.rects.get(k) : void 0;
+    if (!r) {
+      r = slot.getBoundingClientRect();
+      this.rects.set(k, r);
+      this.rectsFresh = true;
+    }
+    return r;
+  }
+  /** The printed line (or picture) under a point, by its page's slot: a binary search by its top, then its column. */
+  atPoint(target, cx, cy) {
+    const slot = target?.closest?.(".slot");
     if (!slot) return null;
     const k = Number(slot.dataset.k);
-    const r = slot.getBoundingClientRect();
+    const ix = this.index.get(k);
+    if (!ix) return null;
+    const r = this.rectOf(slot, k);
     const { w, h } = this.p.pageSize();
-    const x = (e.clientX - r.left) / r.width * w, y = (e.clientY - r.top) / r.height * h;
-    const segs = this.segs.get(k) ?? [];
-    const right = /* @__PURE__ */ new Map();
-    for (const s2 of segs) right.set(s2.bx, Math.max(right.get(s2.bx) ?? 0, s2.x1));
-    const s = segs.find((s2) => x >= Math.min(s2.bx - 4, s2.x0) && x <= (right.get(s2.bx) ?? s2.x1) + 8 && y >= s2.y0 && y <= s2.y1);
-    return s ? { k, s } : null;
+    const x = (cx - r.left) / r.width * w, y = (cy - r.top) / r.height * h;
+    const rows = ix.rows;
+    let lo = 0, hi = rows.length;
+    while (lo < hi) {
+      const m = lo + hi >> 1;
+      if (rows[m].y0 <= y) lo = m + 1;
+      else hi = m;
+    }
+    for (let i = lo - 1; i >= 0 && i >= lo - 40; i--) {
+      const s = rows[i];
+      if (y <= s.y1 && x >= Math.min(s.bx - 4, s.x0) && x <= (ix.right.get(s.bx) ?? s.x1) + 8) return { k, s };
+    }
+    return null;
   }
+  at(e) {
+    return this.atPoint(e.target, e.clientX, e.clientY);
+  }
+  /** The pointer's last place, hit-tested once a frame at most. */
+  moved = null;
+  frame = 0;
+  dwell;
   move(e) {
     if (!this.on || this.pinned) return;
-    const a = this.at(e);
-    if (a?.s === this.hover?.s) return;
-    this.over(a, e);
+    this.moved = { t: e.target, x: e.clientX, y: e.clientY };
+    if (this.frame) return;
+    this.frame = requestAnimationFrame(() => {
+      this.frame = 0;
+      const p = this.moved;
+      if (!p || !this.on || this.pinned) return;
+      const a = this.atPoint(p.t, p.x, p.y);
+      if (a?.s === this.hover?.s) return;
+      this.over(a, p.x, p.y);
+    });
   }
-  over(a, e) {
+  /** The line under the pointer changed: its paragraph's tint (only when that changes), the card after a short dwell. */
+  over(a, x, y) {
     const was = this.hover;
     this.hover = a;
+    clearTimeout(this.dwell);
     if (!a) this.card.hidden = true;
-    else if (e) this.show(a, e);
-    if (was?.s.para !== a?.s.para || was?.k !== a?.k) this.draw();
+    else if (x !== void 0 && y !== void 0) {
+      if (!this.card.hidden) this.show(a, x, y);
+      else this.dwell = setTimeout(() => this.hover === a && this.show(a, x, y), 180);
+    }
+    if (was?.s.para !== a?.s.para || was?.k !== a?.k) this.drawHover();
   }
   click(e) {
     if (!this.on) return;
@@ -7772,34 +7966,58 @@ var Blame = class {
     }
     this.pinned = a;
     this.hover = a;
-    this.show(a, e);
-    this.draw();
+    clearTimeout(this.dwell);
+    this.show(a, e.clientX, e.clientY);
+    this.drawHover();
   }
-  /** The card for line `a`, near the pointer. */
-  show(a, e) {
+  /** What the card shows now (its line's commit and source): drawn again only when that changes. */
+  cardFor = "";
+  /** The card for line `a`, near the pointer: its words drawn only when its line's commit or source changes. */
+  show(a, px, py) {
     const m = this.m;
     if (!m) return;
     const c = a.s.c >= 0 ? m.commits[a.s.c] : null;
     const src = a.s.fig ? `${a.s.fig}` : `${a.s.file}:${a.s.l0 + 1}${a.s.l1 > a.s.l0 ? `\u2013${a.s.l1 + 1}` : ""}`;
-    const { commit: word, hashes } = this.words;
-    const color = c ? this.colorOf(c) : UNCOMMITTED;
-    const via = c ? this.host.via?.(c) ?? null : null;
-    this.card.replaceChildren(
-      html`<div class="h"><span class="av" style="${`background:${color}`}">${c ? (c.author || c.email).trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase() : "Y"}</span>${c ? c.author || c.email : "You"}</div><div class="meta">${c ? html`${agoWords(c.time, m.now)} · <code>${c.short}</code>` : `now \xB7 not ${word === "version" ? "saved to the history" : "committed"}`}</div><div class="sub">${c ? c.subject || "(no subject)" : word === "version" ? "Typed since the last version" : "Typed since the last commit"}</div>${via ? html`<div class="via">${via}</div>` : ""}<div class="src">${src}</div><div class="acts">${this.host.compare && c ? html`<button type="button" data-a="cmp">${`What this ${word} changed`}</button>` : ""}<button type="button" data-a="src">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy">Copy hash</button>` : ""}</div>`
-    );
-    this.card.hidden = false;
-    const W2 = this.card.offsetWidth || 300, H2 = this.card.offsetHeight || 120;
-    const box = this.p.stage.getBoundingClientRect();
-    const x = Math.max(box.left + 6, Math.min(box.right - W2 - 6, e.clientX + 14));
-    const y = e.clientY + H2 + 20 > box.bottom ? Math.max(box.top + 6, e.clientY - H2 - 12) : e.clientY + 16;
-    this.card.style.left = `${x}px`;
-    this.card.style.top = `${y}px`;
-    const at = this.card.getBoundingClientRect();
-    if (Math.abs(at.left - x) > 0.5 || Math.abs(at.top - y) > 0.5) {
-      this.card.style.left = `${2 * x - at.left}px`;
-      this.card.style.top = `${2 * y - at.top}px`;
+    const id = `${a.s.c}|${src}`;
+    if (id !== this.cardFor || this.card.hidden) {
+      this.cardFor = id;
+      const { commit: word, hashes } = this.words;
+      const color = c ? this.colorOf(c) : UNCOMMITTED;
+      const via = c ? this.host.via?.(c) ?? null : null;
+      this.card.replaceChildren(
+        html`<div class="h"><span class="av" style="${`background:${color}`}">${c ? (c.author || c.email).trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase() : "Y"}</span>${c ? c.author || c.email : "You"}</div><div class="meta">${c ? html`${agoWords(c.time, m.now)} · <code>${c.short}</code>` : `now \xB7 not ${word === "version" ? "saved to the history" : "committed"}`}</div><div class="sub">${c ? c.subject || "(no subject)" : word === "version" ? "Typed since the last version" : "Typed since the last commit"}</div>${via ? html`<div class="via">${via}</div>` : ""}<div class="src">${src}</div><div class="acts">${this.host.compare && c ? html`<button type="button" data-a="cmp" title="${`Diff of this ${word} against the one before it`}">${`What this ${word} changed`}</button>` : ""}<button type="button" data-a="src" title="The editor at this line">Show in editor</button>${c && hashes ? html`<button type="button" data-a="copy" title="Copy the full hash">Copy hash</button>` : ""}</div>`
+      );
+      this.card.hidden = false;
+      this.cardSize = [this.card.offsetWidth || 300, this.card.offsetHeight || 120];
+      this.stageBox = this.p.stage.getBoundingClientRect();
+      this.avoidBox = this.p.avoid?.() ?? null;
+    }
+    const [W2, H2] = this.cardSize;
+    const box = this.stageBox ?? this.p.stage.getBoundingClientRect();
+    let x = Math.max(box.left + 6, Math.min(box.right - W2 - 6, px + 14));
+    let y = py + H2 + 20 > box.bottom ? Math.max(box.top + 6, py - H2 - 12) : py + 16;
+    const v = this.avoidBox, over = (l, t) => !!v && l < v.right && l + W2 > v.left && t < v.bottom && t + H2 > v.top;
+    if (v && over(x, y)) {
+      const tries = [[px - 14 - W2, y], [x, v.bottom + 8], [x, py + 16]];
+      const fit = tries.find(([l, t]) => l >= box.left + 6 && t + H2 <= box.bottom && !over(l, t));
+      if (fit) [x, y] = fit;
+    }
+    this.card.style.left = `${x + this.cardShift[0]}px`;
+    this.card.style.top = `${y + this.cardShift[1]}px`;
+    if (!this.cardPlaced) {
+      this.cardPlaced = true;
+      const at = this.card.getBoundingClientRect();
+      this.cardShift = [x - at.left + this.cardShift[0], y - at.top + this.cardShift[1]];
+      this.card.style.left = `${x + this.cardShift[0]}px`;
+      this.card.style.top = `${y + this.cardShift[1]}px`;
     }
   }
+  cardSize = [300, 120];
+  avoidBox = null;
+  stageBox = null;
+  /** Where a fixed box lands against where it was put (its containing block's offset), measured once. */
+  cardShift = [0, 0];
+  cardPlaced = false;
   act(e) {
     e.stopPropagation();
     const a = e.target.closest("button")?.dataset.a;
@@ -8231,7 +8449,7 @@ var DIFF_COLORS = {
   safe: ["#0072B2", "#D55E00", "Blue / orange (colour-blind safe)"],
   mono: ["#111111", "#7a7a7a", "Black / grey (print)"]
 };
-var DIFF_LOOK = { colors: "blue", ins: "wavy", del: "strike", fig: "side" };
+var DIFF_LOOK = { colors: "blue", ins: "wavy", del: "strike", fig: "side", bars: false };
 var KINDS3 = ["Text", "Section", "Citation", "Table", "Figure", "Equation"];
 function words(src, n = 12) {
   return src.replace(/%.*$/gm, " ").replace(/\\(?:cite[tp]?|ref|label|eqref|includegraphics)\*?(\[[^\]]*\])?\{[^}]*\}/g, (m) => /\\cite/.test(m) ? `[${m.replace(/.*\{|\}/g, "")}]` : " ").replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, n).join(" ");
@@ -8252,23 +8470,23 @@ ${COMMITS_CSS}
   --phc-chip: var(--ph-hover); --phc-chip2: color-mix(in srgb, var(--ph-fg) 12%, var(--phc-bg)); --phc-focus: var(--ph-link, var(--ph-accent));
   --phc-sel: color-mix(in srgb, var(--phc-focus) 13%, transparent); --phc-aim: color-mix(in srgb, var(--phc-focus) 60%, transparent);
   --phc-danger: var(--ph-danger, #c23a2f);
-  position: fixed; z-index: 40; width: min(var(--chg-w, 380px), calc(100vw - 16px)); max-height: min(640px, calc(100vh - 70px)); display: flex; flex-direction: column;
+  position: fixed; z-index: 24; /* (under the panel's dialogs (25) and menus (31), over its pages) */ width: min(var(--chg-w, 380px), calc(100vw - 16px)); max-height: min(680px, var(--chg-h, calc(100vh - 70px))); display: flex; flex-direction: column;
   background: var(--phc-bg); color: var(--phc-fg); border: 1px solid var(--phc-line); border-radius: 12px; box-shadow: 0 10px 30px rgb(15 25 40 / 22%);
   font: 13px/1.4 var(--ph-font, "Noto Sans", system-ui, sans-serif); transform-origin: top right; transition: opacity .15s, transform .15s; }
 .chg-pop[hidden] { display: flex; opacity: 0; transform: scale(.97); pointer-events: none; visibility: hidden; }
 .chg-pop::before { content: ""; position: absolute; top: -6px; right: var(--chg-arrow, 40px); width: 10px; height: 10px; background: var(--phc-bg); border-left: 1px solid var(--phc-line); border-top: 1px solid var(--phc-line); transform: rotate(45deg); }
 .chg-pop > * { flex: none; }
-.chg-pop > .body { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.chg-pop > .body { flex: 1 1 auto; min-height: 96px; overflow: auto; overscroll-behavior: contain; }
+.chg-pop { container: chgpop / inline-size; }
 .chg-pop button { font: inherit; color: inherit; }
 .chg-pop button:focus-visible, .chg-pop input:focus-visible, .chg-pop [tabindex]:focus-visible { outline: 2px solid var(--phc-focus); outline-offset: 1px; }
 .chg-pop .ph { padding: 10px 12px 12px; display: grid; gap: 10px; border-bottom: 1px solid var(--phc-line); }
-.chg-pop .ttl { display: grid; grid-template-columns: 40px 1fr 28px 28px; align-items: center; gap: 4px; }
+.chg-pop .ttl { display: grid; grid-template-columns: 28px 1fr 28px 28px; align-items: center; gap: 4px; }
 .chg-pop .ttl h2 { margin: 0; font-size: 14px; text-align: center; grid-column: 2; }
-.chg-pop .pin { font-weight: 600; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); }
 .chg-pop .ib2 { border: 0; background: transparent; color: var(--phc-muted); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 15px; display: grid; place-items: center; }
 .chg-pop .ib2:hover, .chg-pop .ib2[aria-pressed="true"] { background: var(--phc-chip); color: var(--phc-fg); }
 .chg-pop .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--phc-chip); border-radius: 8px; padding: 2px; }
-.chg-pop .seg button { font-size: 12.5px; font-weight: 600; border: 0; background: transparent; color: var(--phc-muted); padding: 6px 8px; border-radius: 6px; cursor: pointer; transition: background .15s, color .15s; }
+.chg-pop .seg button { font-size: 12.5px; font-weight: 600; border: 0; background: transparent; color: var(--phc-muted); padding: 6px 6px; border-radius: 6px; cursor: pointer; transition: background .15s, color .15s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .chg-pop .seg button[aria-pressed="true"] { background: var(--phc-bg); color: var(--phc-fg); box-shadow: 0 1px 2px rgb(0 0 0 / 18%); }
 .chg-pop .seg.small button { font-weight: 500; font-size: 12px; padding: 4px 6px; }
 .chg-pop .ends { display: grid; grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr); align-items: end; gap: 6px; }
@@ -8285,6 +8503,8 @@ ${COMMITS_CSS}
 @keyframes chg-flash { from { opacity: .2; transform: translateY(3px); } }
 .chg-pop .field .clr { border: 0; background: transparent; color: var(--phc-muted); width: 20px; height: 20px; border-radius: 4px; cursor: pointer; flex: none; }
 .chg-pop .field .clr:hover { background: var(--phc-chip2); color: var(--phc-fg); }
+.chg-pop .field .chev { color: var(--phc-muted); font-size: 11px; flex: none; }
+.chg-pop .field .ph2 { color: var(--phc-muted); font-weight: 500; }
 .chg-pop .sub { font-size: 12px; color: var(--phc-muted); margin: 0; text-align: center; }
 /* (the progress line floats over the bottom of the list: the rows under the pointer never move as it comes and goes) */
 .chg-pop .prog { position: absolute; z-index: 3; left: 8px; right: 8px; bottom: 8px; padding: 6px 10px 7px; border: 1px solid var(--phc-line); border-radius: 8px; background: var(--phc-bg); box-shadow: 0 4px 14px rgb(15 25 40 / 16%); font-size: 12px; color: var(--phc-muted); display: grid; gap: 5px; }
@@ -8299,7 +8519,27 @@ ${COMMITS_CSS}
 /* (an error stays in the flow: it waits for Try again, its words never over the rows) */
 .chg-pop .prog.err { color: var(--phc-danger); position: static; order: 0; margin: 8px 8px 0; box-shadow: none; }
 .chg-pop .prog .again { justify-self: start; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 1px 10px; cursor: pointer; font-size: 12px; color: var(--phc-fg); }
-.chg-pop .foot { border-top: 1px solid var(--phc-line); padding: 6px 10px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; font-size: 12px; color: var(--phc-muted); }
+.chg-pop .foot { border-top: 1px solid var(--phc-line); padding: 6px 10px; height: 42px; box-sizing: border-box; display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; font-size: 12px; color: var(--phc-muted); }
+.chg-pop .foot .count { min-width: 76px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chg-pop .seg.tiny { justify-self: start; }
+.chg-pop .seg.tiny button { font-size: 11.5px; font-weight: 500; padding: 3px 8px; }
+.chg-pop .seg button:disabled { opacity: .45; cursor: default; }
+.chg-pop .primary { display: block; margin: 12px auto 0; border: 0; background: var(--phc-focus); color: #fff !important; border-radius: 7px; padding: 6px 14px; font-weight: 600; font-size: 12.5px; cursor: pointer; }
+.chg-pop .primary:hover { filter: brightness(1.08); }
+.chg-pop .lookbox { border-top: 1px solid var(--phc-line); display: flex; flex-direction: column; min-height: 0; }
+/* (open: the look keeps its height, up to 55% of the popover, scrolling inside; the list above gives way, down to its own least) */
+.chg-pop .lookbox.open { max-height: calc(min(680px, var(--chg-h, calc(100vh - 70px))) * .55); flex: 0 0 auto; }
+.chg-pop .lookhead { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; background: transparent; padding: 7px 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); cursor: pointer; text-align: left; flex: none; }
+.chg-pop .lookhead:hover { color: var(--phc-fg); background: var(--phc-chip); }
+.chg-pop .chev2 { display: inline-block; transition: transform .15s; font-size: 10px; }
+.chg-pop .lookbox.open .chev2 { transform: rotate(90deg); }
+.chg-pop .lookin { overflow: auto; min-height: 0; }
+.chg-pop .lookin[hidden] { display: none; }
+.chg-pop .dls { display: flex; gap: 10px; }
+.chg-pop .lnk { border: 0; background: transparent; color: var(--phc-focus); padding: 0; cursor: pointer; font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
+.chg-pop .lnk:disabled { color: var(--phc-muted); text-decoration: none; cursor: default; }
+.chg-pop .filters .hd { margin-left: auto; font-size: 12px; color: var(--phc-muted); white-space: nowrap; flex: none; }
+.chg-pop .preview.bars { box-shadow: inset 3px 0 0 var(--chg-add); padding-left: 14px; }
 .chg-pop .foot .r { justify-self: end; }
 .chg-pop .nav { display: inline-flex; gap: 2px; align-items: center; }
 .chg-pop .nav button { border: 0; background: transparent; width: 28px; height: 26px; border-radius: 6px; cursor: pointer; font-size: 15px; color: var(--phc-fg); }
@@ -8314,7 +8554,7 @@ ${COMMITS_CSS}
 .chg-pop .qb:hover { border-color: var(--phc-focus); }
 .chg-pop .hint { padding: 8px 12px; font-size: 12px; color: var(--phc-muted); border-bottom: 1px solid var(--phc-line); min-height: 34px; }
 .chg-pop .hint b { color: var(--phc-fg); font-weight: 600; }
-.chg-pop .filters { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--phc-line); overflow-x: auto; scrollbar-width: none; }
+.chg-pop .filters { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--phc-line); overflow-x: auto; scrollbar-width: none; align-items: center; }
 .chg-pop .fchip { font-size: 12px; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 2px 9px; cursor: pointer; display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; flex: none; transition: opacity .15s; }
 .chg-pop .fchip[aria-pressed="false"] { opacity: .45; }
 .chg-pop .fchip small { color: var(--phc-muted); font-size: inherit; }
@@ -8354,10 +8594,13 @@ ${COMMITS_CSS}
 .chg-pop .sw.hatch { background: repeating-linear-gradient(0deg, #99a3ad 0 3px, transparent 3px 6px) !important; }
 .chg-pop .ramp { display: flex; gap: 4px; align-items: center; font-size: 11px; color: var(--phc-muted); justify-content: center; }
 .chg-pop .ramp i { width: 26px; height: 8px; border-radius: 2px; display: inline-block; }
-.chg-pop .set { padding: 4px 12px 12px; display: grid; gap: 12px; }
+.chg-pop .set { padding: 2px 12px 12px; display: grid; gap: 10px; }
 .chg-pop .set h3 { margin: 10px 0 0; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); }
-.chg-pop .opt2 { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 13px; }
-.chg-pop .note2 { margin: -6px 0 0 120px; font-size: 12px; color: var(--phc-muted); }
+.chg-pop .opt2 { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 12.5px; }
+.chg-pop .note2 { margin: -4px 0 0 116px; font-size: 12px; color: var(--phc-muted); }
+/* (the look's choices sized by their words, the spare width shared: "Underline", "Side by side" whole) */
+.chg-pop .opt2 .seg { grid-auto-columns: auto; }
+@container chgpop (max-width: 330px) { .chg-pop .opt2 { grid-template-columns: 1fr; gap: 4px; } .chg-pop .note2 { margin-left: 0; } }
 .chg-pop .swatches { display: flex; gap: 6px; flex-wrap: wrap; }
 .chg-pop .swb { border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 8px; padding: 4px 8px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; font-size: 12px; }
 .chg-pop .swb[aria-pressed="true"] { border-color: var(--phc-focus); box-shadow: 0 0 0 2px var(--phc-sel); }
@@ -8399,15 +8642,14 @@ var Changes = class {
   host;
   blame;
   el;
-  /** Kept on (the marks stay with the popover closed). */
-  on = false;
-  /** The popover shown. */
+  /** The popover open (its button pressed): its mode's marks on the pages while it is. */
   open = false;
   mode;
   look;
   hide;
   kinds;
-  settings = false;
+  /** The look's section (under the list) open. */
+  lookOpen = false;
   /** The picker shown, opened from which field. */
   pick = null;
   pair = null;
@@ -8418,19 +8660,20 @@ var Changes = class {
   prog;
   error = "";
   cur = -1;
+  /** Which pages the diff shows: its marked-up document's, or the current version's (D). */
+  pages = "diff";
+  /** Blame asked for (its half clicked) in this visit: worked out again when the popover opens. */
+  blameAsked = false;
   graph = null;
   anchors = [];
-  /** What the pointer is over, as its enters and leaves say (the popover, a button): it closes once over none. */
-  over = /* @__PURE__ */ new Set();
+  anchor = null;
   badges = [];
-  hideT;
-  showT;
   attrAbort;
   histProgress = null;
   seenItems = /* @__PURE__ */ new Set();
   lastCount = -1;
   width = null;
-  dragging = false;
+  blameSig = "";
   constructor(p, host2, blame2) {
     this.p = p;
     this.host = host2;
@@ -8451,9 +8694,17 @@ var Changes = class {
     this.el.setAttribute("aria-label", "Changes");
     shadow.append(style, this.el);
     p.win.append(box);
-    this.el.addEventListener("pointerenter", () => (this.over.add(this.el), this.stay()));
-    this.el.addEventListener("pointerleave", () => (this.over.delete(this.el), this.soon()));
-    blame2?.onState(() => this.mode === "blame" && this.open && this.render());
+    blame2?.onState(() => {
+      if (this.mode !== "blame" || !this.open) return;
+      this.renderProg();
+      const s = blame2.summary();
+      const sig = JSON.stringify([this.blameAsked, s.lines, s.unit, !!s.busy && !s.lines, !!s.error && !s.lines, s.waiting > 0, s.people.map((p2) => [p2.key, p2.n, p2.color]), s.commits.map((c) => [c.c, c.n, c.color, c.via]), blame2.focusP, blame2.focusC, blame2.look.color, blame2.look.ages]);
+      if (sig === this.blameSig) return;
+      this.blameSig = sig;
+      const focus = this.focusKey();
+      this.renderBody();
+      this.refocus(focus);
+    });
     host2.onProgress?.((text, done, total) => {
       this.histProgress = text ? { text, done, total } : null;
       if (this.open) this.renderProg();
@@ -8463,12 +8714,8 @@ var Changes = class {
       if (e.composedPath().includes(p.win)) return;
       this.key(e);
     });
-    document.addEventListener("pointerdown", (e) => {
-      if (!this.open || this.on || this.busyNow()) return;
-      if (e.composedPath().some((n) => n === this.el || this.anchors.includes(n))) return;
-      this.setOpen(false);
-    });
     addEventListener("resize", () => this.open && this.place());
+    if (typeof ResizeObserver === "function") new ResizeObserver(() => this.open && this.place()).observe(p.win);
     this.applyColors();
     this.kept(p.prefs());
   }
@@ -8488,105 +8735,89 @@ var Changes = class {
     this.p.savePrefs({ mode: this.mode, diff: this.look, blame: this.blame?.look ?? BLAME_LOOK, hide: this.hide, kinds: [...this.kinds] });
   }
   /**
-   * A ± Changes button (the panel's, a host's own): hovering it peeks, a
-   * click keeps it on; `badge` the count of changes beside it.
+   * A ± Changes button (the panel's, a host's own): a click opens the
+   * popover, a second closes it; `badge` the count of changes beside it.
+   * Pointing at it does nothing but say what it is.
    */
   attach(btn, badge2) {
     const was = this.anchor && !this.anchor.isConnected;
-    for (const a of this.anchors) if (!a.isConnected && this.over.delete(a)) this.over.add(btn);
     this.anchors = [...this.anchors.filter((a) => a.isConnected), btn];
     this.badges = [...this.badges.filter((b) => b.isConnected), ...badge2 ? [badge2] : []];
     btn.setAttribute("aria-haspopup", "dialog");
-    btn.setAttribute("aria-pressed", String(this.on));
-    btn.classList.toggle("on", this.on);
-    btn.classList.toggle("active", this.on);
+    btn.setAttribute("aria-expanded", String(this.open));
+    btn.setAttribute("aria-pressed", String(this.open));
+    btn.classList.toggle("on", this.open);
+    btn.classList.toggle("active", this.open);
     if (was) {
       this.anchor = btn;
       if (this.open) this.place();
     }
     this.badge();
-    btn.addEventListener("pointerenter", () => {
-      this.over.add(btn);
-      this.stay();
-      if (!this.open) this.showT = setTimeout(() => this.setOpen(true, btn), 120);
-    });
-    btn.addEventListener("pointerleave", () => (this.over.delete(btn), this.soon()));
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      clearTimeout(this.showT);
-      if (this.on) this.off();
-      else this.setOn(true, btn);
+      this.setOpen(!this.open, btn);
     });
   }
-  /** Whether the popover must stay: the picker, the settings, a first end, a drag. */
-  busyNow() {
-    return !!this.pick || this.settings || this.dragging || !!this.graph?.aiming;
-  }
-  soon() {
-    clearTimeout(this.showT);
-    clearTimeout(this.hideT);
-    this.hideT = setTimeout(() => {
-      if (!this.busyNow() && !this.over.size) this.setOpen(false);
-    }, 350);
-  }
-  stay() {
-    clearTimeout(this.hideT);
-  }
-  anchor = null;
-  /** The popover shown or hidden; shown, the marks of its mode on the pages; hidden and not on, none. */
+  /**
+   * The popover opened or closed: by its button, ✕ or Esc, nothing else (a
+   * pointer moving, a click on the pages beside it). Opened, it shows what is
+   * known already and starts nothing: a diff runs once a pair is chosen, Blame
+   * once its half is clicked. Its marks are on the pages while it is open.
+   */
   setOpen(v, at) {
     if (at) this.anchor = at;
     if (v === this.open) return;
     this.open = v;
     this.el.hidden = !v;
-    if (v) {
-      this.place();
-      this.render();
-      this.marks(true);
-    } else {
-      this.over.delete(this.el);
-      this.pick = null;
-      this.settings = false;
-      this.graph?.cancel();
-      if (!this.on) this.marks(false);
-    }
-  }
-  /** Kept on (the marks stay), or not. */
-  setOn(v, at) {
-    this.on = v;
     for (const a of this.anchors) {
       a.setAttribute("aria-pressed", String(v));
+      a.setAttribute("aria-expanded", String(v));
       a.classList.toggle("on", v);
       a.classList.toggle("active", v);
     }
-    if (v && this.open) this.render();
-    else if (v) this.setOpen(true, at);
-    else this.setOpen(false);
+    if (v) {
+      this.render();
+      this.place();
+      this.marks();
+      if (at && document.activeElement === at) this.el.querySelector("[data-m][aria-pressed=true], button")?.focus({ preventScroll: true });
+    } else {
+      this.pick = null;
+      this.graph?.cancel();
+      this.marks();
+      if (this.el.contains(this.el.getRootNode() instanceof ShadowRoot ? this.el.getRootNode().activeElement : null)) (this.anchor ?? this.anchors[0])?.focus({ preventScroll: true });
+    }
   }
-  /** Turned off: ✕, Esc, a second click on the button. */
+  /** The popover's box while open (Blame's card keeps clear of it), else null. */
+  box() {
+    return this.open ? this.el.getBoundingClientRect() : null;
+  }
+  /** The diff's pages asked for last (the host's pages start as the current version's). */
+  diffShown = false;
+  /** Closed: ✕, Esc, a second click on the button. */
   off() {
-    this.pick = null;
-    this.settings = false;
-    this.setOn(false);
-    this.marks(false);
+    this.setOpen(false);
   }
-  /** The marks of the mode shown on the pages (`v`), or none. */
-  marks(v) {
-    const diff2 = v && this.mode === "diff";
-    const blame2 = v && this.mode === "blame";
-    this.host.diff?.show(diff2 && !!this.ran);
+  /** The marks of the mode shown on the pages while open (only what was asked for: a diff run, Blame clicked), else none. */
+  marks() {
+    const diff2 = this.open && this.mode === "diff" && !!this.ran;
+    const blame2 = this.open && this.mode === "blame" && this.blameAsked;
+    const pages2 = diff2 && this.pages === "diff";
+    if (pages2 !== this.diffShown) this.diffShown = pages2, this.host.diff?.show(pages2);
     this.blame?.toggle(blame2);
-    if (diff2) this.ensureDiff();
   }
-  /** Placed under its button, its arrow at the button's middle; within the window. */
+  /** Under its button, within the pane (never over the button): as wide as the pane allows, its height the pane's below the button at most, scrolled inside. */
   place() {
-    const a = this.anchor ?? this.anchors[0];
+    const a = this.anchor ?? this.anchors.find((x) => x.isConnected) ?? this.anchors[0];
     if (!a) return;
     const r = a.getBoundingClientRect();
-    const w = Math.min(this.width ?? 380, innerWidth - 16);
+    const pane2 = this.p.win.getBoundingClientRect();
+    const lo = Math.max(0, pane2.left), hi = Math.min(innerWidth, pane2.right > lo ? pane2.right : innerWidth);
+    const w = Math.max(260, Math.min(this.width ?? 380, hi - lo - 16));
     this.el.style.setProperty("--chg-w", `${w}px`);
-    const left = Math.max(8, Math.min(innerWidth - w - 8, r.right - w + 10));
+    const left = Math.max(lo + 8, Math.min(hi - w - 8, r.right - w + 10));
     const top = r.bottom + 8;
+    const bottom = Math.min(innerHeight, pane2.bottom > top ? pane2.bottom : innerHeight);
+    this.el.style.setProperty("--chg-h", `${Math.max(220, bottom - top - 8)}px`);
     this.el.style.left = `${left}px`;
     this.el.style.top = `${top}px`;
     this.el.style.setProperty("--chg-arrow", `${Math.max(14, Math.min(w - 24, left + w - (r.left + r.width / 2) - 5))}px`);
@@ -8597,22 +8828,23 @@ var Changes = class {
     }
   }
   key(e) {
-    if (!this.open && !this.on) return;
+    if (!this.open || e.defaultPrevented) return;
     const t = e.composedPath()[0];
-    if (t?.closest?.("input:not([type=checkbox]), textarea, [contenteditable=true], .cm-editor")) return;
+    if (t?.closest?.("input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable=true], .cm-editor")) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const done = () => (e.preventDefault(), e.stopPropagation());
     if (e.key === "Escape") {
-      if (!this.open) return;
-      if (this.pick && this.graph?.aiming && this.pick === "from") this.graph.cancel(), this.refreshHint();
-      else if (this.pick) this.pick = null, this.render();
-      else if (this.settings) this.settings = false, this.render();
+      if (this.p.root.querySelector(".dialog:not([hidden])")) return;
+      if (this.pick && this.graph?.aiming) this.graph.cancel(), this.refreshHint();
+      else if (this.pick) this.pick = null, this.render(), this.el.querySelector("#chg-from")?.focus();
       else this.off();
-      e.preventDefault();
-      e.stopPropagation();
-    } else if ((e.key === "]" || e.key === "[") && this.mode === "diff") {
-      this.step(e.key === "]" ? 1 : -1);
-      e.preventDefault();
-      e.stopPropagation();
+      done();
+    } else if (this.mode === "diff" && (e.key === "]" || e.key === "[" || e.key === "n" || e.key === "N")) {
+      this.step(e.key === "]" || e.key === "n" ? 1 : -1);
+      done();
+    } else if (this.mode === "diff" && (e.key === "d" || e.key === "D") && this.ran) {
+      this.showPages(this.pages === "diff" ? "current" : "diff");
+      done();
     }
   }
   // ---- the diff ----
@@ -8620,25 +8852,9 @@ var Changes = class {
   shown() {
     return this.items.filter((c) => this.kinds.has(c.kind));
   }
-  /** A pair to compare when none is chosen yet: the last visit, else the last tag, else the last commit, against the working tree. */
-  async defaultPair() {
-    const g = this.ensureGraph();
-    if (!g.commits.length && g.hasMore) await g.load();
-    const cs = g.commits;
-    if (!cs.length) return null;
-    const visit2 = this.host.lastVisit?.();
-    if (visit2 && g.find(visit2) > 0) return { from: cs[g.find(visit2)].id, to: null };
-    if (this.host.words?.commit === "version") {
-      const tag = cs.findIndex((c) => c.refs.some((r) => r.kind === "tag"));
-      if (tag > 0) return { from: cs[tag].id, to: null };
-      const far = await this.farTag();
-      return { from: far ? far.id : cs[0].parents[0] ?? cs[0].id, to: null };
-    }
-    return { from: cs[0].id, to: null };
-  }
   farKnown = null;
   far = null;
-  /** The host's newest tag, older than the graph has read (named in the fields at once; the graph reads on to it). */
+  /** The host's newest tag, older than the graph has read (a quick choice at once; the picker asked for it). */
   farTag() {
     this.far ??= (this.host.lastTag?.() ?? Promise.resolve(null)).then((t) => {
       if (t) this.labels.set(t.id, t.name);
@@ -8647,18 +8863,6 @@ var Changes = class {
       return t;
     }).catch(() => null);
     return this.far;
-  }
-  /** The diff of the pair chosen, started once Diff shows. */
-  ensureDiff() {
-    if (!this.host.diff || this.ran || this.busy) return;
-    if (this.pair) return void this.run(this.pair);
-    this.busy = "Reading the history\u2026";
-    this.renderSoon();
-    void this.defaultPair().then((p) => {
-      this.busy = "";
-      if (!p) return this.render();
-      if (!this.pair) this.choose(p, false);
-    });
   }
   ensureGraph() {
     if (this.graph) return this.graph;
@@ -8674,8 +8878,17 @@ var Changes = class {
     this.graph.onChange(() => {
       if (this.pair) this.graph.mark(this.pair.from, this.pair.to);
       if (this.open) this.renderHead();
+      if (this.open && this.pick) this.refreshQuick();
     });
     return this.graph;
+  }
+  /** The picker opened from From or To (the history read from here: asked for). */
+  openPicker(which) {
+    this.pick = this.pick === which ? null : which;
+    const g = this.ensureGraph();
+    if (this.pick) g.open(which);
+    this.render();
+    this.el.querySelector(".phx-commits .row[data-i], .qb, #chg-done")?.focus({ preventScroll: true });
   }
   /** A pair chosen: the diff run; `done` closes the picker. */
   choose(p, done) {
@@ -8698,7 +8911,9 @@ var Changes = class {
     this.error = "";
     this.busy = "Reading the two versions\u2026";
     this.prog = void 0;
-    r.show((this.open || this.on) && this.mode === "diff");
+    this.pages = "diff";
+    this.diffShown = this.open && this.mode === "diff";
+    r.show(this.diffShown);
     this.render();
     if (p.to !== null && p.from === p.to) {
       this.busy = "";
@@ -8723,7 +8938,7 @@ var Changes = class {
       if (turn !== this.turn) return;
       this.busy = "";
       this.setItems(got);
-      r.show(this.open || this.on ? this.mode === "diff" : false);
+      this.marks();
     } catch (e) {
       if (turn !== this.turn) return;
       this.busy = "";
@@ -8733,10 +8948,11 @@ var Changes = class {
   }
   /** The diff's changes as the list's items, their authors filled in as the host knows them. */
   setItems(changes2) {
-    const old = new Map(this.items.map((i) => [`${i.file}:${i.old}:${i.neu}`, i.who]));
+    const old = new Map(this.items.map((i) => [`${i.file}:${i.old}:${i.neu}`, i]));
     this.items = changes2.map((c, i) => {
       const it = itemOf(c, i + 1);
-      it.who = old.get(`${it.file}:${it.old}:${it.neu}`);
+      const was = old.get(`${it.file}:${it.old}:${it.neu}`);
+      if (was) it.who = was.who, it.wip = was.wip;
       return it;
     });
     this.cur = Math.min(this.cur, this.shown().length - 1);
@@ -8745,45 +8961,48 @@ var Changes = class {
     if (p && this.host.attribute && this.items.length) {
       this.attrAbort?.abort();
       const a = this.attrAbort = new AbortController();
-      void this.host.attribute(this.items, p, () => !a.signal.aborted && this.open && this.mode === "diff" && !this.pick && !this.settings && this.renderBody(), a.signal).catch(() => void 0);
+      void this.host.attribute(this.items, p, () => !a.signal.aborted && this.open && this.mode === "diff" && !this.pick && this.renderBody(), a.signal).catch(() => void 0);
     }
   }
-  /** Change `d` steps on (‹ › and ] [): the diff's pages shown at it. */
+  /** Change `d` steps on (‹ ›, ] [, N Shift+N): the diff's pages shown at it. */
   step(d) {
     const v = this.shown();
     if (!v.length) return;
     this.cur = this.cur < 0 ? d > 0 ? 0 : v.length - 1 : (this.cur + d + v.length) % v.length;
     this.pick = null;
     if (this.host.diff && this.ran) {
-      this.host.diff.show(true);
+      if (this.pages !== "diff") this.showPages("diff");
       this.host.diff.goto(v[this.cur].k);
     }
     this.render();
     this.el.querySelector(".citem.cur")?.scrollIntoView({ block: "nearest", behavior: reduced3() ? "auto" : "smooth" });
   }
+  /** The diff's pages or the current version's (the diff kept). */
+  showPages(w) {
+    this.pages = w;
+    this.marks();
+    this.render();
+  }
   /** Ends the history does not list, named by the host ("What git has staged", "Proposal 3"). */
   labels = /* @__PURE__ */ new Map();
-  /** Diff `p` shown and kept on (the host's own ask: a review's changes), its ends named by `names` where the history does not list them. */
+  /** Diff `p` shown, the popover open (the host's own ask: a review's changes), its ends named by `names` where the history does not list them. */
   show(p, names = {}) {
     if (names.from) this.labels.set(p.from, names.from);
     if (names.to && p.to) this.labels.set(p.to, names.to);
     this.mode = "diff";
-    this.settings = false;
-    this.blame?.toggle(false);
+    this.setOpen(true);
     this.choose(p, true);
-    this.setOn(true);
-    this.marks(true);
-    this.render();
+    this.marks();
   }
   /** What `c` changed: Diff against its first parent (Blame's card). */
   diffCommit(c) {
     const g = this.ensureGraph();
     this.mode = "diff";
-    this.settings = false;
-    this.blame?.toggle(false);
     const id = c ? c.rev ?? c.id : null;
     const at = id ? g.find(id) : -1;
     const parent = c && id ? c.parent ?? (at >= 0 ? g.commits[at].parents[0] : void 0) ?? this.host.firstParentOf?.(id) ?? null : null;
+    this.save();
+    this.setOpen(true);
     if (c && id && parent) {
       this.choose({ from: parent, to: id }, true);
       if (at < 0)
@@ -8791,10 +9010,8 @@ var Changes = class {
           while (g.find(id) < 0 && g.hasMore && this.pair?.to === id) await g.load();
           this.renderHead();
         })();
-    } else if (!c && g.commits[0]) this.choose({ from: g.commits[0].id, to: null }, true);
-    this.setOn(true);
-    this.save();
-    this.marks(true);
+    }
+    this.marks();
     this.render();
   }
   /** The diff's colours on the list and the preview. */
@@ -8809,7 +9026,7 @@ var Changes = class {
     const g = this.graph;
     const i = g ? g.find(id) : -1;
     const c = i >= 0 ? g.commits[i] : null;
-    if (!c) return { b: this.labels.get(id) ?? id.slice(0, 12), k: this.labels.has(id) ? "" : "not in the history read" };
+    if (!c) return { b: this.labels.get(id) ?? id.slice(0, 12), k: this.labels.has(id) ? "" : "" };
     const tag = c.refs.find((r) => r.kind === "tag");
     const hashes = this.host.words?.hashes !== false;
     return { b: tag ? tag.name : c.subject, k: `${c.short} \xB7 ${agoWords(c.time, Date.now() / 1e3)}${hashes ? "" : ` \xB7 ${c.author}`}` };
@@ -8823,17 +9040,13 @@ var Changes = class {
     }
   }
   // ---- drawing ----
-  soonT;
-  renderSoon() {
-    clearTimeout(this.soonT);
-    this.soonT = setTimeout(() => this.open && this.render(), 0);
-  }
-  /** The count beside ± Changes (Diff's changes), ticking as it changes. */
+  /** The count beside ± Changes: the diff's changes, once one is known (never read for it). */
   badge() {
-    const n = this.mode === "diff" && this.ran ? this.shown().length : -1;
+    const n = this.ran && !this.busy ? this.shown().length : -1;
     for (const b of this.badges) {
-      b.textContent = n > 0 && (this.open || this.on) ? String(n) : "";
-      if (n !== this.lastCount && n >= 0 && !reduced3()) {
+      b.textContent = n > 0 ? String(n) : "";
+      b.title = n > 0 ? `${n} change${n === 1 ? "" : "s"} in the diff shown` : "";
+      if (n !== this.lastCount && n > 0 && !reduced3()) {
         b.classList.remove("tick");
         void b.offsetWidth;
         b.classList.add("tick");
@@ -8844,37 +9057,53 @@ var Changes = class {
   render() {
     if (!this.open) return this.badge();
     const keep = this.el.querySelector(".body")?.scrollTop ?? 0;
+    const focus = this.focusKey();
     const was = this.el.dataset.view;
-    const view = this.settings ? `set-${this.mode}` : `${this.mode}${this.pick ? "-pick" : ""}`;
+    const view = `${this.mode}${this.pick ? "-pick" : ""}`;
     this.el.dataset.view = view;
-    this.el.replaceChildren(html`<div class="grip" title="Drag to resize"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.foot()}`);
+    this.el.replaceChildren(html`<div class="grip" title="Drag to make it wider or narrower"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.lookBox()}${this.foot()}`);
     this.renderProg();
     this.renderBody();
     const body = this.el.querySelector(".body");
     if (was === view) body.scrollTop = keep;
     this.wire();
     this.badge();
+    this.refocus(focus);
+  }
+  /** The control the keyboard was on, by what it is (drawn again, the focus kept on its like). */
+  focusKey() {
+    const a = this.el.getRootNode().activeElement;
+    if (!a || !this.el.contains(a)) return null;
+    if (a.id) return `#${a.id}`;
+    for (const k of ["m", "look", "i", "k", "col", "p", "c", "q", "reset", "skip"]) {
+      const v = a.dataset[k];
+      if (v !== void 0) return `[data-${k}="${CSS.escape(v)}"]${a.dataset.v !== void 0 ? `[data-v="${CSS.escape(a.dataset.v)}"]` : ""}`;
+    }
+    return null;
+  }
+  refocus(k) {
+    if (k) this.el.querySelector(k)?.focus({ preventScroll: true });
   }
   /** Just the head's fields (a first end clicked). */
   renderHead() {
     if (!this.open) return;
     const ph = this.el.querySelector(".ph");
     if (!ph) return this.render();
+    const focus = this.focusKey();
     ph.replaceWith(this.head());
     this.wire();
+    this.refocus(focus);
   }
   head() {
-    const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}">Blame</button></div>`;
-    const pin = html`<span class="pin" title="${this.on ? "Kept on: click \xB1 Changes or \u2715 to turn it off" : "Peeking: click \xB1 Changes to keep it on"}">${this.on ? "on" : "peek"}</span>`;
-    const ttl = html`<div class="ttl">${pin}<h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-pressed="${String(this.settings)}" aria-label="${this.mode === "blame" ? "Blame settings" : "Diff settings"}" title="Settings">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Turn Changes off" title="Turn off (Esc)">✕</button></div>`;
+    const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
+    const ttl = html`<div class="ttl"><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
     let below;
-    if (this.settings) below = html`<p class="sub">${this.mode === "blame" ? "Blame settings" : "Diff settings"}</p>`;
-    else if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
+    if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
       const p = this.pair;
       const f = p ? this.name(p.from) : null, t = this.name(p ? p.to : null);
-      const field2 = (which, n, clear) => html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k}</code>` : html`<b style="opacity:.7">Choose…</b><code>a commit, a tag, your last visit</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Clear From" : "To the working tree"}">×</button>` : html`<span aria-hidden="true">▾</span>`}</div></div>`;
-      below = html`<div class="ends">${field2("from", f, !!p)}<span class="arrow">→</span>${field2("to", t, !!p?.to)}</div>`;
+      const field2 = (which, n, clear) => html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-expanded="${String(this.pick === which)}" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}" title="${which === "from" ? "The older version: click to choose it from the history" : "The newer version: click to choose it from the history"}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k || "\xA0"}</code>` : html`<b class="ph2">Choose…</b><code>a version from the history</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Clear From" : "To the working tree"}" title="${which === "from" ? "Clear: compare nothing" : `Back to ${this.host.tree?.title ?? "the working tree"}`}">×</button>` : html`<span class="chev" aria-hidden="true">▾</span>`}</div></div>`;
+      below = html`<div class="ends">${field2("from", f, !!p)}<span class="arrow" aria-hidden="true">→</span>${field2("to", t, !!p?.to)}</div>`;
     }
     return html`<div class="ph">${ttl}${seg}${below}</div>`;
   }
@@ -8883,11 +9112,11 @@ var Changes = class {
     const el = this.el.querySelector(".prog");
     if (!el) return;
     let text = "", prog, err = "", again = null;
-    const b = this.mode === "blame" ? this.blame?.summary() : null;
-    if (this.mode === "blame" && b) {
+    const b = this.mode === "blame" && this.blameAsked ? this.blame?.summary() : null;
+    if (b) {
       if (b.error) err = b.error, again = () => this.blame.retry();
       else if (b.busy) text = this.histProgress?.text && /history/i.test(this.histProgress.text) ? this.histProgress.text : b.busy, prog = this.histProgress?.total && /history/i.test(this.histProgress.text) ? [this.histProgress.done ?? 0, this.histProgress.total] : b.progress;
-    } else if (this.mode === "diff" && !this.settings) {
+    } else if (this.mode === "diff") {
       if (this.error) err = this.error, again = () => this.ran && this.run(this.ran);
       else if (this.busy) text = this.histProgress && /history/i.test(this.busy) ? this.histProgress.text : this.busy, prog = this.prog ?? (this.histProgress?.total ? [this.histProgress.done ?? 0, this.histProgress.total] : void 0);
       else if (this.pick && this.histProgress) text = this.histProgress.text, prog = this.histProgress.total ? [this.histProgress.done ?? 0, this.histProgress.total] : void 0;
@@ -8896,7 +9125,7 @@ var Changes = class {
     el.className = `prog${err ? " err" : ""}`;
     el.setAttribute("role", err ? "alert" : "status");
     if (err) {
-      el.replaceChildren(html`<span>${err}</span><button type="button" class="again">Try again</button>`);
+      el.replaceChildren(html`<span>${err}</span><button type="button" class="again" title="Read it again">Try again</button>`);
       el.querySelector(".again").onclick = () => again?.();
       return;
     }
@@ -8907,8 +9136,7 @@ var Changes = class {
     const body = this.el.querySelector(".body");
     if (!body) return;
     const keep = body.scrollTop;
-    if (this.settings) body.replaceChildren(this.mode === "blame" ? this.blameSettings() : this.diffSettings());
-    else if (this.mode === "blame") body.replaceChildren(this.blameBody());
+    if (this.mode === "blame") body.replaceChildren(this.blameBody());
     else if (this.pick) {
       body.replaceChildren(this.pickerHead());
       const g = this.ensureGraph();
@@ -8920,35 +9148,39 @@ var Changes = class {
     this.wireBody();
     this.badge();
   }
+  /** The footer: Diff's, always there (no jump as a diff comes): the pages shown, n of m, ‹ ›. */
   foot() {
-    if (this.settings || this.mode !== "diff") return html``;
+    if (this.mode !== "diff") return html``;
     const n = this.shown().length;
-    const say = this.busy && !this.items.length ? "\u2026" : this.cur < 0 ? `${n} change${n === 1 ? "" : "s"}` : `${this.cur + 1} of ${n}`;
-    return html`<div class="foot"><label class="toggle"><input type="checkbox" id="chg-hide" checked="${this.hide}"> Hide deletions</label><span aria-live="polite">${say}</span><span class="r nav"><button type="button" id="chg-prev" aria-label="Previous change ([)" title="Previous change ([)" disabled="${!n}">‹</button><button type="button" id="chg-next" aria-label="Next change (])" title="Next change (])" disabled="${!n}">›</button></span></div>`;
+    const has = !!this.ran && !this.busy;
+    const say = !this.ran ? "No diff yet" : this.busy && !this.items.length ? "\u2026" : this.cur < 0 ? `${n} change${n === 1 ? "" : "s"}` : `${this.cur + 1} of ${n}`;
+    const pg = (w, l, t) => html`<button type="button" data-pg="${w}" aria-pressed="${String(this.pages === w)}" disabled="${!has}" title="${t}">${l}</button>`;
+    return html`<div class="foot"><div class="seg tiny" role="group" aria-label="Pages shown (D)">${pg("diff", "Diff", "Show the diff's pages, the changes marked (D)")}${pg("current", "Current", "Show the current version's pages, the diff kept (D)")}</div><span class="count" aria-live="polite">${say}</span><span class="r nav"><button type="button" id="chg-prev" aria-label="Previous change" title="Previous change ([ or Shift+N)" disabled="${!n}">‹</button><button type="button" id="chg-next" aria-label="Next change" title="Next change (] or N)" disabled="${!n}">›</button></span></div>`;
   }
   pickerHead() {
     const w = this.pick;
     const g = this.ensureGraph();
     const cs = g.commits;
+    const word = this.host.words?.commit ?? "commit";
     const q = [];
     if (w === "from") {
       const visit2 = this.host.lastVisit?.();
-      if (visit2 && g.find(visit2) >= 0) q.push([cs[g.find(visit2)].id, "Your last visit"]);
+      if (visit2 && g.find(visit2) >= 0) q.push([cs[g.find(visit2)].id, "Your last visit", "The version as it was when you last opened Changes here"]);
       const tag = cs.find((c) => c.refs.some((r) => r.kind === "tag"));
       const far = this.farKnown;
       if (!tag && !far) void this.farTag();
-      if (tag) q.push([tag.id, `The last ${this.host.words?.commit === "version" ? "label" : "tag"} \xB7 ${tag.refs.find((r) => r.kind === "tag").name}`]);
-      else if (far) q.push([far.id, `The last ${this.host.words?.commit === "version" ? "label" : "tag"} \xB7 ${far.name}`]);
+      const tagWord = word === "version" ? "label" : "tag";
+      if (tag) q.push([tag.id, `The last ${tagWord} \xB7 ${tag.refs.find((r) => r.kind === "tag").name}`, `From the newest ${tagWord}`]);
+      else if (far) q.push([far.id, `The last ${tagWord} \xB7 ${far.name}`, `From the newest ${tagWord}`]);
       const merge2 = cs.find((c) => c.parents.length > 1);
-      if (merge2) q.push([merge2.parents[0], "Before the merge"]);
-      if (cs[0] && !q.length) q.push([cs[0].id, this.host.words?.commit === "version" ? "The last version" : "Last commit \xB7 HEAD"]);
+      if (merge2) q.push([merge2.parents[0], "Before the merge", "From just before the newest merge"]);
+      if (cs[0] && !q.length) q.push([cs[0].id, word === "version" ? "The last version" : "Last commit \xB7 HEAD", `From the newest ${word}`]);
     } else {
-      if (this.host.tree !== null) q.push([null, "Working tree"]);
-      else q.push([null, "Your edits now"]);
-      if (cs[0]) q.push([cs[0].id, this.host.words?.commit === "version" ? "The last version" : "Last commit \xB7 HEAD"]);
+      q.push([null, this.host.tree?.title ?? "Working tree", "Up to the text as it is now"]);
+      if (cs[0]) q.push([cs[0].id, word === "version" ? "The last version" : "Last commit \xB7 HEAD", `Up to the newest ${word}`]);
     }
-    const hint = g.aiming ? html`<b>Now click the other end</b> (the ${this.host.tree === null ? "editor's text" : "working tree"} for now). The same ${this.host.words?.commit ?? "commit"} again cancels.` : html`Click one end, then the other. Drag for a range. <b>Shift</b>-click: To. Double-click: one ${this.host.words?.commit ?? "commit"}'s changes.`;
-    return html`<div class="pickhead"><b>${w === "from" ? "Compare from\u2026" : "\u2026up to"}</b><button type="button" class="done" id="chg-done">Done</button></div><div class="quick">${q.map(([h, l]) => html`<button type="button" class="qb" data-q="${h ?? ""}">${l}</button>`)}</div><div class="hint" id="chg-hint">${hint}</div>`;
+    const hint = g.aiming ? html`<b>Now click the other end</b> (the ${this.host.tree === null ? "editor's text" : "working tree"} for now). The same ${word} again cancels.` : html`Click one end, then the other. Drag for a range. <b>Shift</b>-click: To. Double-click: one ${word}'s changes.`;
+    return html`<div class="pickhead"><b>${w === "from" ? "Compare from\u2026" : "\u2026up to"}</b><button type="button" class="done" id="chg-done" title="Back to the list, nothing changed (Esc)">Done</button></div><div class="quick">${q.map(([h, l, t]) => html`<button type="button" class="qb" data-q="${h ?? ""}" title="${t}">${l}</button>`)}</div><div class="hint" id="chg-hint">${hint}</div>`;
   }
   /** A list's skeleton: rows shaped like the changes'. */
   skeleton(n = 5) {
@@ -8957,20 +9189,21 @@ var Changes = class {
   list() {
     const all = this.items;
     const n = this.shown().length;
+    const word = this.host.words?.commit ?? "commit";
     const chips = KINDS3.map((k) => {
       const m = all.filter((c) => c.kind === k).length;
-      return m ? html`<button type="button" class="fchip" data-k="${k}" aria-pressed="${String(this.kinds.has(k))}">${k} <small>${m}</small></button>` : "";
+      return m ? html`<button type="button" class="fchip" data-k="${k}" aria-pressed="${String(this.kinds.has(k))}" title="${this.kinds.has(k) ? `Hide the ${k.toLowerCase()} changes from the list` : `Show the ${k.toLowerCase()} changes`}">${k} <small>${m}</small></button>` : "";
     });
-    const filters = all.length ? html`<div class="filters" role="group" aria-label="Kinds of change">${chips}</div>` : html``;
-    if (!this.ran && !this.busy) {
+    const filters = all.length ? html`<div class="filters" role="group" aria-label="Kinds of change">${chips}<label class="toggle hd" title="Leave deleted text out of the list and the pages"><input type="checkbox" id="chg-hide" checked="${this.hide}"> Hide deletions</label></div>` : html``;
+    if (!this.ran) {
       const g = this.graph;
-      if (g && !g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${this.host.words?.commit === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
-      return html`<div class="empty"><b>Choose where to compare from</b>Click From: a ${this.host.words?.commit ?? "commit"}, a ${this.host.words?.commit === "version" ? "label" : "tag"}, your last visit.</div>`;
+      if (g && !g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${word === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
+      return html`<div class="empty"><b>Pick a version to compare with</b>Choose From: a ${word}, a ${word === "version" ? "label" : "tag"} or your last visit. What changed since then is listed here and marked on the pages.<button type="button" class="primary" id="chg-start" title="Open the history to choose From">Choose a version…</button></div>`;
     }
     if (!all.length && this.busy) return this.skeleton();
     if (!all.length && this.error) return html``;
-    if (!all.length) return html`<div class="empty"><b>Nothing between these two points</b>The two versions have the same text.</div>`;
-    if (!n) return html`${filters}<div class="empty">No changes match these filters.</div>`;
+    if (!all.length) return html`<div class="empty"><b>Nothing between these two points</b>The two versions have the same text. Choose another From.</div>`;
+    if (!n) return html`${filters}<div class="empty"><b>No changes match these filters</b>Turn a kind back on above.</div>`;
     const groups = /* @__PURE__ */ new Map();
     this.shown().forEach((c, i) => (groups.get(c.sec) ?? groups.set(c.sec, []).get(c.sec)).push([c, i]));
     const seen = this.seenItems;
@@ -8981,45 +9214,57 @@ var Changes = class {
       seen.add(key);
       const who = c.who;
       const col = who?.color ?? (who ? hashColor(who.name) : UNCOMMITTED);
-      const by = who ? html`<span class="av sm" style="${`background:${col}`}">${initials(who.name)}</span>${who.name}${who.time ? ` \xB7 ${agoWords(who.time, Date.now() / 1e3)}` : ""}${who.short ? html` · <code>${who.short}</code>` : ""}${who.via ? html` · <span class="refp">via merge</span>` : ""}${c.wip ? this.host.words?.commit === "version" ? " \xB7 and yours, not saved yet" : " \xB7 and yours, not committed" : ""}` : c.wip ? html`<span class="av sm" style="${`background:${UNCOMMITTED}`}">Y</span>${this.host.words?.commit === "version" ? "You \xB7 not saved yet" : "You \xB7 not committed"}` : html`<span>${c.file}</span>`;
-      return html`<button type="button" class="${`citem${i === this.cur ? " cur" : ""}${isNew ? " new" : ""}`}" data-i="${i}"><span class="k">${c.kind}</span><span class="w"><div>${c.old ? html`<del>${c.old}</del> ` : ""}${c.neu ? html`<ins>${c.neu}</ins>` : ""}</div><small>${by}</small></span></button>`;
+      const mine = word === "version" ? "not saved yet" : "not committed";
+      const by = who ? html`<span class="av sm" style="${`background:${col}`}">${initials(who.name)}</span>${who.name}${who.time ? ` \xB7 ${agoWords(who.time, Date.now() / 1e3)}` : ""}${who.short ? html` · <code>${who.short}</code>` : ""}${who.via ? html` · <span class="refp">via merge</span>` : ""}${c.wip ? ` \xB7 and yours, ${mine}` : ""}` : c.wip ? html`<span class="av sm" style="${`background:${UNCOMMITTED}`}">Y</span>You · ${mine}` : html`<span>${c.file}</span>`;
+      return html`<button type="button" class="${`citem${i === this.cur ? " cur" : ""}${isNew ? " new" : ""}`}" data-i="${i}" title="Show this change on the pages"><span class="k">${c.kind}</span><span class="w"><div>${c.old ? html`<del>${c.old}</del> ` : ""}${c.neu ? html`<ins>${c.neu}</ins>` : ""}</div><small>${by}</small></span></button>`;
     })}`);
     return html`${filters}${rows}`;
   }
   blameBody() {
     const b = this.blame;
     if (!b) return html`<div class="empty">Blame needs the project's history.</div>`;
-    const s = b.summary();
     const L = b.look;
     const ramp = AGE_RAMPS[L.ages] ?? AGE_RAMPS.violet;
-    const colour = html`<div class="sec"><h3>Colour lines by</h3><div class="seg small" role="group"><button type="button" data-col="author" aria-pressed="${String(L.color === "author")}">Author</button><button type="button" data-col="age" aria-pressed="${String(L.color === "age")}">Age</button></div>${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}</div>`;
+    const word = b.words.commit;
+    if (!this.blameAsked)
+      return html`<div class="empty"><b>See who wrote each line</b>Bars in the margin, one per printed line, coloured by ${L.color === "age" ? "age" : "author"}; the people and the ${word}s that wrote this version listed here.<button type="button" class="primary" id="chg-blame-go" title="Read the history and mark who wrote each line">Show who wrote what</button></div>`;
+    const s = b.summary();
+    const colour = html`<div class="sec"><h3>Colour lines by</h3><div class="seg small" role="group"><button type="button" data-col="author" aria-pressed="${String(L.color === "author")}" title="A colour per person">Author</button><button type="button" data-col="age" aria-pressed="${String(L.color === "age")}" title="Newer lines darker">Age</button></div>${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}</div>`;
     if (!s.lines && (s.busy || s.waiting)) return html`${colour}<div class="sec"><h3>Who wrote this version</h3>${this.skeleton(3)}</div>`;
     if (!s.lines && s.error) return colour;
-    if (!s.lines) return html`${colour}<div class="empty"><b>Nothing to blame yet</b>The pages show here once they are built.</div>`;
-    const word = b.words.commit;
-    const people = s.people.map((p) => html`<button type="button" class="${`prow${b.focusP === p.key ? " sel" : ""}`}" data-p="${p.key}" aria-pressed="${String(b.focusP === p.key)}"><span class="av" style="${`background:${p.color}`}">${p.key ? initials(p.name) : "Y"}</span><span class="nm"><span>${p.name}</span><span class="bar6"><i style="${`width:${Math.round(100 * p.n / s.lines)}%;background:${p.color}`}"></i></span></span><span class="ct">${p.n}</span></button>`);
+    if (!s.lines) return html`${colour}<div class="empty"><b>Nothing to blame yet</b>The bars come once the pages are built.</div>`;
+    const people = s.people.map((p) => html`<button type="button" class="${`prow${b.focusP === p.key ? " sel" : ""}`}" data-p="${p.key}" aria-pressed="${String(b.focusP === p.key)}" title="${b.focusP === p.key ? "Show everyone's lines again" : `Pick out ${p.name}'s lines on the pages`}"><span class="av" style="${`background:${p.color}`}">${p.key ? initials(p.name) : "Y"}</span><span class="nm"><span>${p.name}</span><span class="bar6"><i style="${`width:${Math.round(100 * p.n / s.lines)}%;background:${p.color}`}"></i></span></span><span class="ct">${p.n}</span></button>`);
     const commits = s.commits.map((c) => {
       const x = c.commit;
-      return html`<button type="button" class="${`crow${b.focusC === c.c ? " sel" : ""}`}" data-c="${String(c.c)}" aria-pressed="${String(b.focusC === c.c)}"><span class="${`sw${x ? "" : " hatch"}`}" style="${`background:${c.color}`}"></span><span style="min-width:0"><div class="s">${x ? x.subject || "(no subject)" : word === "version" ? "Not saved to the history yet" : "Not committed"}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1e3)} · <code>${x.short}</code>${c.via ? html` · <span class="refp">${c.via.replace(/^On (\S+),.*/, "$1")}</span>` : ""}` : "You \xB7 now"}</small></span><span class="ct">${c.n}</span></button>`;
+      return html`<button type="button" class="${`crow${b.focusC === c.c ? " sel" : ""}`}" data-c="${String(c.c)}" aria-pressed="${String(b.focusC === c.c)}" title="${b.focusC === c.c ? "Show every line again" : `Pick out this ${word}'s lines on the pages`}"><span class="${`sw${x ? "" : " hatch"}`}" style="${`background:${c.color}`}"></span><span style="min-width:0"><div class="s">${x ? x.subject || "(no subject)" : word === "version" ? "Not saved to the history yet" : "Not committed"}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1e3)} · <code>${x.short}</code>${c.via ? html` · <span class="refp">${c.via.replace(/^On (\S+),.*/, "$1")}</span>` : ""}` : "You \xB7 now"}</small></span><span class="ct">${c.n}</span></button>`;
     });
     const more = s.waiting ? html`<small style="color:var(--phc-muted)">${`${s.waiting} file${s.waiting === 1 ? "" : "s"} still being read`}</small>` : "";
-    return html`${colour}<div class="sec"><h3><span>Who wrote this version · ${s.lines} lines</span></h3>${people}${more}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${commits}</div>`;
+    return html`${colour}<div class="sec"><h3><span>Who wrote this version · ${s.lines.toLocaleString()} ${s.unit}</span></h3>${people}${more}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${commits}</div>`;
   }
   segOf(key, cur, opts) {
-    return html`<div class="seg small" role="group">${opts.map(([v, l]) => html`<button type="button" data-look="${key}" data-v="${String(v)}" aria-pressed="${String(cur === v)}">${l}</button>`)}</div>`;
+    return html`<div class="seg small" role="group">${opts.map(([v, l, t]) => html`<button type="button" data-look="${key}" data-v="${String(v)}" aria-pressed="${String(cur === v)}" title="${t ?? null}">${l}</button>`)}</div>`;
+  }
+  /** The look's section under the list: the mode's settings, folded or open (⚙ too); the same ones as the panel's Settings, Changes. */
+  lookBox() {
+    if (this.pick) return html``;
+    const name = this.mode === "blame" ? "Blame's look" : "Diff's look";
+    return html`<div class="${`lookbox${this.lookOpen ? " open" : ""}`}"><button type="button" class="lookhead" id="chg-lookhead" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" title="${this.lookOpen ? `Fold ${name}` : `${name}: how the marks look, kept for next time`}"><span class="chev2" aria-hidden="true">▸</span>${name}</button><div class="lookin" id="chg-look" hidden="${!this.lookOpen}">${this.lookOpen ? this.mode === "blame" ? this.blameSettings() : this.diffSettings() : ""}</div></div>`;
   }
   diffSettings() {
     const L = this.look;
+    const can = !!this.host.diff?.download && !!this.ran && !this.busy;
     return html`<div class="set">
-      <h3>Colours</h3>
-      <div class="opt2"><span>Added / deleted</span><div class="swatches">${Object.entries(DIFF_COLORS).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
-      <h3>Styles</h3>
-      <div class="opt2"><span>Added text</span>${this.segOf("ins", L.ins, [["wavy", "Wavy"], ["line", "Underline"], ["mark", "Marker"], ["colour", "Colour"]])}</div>
-      <div class="opt2"><span>Deleted text</span>${this.segOf("del", L.del, [["strike", "Struck"], ["mark", "Marker"], ["caret", "Caret only"]])}</div>
-      <div class="opt2"><span>Changed figure</span>${this.segOf("fig", L.fig, [["side", "Side by side"], ["over", "Overlay"], ["new", "New only"]])}</div>
-      <div class="${`preview i-${L.ins} d-${L.del}`}">We show it <span class="dl">cuts the wait</span> <span class="ins">keeps every edit under 50 ms</span>.</div>
-      <button type="button" class="reset" data-reset="diff">Reset to defaults</button></div>`;
+      <div class="opt2"><span>Colours</span><div class="swatches">${Object.entries(DIFF_COLORS).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
+      <div class="opt2"><span>Added text</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
+      <div class="opt2"><span>Deleted text</span>${this.segOf("del", L.del, [["strike", "Struck", "Struck through"], ["mark", "Marker", "Struck, a highlight behind it"], ["caret", "Caret only", "A caret where it was, the text left out"]])}</div>
+      <div class="opt2"><span>Changed figure</span>${this.segOf("fig", L.fig, [["side", "Side by side", "The old one beside the new"], ["over", "Overlay", "The old one under the new"], ["new", "New only", "The new one alone"]])}</div>
+      <div class="opt2"><span>Change bars</span>${this.segOf("bars", L.bars ? "on" : "off", [["off", "Off", "No bars in the margin"], ["on", "In the margin", "A bar beside each changed line (latexdiff's classic marks)"]])}</div>
+      <div class="${`preview i-${L.ins} d-${L.del}${L.bars ? " bars" : ""}`}" aria-label="Preview">We show it <span class="dl">cuts the wait</span> <span class="ins">keeps every edit under 50 ms</span>.</div>
+      ${this.host.diff?.download ? html`<div class="opt2"><span>Download</span><div class="dls"><button type="button" class="lnk" data-dl="pdf" disabled="${!can}" title="${can ? "The diff's PDF" : "Compare two versions first"}">PDF</button><button type="button" class="lnk" data-dl="tex" disabled="${!can}" title="${can ? "The marked-up source, diff.tex" : "Compare two versions first"}">diff.tex</button></div></div>` : ""}
+      <button type="button" class="reset" data-reset="diff" title="Diff's look as it came">Reset to defaults</button></div>`;
   }
+  /** Blame's commits as seen (a skipped one's name and subject kept). */
+  seenCommits = /* @__PURE__ */ new Map();
   blameSettings() {
     const b = this.blame;
     const L = b.look;
@@ -9027,61 +9272,110 @@ var Changes = class {
     const hashes = b.words.hashes !== false;
     const detailNote = L.detail === "line" ? "Each line takes the newest edit in it, as git blame does." : L.detail === "word" ? "Each word keeps who typed it: a word someone changed in another's sentence is theirs." : word === "version" ? "Exact to the character, from Overleaf's history." : "Each character as git's history gives it: words at best.";
     const known2 = b.commitsKnown();
+    for (const c of known2) this.seenCommits.set(c.id, c);
     const skips = [.../* @__PURE__ */ new Set([...L.skip, ...known2.map((c) => c.id)])].slice(0, 40).map((id) => {
-      const c = known2.find((x) => x.id === id);
-      return html`<label><input type="checkbox" data-skip="${id}" checked="${L.skip.includes(id)}"><span>${c ? html`<code>${c.short}</code> ${c.subject}${hashes ? "" : ` \xB7 ${c.author}`}` : id.slice(0, 10)}</span></label>`;
+      const c = known2.find((x) => x.id === id) ?? this.seenCommits.get(id);
+      const what = c ? `${c.short} ${c.subject}${hashes ? "" : ` \xB7 ${c.author}`}` : id.slice(0, 10);
+      return html`<label title="${what}: skipped, its lines go to whoever wrote them before"><input type="checkbox" data-skip="${id}" checked="${L.skip.includes(id)}"><span>${c ? html`<code>${c.short}</code> ${c.subject}${hashes ? "" : ` \xB7 ${c.author}`}` : id.slice(0, 10)}</span></label>`;
     });
     const since = b.summary().since;
-    const sinceSel = html`<select id="chg-since" aria-label="Changed since"><option value="off" selected="${L.since === "off"}">Off</option>${since.map((s) => html`<option value="${s.v}" selected="${L.since === s.v}">${s.label}</option>`)}${L.since !== "off" && !since.some((s) => s.v === L.since) ? html`<option value="${L.since}" selected>${L.since.split(":").slice(1).join(":")}</option>` : ""}</select>`;
+    const sinceSel = html`<select id="chg-since" aria-label="Changed since" title="Lines older than this are dimmed"><option value="off" selected="${L.since === "off"}">Off</option>${since.map((s) => html`<option value="${s.v}" selected="${L.since === s.v}">${s.label}</option>`)}${L.since !== "off" && !since.some((s) => s.v === L.since) ? html`<option value="${L.since}" selected>${L.since.split(":").slice(1).join(":")}</option>` : ""}</select>`;
     const sw = (key, cur, opts) => html`<div class="swatches">${opts.map(([k, cols, name]) => html`<button type="button" class="swb" data-look="${key}" data-v="${k}" aria-pressed="${String(cur === k)}" title="${name}" aria-label="${name}">${cols.slice(0, 4).map((c) => html`<i style="${`background:${c}`}"></i>`)}</button>`)}</div>`;
     return html`<div class="set">
-      <h3>What counts as a change</h3>
-      <div class="opt2"><span>Detail</span>${this.segOf("detail", L.detail, [["line", "Line"], ["word", "Word"], ["char", "Character"]])}</div>
+      <div class="opt2"><span>Detail</span>${this.segOf("detail", L.detail, [["line", "Line", "Whole lines"], ["word", "Word", "Word by word"], ["char", "Character", "Character by character"]])}</div>
       <p class="note2">${detailNote}</p>
-      <div class="opt2"><span>Spacing-only edits</span>${this.segOf("ws", L.ws, [["ignore", "Ignore"], ["count", "Count"]])}</div>
-      <div class="opt2"><span>Moved text</span>${this.segOf("moved", L.moved, [["keep", "Keep its writer"], ["mover", "Credit the mover"]])}</div>
-      <div class="opt2"><span>${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Show hatched"], ["hide", "Hide"]])}</div>
+      <div class="opt2"><span>Spacing-only edits</span>${this.segOf("ws", L.ws, [["ignore", "Ignore", "A change of spacing alone changes no one's text"], ["count", "Count", "Spacing changes count as edits"]])}</div>
+      <div class="opt2"><span>Moved text</span>${this.segOf("moved", L.moved, [["keep", "Keep its writer", "Text moved stays its writer's"], ["mover", "Credit the mover", "Text moved is the mover's"]])}</div>
+      <div class="opt2"><span>${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Show hatched", "Grey hatched bars"], ["hide", "Hide", "No bars"]])}</div>
       <div class="opt2" style="align-items:start"><span>Skip ${word}s</span><div class="skips">${skips.length ? skips : html`<small>None blamed yet</small>`}<small>A skipped ${word}'s lines go to whoever wrote them before (a reformat, a spell-check)</small></div></div>
-      <h3>Pick out</h3>
       <div class="opt2"><span>Changed since</span>${sinceSel}</div>
-      <div class="opt2"><span>Tint the text</span>${this.segOf("tint", L.tint, [["off", "Off"], ["hover", "Paragraph under pointer"], ["all", "Everywhere"]])}</div>
-      <h3>Look</h3>
-      <div class="opt2"><span>Bars</span>${this.segOf("bars", L.bars, [["left", "Left margin"], ["right", "Right margin"]])}</div>
+      <div class="opt2"><span>Tint the text</span>${this.segOf("tint", L.tint, [["off", "Off", "No tint"], ["hover", "Under pointer", "The paragraph under the pointer"], ["all", "Everywhere", "Every line tinted"]])}</div>
+      <div class="opt2"><span>Bars</span>${this.segOf("bars", L.bars, [["left", "Left margin", "Bars in the left margin"], ["right", "Right margin", "Bars in the right margin"]])}</div>
       <div class="opt2"><span>Bar width</span>${this.segOf("width", L.width, [[2, "Thin"], [4, "Medium"], [7, "Wide"]])}</div>
-      <div class="opt2"><span>People</span>${sw("people", L.people, [["okabe", AUTHOR_COLORS, "Okabe\u2013Ito"], ["overleaf", OVERLEAF_COLORS, "Overleaf's collaborator colours"]])}</div>
+      <div class="opt2"><span>People</span>${sw("people", L.people, [["okabe", AUTHOR_COLORS, "Okabe\u2013Ito (colour-blind safe)"], ["overleaf", OVERLEAF_COLORS, "Overleaf's collaborator colours"]])}</div>
       <div class="opt2"><span>Age</span>${sw("ages", L.ages, Object.entries(AGE_RAMPS).map(([k, v]) => [k, v.light, v.name]))}</div>
-      <button type="button" class="reset" data-reset="blame">Reset to defaults</button></div>`;
+      <button type="button" class="reset" data-reset="blame" title="Blame's look as it came">Reset to defaults</button></div>`;
+  }
+  /** The look changed, from the popover or the panel's Settings: kept, applied. */
+  setDiffLook(l) {
+    this.look = { ...this.look, ...l };
+    this.applyColors();
+    if (this.ran) this.host.diff?.restyle(this.look, this.hide);
+    this.save();
+    this.render();
+  }
+  setHide(v) {
+    this.hide = v;
+    this.save();
+    if (this.ran) this.host.diff?.restyle(this.look, this.hide);
+    this.render();
+  }
+  setBlameLook(l) {
+    this.blame?.setLook(l);
+    this.save();
+    this.render();
+  }
+  /**
+   * The panel's Settings, Changes: the same choices as the popover's look
+   * sections (one place or the other, the same prefs).
+   */
+  settingRows() {
+    const rows = [];
+    const L = this.look;
+    if (this.host.diff) {
+      rows.push(
+        { id: "chg-colors", label: "Diff: colours", help: "Added and deleted text", kind: "choice", options: Object.entries(DIFF_COLORS).map(([k, v]) => [k, v[2].replace(/ \(.*\)/, "")]), value: L.colors, set: (v) => this.setDiffLook({ colors: v }) },
+        { id: "chg-ins", label: "Diff: added text", kind: "choice", options: [["wavy", "Wavy"], ["line", "Underline"], ["mark", "Marker"], ["colour", "Colour"]], value: L.ins, set: (v) => this.setDiffLook({ ins: v }) },
+        { id: "chg-del", label: "Diff: deleted text", kind: "choice", options: [["strike", "Struck"], ["mark", "Marker"], ["caret", "Caret only"]], value: L.del, set: (v) => this.setDiffLook({ del: v }) },
+        { id: "chg-fig", label: "Diff: changed figure", kind: "choice", options: [["side", "Side by side"], ["over", "Overlay"], ["new", "New only"]], value: L.fig, set: (v) => this.setDiffLook({ fig: v }) },
+        { id: "chg-bars", label: "Diff: change bars", help: "A bar beside each changed line (latexdiff's classic marks)", kind: "toggle", value: !!L.bars, set: (v) => this.setDiffLook({ bars: !!v }) },
+        { id: "chg-hide", label: "Diff: hide deletions", help: "Deleted text left out of the list and the pages", kind: "toggle", value: this.hide, set: (v) => this.setHide(!!v) }
+      );
+    }
+    const b = this.blame;
+    if (b) {
+      const B = b.look;
+      rows.push(
+        { id: "bl-detail", label: "Blame: detail", kind: "choice", options: [["line", "Line"], ["word", "Word"], ["char", "Character"]], value: B.detail, set: (v) => this.setBlameLook({ detail: v }) },
+        { id: "bl-color", label: "Blame: colour lines by", kind: "choice", options: [["author", "Author"], ["age", "Age"]], value: B.color, set: (v) => this.setBlameLook({ color: v }) },
+        { id: "bl-ws", label: "Blame: spacing-only edits", kind: "choice", options: [["ignore", "Ignore"], ["count", "Count"]], value: B.ws, set: (v) => this.setBlameLook({ ws: v }) },
+        { id: "bl-moved", label: "Blame: moved text", kind: "choice", options: [["keep", "Keep its writer"], ["mover", "Credit the mover"]], value: B.moved, set: (v) => this.setBlameLook({ moved: v }) },
+        { id: "bl-tint", label: "Blame: tint the text", kind: "choice", options: [["off", "Off"], ["hover", "Under pointer"], ["all", "Everywhere"]], value: B.tint, set: (v) => this.setBlameLook({ tint: v }) },
+        { id: "bl-bars", label: "Blame: bars", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v }) },
+        { id: "bl-width", label: "Blame: bar width", kind: "choice", options: [["2", "Thin"], ["4", "Medium"], ["7", "Wide"]], value: String(B.width), set: (v) => this.setBlameLook({ width: Number(v) }) },
+        { id: "bl-people", label: "Blame: people's colours", kind: "choice", options: [["okabe", "Okabe\u2013Ito"], ["overleaf", "Overleaf's"]], value: B.people, set: (v) => this.setBlameLook({ people: v }) }
+      );
+    }
+    return rows;
   }
   wire() {
     const $ = (s) => this.el.querySelector(s);
     $("#chg-x").onclick = () => this.off();
-    $("#chg-gear").onclick = () => {
-      this.settings = !this.settings;
-      this.pick = null;
+    const look2 = () => {
+      this.lookOpen = !this.lookOpen;
       this.render();
+      if (this.lookOpen) this.el.querySelector(".lookbox")?.scrollIntoView({ block: "nearest" });
     };
+    $("#chg-gear").onclick = look2;
+    const lh = $("#chg-lookhead");
+    if (lh) lh.onclick = look2;
     for (const b of this.el.querySelectorAll(".ph [data-m]"))
       b.onclick = () => {
-        if (this.mode === b.dataset.m) return;
-        this.mode = b.dataset.m;
-        this.settings = false;
+        const m = b.dataset.m;
+        if (m === "blame") this.blameAsked = true;
+        if (this.mode === m && m !== "blame") return;
+        this.mode = m;
         this.pick = null;
         this.cur = -1;
         this.save();
-        this.marks(true);
+        this.marks();
         this.render();
       };
     const field2 = (which) => {
       const f = $(`#chg-${which}`);
       if (!f) return;
-      const go = () => {
-        this.pick = this.pick === which ? null : which;
-        const g = this.ensureGraph();
-        if (this.pick) g.open(which);
-        this.render();
-      };
-      f.onclick = (e) => !e.target.closest(".clr") && go();
-      f.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), go());
+      f.onclick = (e) => !e.target.closest(".clr") && this.openPicker(which);
+      f.onkeydown = (e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), this.openPicker(which));
     };
     field2("from");
     field2("to");
@@ -9094,32 +9388,52 @@ var Changes = class {
           this.items = [];
           this.host.diff?.stop();
           this.graph?.mark(null, null);
+          this.marks();
           this.render();
         } else if (this.pair) this.choose({ from: this.pair.from, to: null }, false);
       };
-    const hide = $("#chg-hide");
-    if (hide)
-      hide.onchange = () => {
-        this.hide = hide.checked;
-        this.save();
-        if (this.ran) this.host.diff?.restyle(this.look, this.hide);
-        this.el.querySelector(".body")?.classList.toggle("hidedel", this.hide);
-      };
+    for (const b of this.el.querySelectorAll("[data-pg]")) b.onclick = () => this.showPages(b.dataset.pg);
     const prev = $("#chg-prev"), next = $("#chg-next");
     if (prev) prev.onclick = () => this.step(-1);
     if (next) next.onclick = () => this.step(1);
+    this.wireLook();
     const grip = $(".grip");
     if (grip)
       grip.onpointerdown = (e) => {
         grip.setPointerCapture(e.pointerId);
-        this.dragging = true;
         const right = this.el.getBoundingClientRect().right;
         grip.onpointermove = (m) => {
-          this.width = Math.max(320, Math.min(640, right - m.clientX));
-          this.el.style.setProperty("--chg-w", `${this.width}px`);
-          this.el.style.left = `${right - this.width}px`;
+          this.width = Math.max(300, Math.min(640, right - m.clientX));
+          this.place();
         };
-        grip.onpointerup = () => (grip.onpointermove = null, this.dragging = false);
+        grip.onpointerup = () => grip.onpointermove = null;
+      };
+  }
+  /** The look's controls (the section under the list). */
+  wireLook() {
+    const box = this.el.querySelector(".lookin");
+    if (!box) return;
+    const b = this.blame;
+    for (const x of box.querySelectorAll("[data-look]"))
+      x.onclick = () => {
+        const k = x.dataset.look, v = x.dataset.v;
+        if (this.mode === "blame") this.setBlameLook({ [k]: k === "width" ? Number(v) : v });
+        else this.setDiffLook(k === "bars" ? { bars: v === "on" } : { [k]: v });
+      };
+    for (const x of box.querySelectorAll("[data-skip]"))
+      x.onchange = () => {
+        if (!b) return;
+        const skip = new Set(b.look.skip);
+        x.checked ? skip.add(x.dataset.skip) : skip.delete(x.dataset.skip);
+        this.setBlameLook({ skip: [...skip] });
+      };
+    const since = box.querySelector("#chg-since");
+    if (since) since.onchange = () => this.setBlameLook({ since: since.value });
+    for (const x of box.querySelectorAll("[data-dl]")) x.onclick = () => this.host.diff?.download?.(x.dataset.dl);
+    for (const x of box.querySelectorAll("[data-reset]"))
+      x.onclick = () => {
+        if (x.dataset.reset === "blame") this.setBlameLook({ ...BLAME_LOOK, skip: [] });
+        else this.setDiffLook({ ...DIFF_LOOK });
       };
   }
   wireBody() {
@@ -9127,19 +9441,34 @@ var Changes = class {
     if (!body) return;
     const $ = (s) => body.querySelector(s);
     const done = $("#chg-done");
-    if (done) done.onclick = () => (this.pick = null, this.graph?.cancel(), this.render());
+    if (done)
+      done.onclick = () => {
+        this.pick = null;
+        this.graph?.cancel();
+        this.render();
+        this.el.querySelector("#chg-from")?.focus();
+      };
+    const start = $("#chg-start");
+    if (start) start.onclick = () => this.openPicker("from");
+    const go = $("#chg-blame-go");
+    if (go)
+      go.onclick = () => {
+        this.blameAsked = true;
+        this.marks();
+        this.render();
+      };
     for (const q of body.querySelectorAll(".qb"))
       q.onclick = () => {
         const h = q.dataset.q || null;
         const p = this.pair;
+        const g2 = this.ensureGraph();
         if (this.pick === "from") {
           if (!h) return;
-          const g2 = this.ensureGraph();
           const keepTo = p?.to && g2.find(p.to) >= 0 && g2.find(p.to) < g2.find(h) ? p.to : null;
           this.choose({ from: h, to: keepTo }, true);
         } else {
-          const from2 = p?.from ?? this.ensureGraph().commits[1]?.id ?? this.ensureGraph().commits[0]?.id;
-          if (from2) this.choose({ from: h === from2 ? this.ensureGraph().commits[this.ensureGraph().find(from2)]?.parents[0] ?? from2 : from2, to: h }, true);
+          const from2 = p?.from ?? g2.commits[1]?.id ?? g2.commits[0]?.id;
+          if (from2) this.choose({ from: h === from2 ? g2.commits[g2.find(from2)]?.parents[0] ?? from2 : from2, to: h }, true);
         }
       };
     for (const c of body.querySelectorAll(".fchip[data-k]"))
@@ -9150,65 +9479,32 @@ var Changes = class {
         this.save();
         this.render();
       };
+    const hide = $("#chg-hide");
+    if (hide) hide.onchange = () => this.setHide(hide.checked);
     for (const c of body.querySelectorAll(".citem"))
       c.onclick = () => {
         this.cur = Number(c.dataset.i);
         const it = this.shown()[this.cur];
         if (it && this.host.diff && this.ran) {
-          this.host.diff.show(true);
+          if (this.pages !== "diff") this.showPages("diff");
           this.host.diff.goto(it.k);
         }
         this.render();
       };
     const b = this.blame;
-    for (const x of body.querySelectorAll("[data-col]"))
-      x.onclick = () => {
-        b?.setLook({ color: x.dataset.col });
-        this.save();
-      };
+    for (const x of body.querySelectorAll("[data-col]")) x.onclick = () => this.setBlameLook({ color: x.dataset.col });
     for (const x of body.querySelectorAll(".prow")) x.onclick = () => b?.focus("person", x.dataset.p ?? "");
     for (const x of body.querySelectorAll(".crow")) x.onclick = () => b?.focus("commit", Number(x.dataset.c));
-    for (const x of body.querySelectorAll("[data-look]"))
-      x.onclick = () => {
-        const k = x.dataset.look, v = x.dataset.v;
-        if (this.mode === "blame" && b) b.setLook({ [k]: k === "width" ? Number(v) : v });
-        else {
-          this.look = { ...this.look, [k]: v };
-          this.applyColors();
-          if (this.ran) this.host.diff?.restyle(this.look, this.hide);
-        }
-        this.save();
-        this.render();
-      };
-    for (const x of body.querySelectorAll("[data-skip]"))
-      x.onchange = () => {
-        if (!b) return;
-        const skip = new Set(b.look.skip);
-        x.checked ? skip.add(x.dataset.skip) : skip.delete(x.dataset.skip);
-        b.setLook({ skip: [...skip] });
-        this.save();
-      };
-    const since = $("#chg-since");
-    if (since)
-      since.onchange = () => {
-        b?.setLook({ since: since.value });
-        this.save();
-      };
-    for (const x of body.querySelectorAll("[data-reset]"))
-      x.onclick = () => {
-        if (x.dataset.reset === "blame") b?.setLook({ ...BLAME_LOOK, skip: [] });
-        else {
-          this.look = { ...DIFF_LOOK };
-          this.applyColors();
-          if (this.ran) this.host.diff?.restyle(this.look, this.hide);
-        }
-        this.save();
-        this.render();
-      };
     const g = this.graph;
-    if (this.pick && g) {
-      g.element.onpointerup = () => setTimeout(() => this.open && this.pick && this.refreshHint(), 0);
-    }
+    if (this.pick && g) g.element.onpointerup = () => setTimeout(() => this.open && this.pick && this.refreshHint(), 0);
+  }
+  /** The picker's quick choices, the history read further (a tag, a merge found): replaced where they changed, in place. */
+  refreshQuick() {
+    const q = this.el.querySelector(".quick");
+    const nq = this.pickerHead().querySelector(".quick");
+    if (!q || !nq || q.textContent === nq.textContent) return;
+    q.replaceWith(nq);
+    this.wireBody();
   }
   refreshHint() {
     const h = this.el.querySelector("#chg-hint");
@@ -9227,14 +9523,15 @@ var Changes = class {
     const main = g.commits[0]?.refs.find((r) => r.kind === "branch")?.name ?? "main";
     return `On ${m.branch}, merged into ${main} (${m.merge.short})`;
   }
-  /** The graph read (Blame's merges need it): its first page. */
+  /** The graph read (Blame's merges need it): its first page; Blame asked for, so the history is being read anyway. */
   readHistory() {
+    if (!this.blameAsked) return;
     const g = this.ensureGraph();
     if (!g.commits.length && g.hasMore && !g.busy) void g.load();
   }
-  /** The history changed (a commit, a new version): read again. */
+  /** The history changed (a commit, a new version): read again, if it was read. */
   historyChanged() {
-    if (!this.graph) return;
+    if (!this.graph?.commits.length) return;
     void this.graph.reload();
   }
 };
@@ -9386,7 +9683,7 @@ var TIPS = [
     at: "#b-changes",
     title: "Changes",
     fresh: true,
-    text: "Hover \xB1 Changes to see what changed since an earlier version, marked on the pages; switch to Blame to see who wrote each line. Click it to keep the marks on.",
+    text: "Click \xB1 Changes to see what changed since an earlier version, marked on the pages, or switch to Blame to see who wrote each line. Click it again to close it.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
     demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`
   },
@@ -9470,7 +9767,7 @@ var Panel = class {
     <span class="grow"></span>
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
-    <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what (hover to peek, click to keep on)" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
+    <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
@@ -9559,7 +9856,7 @@ var Panel = class {
     this.$("#go").onclick = () => this.rebuild();
     this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
     this.$("#r-clean").onclick = () => (this.menu(null), this.clean());
-    this.$("#r-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), this.changes?.setOn(true));
+    this.$("#r-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), this.changes?.setOpen(true));
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
@@ -9621,9 +9918,10 @@ var Panel = class {
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || this.changes?.open) return;
+      if (e.key !== "Escape") return;
       const open = this.root.querySelector(".dialog:not([hidden])");
-      if (open) open.hidden = true;
+      if (!open && this.changes?.open) return;
+      if (open) open.hidden = true, e.preventDefault();
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
       else if (!this.escapeProblems()) this.unmark();
     });
@@ -9665,7 +9963,7 @@ var Panel = class {
     this.extras(opts);
     if (opts.blame) {
       const host3 = { ...opts.blame, compare: opts.changes?.diff ? (c) => this.changes?.diffCommit(c) : opts.blame.compare, via: opts.blame.via ?? ((c) => this.changes?.via(c.id) ?? null) };
-      const bl = this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true) }, host3);
+      const bl = this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), avoid: () => this.changes?.box() ?? null }, host3);
       let dark = this.sheetDark();
       new MutationObserver(() => dark !== this.sheetDark() && (dark = this.sheetDark(), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
     }
@@ -11477,6 +11775,7 @@ var Panel = class {
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },
       { title: "Packages", rows: [] },
+      { title: "Changes", rows: this.changes?.settingRows() ?? [] },
       { title: "Updates and tips", rows: tips }
     ];
   }
@@ -14147,6 +14446,12 @@ function textLayer(lines3, w, h) {
   return svg2;
 }
 
+// viewer/src/compare.ts
+function diffStyle(l, hide) {
+  const [add, del] = DIFF_COLORS[l.colors] ?? DIFF_COLORS.blue;
+  return { markup: l.bars ? "culinechbar" : "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
+}
+
 // crates/cli/viewer/cli.ts
 var Socket = class {
   ws;
@@ -14402,6 +14707,15 @@ var blame = {
     return r.ok ? r.json : r.error ?? "no history here";
   },
   glyphs: (k) => session.pageGlyphs(k),
+  // (a build done: a file blamed again only once its text on disk changed, every file once HEAD moved)
+  text: async (file) => {
+    const r = await sock.request({ op: "info", what: "source", file });
+    return r.ok && r.json ? String(r.json.text ?? "") : void 0;
+  },
+  head: async () => {
+    const r = await sock.request({ op: "info", what: "head" });
+    return r.ok && typeof r.json?.head === "string" ? r.json.head : null;
+  },
   goto: (file, line) => source(file, line)
 };
 var diffState = {};
@@ -14417,10 +14731,7 @@ var save = (name) => {
   a.download = name;
   a.click();
 };
-var lookFields = (l, hide) => {
-  const [add, del] = { blue: ["#1347ae", "#bb1b1b"], green: ["#1a7f37", "#cf222e"], safe: ["#0072B2", "#D55E00"], mono: ["#111111", "#7a7a7a"] }[l.colors] ?? ["#1347ae", "#bb1b1b"];
-  return { markup: "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
-};
+var lookFields = (l, hide) => diffStyle(l, hide);
 var goes = 0;
 var wanted;
 var words2 = (src) => src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");

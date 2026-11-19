@@ -511,7 +511,7 @@ const TIPS: { id: string; at: string; title: string; text: string; demo: () => D
   },
   {
     id: "changes", at: "#b-changes", title: "Changes", fresh: true,
-    text: "Hover ± Changes to see what changed since an earlier version, marked on the pages; switch to Blame to see who wrote each line. Click it to keep the marks on.",
+    text: "Click ± Changes to see what changed since an earlier version, marked on the pages, or switch to Blame to see who wrote each line. Click it again to close it.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
     demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
   },
@@ -591,7 +591,7 @@ export class Panel {
     <span class="grow"></span>
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
-    <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what (hover to peek, click to keep on)" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
+    <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
@@ -684,7 +684,7 @@ export class Panel {
     this.$("#go").onclick = () => this.rebuild();
     this.$("#r-rebuild").onclick = () => (this.menu(null), this.rebuild());
     this.$("#r-clean").onclick = () => (this.menu(null), this.clean());
-    this.$("#r-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), this.changes?.setOn(true));
+    this.$("#r-compare").onclick = this.$("#x-compare").onclick = () => (this.menu(null), this.changes?.setOpen(true));
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
@@ -750,9 +750,11 @@ export class Panel {
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key !== "Escape" || this.changes?.open) return;
+      if ((e as KeyboardEvent).key !== "Escape") return;
       const open = this.root.querySelector<HTMLElement>(".dialog:not([hidden])");
-      if (open) open.hidden = true;
+      if (!open && this.changes?.open) return;
+      // (taken: Changes, under the dialog, leaves this Esc alone)
+      if (open) (open.hidden = true), e.preventDefault();
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
       else if (!this.escapeProblems()) this.unmark();
     });
@@ -796,7 +798,7 @@ export class Panel {
     if (opts.blame) {
       // (Blame's "What this commit changed" is Changes' Diff of it; a merged commit's branch from Changes' graph)
       const host: BlameHost = { ...opts.blame, compare: opts.changes?.diff ? (c) => this.changes?.diffCommit(c) : opts.blame.compare, via: opts.blame.via ?? ((c) => this.changes?.via(c.id) ?? null) };
-      const bl = (this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true) }, host));
+      const bl = (this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), avoid: () => this.changes?.box() ?? null }, host));
       // (the pages drawn dark or light again: the bars' colours with them)
       let dark = this.sheetDark();
       new MutationObserver(() => dark !== this.sheetDark() && ((dark = this.sheetDark()), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
@@ -2911,6 +2913,7 @@ export class Panel {
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build },
       { title: "Packages", rows: [] },
+      { title: "Changes", rows: (this.changes?.settingRows() ?? []) as SettingRow[] },
       { title: "Updates and tips", rows: tips },
     ];
   }

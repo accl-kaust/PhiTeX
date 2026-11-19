@@ -193,15 +193,19 @@ jobs:
           # top level, a search, a folder opened, a drag into a folder, a settings change)
           node tools/dev/mock-run.mjs test/scenarios/dashboard.json
           # (Changes, Diff and Blame in one popover under ± Changes, on a generated history of
-          # 764 changes in 650 sessions (tools/mock/history-gen.mjs): hover peeks, a click keeps it
-          # on; the list, its filters, ] and [; the picker's rules (an end, the aim, the other end,
-          # the same again, Esc, a double-click, shift-click, a drag, Done); Diff's and Blame's
-          # settings kept; Blame exact to the character against the generator's own truth; the card's
-          # "What this version changed"; light and dark; reopened from the history kept)
+          # 764 changes in 650 sessions (tools/mock/history-gen.mjs): its tip once, then never; a
+          # hover does nothing and reads nothing; a click opens it, reading nothing till a version is
+          # picked; the pointer and clicks on the pages leave it open; the list, its filters, ] [ N
+          # and D; the picker's rules (an end, the aim, the other end, the same again, Esc, a
+          # double-click, shift-click, a drag, Done); Diff's and Blame's look inline and in Settings,
+          # kept; Blame once its half is clicked, exact to the character against the generator's own
+          # truth; the card after a dwell; a 2 s pointer sweep with no long task; a clean rebuild
+          # blames nothing again, the lists' nodes kept; light and dark; Esc and ✕ close it)
           node tools/dev/mock-run.mjs test/scenarios/changes.json
           # (the same history read slowly (each read 700 ms late): skeletons and the progress line
           # at once, the graph and the bars filling as pages land, usable meanwhile; a failed read
-          # said with Try again)
+          # said with Try again; the first build held: Blame's people and versions filled before any
+          # page, each page's bars as it comes, nothing read again)
           node tools/dev/mock-run.mjs test/scenarios/changes-slow.json
           # (the loading animation from the moment the panel shows, no page ready: the project's
           # download held, Overleaf's PDF pane laid out late; each opening, "off", gone with the page)

@@ -1254,15 +1254,22 @@ TeX run; the PDF stays byte-identical.
   content script answer it from their own history): `{op: "blame", files:
   [NAME]}` → `{commits: [{id, short, author, email, time, subject}],
   files: {NAME: {text, lines: [commit index or -1]} | {last: commit index
-  or -1} | {error}}, refs: [{name, kind, time}], now}`. A text file is
+  or -1} | {error}}, refs: [{name, kind, time}], head, now}`; no files: the
+  main file and what it inputs. A text file is
   blamed as the build reads it (an attached editor's buffer, else the
   disk's), `-1` its lines `HEAD` does not have; a binary file (an image)
   has its last change. The watch reads git itself (`phitex-git`, no `git`
   process); renames are not followed.
 - **Changes (built 2026-11-19).** Diff and Blame are one popover under one
-  `± Changes` button (`viewer/src/changes.ts`): hovering it peeks, a click
-  keeps it on (the marks stay, the popover back on hover), ✕, Esc or a
-  second click turns it off. Diff: From → To (a commit, a tag, your last
+  `± Changes` button (`viewer/src/changes.ts`): a click opens it, a second
+  click, ✕ or Esc closes it; the pointer and clicks elsewhere never do.
+  Opening reads nothing: a diff starts once a range is picked, Blame once
+  its half is clicked. Blame is worked out from the sources (the session's
+  main file and what it inputs, else every .tex and .bib; the watch's
+  `blame` op with no files picks them itself) and the history, never from
+  the pages; each page gets its bars as its glyphs come, and a build blames
+  nothing again unless a file's text or the history's head (`info`
+  `head`) moved. Diff: From → To (a commit, a tag, your last
   visit; the working tree), the changes listed by place with kind filters,
   `]`/`[` through them, Hide deletions; From and To open the commit picker
   (`viewer/src/commits.ts`: one end, the rows to the pointer aimed, the
@@ -1270,8 +1277,8 @@ TeX run; the PDF stays byte-identical.
   commit against its first parent, the picker staying; the graph coloured
   by branch, a first parent in its lane). Blame: who wrote this version by
   person and by commit, each a filter; the card's "What this commit
-  changed" is Diff of that commit. Each mode's settings (⚙) are kept with
-  the viewer's.
+  changed" is Diff of that commit. Each mode's look (⚙) opens under its
+  list and is in the viewer's Settings too, kept with the viewer's.
 - **The `blame` op's options**: `{op: "blame", files, detail?: "line" |
   "word" | "char", ws?: "ignore" | "count", moved?: "keep" | "mover",
   skip?: [commit id]}`. Detail finer than lines answers `runs: [[from, to,

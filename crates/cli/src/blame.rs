@@ -47,6 +47,68 @@ pub fn opts_of(req: &Value) -> BlameOpts {
     }
 }
 
+/// The project's sources, for a blame asked with no files: the main file
+/// and what it inputs (`\\input`, `\\include`, `\\subfile`,
+/// `\\bibliography`, `\\addbibresource`), each followed in turn, as the
+/// build reads them (an editor's buffer, else the disk). Blame works on
+/// these and the history, never on the pages.
+#[must_use]
+pub fn sources(root: &Path, main: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut todo = vec![main.trim_start_matches("./").to_owned()];
+    while let Some(f) = todo.pop() {
+        if out.contains(&f) || !safe(&f) {
+            continue;
+        }
+        let Some(bytes) = now(root, &f) else { continue };
+        out.push(f.clone());
+        let text = String::from_utf8_lossy(&bytes);
+        let mut found = Vec::new();
+        for line in text.lines() {
+            // (a comment's rest dropped: an unescaped %)
+            let mut code = String::new();
+            let mut esc = false;
+            for ch in line.chars() {
+                if ch == '%' && !esc {
+                    break;
+                }
+                esc = ch == '\\' && !esc;
+                code.push(ch);
+            }
+            for (cmd, ext) in [("\\input", ".tex"), ("\\include", ".tex"), ("\\subfile", ".tex"), ("\\bibliography", ".bib"), ("\\addbibresource", "")] {
+                let mut rest = code.as_str();
+                while let Some(i) = rest.find(cmd) {
+                    rest = &rest[i + cmd.len()..];
+                    // (a longer command's name: \inputencoding, \includegraphics)
+                    if rest.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                        continue;
+                    }
+                    let r = rest.trim_start();
+                    let r = if r.starts_with('[') { r.find(']').map_or(r, |j| r[j + 1..].trim_start()) } else { r };
+                    let Some(r) = r.strip_prefix('{') else { continue };
+                    let Some(end) = r.find('}') else { continue };
+                    for n in r[..end].split(',') {
+                        let n = n.trim().trim_start_matches("./");
+                        if n.is_empty() {
+                            continue;
+                        }
+                        let with = format!("{n}{ext}");
+                        let pick = if now(root, n).is_some() && (ext != ".tex" || n.contains('.')) { n.to_owned() } else { with };
+                        found.push(pick);
+                    }
+                }
+            }
+        }
+        // (in the order they come: the stack taken from its end)
+        for n in found.into_iter().rev() {
+            if !out.contains(&n) {
+                todo.push(n);
+            }
+        }
+    }
+    out
+}
+
 fn kept() -> &'static Mutex<Kept> {
     static K: OnceLock<Mutex<Kept>> = OnceLock::new();
     K.get_or_init(Mutex::default)
@@ -145,10 +207,17 @@ fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8], opts: &BlameOpts)
     Ok(b)
 }
 
+/// The project's history's head (git's `HEAD`, its commit), if it is in
+/// git and has one.
+#[must_use]
+pub fn head(root: &Path) -> Option<String> {
+    Repo::discover(root).ok()?.resolve("HEAD").ok().map(|h| h.to_string())
+}
+
 /// The viewer's `blame` op: `files` (the project's, by their names from
 /// `root`) blamed. `{commits: [{id, short, author, email, time,
 /// subject}], files: {NAME: {text, lines: [commit or -1]} | {last: commit
-/// or -1} | {error}}, refs: [{name, kind, time}], now}`: -1 is not
+/// or -1} | {error}}, refs: [{name, kind, time}], head, now}`: -1 is not
 /// committed yet.
 ///
 /// # Errors
@@ -215,6 +284,7 @@ pub fn files(root: &Path, files: &[String], opts: &BlameOpts) -> Result<Value, S
         "commits": commits.out,
         "files": out,
         "refs": refs,
+        "head": head,
         "now": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
@@ -417,5 +487,19 @@ mod tests {
     fn lines_start_after_each_newline() {
         assert_eq!(line_starts("a\nbc\n"), [0, 2, 5]);
         assert_eq!(line_starts(""), [0]);
+    }
+
+    #[test]
+    fn sources_follow_the_main_files_inputs() {
+        let d = std::env::temp_dir().join(format!("phitex-sources-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("ch")).unwrap();
+        std::fs::write(d.join("main.tex"), "\\documentclass{article}\n\\usepackage[utf8]{inputenc}\n% \\input{commented}\n\\begin{document}\n\\input{ch/one}\n\\include{two.tex}\n\\bibliography{refs,more}\n\\end{document}\n").unwrap();
+        std::fs::write(d.join("ch/one.tex"), "One \\input{ch/three}.\n").unwrap();
+        std::fs::write(d.join("ch/three.tex"), "Three.\n").unwrap();
+        std::fs::write(d.join("two.tex"), "Two.\n").unwrap();
+        std::fs::write(d.join("refs.bib"), "@misc{a}\n").unwrap();
+        std::fs::write(d.join("other.tex"), "Not input.\n").unwrap();
+        assert_eq!(super::sources(&d, "main.tex"), ["main.tex", "ch/one.tex", "ch/three.tex", "two.tex", "refs.bib"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

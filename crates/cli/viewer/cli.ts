@@ -25,6 +25,7 @@ import type { SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
 import type { Commit } from "../../../viewer/src/commits.ts";
 import type { ChangeItem, ChangesDiffLook, ChangesHost, ChangesRunner, Pair } from "../../../viewer/src/changes.ts";
 import type { DiffChange } from "../../../viewer/src/diff.ts";
+import { diffStyle } from "../../../viewer/src/compare.ts";
 import type { ReviewHost, ReviewState } from "../../../viewer/src/review.ts";
 import type { BlameData, BlameHost } from "../../../viewer/src/blame.ts";
 
@@ -389,6 +390,15 @@ const blame: BlameHost = {
     return r.ok ? (r.json as unknown as BlameData) : (r.error ?? "no history here");
   },
   glyphs: (k) => session.pageGlyphs(k),
+  // (a build done: a file blamed again only once its text on disk changed, every file once HEAD moved)
+  text: async (file) => {
+    const r = await sock.request({ op: "info", what: "source", file });
+    return r.ok && r.json ? String(r.json.text ?? "") : undefined;
+  },
+  head: async () => {
+    const r = await sock.request({ op: "info", what: "head" });
+    return r.ok && typeof r.json?.head === "string" ? r.json.head : null;
+  },
   goto: (file, line) => source(file, line),
 };
 
@@ -412,10 +422,7 @@ const save = (name: string) => {
   a.click();
 };
 /** The look as the watch's diff ops take it. */
-const lookFields = (l: ChangesDiffLook, hide: boolean) => {
-  const [add, del] = { blue: ["#1347ae", "#bb1b1b"], green: ["#1a7f37", "#cf222e"], safe: ["#0072B2", "#D55E00"], mono: ["#111111", "#7a7a7a"] }[l.colors] ?? ["#1347ae", "#bb1b1b"];
-  return { markup: "underline", subtype: "safe", add_color: add, del_color: del, ins_style: l.ins, del_style: hide ? "hide" : l.del, fig_style: l.fig };
-};
+const lookFields = (l: ChangesDiffLook, hide: boolean) => diffStyle(l, hide);
 /** The changes gone to (the last one's answer alone is shown), and the one to go to once the diff is built. */
 let goes = 0;
 let wanted: number | undefined;

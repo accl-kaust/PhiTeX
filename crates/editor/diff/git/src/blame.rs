@@ -200,68 +200,68 @@ impl Walk<'_> {
 /// units of `a` it did not match either (text moved): matched there. By
 /// lines, a line of more than spaces; by words, a run of four units or
 /// more, the same run in `a`.
-fn moved(a: &[u64], b: &[u64], m: &mut HashMap<usize, usize>, words: bool) {
-    let used: std::collections::HashSet<usize> = m.values().copied().collect();
+fn moved(old: &[u64], new: &[u64], pairs: &mut HashMap<usize, usize>, words: bool) {
+    let used: std::collections::HashSet<usize> = pairs.values().copied().collect();
     let mut free: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (i, k) in a.iter().enumerate() {
-        if !used.contains(&i) {
-            free.entry(*k).or_default().push(i);
+    for (at, unit) in old.iter().enumerate() {
+        if !used.contains(&at) {
+            free.entry(*unit).or_default().push(at);
         }
     }
     if !words {
         let blank = {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            b"".as_slice().hash(&mut h);
-            h.finish()
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            b"".as_slice().hash(&mut hasher);
+            hasher.finish()
         };
-        for (j, k) in b.iter().enumerate() {
-            if m.contains_key(&j) || *k == blank {
+        for (from, unit) in new.iter().enumerate() {
+            if pairs.contains_key(&from) || *unit == blank {
                 continue;
             }
-            if let Some(v) = free.get_mut(k)
-                && !v.is_empty()
+            if let Some(spots) = free.get_mut(unit)
+                && !spots.is_empty()
             {
-                m.insert(j, v.remove(0));
+                pairs.insert(from, spots.remove(0));
             }
         }
         return;
     }
-    let mut j = 0;
+    let mut from = 0;
     let mut taken: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    while j < b.len() {
-        if m.contains_key(&j) {
-            j += 1;
+    while from < new.len() {
+        if pairs.contains_key(&from) {
+            from += 1;
             continue;
         }
-        let mut e = j;
-        while e < b.len() && !m.contains_key(&e) {
-            e += 1;
+        let mut to = from;
+        while to < new.len() && !pairs.contains_key(&to) {
+            to += 1;
         }
-        // (the unmatched run b[j..e]: its longest stretch of four or more found whole in a's free units)
-        let mut s = j;
-        while s + 4 <= e {
+        // (the unmatched run new[from..to]: its longest stretch of four or more found whole in old's free units)
+        let mut start = from;
+        while start + 4 <= to {
             let mut best: Option<(usize, usize)> = None;
-            for &i in free.get(&b[s]).map_or(&[][..], Vec::as_slice) {
-                let mut n = 0;
-                while s + n < e && i + n < a.len() && a[i + n] == b[s + n] && !used.contains(&(i + n)) && !taken.contains(&(i + n)) {
-                    n += 1;
+            for &at in free.get(&new[start]).map_or(&[][..], Vec::as_slice) {
+                let mut len = 0;
+                while start + len < to && at + len < old.len() && old[at + len] == new[start + len] && !used.contains(&(at + len)) && !taken.contains(&(at + len)) {
+                    len += 1;
                 }
-                if n >= 4 && best.is_none_or(|(_, bn)| n > bn) {
-                    best = Some((i, n));
+                if len >= 4 && best.is_none_or(|(_, bn)| len > bn) {
+                    best = Some((at, len));
                 }
             }
             match best {
-                Some((i, n)) => {
-                    for k in 0..n {
-                        m.insert(s + k, i + k);
-                        taken.insert(i + k);
+                Some((at, len)) => {
+                    for unit in 0..len {
+                        pairs.insert(start + unit, at + unit);
+                        taken.insert(at + unit);
                     }
-                    s += n;
+                    start += len;
                 }
-                None => s += 1,
+                None => start += 1,
             }
         }
-        j = e;
+        from = to;
     }
 }
 
@@ -494,20 +494,19 @@ impl Repo {
                     break;
                 }
             }
-            match same {
-                Some(p) => at = p,
-                None => {
-                    // (skipped: on to its first parent's version, if it had one)
-                    if skip.contains(&at)
-                        && let Some(&p) = parents.first()
-                        && let Some(b) = w.commit(p)?.0
-                    {
-                        (at, blob) = (p, b);
-                        continue;
-                    }
-                    return self.blame_commit(at).map(Some);
-                }
+            if let Some(p) = same {
+                at = p;
+                continue;
             }
+            // (skipped: on to its first parent's version, if it had one)
+            if skip.contains(&at)
+                && let Some(&p) = parents.first()
+                && let Some(b) = w.commit(p)?.0
+            {
+                (at, blob) = (p, b);
+                continue;
+            }
+            return self.blame_commit(at).map(Some);
         }
     }
 

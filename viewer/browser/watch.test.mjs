@@ -97,14 +97,14 @@ test("a .bib edited while watching is read again (item 17)", async () => {
 });
 
 /**
- * ± Changes kept on, Diff: the last commit (one end, the picker's first row) against the
+ * ± Changes opened, Diff: the last commit (one end, the picker's first row) against the
  * working tree (the other, its row above), its `n` changes counted in the popover's footer.
  */
 async function compareWith(t, n) {
   if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
   await t.click("#b-changes");
   await t.until(`!$(".chg-pop").hidden`, "the popover");
-  await t.click("#chg-from");
+  await t.click("#chg-start");
   await t.until(`$$(".phx-commits .row[data-i]").length > 0`, "the commits");
   await t.click(".phx-commits .row[data-i='0']");
   await t.click(".phx-commits .row:not([data-i]):not(.skel)");
