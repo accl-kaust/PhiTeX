@@ -7117,6 +7117,10 @@ var Model = class {
   /** The detail lines are looked up at, and spacing's. */
   detail = "line";
   ws = "ignore";
+  /** Commit `id`'s index here, or -1. */
+  indexOf(id) {
+    return this.byId.get(id) ?? -1;
+  }
   /** `d` taken in: its commits merged with those already here by id; a file blamed again replaces its own. */
   add(d) {
     const map = d.commits.map((c) => {
@@ -7392,8 +7396,11 @@ function lookOf2(m, c, look2, dark, colors) {
   return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
 }
 var sinceTime = (since) => since && since !== "off" ? Number(since.split(":")[0]) : null;
+var SVG_NS = "http://www.w3.org/2000/svg";
 var BLAME_CSS = `
 .slot .bl { position: absolute; pointer-events: none; }
+.slot svg.bl-hsvg { left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
+.slot svg.bl-hsvg .bl { position: static; }
 .slot .bl-bar { border-radius: 1px; }
 .slot .bl-tint { border-radius: 1px; }
 .slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
@@ -7405,7 +7412,6 @@ var BLAME_CSS = `
   /* (backwards only: done, no effect is left on each bar; a fill kept a compositor effect per bar, hundreds on a long paper, and every frame's layerizing paid for them) */
   .slot .bl-in { animation: bl-in .22s ease-out backwards; }
   .slot .bl-wait { animation: bl-wait 1.4s ease-in-out infinite; }
-  .slot .bl-tint { transition: opacity .12s; }
 }
 @keyframes bl-in { from { opacity: 0; } }
 @keyframes bl-wait { 50% { opacity: .3; } }
@@ -7583,7 +7589,12 @@ var Blame = class {
       this.mapped.clear();
       return;
     }
-    this.slots = new MutationObserver(() => this.pagesSoon());
+    const ours = (n) => n instanceof Element && n.classList.contains("bl");
+    this.slots = new MutationObserver((recs) => {
+      if (recs.every((r) => [...r.addedNodes, ...r.removedNodes].every(ours))) return;
+      this.redrawBare();
+      this.pagesSoon();
+    });
     this.slots.observe(this.p.stage, { childList: true, subtree: true });
     if (this.m && this.worked === this.workKey()) {
       void this.mapPages();
@@ -7753,12 +7764,15 @@ var Blame = class {
         m.ws = this.look.ws;
         m.refs = this.m?.refs ?? [];
       }
-      const take = (d) => {
+      const take = async (d) => {
         m.add(d);
         for (const [f, x] of Object.entries(d.files)) if (x.text !== void 0) this.texts.set(f, x.text);
         if (d.head !== void 0) this.head = d.head;
-        if (fresh || this.m !== m) this.m = m, this.worked = key, this.colorsOf();
+        if (fresh || this.m !== m) {
+          if (!await this.swapIn(m, key, turn)) return false;
+        }
         this.sum = null;
+        return true;
       };
       let files = only ?? await this.sourceList();
       if (turn !== this.turn) return;
@@ -7767,8 +7781,10 @@ var Blame = class {
         const d = await this.host.blame([], opts);
         if (turn !== this.turn) return;
         if (typeof d === "string") throw new Error(d);
-        take(d);
+        if (!await take(d)) return;
         files = Object.keys(d.files);
+        await this.mapPages();
+        if (turn !== this.turn) return;
       } else {
         if (fresh) this.pending = new Set(files), this.fileTotal = files.length, void this.mapPages();
         if (fresh && this.m !== m && this.m) this.texts.clear();
@@ -7780,10 +7796,11 @@ var Blame = class {
           const d = await this.host.blame([file], opts);
           if (turn !== this.turn) return;
           if (typeof d === "string") throw new Error(d);
-          take(d);
+          if (!await take(d)) return;
           this.pending.delete(file);
           i++;
-          void this.mapPages();
+          await this.mapPages();
+          if (turn !== this.turn) return;
           this.emit();
         }
       }
@@ -7792,7 +7809,7 @@ var Blame = class {
         say("Reading the figures' and the bibliography's history\u2026");
         const d2 = await this.host.blame(more, opts);
         if (turn !== this.turn) return;
-        if (typeof d2 !== "string") take(d2);
+        if (typeof d2 !== "string" && !await take(d2)) return;
       }
       if (!this.m) this.m = m, this.worked = key;
       this.error = "";
@@ -7810,6 +7827,47 @@ var Blame = class {
   retry() {
     this.error = "";
     void this.work();
+  }
+  /**
+   * Blame `m` made the one shown: every page on the stage worked out in it
+   * (their glyphs asked first), then in one task the model, the pages'
+   * segments and the lists swapped together; a page whose glyphs are not
+   * made yet keeps its segments, renumbered to `m`'s commits (one `m` no
+   * longer has shows nothing there till it is mapped). False: a newer
+   * work took over meanwhile.
+   */
+  async swapIn(m, key, turn) {
+    const size2 = this.p.pageSize();
+    const got = /* @__PURE__ */ new Map();
+    for (const slot of [...this.p.stage.querySelectorAll(".slot")]) {
+      const k = Number(slot.dataset.k);
+      const gs = await this.host.glyphs(k).catch(() => []);
+      if (turn !== this.turn) return false;
+      if (gs.length) got.set(k, { gs, segs: mapPage(gs, m, size2) });
+    }
+    const old = this.m;
+    this.m = m;
+    this.worked = key;
+    this.colorsOf();
+    this.mapped.clear();
+    for (const [k, segs] of this.segs)
+      if (!got.has(k) && old && old !== m) {
+        const kept = segs.flatMap((x) => x.c < 0 ? [x] : old.commits[x.c] && m.indexOf(old.commits[x.c].id) >= 0 ? [{ ...x, c: m.indexOf(old.commits[x.c].id) }] : []);
+        this.segs.set(k, kept);
+        this.indexPage(k, kept);
+      }
+    for (const [k, { gs, segs }] of got) this.segs.set(k, segs), this.mapped.set(k, gs), this.indexPage(k, segs);
+    this.sum = null;
+    this.drawAll();
+    return true;
+  }
+  /** The pages on the stage with no marks but a mapping known: drawn from it now. */
+  redrawBare() {
+    if (!this.on || !this.m) return;
+    for (const slot of this.p.stage.querySelectorAll(".slot")) {
+      const k = Number(slot.dataset.k);
+      if (this.segs.has(k) && !slot.querySelector(".bl")) this.drawPage(k);
+    }
   }
   pagesT;
   /** The pages changed: mapped again a moment after the last change (one pass for a stream of them). */
@@ -7829,11 +7887,12 @@ var Blame = class {
     const size2 = this.p.pageSize();
     const ks = [...this.p.stage.querySelectorAll(".slot")].map((s) => Number(s.dataset.k));
     const live = new Set(ks);
-    for (const k of [...this.segs.keys()]) if (!live.has(k)) this.segs.delete(k), this.index.delete(k), this.mapped.delete(k);
+    for (const k of [...this.mapped.keys()]) if (!live.has(k)) this.mapped.delete(k);
     for (const k of ks) {
       const gs = await this.host.glyphs(k).catch(() => []);
       if (!this.on || this.m !== m) return;
       if (!all && m && this.mapped.get(k) === gs && this.slot(k)?.querySelector(".bl")) continue;
+      if (m && !gs.length) continue;
       if (m) this.mapped.set(k, gs);
       const segs = m ? mapPage(gs, m, size2) : [];
       this.segs.set(k, segs);
@@ -7976,7 +8035,8 @@ var Blame = class {
       if (!l) continue;
       const t = document.createElement("div");
       t.className = `bl ${cls}${l.hatch ? " bl-hatch" : ""}`;
-      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
+      const a2 = l.hatch ? 100 : Math.round(100 * Math.min(1, dark ? l.tint * 1.3 : l.tint));
+      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.hatch ? l.color : `color-mix(in srgb, ${l.color} ${a2}%, transparent)` });
       out.push(t);
     }
     return out;
@@ -7993,10 +8053,32 @@ var Blame = class {
     if (!slot) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
-    const frag = document.createDocumentFragment();
-    for (const s of this.segs.get(f.k) ?? []) if (s.para === f.s.para && !this.dimmed(s.c)) this.htints.push(...this.tints(s, w, h, dark, "bl-tint bl-htint"));
-    frag.append(...this.htints);
-    slot.append(frag);
+    let svg2 = slot.querySelector(":scope > svg.bl-hsvg");
+    if (!svg2) {
+      svg2 = document.createElementNS(SVG_NS, "svg");
+      svg2.setAttribute("class", "bl bl-hsvg");
+      svg2.setAttribute("preserveAspectRatio", "none");
+      slot.append(svg2);
+    }
+    svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    for (const s of this.segs.get(f.k) ?? []) {
+      if (s.para !== f.s.para || this.dimmed(s.c)) continue;
+      const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
+      for (const [a, b, c] of runs) {
+        const l = this.shade(c);
+        if (!l) continue;
+        const r = document.createElementNS(SVG_NS, "rect");
+        r.setAttribute("class", "bl bl-tint bl-htint");
+        r.setAttribute("x", String(a - 1));
+        r.setAttribute("y", String(s.y0));
+        r.setAttribute("width", String(b - a + 2));
+        r.setAttribute("height", String(s.y1 - s.y0));
+        r.setAttribute("fill", l.hatch ? UNCOMMITTED : l.color);
+        r.setAttribute("fill-opacity", String(l.hatch ? 0.35 : Math.min(1, dark ? l.tint * 1.3 : l.tint)));
+        this.htints.push(r);
+      }
+    }
+    svg2.append(...this.htints);
   }
   /** Each page's box, read once after a scroll or a resize (not on every pointer move). */
   rects = /* @__PURE__ */ new Map();
@@ -8934,7 +9016,7 @@ var Changes = class {
     if (!on && body) body.scrollTop = this.foldScroll;
     const b = this.el.querySelector("#chg-fold");
     if (b) {
-      b.textContent = on ? "\u25BE" : "\u25B4";
+      b.textContent = on ? "\u25B8" : "\u25BE";
       b.setAttribute("aria-expanded", String(!on));
       b.setAttribute("aria-label", on ? "Unfold Changes" : "Fold Changes");
       b.title = on ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept";
@@ -9271,7 +9353,7 @@ var Changes = class {
   }
   head() {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><button type="button" class="ib2 fold" id="chg-fold" aria-expanded="${String(!this.folded)}" aria-label="${this.folded ? "Unfold Changes" : "Fold Changes"}" title="${this.folded ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept"}">${this.folded ? "\u25BE" : "\u25B4"}</button><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
+    const ttl = html`<div class="ttl"><button type="button" class="ib2 fold" id="chg-fold" aria-expanded="${String(!this.folded)}" aria-label="${this.folded ? "Unfold Changes" : "Fold Changes"}" title="${this.folded ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept"}">${this.folded ? "\u25B8" : "\u25BE"}</button><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
     let below;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {

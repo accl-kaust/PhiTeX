@@ -420,6 +420,11 @@ export class Model {
   detail: BlameOpts["detail"] = "line";
   ws: BlameOpts["ws"] = "ignore";
 
+  /** Commit `id`'s index here, or -1. */
+  indexOf(id: string): number {
+    return this.byId.get(id) ?? -1;
+  }
+
   /** `d` taken in: its commits merged with those already here by id; a file blamed again replaces its own. */
   add(d: BlameData): void {
     const map = d.commits.map((c) => {
@@ -885,8 +890,12 @@ export function lookOf(m: Model, c: number, look: Pick<BlameLook, "color" | "age
 /** The time "changed since" names (seconds), or null: off. */
 export const sinceTime = (since: string): number | null => (since && since !== "off" ? Number(since.split(":")[0]) : null);
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
 export const BLAME_CSS = `
 .slot .bl { position: absolute; pointer-events: none; }
+.slot svg.bl-hsvg { left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
+.slot svg.bl-hsvg .bl { position: static; }
 .slot .bl-bar { border-radius: 1px; }
 .slot .bl-tint { border-radius: 1px; }
 .slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
@@ -898,7 +907,6 @@ export const BLAME_CSS = `
   /* (backwards only: done, no effect is left on each bar; a fill kept a compositor effect per bar, hundreds on a long paper, and every frame's layerizing paid for them) */
   .slot .bl-in { animation: bl-in .22s ease-out backwards; }
   .slot .bl-wait { animation: bl-wait 1.4s ease-in-out infinite; }
-  .slot .bl-tint { transition: opacity .12s; }
 }
 @keyframes bl-in { from { opacity: 0; } }
 @keyframes bl-wait { 50% { opacity: .3; } }
@@ -1137,7 +1145,15 @@ export class Blame {
       return;
     }
     // (pages come and go (a build streaming, a page drawn again): each mapped as it comes, no blame again)
-    this.slots = new MutationObserver(() => this.pagesSoon());
+    // (a page drawn anew, the same page: its known bars back at once, in the same task, never a page shown bare
+    // for the debounce and its glyphs' round trip; then mapped again, as any page that came)
+    // (Blame's own marks coming and going (a hover's tints) are not pages changing)
+    const ours = (n: Node) => n instanceof Element && n.classList.contains("bl");
+    this.slots = new MutationObserver((recs) => {
+      if (recs.every((r) => [...r.addedNodes, ...r.removedNodes].every(ours))) return;
+      this.redrawBare();
+      this.pagesSoon();
+    });
     this.slots.observe(this.p.stage, { childList: true, subtree: true });
     if (this.m && this.worked === this.workKey()) {
       void this.mapPages();
@@ -1324,12 +1340,17 @@ export class Blame {
         // (the tags known already, till the new answer brings its own: "Changed since" keeps its choices)
         m.refs = this.m?.refs ?? [];
       }
-      const take = (d: BlameData) => {
+      const take = async (d: BlameData): Promise<boolean> => {
         m.add(d);
         for (const [f, x] of Object.entries(d.files)) if (x.text !== undefined) this.texts.set(f, x.text);
         if (d.head !== undefined) this.head = d.head;
-        if (fresh || this.m !== m) (this.m = m), (this.worked = key), this.colorsOf();
+        if (fresh || this.m !== m) {
+          // (a new blame, its commits numbered anew: the pages worked out in it first, then swapped in with the lists
+          // in one task, so the lists never say what the pages do not show)
+          if (!(await this.swapIn(m, key, turn))) return false;
+        }
         this.sum = null;
+        return true;
       };
       let files = only ?? (await this.sourceList());
       if (turn !== this.turn) return;
@@ -1339,8 +1360,11 @@ export class Blame {
         const d = await this.host.blame([], opts);
         if (turn !== this.turn) return;
         if (typeof d === "string") throw new Error(d);
-        take(d);
+        if (!(await take(d))) return;
         files = Object.keys(d.files);
+        // (the pages mapped before anything says the new blame: the lists follow the pages, never lead them)
+        await this.mapPages();
+        if (turn !== this.turn) return;
       } else {
         if (fresh) (this.pending = new Set(files)), (this.fileTotal = files.length), void this.mapPages();
         if (fresh && this.m !== m && this.m) this.texts.clear();
@@ -1353,11 +1377,13 @@ export class Blame {
           const d = await this.host.blame([file], opts);
           if (turn !== this.turn) return;
           if (typeof d === "string") throw new Error(d);
-          take(d);
+          if (!(await take(d))) return;
           this.pending.delete(file);
           i++;
           // (each file's lines on the pages as it lands; the lists as they grow)
-          void this.mapPages();
+          // (the pages first, then the lists: the lists never say what the pages do not show yet)
+          await this.mapPages();
+          if (turn !== this.turn) return;
           this.emit();
         }
       }
@@ -1366,7 +1392,7 @@ export class Blame {
         say("Reading the figures' and the bibliography's history…");
         const d2 = await this.host.blame(more, opts);
         if (turn !== this.turn) return;
-        if (typeof d2 !== "string") take(d2);
+        if (typeof d2 !== "string" && !(await take(d2))) return;
       }
       if (!this.m) (this.m = m), (this.worked = key);
       this.error = "";
@@ -1385,6 +1411,49 @@ export class Blame {
   retry(): void {
     this.error = "";
     void this.work();
+  }
+
+  /**
+   * Blame `m` made the one shown: every page on the stage worked out in it
+   * (their glyphs asked first), then in one task the model, the pages'
+   * segments and the lists swapped together; a page whose glyphs are not
+   * made yet keeps its segments, renumbered to `m`'s commits (one `m` no
+   * longer has shows nothing there till it is mapped). False: a newer
+   * work took over meanwhile.
+   */
+  private async swapIn(m: Model, key: string, turn: number): Promise<boolean> {
+    const size = this.p.pageSize();
+    const got = new Map<number, { gs: Glyph[]; segs: Seg[] }>();
+    for (const slot of [...this.p.stage.querySelectorAll<HTMLElement>(".slot")]) {
+      const k = Number(slot.dataset.k);
+      const gs = await this.host.glyphs(k).catch(() => [] as Glyph[]);
+      if (turn !== this.turn) return false;
+      if (gs.length) got.set(k, { gs, segs: mapPage(gs, m, size) });
+    }
+    const old = this.m;
+    this.m = m;
+    this.worked = key;
+    this.colorsOf();
+    this.mapped.clear();
+    for (const [k, segs] of this.segs)
+      if (!got.has(k) && old && old !== m) {
+        const kept = segs.flatMap((x) => (x.c < 0 ? [x] : old.commits[x.c] && m.indexOf(old.commits[x.c].id) >= 0 ? [{ ...x, c: m.indexOf(old.commits[x.c].id) }] : []));
+        this.segs.set(k, kept);
+        this.indexPage(k, kept);
+      }
+    for (const [k, { gs, segs }] of got) (this.segs.set(k, segs), this.mapped.set(k, gs), this.indexPage(k, segs));
+    this.sum = null;
+    this.drawAll();
+    return true;
+  }
+
+  /** The pages on the stage with no marks but a mapping known: drawn from it now. */
+  private redrawBare(): void {
+    if (!this.on || !this.m) return;
+    for (const slot of this.p.stage.querySelectorAll<HTMLElement>(".slot")) {
+      const k = Number(slot.dataset.k);
+      if (this.segs.has(k) && !slot.querySelector(".bl")) this.drawPage(k);
+    }
   }
 
   private pagesT: ReturnType<typeof setTimeout> | undefined;
@@ -1407,11 +1476,16 @@ export class Blame {
     const size = this.p.pageSize();
     const ks = [...this.p.stage.querySelectorAll<HTMLElement>(".slot")].map((s) => Number(s.dataset.k));
     const live = new Set(ks);
-    for (const k of [...this.segs.keys()]) if (!live.has(k)) (this.segs.delete(k), this.index.delete(k), this.mapped.delete(k));
+    // (a page not on the stage just now (drawn anew, its old slot gone before the new one came) keeps what is known of
+    // it: its new slot gets it back at once (redrawBare), mapped again as it comes)
+    for (const k of [...this.mapped.keys()]) if (!live.has(k)) this.mapped.delete(k);
     for (const k of ks) {
       const gs = await this.host.glyphs(k).catch(() => [] as Glyph[]);
       if (!this.on || this.m !== m) return;
       if (!all && m && this.mapped.get(k) === gs && this.slot(k)?.querySelector(".bl")) continue;
+      // (no glyphs yet: the host has not made this page's origins (asked too early, a loaded core's ask given up),
+      // not a page with no text. Its bars stay as they are, unmapped; the origins' coming maps it (refresh))
+      if (m && !gs.length) continue;
       if (m) this.mapped.set(k, gs);
       const segs = m ? mapPage(gs, m, size) : [];
       this.segs.set(k, segs);
@@ -1565,7 +1639,10 @@ export class Blame {
       if (!l) continue;
       const t = document.createElement("div");
       t.className = `bl ${cls}${l.hatch ? " bl-hatch" : ""}`;
-      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.color, opacity: String(l.hatch ? 1 : dark ? l.tint * 1.3 : l.tint) });
+      // (its strength in its colour's alpha, not an opacity: an opacity is an effect of its own on every tint, and every
+      // hover's tints came and went as effects, the whole page's layers worked out again each time)
+      const a2 = l.hatch ? 100 : Math.round(100 * Math.min(1, dark ? l.tint * 1.3 : l.tint));
+      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.hatch ? l.color : `color-mix(in srgb, ${l.color} ${a2}%, transparent)` });
       out.push(t);
     }
     return out;
@@ -1573,7 +1650,7 @@ export class Blame {
 
   /** The paragraph under the pointer tinted ("under the pointer"), alone: the rest of the page left as it is. */
   /** The hover's tints now on a page (removed by the next hover, not looked for across every page). */
-  private htints: HTMLElement[] = [];
+  private htints: Element[] = [];
 
   private drawHover(): void {
     for (const e of this.htints) e.remove();
@@ -1584,10 +1661,34 @@ export class Blame {
     if (!slot) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
-    const frag = document.createDocumentFragment();
-    for (const s of this.segs.get(f.k) ?? []) if (s.para === f.s.para && !this.dimmed(s.c)) this.htints.push(...this.tints(s, w, h, dark, "bl-tint bl-htint"));
-    frag.append(...this.htints);
-    slot.append(frag);
+    // (in one SVG over the page, made once per page: its rects come and go inside it, never boxes of their own; a
+    // positioned box each was a layer each, and every hover had the whole stage's layers worked out again)
+    let svg = slot.querySelector<SVGSVGElement>(":scope > svg.bl-hsvg");
+    if (!svg) {
+      svg = document.createElementNS(SVG_NS, "svg");
+      svg.setAttribute("class", "bl bl-hsvg");
+      svg.setAttribute("preserveAspectRatio", "none");
+      slot.append(svg);
+    }
+    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    for (const s of this.segs.get(f.k) ?? []) {
+      if (s.para !== f.s.para || this.dimmed(s.c)) continue;
+      const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
+      for (const [a, b, c] of runs) {
+        const l = this.shade(c);
+        if (!l) continue;
+        const r = document.createElementNS(SVG_NS, "rect");
+        r.setAttribute("class", "bl bl-tint bl-htint");
+        r.setAttribute("x", String(a - 1));
+        r.setAttribute("y", String(s.y0));
+        r.setAttribute("width", String(b - a + 2));
+        r.setAttribute("height", String(s.y1 - s.y0));
+        r.setAttribute("fill", l.hatch ? UNCOMMITTED : l.color);
+        r.setAttribute("fill-opacity", String(l.hatch ? 0.35 : Math.min(1, dark ? l.tint * 1.3 : l.tint)));
+        this.htints.push(r);
+      }
+    }
+    svg.append(...this.htints);
   }
 
   /** Each page's box, read once after a scroll or a resize (not on every pointer move). */

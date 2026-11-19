@@ -213,6 +213,9 @@ jobs:
           # (Overleaf's download failing once: the pane waits for Overleaf, says so in plain
           # words, and opens on Try again; the failure in the start's errors and the trace)
           node tools/dev/mock-run.mjs test/scenarios/zip-fail.json
+          # (the start's failures, each said where it stopped and why: the engine's page and module, a
+          # worker's fetch and script, a download refused (waiting for Overleaf), cut off or hung)
+          node tools/dev/mock-run.mjs test/scenarios/startup-errors.json
           # (the toolbar's status while builds come fast: nothing after it moves, its words at
           # most about four times a second, never "no page changed" while pages change)
           node tools/dev/mock-run.mjs test/scenarios/status-steady.json

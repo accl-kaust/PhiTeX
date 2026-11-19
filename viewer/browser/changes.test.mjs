@@ -322,7 +322,7 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   await t.q(`(() => { const s = $("#chg-since"); s.value = [...s.options].find((o) => /submitted/.test(o.textContent)).value; s.dispatchEvent(new Event("change")); return 1; })()`);
   await click(`[data-look="bars"][data-v="right"]`);
   await t.until(`$$(".chg-pop .prow").length > 0 && !$$(".chg-pop .prow .nm > span:first-child").some((e) => e.textContent === "Bob")`, "Bob's lines gone to who wrote them before", 60000);
-  assert.ok(await t.q(`$$(".slot .bl-wash").length > 0`), "since the tag: the lines older than it washed");
+  assert.ok(await t.q(`$$(".slot .bl-wash").length > 0`), `since the tag: the lines older than it washed ${JSON.stringify(await t.q(`({ since: $("#chg-since")?.value, slots: $$(".slot").length, bars: $$(".slot .bl-bar").length, wash: $$(".slot .bl-wash").length, dim: $$(".slot .bl-dim").length, head: $(".chg-pop .sec h3 span")?.textContent, crows: $$(".chg-pop .crow small").map((s) => s.textContent).join(" | ") })`))}`);
   await shot("blame-since-light");
   await dark(t, true);
   await t.q(`(() => { $(".win").classList.add("dark-pdf"); return 1; })()`);

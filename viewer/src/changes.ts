@@ -539,7 +539,7 @@ export class Changes {
     if (!on && body) body.scrollTop = this.foldScroll;
     const b = this.el.querySelector<HTMLElement>("#chg-fold");
     if (b) {
-      b.textContent = on ? "▾" : "▴";
+      b.textContent = on ? "▸" : "▾";
       b.setAttribute("aria-expanded", String(!on));
       b.setAttribute("aria-label", on ? "Unfold Changes" : "Fold Changes");
       b.title = on ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept";
@@ -917,7 +917,7 @@ export class Changes {
 
   private head(): DocumentFragment {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><button type="button" class="ib2 fold" id="chg-fold" aria-expanded="${String(!this.folded)}" aria-label="${this.folded ? "Unfold Changes" : "Fold Changes"}" title="${this.folded ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept"}">${this.folded ? "▾" : "▴"}</button><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
+    const ttl = html`<div class="ttl"><button type="button" class="ib2 fold" id="chg-fold" aria-expanded="${String(!this.folded)}" aria-label="${this.folded ? "Unfold Changes" : "Fold Changes"}" title="${this.folded ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept"}">${this.folded ? "▸" : "▾"}</button><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
     let below: DocumentFragment;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
