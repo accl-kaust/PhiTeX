@@ -10,7 +10,7 @@ milestones, not versions.
 
 ## 1.0.4 (2026-11-17)
 
-Compare got a lot smarter, and Firefox opens your Overleaf projects again :)
+Compare got a lot smarter, and Blame is here :)
 
 - **Compare reads like your paper.** Comparing with a past version
   (latexdiff) now shows tables row by row, figures and tables that moved
@@ -22,9 +22,8 @@ Compare got a lot smarter, and Firefox opens your Overleaf projects again :)
 - **Blame, beside Compare.** Margin bars show who changed each line and
   when, coloured by age, by author, or since a version you pick. Hover a
   bar to see the change and jump to it.
-- **Fixed:** in Firefox, Overleaf projects stopped opening in 1.0.3
-  ("Permission denied to access property constructor"). They open again,
-  and Compare and replaced figures work there too. Sorry about that one!
+- **Fixed:** Overleaf projects open in Firefox again, with Compare and
+  replaced figures.
 
 Thanks for the quick reports, they made this release!
 
