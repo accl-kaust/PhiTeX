@@ -8290,13 +8290,14 @@ ${COMMITS_CSS}
 .chg-pop .prog { position: absolute; z-index: 3; left: 8px; right: 8px; bottom: 8px; padding: 6px 10px 7px; border: 1px solid var(--phc-line); border-radius: 8px; background: var(--phc-bg); box-shadow: 0 4px 14px rgb(15 25 40 / 16%); font-size: 12px; color: var(--phc-muted); display: grid; gap: 5px; }
 .chg-pop:has(> .foot) .prog { bottom: 44px; }
 .chg-pop .prog:not(.err) { pointer-events: none; }
-.chg-pop:has(> .prog:not([hidden])) > .body { padding-bottom: 48px; }
+.chg-pop:has(> .prog:not([hidden]):not(.err)) > .body { padding-bottom: 48px; }
 .chg-pop .prog[hidden] { display: none; }
 .chg-pop .track { height: 3px; border-radius: 2px; background: var(--phc-chip2); overflow: hidden; position: relative; }
 .chg-pop .track i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ph-progress, var(--phc-focus)); border-radius: 2px; transition: width .2s; }
 .chg-pop .track.ind i { width: 30%; animation: chg-ind 1.2s ease-in-out infinite; }
 @keyframes chg-ind { from { left: -30%; } to { left: 100%; } }
-.chg-pop .prog.err { color: var(--phc-danger); }
+/* (an error stays in the flow: it waits for Try again, its words never over the rows) */
+.chg-pop .prog.err { color: var(--phc-danger); position: static; order: 0; margin: 8px 8px 0; box-shadow: none; }
 .chg-pop .prog .again { justify-self: start; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 1px 10px; cursor: pointer; font-size: 12px; color: var(--phc-fg); }
 .chg-pop .foot { border-top: 1px solid var(--phc-line); padding: 6px 10px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 8px; align-items: center; font-size: 12px; color: var(--phc-muted); }
 .chg-pop .foot .r { justify-self: end; }
