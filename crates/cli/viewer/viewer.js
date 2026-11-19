@@ -11434,9 +11434,10 @@ var PreviewSession = class {
   /** Page `k`, for a view that wants it. */
   async fetch(k) {
     if (!this.opened) return;
+    const asked = this.hashes[k] ?? null;
     const r = await this.core.request({ op: "png", page: k, dpi: this.dpi() });
     const img = image(r);
-    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
+    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? asked);
   }
   /** Part of page `k` (`view`, fractions of it) at `scale` pixels a point, for a link's window zoomed in: not the pages' drawing, which stays as it is. */
   async zoomed(k, scale, view) {

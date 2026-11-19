@@ -1029,10 +1029,17 @@ export class PreviewSession {
   /** Page `k`, for a view that wants it. */
   async fetch(k: number): Promise<void> {
     if (!this.opened) return;
+    // (the page asked for: its hash now, before the answer)
+    const asked = this.hashes[k] ?? null;
     const r = await this.core.request({ op: "png", page: k, dpi: this.dpi() });
     const img = image(r);
-    // (the hash of the page drawn: the draw worker's PDF may be a build behind or ahead)
-    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
+    // (the hash of the page drawn: the one the answer says, else the one it
+    // was asked for. The core draws the page it has when it answers, no older
+    // than the one asked for; the pages known when the answer comes may be a
+    // build's that came meanwhile. Said to be theirs, a page streamed mid-build
+    // and drawn as the build came in passed for the build's page, never asked
+    // for again: in Overleaf a band of the frame before stayed on, #56)
+    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? asked);
   }
 
   /** Part of page `k` (`view`, fractions of it) at `scale` pixels a point, for a link's window zoomed in: not the pages' drawing, which stays as it is. */
