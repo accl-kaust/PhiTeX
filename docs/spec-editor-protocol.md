@@ -1268,8 +1268,14 @@ TeX run; the PDF stays byte-identical.
   main file and what it inputs, else every .tex and .bib; the watch's
   `blame` op with no files picks them itself) and the history, never from
   the pages; each page gets its bars as its glyphs come, and a build blames
-  nothing again unless a file's text or the history's head (`info`
-  `head`) moved. Diff: From → To (a commit, a tag, your last
+  nothing again unless a file's text changed; the history's head (`info`
+  `head`, Overleaf's newest version by one `/updates` read) is asked only
+  when Blame is shown again (its tab, the popover opened or unfolded, the
+  browser tab back). Its words are a reader's (`readerWords`: runs of
+  letters; no numbers, control sequences, comments, options, key=value,
+  names, TikZ paths). The popover folds to its title row (kept), the marks
+  and the card live. The badge: Diff, the diff's changes; Blame, the
+  people who wrote this version; none when there is nothing to count. Diff: From → To (a commit, a tag, your last
   visit; the working tree), the changes listed by place with kind filters,
   `]`/`[` through them, Hide deletions; From and To open the commit picker
   (`viewer/src/commits.ts`: one end, the rows to the pointer aimed, the

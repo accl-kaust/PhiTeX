@@ -179,6 +179,7 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await t.until(`${view} === "diff-pick" && ${to} === ${JSON.stringify(ids[m].slice(0, 7))}`, "the merge against its first parent, the picker open", 5000);
   await click("#chg-done");
   await t.until(counted, "the merge's changes", 120000);
+  assert.ok(await t.q(`$("#chg-n").textContent === $(".chg-pop .foot .count").textContent.split(" ")[0] && /The number: \\d+ changes? in the diff shown/.test($("#b-changes").title)`), "Diff's badge: the diff's changes, as the title says");
   assert.ok(await t.q(`$$(".chg-pop .citem").some((c) => /Lina/.test(c.textContent))`), "what the merge brought: Lina's paragraph");
   // (against the working tree: the sentence not committed, yours; ] [ and N step, D the pages)
   await click("#chg-to");
@@ -258,6 +259,7 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   assert.ok(await t.q(`${asked}.includes("blame")`), "Blame asked once its half was clicked");
   const people = () => t.q(`$$(".chg-pop .prow .nm > span:first-child").map((e) => e.textContent).sort()`);
   assert.deepEqual(await people(), ["Alice", "Bob", "Carol", "Lina", "Mary", "Not committed"]);
+  assert.deepEqual(await t.q(`[$("#chg-n").textContent, /The number: 5 people wrote this version/.test($("#b-changes").title)]`), ["5", true], "Blame's badge: the people who wrote this version, as the title says");
   assert.match(await t.q(`$(".chg-pop .sec h3 span").textContent`), /· [\d,]+ words$/, "counted in the sources' words");
   assert.ok(await t.q(`$$(".slot .bl-bar.bl-hatch").length >= 1`), "the sentence not committed hatched");
   assert.ok(await t.q(`$$(".slot .bl-bar").some((b) => b.getBoundingClientRect().height > 30)`), "the figure's picture: a bar of its own (its image's last commit)");
@@ -313,6 +315,7 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   // (Blame's look, inline: Bob's commit skipped, his lines go to who wrote them before (Carol); since the tag)
   await click("#chg-lookhead");
   await shot("look-blame-light");
+  assert.ok(await t.q(`$$(".chg-pop .skips label").every((l) => l.querySelector("span").scrollWidth <= l.querySelector("span").clientWidth + 1 && /: skipped, its lines go/.test(l.title))`), "Skip commits: whole rows, full titles");
   const bob = await t.q(`$$(".chg-pop [data-skip]").findIndex((x) => /Bob's paragraph/.test(x.closest("label").textContent))`);
   assert.ok(bob >= 0, "Bob's commit offered to skip");
   await t.q(`(() => { const x = $$(".chg-pop [data-skip]")[${bob}]; x.click(); return 1; })()`);
@@ -330,6 +333,137 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   await click("#chg-lookhead");
   await click("#chg-x");
   assert.equal(await t.q(`$$(".slot .bl").length`), 0, "closed: nothing over the pages");
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});
+
+/**
+ * A long paper in git (16+ pages): Carol's draft, then Bob's, Lina's and
+ * Mary's paragraphs; an \input data table of numbers and an \input TikZ
+ * picture, so Blame's words are the reader's (no numbers, no drawing).
+ */
+function longPaper() {
+  const W = "results method latency typeset page edit reader writer measure figure claim history version change output document sentence paragraph".split(" ");
+  let seed = 7;
+  const word = () => W[(seed = (seed * 1103515245 + 12345) % 2147483648) % W.length];
+  const p = (who, i) => `${who} wrote this: ${Array.from({ length: 90 }, word).join(" ")}.\n\n`;
+  const paras = (who) => Array.from({ length: 90 }, (_, i) => p(who, i));
+  const body = (ps) => ps.map((x, i) => (i % 15 === 0 ? `\\section{Part ${"ABCDEFGH"[i / 15]} of the study}\n${x}` : x)).join("");
+  const table = `\\begin{table}[h]\\centering\\begin{tabular}{rrr}\n${Array.from({ length: 30 }, (_, i) => `${i} & ${(i * 0.37).toFixed(2)} & ${i * i}e-3 \\\\`).join("\n")}\n\\end{tabular}\\caption{Measured data}\\end{table}\n`;
+  const tikz = "\\begin{figure}[h]\\centering\\begin{tikzpicture}[scale=0.6, every node/.style={draw, fill=blue!10}]\n\\draw[thick, ->] (0,0) -- (4,0) node[right] {Time};\n\\draw (0,0) circle (1) node[above=3pt] {Peak load};\n\\foreach \\x in {1,...,4} \\draw (\\x,0.1) -- (\\x,-0.1);\n\\end{tikzpicture}\\caption{A drawing}\\end{figure}\n";
+  const ps = paras("Carol");
+  const write = (dir) => writeFileSync(join(dir, "main.tex"), doc(`${body(ps)}\\input{data}\n\\input{drawing}\n`, "\\usepackage{tikz}\n"));
+  const dir = project({ "main.tex": "", "data.tex": table, "drawing.tex": tikz });
+  write(dir);
+  const now = Math.floor(Date.now() / 1000);
+  const commit = (who, days, msg) => {
+    process.env.GIT_AUTHOR_DATE = process.env.GIT_COMMITTER_DATE = `@${Math.round(now - days * 86400)} +0000`;
+    git(dir, "add", "-A");
+    git(dir, "-c", `user.name=${who}`, "-c", `user.email=${who.toLowerCase()}@example.com`, "commit", "-qm", msg);
+  };
+  git(dir, "init", "-q", "-b", "main");
+  commit("Carol", 60, "Draft");
+  for (const [k, who] of ["Bob", "Lina", "Mary"].entries()) {
+    for (let i = k; i < ps.length; i += 4) ps[i] = p(who, i);
+    write(dir);
+    commit(who, 20 - k * 5, `${who}'s paragraphs`);
+  }
+  delete process.env.GIT_AUTHOR_DATE;
+  delete process.env.GIT_COMMITTER_DATE;
+  // (the words a reader reads: the paragraphs' and the section titles', the captions', the drawing's two labels)
+  const words = (s) => (s.match(/\p{L}+/gu) ?? []).length;
+  const expected = ps.reduce((n, x) => n + words(x), 0) + 6 * words("Part A of the study") + words("Measured data A drawing Time Peak load");
+  return { dir, expected };
+}
+
+/** A trace's frames and main-thread work while the pointer moved: what the coordinator's DevTools would show. */
+function framesOf(ev) {
+  const moves = ev.filter((e) => e.name === "EventDispatch" && /^(pointermove|mousemove)$/.test(e.args?.data?.type ?? ""));
+  if (!moves.length) return { error: "no pointer events in the trace" };
+  const { pid, tid } = moves[0];
+  const t0 = Math.min(...moves.map((e) => e.ts)), t1 = Math.max(...moves.map((e) => e.ts));
+  const inWin = (e) => e.ts >= t0 && e.ts <= t1;
+  const draws = ev.filter((e) => e.pid === pid && e.name === "DrawFrame" && inWin(e)).map((e) => e.ts).sort((a, b) => a - b);
+  const begins = ev.filter((e) => e.pid === pid && e.name === "BeginFrame" && inWin(e)).length;
+  const dropped = ev.filter((e) => e.pid === pid && e.name === "DroppedFrame" && inWin(e)).length;
+  const gaps = draws.slice(1).map((t, i) => (t - draws[i]) / 1000).sort((a, b) => a - b);
+  const q = (a, f) => (a.length ? +a[Math.min(a.length - 1, Math.floor(a.length * f))].toFixed(1) : 0);
+  // (the main thread's tasks, each with what it spent on style, layout, paint, script)
+  const main = ev.filter((e) => e.pid === pid && e.tid === tid && e.ph === "X" && inWin(e));
+  const tasks = main.filter((e) => e.name === "RunTask" || e.name === "ThreadControllerImpl::RunTask");
+  const kinds = { style: ["UpdateLayoutTree", "RecalculateStyles"], layout: ["Layout"], paint: ["Paint", "PrePaint", "PaintImage", "Layerize", "UpdateLayer"], script: ["FunctionCall", "EventDispatch", "TimerFire", "FireAnimationFrame", "v8.callFunction"], hittest: ["HitTest"] };
+  const split = (task) => {
+    const out = {};
+    for (const [k, names] of Object.entries(kinds)) out[k] = +(main.filter((e) => names.includes(e.name) && e.ts >= task.ts && e.ts + e.dur <= task.ts + task.dur).reduce((n, e) => n + e.dur, 0) / 1000).toFixed(1);
+    return out;
+  };
+  const durs = tasks.map((e) => e.dur / 1000).sort((a, b) => a - b);
+  const long = tasks.filter((e) => e.dur > 16700).map((e) => ({ ms: +(e.dur / 1000).toFixed(1), ...split(e) }));
+  const raster = ev.filter((e) => e.pid === pid && e.name === "RasterTask" && inWin(e)).map((e) => e.dur / 1000).sort((a, b) => a - b);
+  return { seconds: +((t1 - t0) / 1e6).toFixed(2), moves: moves.length, vsyncs: begins, drawn: draws.length, dropped, frameGapMs: { p50: q(gaps, 0.5), p95: q(gaps, 0.95), max: q(gaps, 1) }, mainTaskMs: { p50: q(durs, 0.5), p95: q(durs, 0.95), max: q(durs, 1) }, over16ms: long, rasterMs: { p95: q(raster, 0.95), max: q(raster, 1) } };
+}
+
+/** A 3 s pointer sweep over the pages from their top (a move every 16 ms, the wheel now and then), traced: its frames (framesOf). */
+async function sweep(t, name) {
+  await t.q(`(() => { $("#stage").scrollTop = 0; return 1; })()`);
+  await sleep(1500);
+  const st = await t.q(`(() => { const r = $("#stage").getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()`);
+  const ev = await t.trace(async () => {
+    for (let i = 0, t0 = Date.now(); Date.now() - t0 < 3000; i++) {
+      const fx = (i % 60) / 60, r = Math.floor(i / 60);
+      await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: st[0] + st[2] * (0.1 + 0.5 * (r % 2 ? 1 - fx : fx)), y: st[1] + st[3] * (0.2 + 0.7 * ((i % 37) / 37)) });
+      if (i % 20 === 19) await t.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: st[0] + st[2] * 0.3, y: st[1] + st[3] * 0.5, deltaX: 0, deltaY: 300 });
+      await sleep(16);
+    }
+  });
+  if (process.env.PHITEX_SHOTS) writeFileSync(join(process.env.PHITEX_SHOTS, `watch-sweep-${name}.json`), JSON.stringify({ traceEvents: ev }));
+  return framesOf(ev);
+}
+
+test("Blame on a 16-page paper: words as a reader counts them, said as partial till every file is in; a 3 s traced pointer sweep with no long frame; the card a dwell after the hover", async () => {
+  const { dir, expected } = longPaper();
+  const w = new Watch(dir, { home });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent >= 16`, "16 pages", 240000);
+  await t.until(`document.title.endsWith("· Built")`, "the build", 240000);
+  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
+  // (the pages' own frames under the sweep, Blame off: what Blame's are measured against)
+  const base = await sweep(t, "blame-off");
+  await t.click("#b-changes");
+  // (the summary's head as it changes: partial, said so, till every file is in)
+  await t.q(`(() => { const seen = (globalThis.__heads = []); new MutationObserver(() => { const h = $(".chg-pop .sec h3 span")?.textContent; if (h && seen.at(-1) !== h) seen.push(h); }).observe($(".chg-pop"), { subtree: true, childList: true, characterData: true }); return 1; })()`);
+  await t.click(`[data-m="blame"]`);
+  await t.until(`/· [\\d,]+ words$/.test($(".chg-pop .sec h3 span")?.textContent ?? "")`, "the words counted", 120000);
+  const heads = await t.q("globalThis.__heads");
+  assert.ok(heads.every((h) => /· so far · \d of 3 files$/.test(h) || h === heads.at(-1)), `partial heads said so: ${JSON.stringify(heads)}`);
+  const n = +(await t.q(`$(".chg-pop .sec h3 span").textContent.match(/· ([\\d,]+) words$/)[1].replace(/,/g, "")`));
+  assert.ok(n >= expected && n <= expected * 1.02 + 10, `words: ${n}, the reader's ${expected} (no numbers, no drawing)`);
+  assert.deepEqual(await t.q(`$$(".chg-pop .prow .nm > span:first-child").map((e) => e.textContent).sort()`), ["Bob", "Carol", "Lina", "Mary"]);
+  await t.until(`$$(".slot .bl-bar:not(.bl-wait)").length > 40`, "the bars", 30000);
+  // (folded: the pages free, the marks on)
+  await t.click("#chg-fold");
+  assert.ok(await t.q(`$(".chg-pop").classList.contains("folded") && $(".chg-pop").getBoundingClientRect().height < 130`), "folded to its title row");
+  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-folded-light.png"));
+  await dark(t, true);
+  if (process.env.PHITEX_SHOTS) (await sleep(300), await t.shot(join(process.env.PHITEX_SHOTS, "watch-folded-dark.png")));
+  await dark(t, false);
+  // (the same 3 s sweep, Blame on: its frames against the pages' own)
+  const f = await sweep(t, "blame-on");
+  console.log(`# traced sweep, Blame off: ${JSON.stringify(base)}`);
+  console.log(`# traced sweep, Blame on:  ${JSON.stringify(f)}`);
+  assert.ok(!f.error && !base.error, f.error ?? base.error);
+  assert.ok(f.dropped <= base.dropped, `no frame dropped for Blame: ${f.dropped} against ${base.dropped}`);
+  assert.ok(f.mainTaskMs.p95 <= base.mainTaskMs.p95 + 4, `Blame's frames' work: p95 ${f.mainTaskMs.p95} ms against ${base.mainTaskMs.p95} ms`);
+  assert.ok(f.over16ms.length <= base.over16ms.length + 2, `Blame adds no long frames: ${JSON.stringify(f.over16ms)} against ${JSON.stringify(base.over16ms)}`);
+  // (the hover to the card: its dwell, then drawn)
+  const line = await t.q(`(() => { const b = $$(".slot .bl-bar:not(.bl-wait)").find((b) => { const r = b.getBoundingClientRect(); return r.top > 150 && r.bottom < innerHeight - 200 && r.height > 4; }); const r = b.getBoundingClientRect(); return [r.right + 80, r.top + r.height / 2]; })()`);
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: line[1] });
+  await t.until(`$(".blcard").hidden`, "no card", 5000);
+  await t.q(`(() => { const card = $(".blcard"); globalThis.__hc = null; let t0 = null; addEventListener("pointermove", (e) => (t0 ??= e.timeStamp), { capture: true }); new MutationObserver(() => { if (!card.hidden && globalThis.__hc === null && t0 !== null) globalThis.__hc = performance.now() - t0; }).observe(card, { attributes: true, childList: true }); return 1; })()`);
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: line[0], y: line[1] });
+  const hc = await t.until(`globalThis.__hc`, "the card", 5000);
+  console.log(`# hover to card: ${hc.toFixed(0)} ms (a 180 ms dwell, then drawn)`);
+  assert.ok(hc >= 170 && hc < 260, `hover to card ${hc} ms`);
   assert.deepEqual(t.errors, []);
   await w.stop();
 });

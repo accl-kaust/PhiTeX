@@ -470,9 +470,12 @@ export class Model {
   }
 
   /**
-   * Who wrote the sources, counted in the detail's units: lines (not blank
-   * ones), words, or characters (not spacing); each commit's count. A
-   * .bbl is the build's, not a source: not counted; nor an image (no text).
+   * Who wrote the sources, counted in the detail's units as a reader counts
+   * them (readerWords: runs of letters, never numbers, control sequences,
+   * comments or option and key=value text): the lines with a word in them,
+   * the words, or their letters; each commit's count, a word's its first
+   * letter's. A .bbl is the build's, not a source: not counted; nor an
+   * image (no text).
    */
   counts(): Map<number, number> {
     const out = new Map<number, number>();
@@ -480,19 +483,37 @@ export class Model {
     for (const [name, f] of this.files) {
       if (f.text === undefined || f.error || /\.bbl$/i.test(name)) continue;
       const t = f.text;
+      let ws = this.words.get(name);
+      if (!ws || ws.text !== t) this.words.set(name, (ws = { text: t, at: readerWords(t) }));
+      const w = ws.at;
       if (this.detail === "line" || !f.units) {
+        // (by the line each word starts on; a line counted once, as "lines", or each word)
         const ls = f.lines ?? [];
         const starts = f.starts ?? lineStarts(t);
-        ls.forEach((c, i) => {
-          const a = starts[i] ?? 0, b = starts[i + 1] ?? t.length;
-          if (/\S/.test(t.slice(a, b))) add(c, 1);
-        });
-      } else if (this.detail === "word") {
-        for (const [a, b, c] of f.units) add(c, (t.slice(a, b).match(/[\p{L}\p{N}_]+/gu) ?? []).length);
-      } else for (const [a, b, c] of f.units) add(c, t.slice(a, b).replace(/\s+/g, "").length);
+        let line = 0, last = -1;
+        for (let i = 0; i < w.length; i += 2) {
+          while (line + 1 < starts.length && starts[line + 1] <= w[i]) line++;
+          const c = ls[line];
+          if (c === undefined) continue;
+          if (this.detail === "line") line !== last && ((last = line), add(c, 1));
+          else add(c, this.detail === "word" ? 1 : w[i + 1] - w[i]);
+        }
+      } else {
+        // (by the unit each word starts in: the units are in order, the words too)
+        const u = f.units;
+        let k = 0;
+        for (let i = 0; i < w.length; i += 2) {
+          while (k + 1 < u.length && u[k][1] <= w[i]) k++;
+          const unit = u[k];
+          if (!unit || unit[0] > w[i]) continue;
+          add(unit[2], this.detail === "word" ? 1 : w[i + 1] - w[i]);
+        }
+      }
     }
     return out;
   }
+  /** Each file's reader words, worked out once per text. */
+  private words = new Map<string, { text: string; at: number[] }>();
 
   time(c: number): number {
     return c < 0 ? Infinity : (this.commits[c]?.time ?? -Infinity);
@@ -874,7 +895,8 @@ export const BLAME_CSS = `
 .win.dark-pdf .slot .bl-wash, .slot.dark .bl-wash { background: rgb(20 22 26 / 58%); }
 .slot .bl-dim { opacity: .28; }
 @media (prefers-reduced-motion: no-preference) {
-  .slot .bl-in { animation: bl-in .22s ease-out both; }
+  /* (backwards only: done, no effect is left on each bar; a fill kept a compositor effect per bar, hundreds on a long paper, and every frame's layerizing paid for them) */
+  .slot .bl-in { animation: bl-in .22s ease-out backwards; }
   .slot .bl-wait { animation: bl-wait 1.4s ease-in-out infinite; }
   .slot .bl-tint { transition: opacity .12s; }
 }
@@ -917,11 +939,102 @@ export interface BlameSummary {
   /** The sources' units blamed so far (lines, words or characters: `unit`), and files still to come. */
   lines: number;
   unit: "lines" | "words" | "characters";
+  /** Files still to come, of `files` in all (the counts are partial till none waits). */
   waiting: number;
+  files: number;
   people: { key: string; name: string; color: string; n: number }[];
   commits: { c: number; commit: BlameCommit | null; n: number; color: string; via: string | null }[];
   /** The tags and the dates "changed since" offers. */
   since: { v: string; label: string }[];
+}
+
+/** Commands whose argument is never text a reader reads: names, keys, files, colours, lengths. */
+const NOT_TEXT = new Set(["begin", "end", "label", "ref", "eqref", "pageref", "autoref", "cref", "Cref", "nameref", "cite", "citep", "citet", "citealt", "citeauthor", "citeyear", "nocite", "parencite", "textcite", "autocite", "footcite", "input", "include", "includeonly", "subfile", "import", "subimport", "includegraphics", "includepdf", "usepackage", "RequirePackage", "documentclass", "bibliography", "bibliographystyle", "addbibresource", "usetikzlibrary", "usepgfplotslibrary", "pgfplotsset", "tikzset", "tikzstyle", "definecolor", "colorlet", "color", "textcolor", "colorbox", "pagecolor", "setlength", "addtolength", "setcounter", "addtocounter", "newcounter", "hspace", "vspace", "newcommand", "renewcommand", "providecommand", "newenvironment", "renewenvironment", "DeclareMathOperator", "def", "let", "url", "href", "hyperref", "pagestyle", "thispagestyle", "bibitem", "newlength", "graphicspath", "lstinputlisting", "inputminted", "pgfplotstableread", "table", "csname", "fontsize", "selectfont", "fontspec", "setmainfont", "setsansfont", "setmonofont"]);
+
+/**
+ * The words a reader reads in a source, as [start, end) pairs: runs of
+ * letters (an apostrophe between letters kept), never numbers; never a
+ * control sequence, a comment, a bracketed option, a key=value's key or
+ * value, or the argument of a command that names rather than says
+ * (NOT_TEXT). Generated tables of numbers and TikZ's coordinates and
+ * options count for nothing; the text of a node does.
+ */
+export function readerWords(t: string): number[] {
+  const out: number[] = [];
+  const n = t.length;
+  const letter = (c: string | undefined) => c !== undefined && /\p{L}/u.test(c);
+  const space = (j: number) => {
+    while (j < n && /\s/.test(t[j])) j++;
+    return j;
+  };
+  // (a group from `j` (its opener) to after its closer, comments and escapes skipped; no closer within `max`: null)
+  const group = (j: number, open: string, close: string, max: number): number | null => {
+    let d = 0;
+    for (let k = j; k < n && k - j < max; k++) {
+      const c = t[k];
+      if (c === "\\") k++;
+      else if (c === "%") {
+        const e = t.indexOf("\n", k);
+        k = e < 0 ? n : e;
+      } else if (c === open) d++;
+      else if (c === close && --d === 0) return k + 1;
+    }
+    return null;
+  };
+  let i = 0, tikz = false, depth = 0;
+  while (i < n) {
+    const c = t[i];
+    if (c === "{" || c === "}") (depth += c === "{" ? 1 : -1), i++;
+    else if (c === "%") {
+      const e = t.indexOf("\n", i);
+      i = e < 0 ? n : e + 1;
+    } else if (c === "\\") {
+      let j = i + 1;
+      if (j < n && /[A-Za-z@]/.test(t[j])) while (j < n && /[A-Za-z@]/.test(t[j])) j++;
+      else j++;
+      const name = t.slice(i + 1, j);
+      if (t[j] === "*") j++;
+      i = j;
+      if (NOT_TEXT.has(name)) {
+        // (its options and its first argument: names, not words)
+        let k = space(i);
+        for (let g; t[k] === "[" && (g = group(k, "[", "]", 2000)) !== null; ) k = space((i = g));
+        const g = t[k] === "{" ? group(k, "{", "}", 4000) : null;
+        if (g !== null) {
+          // (a picture: its paths' words (node, circle, cycle) are drawing, only its braced text is read)
+          const env = t.slice(k, g);
+          if (/^\{tikzpicture\}$/.test(env)) (name === "begin" ? ((tikz = true), (depth = 0)) : name === "end" && (tikz = false));
+          i = g;
+          // (a table's column spec (and tabularx's width): letters, not words)
+          const specs = name === "begin" ? (/^\{(tabular\*|tabularx|tabulary)\}$/.test(env) ? 2 : /^\{(tabular|array|longtable|supertabular)\}$/.test(env) ? 1 : 0) : 0;
+          for (let s = 0; s < specs; s++) {
+            const at = space(i);
+            const e = t[at] === "{" ? group(at, "{", "}", 2000) : null;
+            if (e === null) break;
+            i = e;
+          }
+        }
+      }
+    } else if (c === "[") {
+      const g = group(i, "[", "]", 2000);
+      i = g ?? i + 1;
+    } else if (c === "=") {
+      // (key=value: the key, the word just before, dropped; the value skipped to its , ] } ; or the line's end)
+      const e = out.length ? out[out.length - 1] : -1;
+      if (e >= 0 && !t.slice(e, i).trim()) out.length -= 2;
+      let j = space(i + 1);
+      if (t[j] === "{") j = group(j, "{", "}", 4000) ?? j + 1;
+      else while (j < n && !/[,\]};\n]/.test(t[j])) j += t[j] === "\\" ? 2 : 1;
+      i = j;
+    } else if (letter(c)) {
+      let j = i + 1;
+      while (j < n && (letter(t[j]) || ((t[j] === "'" || t[j] === "’") && letter(t[j + 1])))) j++;
+      // (a run glued to digits (x1, 3D, 2nd) is a label or a number, not a word)
+      if (!/\d/.test(t[i - 1] ?? "") && !/\d/.test(t[j] ?? "") && !(tikz && depth <= 0)) out.push(i, j);
+      i = j;
+    } else i++;
+  }
+  return out;
 }
 
 /** A printed line's key on its page (the same line drawn again is not new). */
@@ -997,6 +1110,8 @@ export class Blame {
   private slots: MutationObserver | null = null;
   /** Files still being worked out (a quiet placeholder on their lines), in the first blame only. */
   private pending = new Set<string>();
+  /** The files the last full blame took in (its sources). */
+  private fileTotal = 0;
   /** The summary as last emitted: emitted again only when it changes. */
   private said = "";
   private sum: BlameSummary | null = null;
@@ -1026,7 +1141,7 @@ export class Blame {
     this.slots.observe(this.p.stage, { childList: true, subtree: true });
     if (this.m && this.worked === this.workKey()) {
       void this.mapPages();
-      this.checkTexts(true);
+      this.checkTexts(true, true);
     } else void this.work();
   }
 
@@ -1079,15 +1194,31 @@ export class Blame {
    * history moved (the host's head): blamed again, quietly, each alone. A
    * host that can say neither: every file asked again (its answer applied
    * only where it differs). `now`: at once (Blame shown again), else once
-   * typing pauses.
+   * typing pauses. `head`: the host's history asked too (one small read:
+   * never on a build, only when Blame is shown, refreshHistory).
    */
-  private checkTexts(now: boolean): void {
+  private checkTexts(now: boolean, head = false): void {
     if (!this.m || !this.on) return;
     clearTimeout(this.again);
-    this.again = setTimeout(() => void this.recheck(), now ? 0 : 700);
+    this.againHead ||= head;
+    this.again = setTimeout(() => {
+      const h = this.againHead;
+      this.againHead = false;
+      void this.recheck(h);
+    }, now ? 0 : 700);
+  }
+  private againHead = false;
+
+  /**
+   * Blame shown to the user again (its tab, the popover opened or unfolded,
+   * the browser tab back): the texts compared, and the history asked once
+   * whether it moved ("not saved yet" saved since); nothing more when not.
+   */
+  refreshHistory(): void {
+    this.checkTexts(true, true);
   }
 
-  private async recheck(): Promise<void> {
+  private async recheck(askHead: boolean): Promise<void> {
     if (!this.on || !this.m) return;
     const turn = this.turn, files = [...this.texts.keys()];
     let changed = files;
@@ -1096,7 +1227,7 @@ export class Blame {
       const texts = await Promise.all(files.map((f) => Promise.resolve(host.text!(f)).catch(() => undefined)));
       changed = files.filter((f, i) => texts[i] !== undefined && texts[i] !== this.texts.get(f));
       // (the history moved (a commit): every file, its lines' writers may have)
-      if (this.head !== undefined && host.head) {
+      if (askHead && this.head !== undefined && host.head) {
         const h = await host.head().catch(() => null);
         if (h !== null && h !== this.head) changed = files;
       }
@@ -1165,6 +1296,7 @@ export class Blame {
     const turn = ++this.turn;
     this.abort?.abort();
     const abort = (this.abort = new AbortController());
+    let doing: [string, [number, number] | undefined] = ["Reading the history…", undefined];
     const say = (text: string, progress?: [number, number]) => {
       if (quiet || turn !== this.turn) return;
       this.busy = text;
@@ -1177,7 +1309,8 @@ export class Blame {
       moved: this.look.moved,
       skip: this.look.skip,
       signal: abort.signal,
-      progress: (text, done, total) => say(text, done !== undefined && total ? [done, total] : undefined),
+      // (the host's own reads said while under way; read to its end, or quiet: what Blame is doing, "Matching 25 files…")
+      progress: (text, done, total) => (text && !(total && done !== undefined && done >= total) ? say(text, done !== undefined && total ? [done, total] : undefined) : say(...doing)),
     };
     const key = this.workKey();
     const fresh = !only || !this.m || this.worked !== key;
@@ -1209,11 +1342,14 @@ export class Blame {
         take(d);
         files = Object.keys(d.files);
       } else {
-        if (fresh) (this.pending = new Set(files)), void this.mapPages();
+        if (fresh) (this.pending = new Set(files)), (this.fileTotal = files.length), void this.mapPages();
         if (fresh && this.m !== m && this.m) this.texts.clear();
         let i = 0;
         for (const file of files) {
-          say(`Working out who wrote each ${unit}… ${file}`, files.length > 1 ? [i, files.length] : undefined);
+          // (the history read, what is happening now: the files matched to it, one by one)
+          const left = files.length - i;
+          doing = [`Matching ${left === 1 ? file : `${left.toLocaleString()} files`} to the history…`, files.length > 1 ? [i, files.length] : undefined];
+          say(...doing);
           const d = await this.host.blame([file], opts);
           if (turn !== this.turn) return;
           if (typeof d === "string") throw new Error(d);
@@ -1320,7 +1456,7 @@ export class Blame {
   summary(): BlameSummary {
     const m = this.m;
     const unit: BlameSummary["unit"] = this.look.detail === "line" ? "lines" : this.look.detail === "word" ? "words" : "characters";
-    const base = { busy: this.busy, progress: this.progress, error: this.error, waiting: this.pending.size, unit, since: this.sinceChoices() };
+    const base = { busy: this.busy, progress: this.progress, error: this.error, waiting: this.pending.size, files: Math.max(this.fileTotal, this.texts.size), unit, since: this.sinceChoices() };
     if (!m) return { ...base, lines: 0, people: [], commits: [] };
     if (!this.sum || this.sum.unit !== unit) {
       const counts = m.counts();
@@ -1436,8 +1572,12 @@ export class Blame {
   }
 
   /** The paragraph under the pointer tinted ("under the pointer"), alone: the rest of the page left as it is. */
+  /** The hover's tints now on a page (removed by the next hover, not looked for across every page). */
+  private htints: HTMLElement[] = [];
+
   private drawHover(): void {
-    for (const e of this.p.stage.querySelectorAll(".slot .bl-htint")) e.remove();
+    for (const e of this.htints) e.remove();
+    this.htints = [];
     const f = this.pinned ?? this.hover;
     if (!f || !this.on || this.look.tint !== "hover") return;
     const slot = this.slot(f.k);
@@ -1445,7 +1585,8 @@ export class Blame {
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
     const frag = document.createDocumentFragment();
-    for (const s of this.segs.get(f.k) ?? []) if (s.para === f.s.para && !this.dimmed(s.c)) frag.append(...this.tints(s, w, h, dark, "bl-tint bl-htint"));
+    for (const s of this.segs.get(f.k) ?? []) if (s.para === f.s.para && !this.dimmed(s.c)) this.htints.push(...this.tints(s, w, h, dark, "bl-tint bl-htint"));
+    frag.append(...this.htints);
     slot.append(frag);
   }
 

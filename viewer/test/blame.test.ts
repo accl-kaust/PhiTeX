@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   AGE, AGE_RAMPS, AUTHOR_COLORS, Model, OVERFLOW, UNCOMMITTED, ageStep, agoWords, authorColors, bibEntries, bibFiles, bibItems, byteIndex, floats,
-  historyBlame, imageNames, lineOf, lineStarts, linesOf, lookOf, mapPage, matchLines, parsePorcelain, printedLines, sinceTime, wordRuns, type BlameCommit, type BlameData,
+  historyBlame, imageNames, lineOf, lineStarts, linesOf, lookOf, mapPage, matchLines, parsePorcelain, printedLines, readerWords, sinceTime, wordRuns, type BlameCommit, type BlameData,
 } from "../src/blame.ts";
 import type { Glyph } from "../src/sync.ts";
 
@@ -236,4 +236,33 @@ test("the editor's lines matched in the history's: those it lacks are not commit
   const m = matchLines(["a", "b", "c", "d"], ["a", "x", "b", "d", "e"]);
   assert.deepEqual([...m].sort((p, q) => p[0] - q[0]), [[0, 0], [2, 1], [3, 3]]);
   assert.deepEqual([...matchLines([], ["a"])], []);
+});
+
+test("a reader's words: runs of letters; no numbers, commands, comments, options, key=value, names", () => {
+  const words = (t: string) => {
+    const w = readerWords(t);
+    const out: string[] = [];
+    for (let i = 0; i < w.length; i += 2) out.push(t.slice(w[i], w[i + 1]));
+    return out;
+  };
+  // (prose, its section title, a citation's key and a label's name not)
+  assert.deepEqual(words("\\section{Our results} We don't wait~\\cite{knuth84}.\\label{sec:res} % a comment here\n"), ["Our", "results", "We", "don't", "wait"]);
+  // (a table's column spec is no word)
+  assert.deepEqual(words("\\begin{tabular}{lrr} Name & 1 \\\\ \\end{tabular}\\begin{tabularx}{\\linewidth}{lX} Width"), ["Name", "Width"]);
+  // (a generated table of numbers: nothing; a 3D or x1: not words)
+  assert.deepEqual(words("0.12 & 3.4e-5 & 17 \\\\\n1 & 2 & 3D x1 \\\\"), []);
+  // (TikZ: options, coordinates, key=value, a style's name not; a node's text is)
+  assert.deepEqual(words("\\begin{tikzpicture}[scale=0.8, every node/.style={draw}]\n\\draw[thick, ->] (0,0) -- (1,2) node[above] {Peak load};\n\\end{tikzpicture}"), ["Peak", "load"]);
+  // (a figure: its file and width not, its caption is)
+  assert.deepEqual(words("\\includegraphics[width=0.3\\linewidth]{figs/plot.pdf}\\caption{Edit time}"), ["Edit", "time"]);
+  // (a .bib entry is all key=value)
+  assert.deepEqual(words("@article{knuth84, author = {Donald Knuth}, title = {Literate Programming}, year = 1984}"), ["article"]);
+});
+
+test("Blame counts words as a reader reads them, a word its first letter's writer", () => {
+  const m = new Model();
+  m.detail = "word";
+  const text = "Alpha beta 12 \\cite{key} gamma\n";
+  m.add({ commits: [commit("a1", "Ann", 3), commit("b2", "Bob", 1)], files: { "main.tex": { text, runs: [[0, 11, 0], [11, text.length, 1]] } } } as BlameData);
+  assert.deepEqual([...m.counts()].sort(), [[0, 2], [1, 1]]);
 });

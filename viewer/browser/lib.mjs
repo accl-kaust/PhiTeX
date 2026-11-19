@@ -181,6 +181,8 @@ export class Tab {
       this.waiting.delete(m.id);
       return;
     }
+    if (m.method === "Tracing.dataCollected") this.traceEvents?.push(...m.params.value);
+    if (m.method === "Tracing.tracingComplete") this.traceDone?.();
     if (m.method === "Runtime.exceptionThrown") this.errors.push(m.params.exceptionDetails.exception?.description ?? m.params.exceptionDetails.text);
     if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error") this.errors.push(m.params.args.map((a) => a.value ?? a.description).join(" "));
     if (m.method === "Page.javascriptDialogOpening") {
@@ -261,6 +263,19 @@ export class Tab {
     const base = { key, code, windowsVirtualKeyCode: vk };
     await this.send("Input.dispatchKeyEvent", { type: "keyDown", ...base, ...(key.length === 1 ? { text: key } : {}) });
     await this.send("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+  }
+  /** A DevTools trace (its events) of what `during` does: the timeline's, its frames' and its rasters'. */
+  async trace(during) {
+    this.traceEvents = [];
+    const done = new Promise((r) => (this.traceDone = r));
+    const cats = ["devtools.timeline", "disabled-by-default-devtools.timeline", "disabled-by-default-devtools.timeline.frame", "blink.user_timing", "cc", "viz", "benchmark", "input", "disabled-by-default-devtools.timeline.paint"];
+    await this.send("Tracing.start", { transferMode: "ReportEvents", traceConfig: { includedCategories: cats, recordMode: "recordAsMuchAsPossible" } });
+    await during();
+    await this.send("Tracing.end");
+    await done;
+    const ev = this.traceEvents;
+    this.traceEvents = null;
+    return ev;
   }
   async shot(file) {
     const r = await this.send("Page.captureScreenshot", { format: "png" });

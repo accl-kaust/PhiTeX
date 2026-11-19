@@ -54,12 +54,17 @@ export const DIFF_COLORS: Record<ChangesDiffLook["colors"], [string, string, str
 export const DIFF_LOOK: ChangesDiffLook = { colors: "blue", ins: "wavy", del: "strike", fig: "side", bars: false };
 
 /** What the popover keeps between visits (the viewer's settings). */
+/** What ± Changes does, its button's title (the badge's meaning added when it shows a number). */
+export const CHANGES_TITLE = "Changes: what changed between two versions, and who wrote what";
+
 export interface ChangesPrefs {
   mode: "diff" | "blame";
   diff: ChangesDiffLook;
   blame: BlameLook;
   hide: boolean;
   kinds: string[];
+  /** Folded to its title row and the Diff/Blame switch, the pages free, the marks on. */
+  folded?: boolean;
 }
 
 /** A change as the list shows it: its kind and place, its text before and after, and who made it where the host can tell. */
@@ -177,6 +182,11 @@ ${COMMITS_CSS}
 .chg-pop .ph { padding: 10px 12px 12px; display: grid; gap: 10px; border-bottom: 1px solid var(--phc-line); }
 .chg-pop .ttl { display: grid; grid-template-columns: 28px 1fr 28px 28px; align-items: center; gap: 4px; }
 .chg-pop .ttl h2 { margin: 0; font-size: 14px; text-align: center; grid-column: 2; }
+.chg-pop .ttl .fold { grid-column: 1; }
+/* (folded: its title row and the Diff/Blame switch only, the pages beside it free; the marks stay) */
+.chg-pop.folded > :not(.ph):not(.grip) { display: none !important; }
+.chg-pop.folded .ph > :not(.ttl):not(.seg) { display: none !important; }
+.chg-pop.folded .ph { padding-bottom: 10px; border-bottom: 0; }
 .chg-pop .ib2 { border: 0; background: transparent; color: var(--phc-muted); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 15px; display: grid; place-items: center; }
 .chg-pop .ib2:hover, .chg-pop .ib2[aria-pressed="true"] { background: var(--phc-chip); color: var(--phc-fg); }
 .chg-pop .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--phc-chip); border-radius: 8px; padding: 2px; }
@@ -303,7 +313,9 @@ ${COMMITS_CSS}
 .chg-pop .skips code { font: 500 11px ui-monospace, monospace; color: var(--phc-muted); }
 .chg-pop .skips small { color: var(--phc-muted); }
 .chg-pop .skips label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; }
-.chg-pop .skips label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* (the list across the whole width, under its label; a long row wraps, its whole text in its title too) */
+.chg-pop .opt2.wide { grid-template-columns: 1fr; align-items: start; gap: 4px; }
+.chg-pop .skips label span { overflow-wrap: anywhere; }
 .chg-pop .preview { border: 1px solid var(--phc-line); border-radius: 8px; padding: 10px 12px; background: #fff; color: #111; font: 15px/1.5 "STIX Two Text", "Latin Modern Roman", "Times New Roman", serif; }
 .chg-pop .preview .ins { color: var(--chg-add); }
 .chg-pop .preview .dl { color: var(--chg-del); }
@@ -351,6 +363,9 @@ export class Changes {
   private kinds: Set<string>;
   /** The look's section (under the list) open. */
   private lookOpen = false;
+  /** Folded to its title row (kept): the pages it marks free to read. */
+  private folded = false;
+  private foldScroll = 0;
   /** The picker shown, opened from which field. */
   private pick: "from" | "to" | null = null;
   private pair: Pair | null = null;
@@ -401,10 +416,11 @@ export class Changes {
     // (Blame's state: its progress line at once; the lists drawn again only when what they show changed,
     // in place: the head, the look and the scroll left as they are)
     blame?.onState(() => {
+      if (this.mode === "blame") this.badge();
       if (this.mode !== "blame" || !this.open) return;
       this.renderProg();
       const s = blame.summary();
-      const sig = JSON.stringify([this.blameAsked, s.lines, s.unit, !!s.busy && !s.lines, !!s.error && !s.lines, s.waiting > 0, s.people.map((p) => [p.key, p.n, p.color]), s.commits.map((c) => [c.c, c.n, c.color, c.via]), blame.focusP, blame.focusC, blame.look.color, blame.look.ages]);
+      const sig = JSON.stringify([this.blameAsked, s.lines, s.unit, !!s.busy && !s.lines, !!s.error && !s.lines, s.waiting, s.files, s.people.map((p) => [p.key, p.n, p.color]), s.commits.map((c) => [c.c, c.n, c.color, c.via]), blame.focusP, blame.focusC, blame.look.color, blame.look.ages]);
       if (sig === this.blameSig) return;
       this.blameSig = sig;
       const focus = this.focusKey();
@@ -423,6 +439,8 @@ export class Changes {
     });
     // (the pane resized: placed again, within it)
     addEventListener("resize", () => this.open && this.place());
+    // (the browser tab shown again: what was "not saved yet" may be saved now)
+    document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && this.historyMoved());
     if (typeof ResizeObserver === "function") new ResizeObserver(() => this.open && this.place()).observe(p.win);
     this.applyColors();
     this.kept(p.prefs());
@@ -434,6 +452,7 @@ export class Changes {
     if (k.mode) this.mode = k.mode === "blame" && this.blame ? "blame" : this.host.diff ? "diff" : "blame";
     this.look = { ...DIFF_LOOK, ...k.diff };
     this.hide = !!k.hide;
+    this.folded = !!k.folded;
     this.kinds = new Set(k.kinds?.length ? k.kinds : KINDS);
     if (this.blame && k.blame) this.blame.look = { ...BLAME_LOOK, ...k.blame, skip: [...(k.blame.skip ?? [])] };
     this.applyColors();
@@ -442,7 +461,7 @@ export class Changes {
 
   /** The look kept. */
   private save(): void {
-    this.p.savePrefs({ mode: this.mode, diff: this.look, blame: this.blame?.look ?? BLAME_LOOK, hide: this.hide, kinds: [...this.kinds] });
+    this.p.savePrefs({ mode: this.mode, diff: this.look, blame: this.blame?.look ?? BLAME_LOOK, hide: this.hide, kinds: [...this.kinds], folded: this.folded });
   }
 
   /**
@@ -492,6 +511,7 @@ export class Changes {
       this.render();
       this.place();
       this.marks();
+      this.historyMoved();
       // (the keyboard's place: the popover's first control)
       if (at && document.activeElement === at) this.el.querySelector<HTMLElement>("[data-m][aria-pressed=true], button")?.focus({ preventScroll: true });
     } else {
@@ -501,6 +521,36 @@ export class Changes {
       // (the keyboard back on the button that opened it)
       if (this.el.contains(this.el.getRootNode() instanceof ShadowRoot ? (this.el.getRootNode() as ShadowRoot).activeElement : null)) (this.anchor ?? this.anchors[0])?.focus({ preventScroll: true });
     }
+  }
+
+  /**
+   * Folded to its title row and the Diff/Blame switch (`on`), or unfolded;
+   * kept. The marks and Blame's card stay live; Esc and ✕ still close it.
+   */
+  fold(on: boolean): void {
+    if (on === this.folded) return;
+    this.folded = on;
+    this.save();
+    if (!this.open) return;
+    // (in place: the lists and the focus left as they are, only hidden; their scroll put back)
+    const body = this.el.querySelector<HTMLElement>(".body");
+    if (on && body) this.foldScroll = body.scrollTop;
+    this.el.classList.toggle("folded", on);
+    if (!on && body) body.scrollTop = this.foldScroll;
+    const b = this.el.querySelector<HTMLElement>("#chg-fold");
+    if (b) {
+      b.textContent = on ? "▾" : "▴";
+      b.setAttribute("aria-expanded", String(!on));
+      b.setAttribute("aria-label", on ? "Unfold Changes" : "Fold Changes");
+      b.title = on ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept";
+    }
+    this.place();
+    if (!on) this.historyMoved();
+  }
+
+  /** Blame shown (opened, unfolded, its tab, the browser tab back): the history asked whether it moved since, once (no polling). */
+  private historyMoved(): void {
+    if (this.open && this.mode === "blame" && this.blameAsked) this.blame?.refreshHistory();
   }
 
   /** The popover's box while open (Blame's card keeps clear of it), else null. */
@@ -791,17 +841,32 @@ export class Changes {
   // ---- drawing ----
 
   /** The count beside ± Changes: the diff's changes, once one is known (never read for it). */
+  /**
+   * The count beside ± Changes, one meaning per mode, said in the button's
+   * title: Diff, the changes in the diff shown; Blame, the people who wrote
+   * this version. Nothing to count (no diff run, Blame not worked out): no
+   * number.
+   */
   private badge(): void {
-    const n = this.ran && !this.busy ? this.shown().length : -1;
+    let n = 0, says = "";
+    if (this.mode === "diff") {
+      n = this.ran && !this.busy ? this.shown().length : 0;
+      says = `${n} change${n === 1 ? "" : "s"} in the diff shown`;
+    } else if (this.blameAsked && this.blame) {
+      const s = this.blame.summary();
+      n = s.waiting || s.busy ? 0 : s.people.filter((p) => p.key).length;
+      says = `${n} ${n === 1 ? "person" : "people"} wrote this version`;
+    }
     for (const b of this.badges) {
       b.textContent = n > 0 ? String(n) : "";
-      b.title = n > 0 ? `${n} change${n === 1 ? "" : "s"} in the diff shown` : "";
+      b.title = n > 0 ? says : "";
       if (n !== this.lastCount && n > 0 && !reduced()) {
         b.classList.remove("tick");
         void b.offsetWidth;
         b.classList.add("tick");
       }
     }
+    for (const a of this.anchors) a.title = `${CHANGES_TITLE}${n > 0 ? `. The number: ${says}` : ""}`;
     this.lastCount = n;
   }
 
@@ -812,6 +877,7 @@ export class Changes {
     const was = this.el.dataset.view;
     const view = `${this.mode}${this.pick ? "-pick" : ""}`;
     this.el.dataset.view = view;
+    this.el.classList.toggle("folded", this.folded);
     this.el.replaceChildren(html`<div class="grip" title="Drag to make it wider or narrower"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.lookBox()}${this.foot()}`);
     this.renderProg();
     this.renderBody();
@@ -851,7 +917,7 @@ export class Changes {
 
   private head(): DocumentFragment {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
+    const ttl = html`<div class="ttl"><button type="button" class="ib2 fold" id="chg-fold" aria-expanded="${String(!this.folded)}" aria-label="${this.folded ? "Unfold Changes" : "Fold Changes"}" title="${this.folded ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept"}">${this.folded ? "▾" : "▴"}</button><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
     let below: DocumentFragment;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
@@ -872,7 +938,12 @@ export class Changes {
     const b = this.mode === "blame" && this.blameAsked ? this.blame?.summary() : null;
     if (b) {
       if (b.error) (err = b.error), (again = () => this.blame!.retry());
-      else if (b.busy) (text = this.histProgress?.text && /history/i.test(this.histProgress.text) ? this.histProgress.text : b.busy), (prog = this.histProgress?.total && /history/i.test(this.histProgress.text) ? [this.histProgress.done ?? 0, this.histProgress.total] : b.progress);
+      else if (b.busy) {
+        // (the history's own line while it is still being read; read to its end, what Blame does now: "Matching 25 files…")
+        const h = this.histProgress, live = !!h && /history/i.test(h.text) && !(h.total && (h.done ?? 0) >= h.total);
+        text = live ? h!.text : b.busy;
+        prog = live && h!.total ? [h!.done ?? 0, h!.total] : b.progress;
+      }
     } else if (this.mode === "diff") {
       if (this.error) (err = this.error), (again = () => this.ran && this.run(this.ran));
       else if (this.busy) (text = this.histProgress && /history/i.test(this.busy) ? this.histProgress.text : this.busy), (prog = this.prog ?? (this.histProgress?.total ? [this.histProgress.done ?? 0, this.histProgress.total] : undefined));
@@ -1004,8 +1075,9 @@ export class Changes {
       const x = c.commit;
       return html`<button type="button" class="${`crow${b.focusC === c.c ? " sel" : ""}`}" data-c="${String(c.c)}" aria-pressed="${String(b.focusC === c.c)}" title="${b.focusC === c.c ? "Show every line again" : `Pick out this ${word}'s lines on the pages`}"><span class="${`sw${x ? "" : " hatch"}`}" style="${`background:${c.color}`}"></span><span style="min-width:0"><div class="s">${x ? x.subject || "(no subject)" : word === "version" ? "Not saved to the history yet" : "Not committed"}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1000)} · <code>${x.short}</code>${c.via ? html` · <span class="refp">${c.via.replace(/^On (\S+),.*/, "$1")}</span>` : ""}` : "You · now"}</small></span><span class="ct">${c.n}</span></button>`;
     });
-    const more = s.waiting ? html`<small style="color:var(--phc-muted)">${`${s.waiting} file${s.waiting === 1 ? "" : "s"} still being read`}</small>` : "";
-    return html`${colour}<div class="sec"><h3><span>Who wrote this version · ${s.lines.toLocaleString()} ${s.unit}</span></h3>${people}${more}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${commits}</div>`;
+    // (the count only once every file is in; till then the lists are said to be partial)
+    const count = s.waiting ? `so far · ${(s.files - s.waiting).toLocaleString()} of ${s.files.toLocaleString()} files` : `${s.lines.toLocaleString()} ${s.unit}`;
+    return html`${colour}<div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${commits}</div>`;
   }
 
   private segOf<T extends string | number>(key: string, cur: T, opts: [T, string, string?][]): DocumentFragment {
@@ -1059,7 +1131,7 @@ export class Changes {
       <div class="opt2"><span>Spacing-only edits</span>${this.segOf("ws", L.ws, [["ignore", "Ignore", "A change of spacing alone changes no one's text"], ["count", "Count", "Spacing changes count as edits"]])}</div>
       <div class="opt2"><span>Moved text</span>${this.segOf("moved", L.moved, [["keep", "Keep its writer", "Text moved stays its writer's"], ["mover", "Credit the mover", "Text moved is the mover's"]])}</div>
       <div class="opt2"><span>${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Show hatched", "Grey hatched bars"], ["hide", "Hide", "No bars"]])}</div>
-      <div class="opt2" style="align-items:start"><span>Skip ${word}s</span><div class="skips">${skips.length ? skips : html`<small>None blamed yet</small>`}<small>A skipped ${word}'s lines go to whoever wrote them before (a reformat, a spell-check)</small></div></div>
+      <div class="opt2 wide"><span>Skip ${word}s</span><div class="skips">${skips.length ? skips : html`<small>None blamed yet</small>`}<small>A skipped ${word}'s lines go to whoever wrote them before (a reformat, a spell-check)</small></div></div>
       <div class="opt2"><span>Changed since</span>${sinceSel}</div>
       <div class="opt2"><span>Tint the text</span>${this.segOf("tint", L.tint, [["off", "Off", "No tint"], ["hover", "Under pointer", "The paragraph under the pointer"], ["all", "Everywhere", "Every line tinted"]])}</div>
       <div class="opt2"><span>Bars</span>${this.segOf("bars", L.bars, [["left", "Left margin", "Bars in the left margin"], ["right", "Right margin", "Bars in the right margin"]])}</div>
@@ -1128,6 +1200,7 @@ export class Changes {
   private wire(): void {
     const $ = <T extends HTMLElement>(s: string) => this.el.querySelector<T>(s);
     $("#chg-x")!.onclick = () => this.off();
+    $("#chg-fold")!.onclick = () => this.fold(!this.folded);
     const look = () => {
       this.lookOpen = !this.lookOpen;
       this.render();
@@ -1139,8 +1212,8 @@ export class Changes {
     for (const b of this.el.querySelectorAll<HTMLButtonElement>(".ph [data-m]"))
       b.onclick = () => {
         const m = b.dataset.m as "diff" | "blame";
-        // (Blame's half clicked: Blame asked for, worked out now)
-        if (m === "blame") this.blameAsked = true;
+        // (Blame's half clicked: Blame asked for, worked out now; shown again: the history asked if it moved)
+        if (m === "blame") (this.blameAsked = true), this.blame?.refreshHistory();
         if (this.mode === m && m !== "blame") return;
         this.mode = m;
         this.pick = null;
