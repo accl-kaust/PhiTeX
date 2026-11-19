@@ -8098,6 +8098,7 @@ var Panel = class {
     this.paints = 0;
     this.walk = null;
     this.opened = false;
+    this.asked = true;
     this.sheetUp(true);
     this.win.classList.toggle("reopening", !!this.anim);
   }
@@ -8171,7 +8172,10 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
+    if (on && !this.last) {
+      this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
+      if (this.asked && this.firstPending()) this.sheetUp(), this.anim && this.hints(true);
+    }
   }
   wasShown;
   save() {
@@ -8811,12 +8815,18 @@ var Panel = class {
    */
   step(what, pct, detail = "", raise = true) {
     if (!this.firstPending()) return;
+    if (raise) this.asked = true;
     const k = !raise ? 0 : what === this.words.steps[2] ? 2 : what === this.words.steps[1] ? 1 : 0;
     if (!this.line.say(k, { what, pct, detail })) return;
     this.walkTo(what);
     if (raise) this.sheetUp();
     if (this.anim) this.hints(true);
   }
+  /**
+   * A build's step has been said for this opening (or a Rebuild asked for it): no page is ready, so
+   * the sheet goes up, its opening playing, as soon as it can, a panel shown only later included.
+   */
+  asked = false;
   /** The line said now (the step, the bar, the detail): an opening put up later says it too. */
   lineNow;
   drawLine(s) {

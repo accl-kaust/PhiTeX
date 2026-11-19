@@ -900,6 +900,7 @@ export class Panel {
     this.paints = 0;
     this.walk = null;
     this.opened = false;
+    this.asked = true;
     this.sheetUp(true);
     // (the last build's pages hidden under it until the dive: the new page shows through the hole)
     this.win.classList.toggle("reopening", !!this.anim);
@@ -985,11 +986,16 @@ export class Panel {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    // (shown with no page yet: the first step said (the status), the sheet not put up: that
-    // waits for a build's own step (the host reading the files, packages fetched, its
-    // phases, typesetting). Put up here, it played while the panel connected to a document
-    // already built (the watch's last build), the pages a moment away)
-    if (on && !this.last) this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
+    // (shown with no page yet: the first step said (the status). The sheet goes up, the opening
+    // playing, once a build's own step has been said (the host reading the files, packages
+    // fetched, its phases, typesetting), before the panel showed or after: Overleaf lays out its
+    // PDF pane late, and the panel showed while the project downloaded, a step said once, and
+    // nothing played until the next. Never on being shown alone: then it played while the panel
+    // connected to a document already built (the watch's last build), the pages a moment away)
+    if (on && !this.last) {
+      this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
+      if (this.asked && this.firstPending()) (this.sheetUp(), this.anim && this.hints(true));
+    }
   }
   private wasShown?: boolean;
 
@@ -1733,6 +1739,7 @@ export class Panel {
    */
   private step(what: string, pct: number | undefined, detail = "", raise = true): void {
     if (!this.firstPending()) return;
+    if (raise) this.asked = true;
     // (the panel shown before any build's step: a first word, never ahead of one said)
     const k = !raise ? 0 : what === this.words.steps[2] ? 2 : what === this.words.steps[1] ? 1 : 0;
     if (!this.line.say(k, { what, pct, detail })) return;
@@ -1741,6 +1748,12 @@ export class Panel {
     // (the hints with the sheet: none while a first open waits to put it up)
     if (this.anim) this.hints(true);
   }
+
+  /**
+   * A build's step has been said for this opening (or a Rebuild asked for it): no page is ready, so
+   * the sheet goes up, its opening playing, as soon as it can, a panel shown only later included.
+   */
+  private asked = false;
 
   /** The line said now (the step, the bar, the detail): an opening put up later says it too. */
   private lineNow: Said | undefined;
