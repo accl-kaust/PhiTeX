@@ -1139,25 +1139,26 @@ export class Changes {
 
   /**
    * The panel's Settings, Changes: the same choices as the popover's look
-   * sections (one place or the other, the same prefs).
+   * sections (one place or the other, the same prefs), Diff's and Blame's
+   * under a sub-heading each.
    */
-  settingRows(): SettingRowLike[] {
-    const rows: SettingRowLike[] = [];
+  settingGroups(): { title: string; rows: SettingRowLike[] }[] {
+    const groups: { title: string; rows: SettingRowLike[] }[] = [];
     const L = this.look;
     if (this.host.diff) {
-      rows.push(
+      groups.push({ title: "Diff", rows: [
         { id: "chg-colors", label: "Diff: colours", help: "Added and deleted text", kind: "choice", options: Object.entries(DIFF_COLORS).map(([k, v]) => [k, v[2].replace(/ \(.*\)/, "")]), value: L.colors, set: (v) => this.setDiffLook({ colors: v as ChangesDiffLook["colors"] }) },
         { id: "chg-ins", label: "Diff: added text", kind: "choice", options: [["wavy", "Wavy"], ["line", "Underline"], ["mark", "Marker"], ["colour", "Colour"]], value: L.ins, set: (v) => this.setDiffLook({ ins: v as ChangesDiffLook["ins"] }) },
         { id: "chg-del", label: "Diff: deleted text", kind: "choice", options: [["strike", "Struck"], ["mark", "Marker"], ["caret", "Caret only"]], value: L.del, set: (v) => this.setDiffLook({ del: v as ChangesDiffLook["del"] }) },
         { id: "chg-fig", label: "Diff: changed figure", kind: "choice", options: [["side", "Side by side"], ["over", "Overlay"], ["new", "New only"]], value: L.fig, set: (v) => this.setDiffLook({ fig: v as ChangesDiffLook["fig"] }) },
         { id: "chg-bars", label: "Diff: change bars", help: "A bar beside each changed line (latexdiff's classic marks)", kind: "toggle", value: !!L.bars, set: (v) => this.setDiffLook({ bars: !!v }) },
         { id: "chg-hide", label: "Diff: hide deletions", help: "Deleted text left out of the list and the pages", kind: "toggle", value: this.hide, set: (v) => this.setHide(!!v) },
-      );
+      ] });
     }
     const b = this.blame;
     if (b) {
       const B = b.look;
-      rows.push(
+      groups.push({ title: "Blame", rows: [
         { id: "bl-detail", label: "Blame: detail", kind: "choice", options: [["line", "Line"], ["word", "Word"], ["char", "Character"]], value: B.detail, set: (v) => this.setBlameLook({ detail: v as BlameLook["detail"] }) },
         { id: "bl-color", label: "Blame: colour lines by", kind: "choice", options: [["author", "Author"], ["age", "Age"]], value: B.color, set: (v) => this.setBlameLook({ color: v as BlameLook["color"] }) },
         { id: "bl-ws", label: "Blame: spacing-only edits", kind: "choice", options: [["ignore", "Ignore"], ["count", "Count"]], value: B.ws, set: (v) => this.setBlameLook({ ws: v as BlameLook["ws"] }) },
@@ -1166,9 +1167,9 @@ export class Changes {
         { id: "bl-bars", label: "Blame: bars", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v as BlameLook["bars"] }) },
         { id: "bl-width", label: "Blame: bar width", kind: "choice", options: [["2", "Thin"], ["4", "Medium"], ["7", "Wide"]], value: String(B.width), set: (v) => this.setBlameLook({ width: Number(v) }) },
         { id: "bl-people", label: "Blame: people's colours", kind: "choice", options: [["okabe", "Okabe–Ito"], ["overleaf", "Overleaf's"]], value: B.people, set: (v) => this.setBlameLook({ people: v as BlameLook["people"] }) },
-      );
+      ] });
     }
-    return rows;
+    return groups;
   }
 
   private wire(): void {

@@ -130,6 +130,14 @@ export interface SettingRow {
   button?: string;
   /** Why it can't be changed here: shown in its place, the row dimmed. */
   disabled?: string;
+  /**
+   * A swatches row's rows under one of its tiles (by the tile's value):
+   * shown, compact, only while that tile is picked (Custom's pickers under
+   * Custom). Their label and help are their pickers' names and tooltips.
+   */
+  under?: Record<string, SettingRow>;
+  /** A colour row's reset: a small button beside the picker, shown while the colour is not `to` (as it came); `set` puts it back. */
+  reset?: { to: string; help: string; set(): string | void };
   /** A picks tile's picture, played in `box` while the tile is on screen: stopped by what it returns. */
   tile?(v: string, box: HTMLElement): () => void;
   /** A range's top (its bottom 0; absent: 100). */
@@ -140,10 +148,39 @@ export interface SettingRow {
   set?(v?: boolean | string): Promise<string | void> | string | void;
 }
 
-/** A group of the Settings dialog: its title and its rows. */
+/**
+ * A group of the Settings dialog: a sub-heading (its title) and its rows,
+ * in one of the dialog's sections (SECTIONS): `section`, else the one its
+ * title is placed in, else General.
+ */
 export interface SettingsGroup {
   title: string;
   rows: SettingRow[];
+  section?: string;
+}
+
+/**
+ * The Settings dialog's sections, in order, and each one's sub-headings in
+ * theirs (a host's other groups after them, in its order). View: how the
+ * pages show, follow and jump. Colours: the pages' and the lines'. Build:
+ * what is typeset and how, its packages, what it warns of. Changes: Diff's
+ * and Blame's look. General: tips and updates, the host's own.
+ */
+const SECTIONS: [section: string, subs: string[]][] = [
+  ["View", ["Preview", "Links", "Loading"]],
+  ["Colours", ["Page colours", "Colour lines"]],
+  ["Build", ["Project", "Builds", "Packages", "Warnings and errors"]],
+  ["Changes", ["Diff", "Blame"]],
+  ["General", ["Updates and tips"]],
+];
+
+/** A group's title from before the sections (a tab each), as its sub-heading now (Appearance's rows went to Loading and Page colours: its title opens Colours). */
+const OLD_GROUPS: Record<string, string> = { Build: "Builds", "Warnings/Errors": "Warnings and errors", Appearance: "Page colours" };
+
+/** The section a group's title (a sub-heading's, a section's own, or a tab's from before) is in; General for any other. */
+export function settingsSection(title: string): string {
+  const t = OLD_GROUPS[title] ?? title;
+  return SECTIONS.find(([s, subs]) => s === t || subs.includes(t))?.[0] ?? "General";
 }
 
 /** The panel's own choices, kept by the host (PanelEvents.onPref, Panel.viewPrefs). */
@@ -355,6 +392,9 @@ export interface PanelPrefs {
   /** Changes' mode and settings (changes.ts). */
   changes?: Partial<ChangesPrefs>;
 }
+
+/** The marker's own colour (an amber), as it came: markColour "" (the panel's CSS variables' own). */
+const MARK = "#ffd600";
 
 const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20, pageColours: "paper", pageCustom: ["#fbf6e9", "#2a2a2a"], markColour: "" };
 
@@ -1284,7 +1324,7 @@ export class Panel {
       const b = document.createElement("button");
       b.className = "btn";
       b.textContent = e === "pdflatex" ? "Try pdfLaTeX anyway" : `Use ${ENGINES[e].label}${ENGINES[e].ready ? "" : " (coming)"}`;
-      b.title = e === "pdflatex" ? "For this project: pdfLaTeX, whatever its preamble loads" : `For this project from now on (Settings → Engine for every project)`;
+      b.title = e === "pdflatex" ? "For this project: pdfLaTeX, whatever its preamble loads" : `For this project from now on (Settings → Build → Engine for every project)`;
       b.onclick = () => this.ev.onEngine?.(e);
       btns.append(b);
     }
@@ -2703,52 +2743,117 @@ export class Panel {
   /** The rows drawn (by data-id): what a click or a change sets. */
   private settingRows = new Map<string, SettingRow>();
 
-  /** The Settings dialog shown (drawn anew: the host's values as they are now) or hidden. */
-  async settings(on = this.$("#settings").hidden): Promise<void> {
+  /**
+   * The Settings dialog shown (drawn anew: the host's values as they are now)
+   * or hidden. `at`: the section to show (a sub-heading's title, or a tab's
+   * from before the sections, opens its section there); absent, the last one
+   * shown, else the first.
+   */
+  async settings(on = this.$("#settings").hidden, at?: string): Promise<void> {
     const el = this.$("#settings");
     if (!on) {
       this.tilesGone();
       if (!el.hidden) (el.hidden = true), this.emit();
       return;
     }
+    // (a host's groups after the panel's own of the same title: a tab's title from before the sections, as its sub-heading now)
     const groups: SettingsGroup[] = this.ownSettings();
     for (const g of (await this.ev.settings?.()) ?? []) {
-      const same = groups.find((x) => x.title === g.title);
+      const title = OLD_GROUPS[g.title] ?? g.title;
+      const same = groups.find((x) => x.title === title);
       if (same) same.rows.push(...g.rows);
-      else groups.push({ title: g.title, rows: [...g.rows] });
+      else groups.push({ title, rows: [...g.rows], section: g.section });
     }
-    // (the margin beside the host's "Highlight follows", where there is one)
     for (const g of groups) {
+      // (the margin beside the host's "Highlight follows", where there is one)
       const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
       if (m >= 0 && f >= 0) g.rows.splice(f + (f > m ? 0 : 1), 0, ...g.rows.splice(m, 1));
     }
     this.settingRows.clear();
     this.tilesGone();
-    // (one group at a time, by its tab: the last one shown, else the first)
-    const shown = groups.filter((g) => g.rows.length);
-    const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
-    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
-    const body = el.querySelector(".sbody")!;
-    shown.forEach((g, i) => {
+    // (each section its sub-headings in order, a host's others after them; a section with no rows not offered)
+    const sections = SECTIONS.map(([name, subs]) => {
+      const mine = groups.filter((g) => g.rows.length && (g.section ?? settingsSection(g.title)) === name);
+      return { name, groups: [...subs.map((t) => mine.find((g) => g.title === t)).filter((g): g is SettingsGroup => !!g), ...mine.filter((g) => !subs.includes(g.title))] };
+    }).filter((x) => x.groups.length);
+    if (at) this.settingsTab = settingsSection(at);
+    const k0 = Math.max(0, sections.findIndex((x) => x.name === settingsSection(this.settingsTab)));
+    el.replaceChildren(
+      html`<header>Settings<label class="sfind">${icon("search", 16)}<input type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search the settings"></label><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist" aria-label="Sections">${sections.map((x, i) => html`<button type="button" role="tab" id="${`st-${x.name}`}" data-tab="${i}" data-section="${x.name}" aria-selected="${i === k0}">${x.name}</button>`)}</nav><div class="sbody"></div><p class="snone" hidden>No setting matches</p>`,
+    );
+    const body = el.querySelector<HTMLElement>(".sbody")!;
+    for (const [i, x] of sections.entries()) {
       const sec = document.createElement("section");
       sec.setAttribute("role", "tabpanel");
-      sec.hidden = i !== at;
-      for (const r of g.rows) sec.append(this.settingRow(r));
+      sec.setAttribute("aria-labelledby", `st-${x.name}`);
+      sec.dataset.section = x.name;
+      sec.hidden = i !== k0;
+      for (const g of x.groups) {
+        const box = html`<div class="sgroup" data-group="${g.title}"><h3 class="ssub"><span class="ssec">${`${x.name} · `}</span>${g.title}</h3></div>`.firstElementChild as HTMLElement;
+        for (const r of g.rows) box.append(this.settingRow(r));
+        sec.append(box);
+      }
       body.append(sec);
-    });
+    }
+    const tabs = [...el.querySelectorAll<HTMLElement>("[data-tab]")];
+    const q = el.querySelector<HTMLInputElement>(".sfind input")!;
+    const show = (k: number) => {
+      this.settingsTab = sections[k].name;
+      tabs.forEach((b, i) => b.setAttribute("aria-selected", String(i === k)));
+      body.querySelectorAll<HTMLElement>(":scope > section").forEach((s, i) => (s.hidden = i !== k));
+      body.scrollTop = 0;
+    };
     el.querySelector<HTMLElement>(".stabs")!.onclick = (e) => {
       const t = (e.target as HTMLElement).closest<HTMLElement>("[data-tab]");
       if (!t) return;
-      const k = Number(t.dataset.tab);
-      this.settingsTab = shown[k].title;
-      el.querySelectorAll<HTMLElement>("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b === t)));
-      body.querySelectorAll<HTMLElement>("section").forEach((s, i) => (s.hidden = i !== k));
+      if (q.value) (q.value = ""), this.settingsFind(el, "");
+      show(Number(t.dataset.tab));
+    };
+    // (the search: every section's rows whose label, help or sub-heading has each word typed; cleared, the section shown before)
+    const find = () => (this.settingsFind(el, q.value), !q.value && show(Math.max(0, sections.findIndex((x) => x.name === this.settingsTab))));
+    q.oninput = find;
+    q.onkeydown = (e) => {
+      // (Esc: the search cleared first, then the dialog closed)
+      if (e.key !== "Escape" || !q.value) return;
+      (q.value = ""), find();
+      e.preventDefault();
+      e.stopPropagation();
     };
     el.hidden = false;
+    // (a sub-heading asked for: scrolled to)
+    const sub = at && at !== this.settingsTab ? body.querySelector<HTMLElement>(`.sgroup[data-group="${CSS.escape(OLD_GROUPS[at] ?? at)}"]`) : null;
+    if (sub) body.scrollTop = sub.offsetTop;
     this.emit();
   }
 
-  /** The Settings tab last shown (its group's title). */
+  /** The Settings dialog's rows filtered by `text` (each word in a row's label, help or sub-heading), every section at once; empty, as it was. */
+  private settingsFind(el: HTMLElement, text: string): void {
+    const words = text.toLowerCase().split(/\s+/).filter(Boolean);
+    el.classList.toggle("searching", words.length > 0);
+    let any = false;
+    for (const sec of el.querySelectorAll<HTMLElement>(".sbody > section")) {
+      let inSec = false;
+      for (const g of sec.querySelectorAll<HTMLElement>(".sgroup")) {
+        let inGroup = false;
+        const head = `${sec.dataset.section} ${g.dataset.group}`.toLowerCase();
+        for (const row of g.querySelectorAll<HTMLElement>(":scope > .srow")) {
+          const r = this.settingRows.get(row.dataset.id!);
+          const said = [head, r?.label, r?.help, r?.disabled, ...Object.values(r?.under ?? {}).flatMap((u) => [u.label, u.help])].join(" ").toLowerCase();
+          const hit = words.every((w) => said.includes(w));
+          row.hidden = words.length > 0 && !hit;
+          inGroup ||= hit;
+        }
+        g.hidden = words.length > 0 && !inGroup;
+        inSec ||= inGroup;
+      }
+      if (words.length) sec.hidden = !inSec;
+      any ||= inSec;
+    }
+    el.querySelector<HTMLElement>(".snone")!.hidden = !words.length || any;
+    if (words.length) el.querySelectorAll<HTMLElement>("[data-tab]").forEach((b) => b.setAttribute("aria-selected", "false"));
+  }
+
+  /** The Settings section last shown. */
   private settingsTab = "";
 
   /** One row: its label and help, its control, a line for the host's error. */
@@ -2778,14 +2883,22 @@ export class Panel {
       row.querySelector(".help")!.after(grid);
       if (r.tile) for (const b of row.querySelectorAll<HTMLElement>(".pick")) this.tileShown(b.querySelector(".lk")!, (box) => r.tile!(b.dataset.v!, box));
     } else if (r.kind === "swatches") {
-      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
+      // (a tile's own rows (r.under) in its cell, under it: shown while it is picked)
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<span class="swc"><button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button></span>`)}</div>`;
       row.querySelector(".help")!.after(grid);
-      for (const t of row.querySelectorAll<HTMLElement>(".sw")) r.paint ? r.paint(t.dataset.v!, t.querySelector<HTMLElement>(".art")!) : this.waspSwatch(t, t.dataset.v as WaspColours);
+      for (const t of row.querySelectorAll<HTMLElement>(".sw")) {
+        r.paint ? r.paint(t.dataset.v!, t.querySelector<HTMLElement>(".art")!) : this.waspSwatch(t, t.dataset.v as WaspColours);
+        const u = r.under?.[t.dataset.v!];
+        if (u) t.after(this.settingSub(u, r.value === t.dataset.v));
+      }
     } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
     else if (r.kind === "colors") {
       const [a, b] = String(r.value ?? "").split(",");
       ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
-    } else if (r.kind === "color") ctl.replaceChildren(html`<span class="cols"><input type="color" value="${String(r.value || "#000000")}" aria-label="${r.label}" disabled="${off}"></span>`);
+    } else if (r.kind === "color")
+      ctl.replaceChildren(
+        html`<span class="cols">${r.reset ? html`<button type="button" class="rst" title="${r.reset.help}" aria-label="${`${r.label}: ${r.reset.help}`}" hidden="${String(r.value ?? "").toLowerCase() === r.reset.to}" disabled="${off}">Reset</button>` : ""}<input type="color" value="${String(r.value || "#000000")}" aria-label="${r.label}" disabled="${off}"></span>`,
+      );
     else if (r.kind === "custom") {
       const made = r.make?.();
       if (made) row.querySelector(".help")!.after(made);
@@ -2794,12 +2907,41 @@ export class Panel {
     return row;
   }
 
+  /** A swatches row's tiles' own rows shown with their tile picked, hidden with it not. */
+  private subsShown(row: HTMLElement): void {
+    for (const c of row.querySelectorAll<HTMLElement>(".swc")) {
+      const sub = c.querySelector<HTMLElement>(":scope > .sub");
+      if (sub) sub.hidden = c.querySelector(".sw")!.getAttribute("aria-pressed") !== "true";
+    }
+  }
+
+  /** A tile's own row (SettingRow.under), compact under it: its pickers named by its label and help; `on` while its tile is picked. */
+  private settingSub(r: SettingRow, on: boolean): HTMLElement {
+    this.settingRows.set(r.id, r);
+    // (each picker named by its option's label: Page, Text)
+    const vals = String(r.value ?? "").split(",");
+    const names = (r.options ?? []).map(([, l]) => l);
+    const sub = html`<span class="srow ${r.kind} sub" data-id="${r.id}" title="${r.help ?? ""}" hidden="${!on}"><span class="cols">${vals.map((c, i) => html`<label><input type="color" value="${c || "#000000"}" aria-label="${`${r.label}: ${names[i] ?? i + 1}`}">${names[i] ?? ""}</label>`)}</span><span class="err" hidden></span></span>`;
+    return sub.firstElementChild as HTMLElement;
+  }
+
   /** A row's control used: its new value to the row's set, its error (if any) under it. */
   private async settingClicked(e: Event): Promise<void> {
     const t = e.target as HTMLElement;
     const row = t.closest<HTMLElement>(".srow");
     const r = row && this.settingRows.get(row.dataset.id!);
     if (!row || !r?.set || r.disabled) return;
+    // (a colour's reset beside its picker: the picker back to the colour as it came, the button gone)
+    if (r.reset && e.type === "click" && t.closest(".rst")) {
+      const why = r.reset.set();
+      const err = row.querySelector<HTMLElement>(".err")!;
+      (err.hidden = !why), (err.textContent = why || "");
+      if (why) return;
+      r.value = r.reset.to;
+      row.querySelector<HTMLInputElement>("input[type=color]")!.value = r.reset.to;
+      row.querySelector<HTMLElement>(".rst")!.hidden = true;
+      return;
+    }
     let v: boolean | string | undefined;
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
@@ -2826,6 +2968,8 @@ export class Panel {
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch")!.setAttribute("aria-checked", String(v === true));
     if (r.kind === "choice" || r.kind === "swatches") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "swatches") this.subsShown(row);
+    if (r.reset) row.querySelector<HTMLElement>(".rst")!.hidden = String(v).toLowerCase() === r.reset.to;
     if (r.kind === "picks") {
       const on = new Set(String(v).split(","));
       row.querySelectorAll<HTMLElement>(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v!))));
@@ -2868,8 +3012,10 @@ export class Panel {
     };
     const keep = ev.onPref ? undefined : "This host doesn't keep it";
     const preview: SettingRow[] = [];
+    const opening: SettingRow[] = [];
+    const project: SettingRow[] = [];
     if (this.mainFiles.names.length)
-      preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+      project.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
     preview.push({
       id: "margin",
       label: "Keep a margin",
@@ -2879,9 +3025,8 @@ export class Panel {
       value: String(this.prefs.margin),
       set: (v) => ((this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0))), this.marginApply(), this.save()),
     });
-    const look: SettingRow[] = [];
-    look.push(
-      { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
+    const dark: SettingRow = { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) };
+    opening.push(
       {
         id: "opening",
         label: "Loading animation",
@@ -2902,7 +3047,8 @@ export class Panel {
         },
       },
     );
-    if (ev.onBoxes) look.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    const underline: SettingRow[] = [];
+    if (ev.onBoxes) underline.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     // (the problems' filters, the same as the buttons at the top of the problems list)
     const problems: SettingRow[] = KINDS.map(([k, name]) => ({
       id: `kind-${k}`,
@@ -2912,23 +3058,24 @@ export class Panel {
       value: !this.hiddenKinds.has(k),
       set: (on) => void (!!on === this.hiddenKinds.has(k) && this.toggleKind(k)),
     }));
-    if (ev.onBoxes) problems.push(look.splice(look.findIndex((r) => r.id === "underline"), 1)[0]);
+    problems.push(...underline);
     const build: SettingRow[] = [];
     if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
     build.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
     const tips: SettingRow[] = [{ id: "tips", label: "Feature tips", help: "Shown again, from the start", kind: "action", button: "Show again", set: () => (this.tipsReset(), this.settings(false)) }];
     if (ev.onTour) tips.push({ id: "tour", label: "The tour", kind: "action", button: "Take the tour", set: () => (this.settings(false), ev.onTour!()) });
     if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews!()) });
+    // (by sub-heading: the sections and their order are SECTIONS')
     return [
       { title: "Preview", rows: preview },
-      { title: "Appearance", rows: look },
-      { title: "Page colours", rows: this.pageRows() },
-      { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
-      { title: "Warnings/Errors", rows: problems },
-      { title: "Build", rows: build },
-      { title: "Packages", rows: [] },
-      { title: "Changes", rows: (this.changes?.settingRows() ?? []) as SettingRow[] },
+      { title: "Loading", rows: opening },
+      { title: "Page colours", rows: [dark, ...this.pageRows()] },
+      { title: "Colour lines", rows: this.waspRows() },
+      { title: "Project", rows: project },
+      { title: "Builds", rows: build },
+      { title: "Warnings and errors", rows: problems },
+      ...((this.changes?.settingGroups() ?? []) as SettingsGroup[]),
       { title: "Updates and tips", rows: tips },
     ];
   }
@@ -2947,7 +3094,7 @@ export class Panel {
     this.pageApply();
   }
 
-  // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
+  // ---- Colour lines: the reading aid (wasp.ts), in Settings' Colours ----
 
   /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
   private waspLook(): WaspLook {
@@ -3092,36 +3239,50 @@ export class Panel {
       {
         id: "page-colours",
         label: "Page colours",
-        help: "The pages' background and text in other colours, figures too; downloads stay the real PDF. With Dark PDF on, Dark PDF's colours are shown",
+        help: "The pages' background and text in other colours, figures too; downloads keep the PDF's own. While Dark PDF is on, its colours are used instead",
         kind: "swatches",
         options: opts,
         value: l.id,
         paint: (v, art) => this.pageSwatch(v, art),
         set: (v) => kept(() => (this.prefs.pageColours = (String(v) as PageColours))),
+        // (Custom's two pickers under its tile, while it is picked)
+        under: {
+          custom: {
+            id: "page-custom",
+            label: "Custom: page and text",
+            help: "Custom's page colour, then its text colour",
+            kind: "colors",
+            options: [["page", "Page"], ["text", "Text"]],
+            value: (l.id === "custom" ? [l.page, l.text] : DEFAULTS.pageCustom).join(","),
+            set: (v) =>
+              kept(() => {
+                const [a, b] = String(v).split(",");
+                this.prefs.pageCustom = [a, b];
+                this.prefs.pageColours = "custom";
+                this.customPicked("page-colours");
+              }),
+          },
+        },
       },
       {
-        id: "page-custom",
-        label: "Custom: page and text",
-        help: "Custom's page colour, then its text colour",
-        kind: "colors",
-        value: (l.id === "custom" ? [l.page, l.text] : DEFAULTS.pageCustom).join(","),
-        set: (v) =>
-          kept(() => {
-            const [a, b] = String(v).split(",");
-            this.prefs.pageCustom = [a, b];
-            this.prefs.pageColours = "custom";
-            const row = this.settingRows.get("page-colours");
-            if (row) row.value = "custom";
-            this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="page-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
-          }),
+        id: "mark-colour",
+        label: "Marker",
+        help: "The highlight where your editor's cursor is, and where a jump lands",
+        kind: "color",
+        value: l.mark || MARK,
+        set: (v) => kept(() => (this.prefs.markColour = String(v))),
+        reset: { to: MARK, help: "Back to the marker's own amber", set: () => kept(() => (this.prefs.markColour = "")) },
       },
-      { id: "mark-colour", label: "Marker", help: "The highlight where your editor's cursor is, and where a jump lands", kind: "color", value: l.mark || "#ffd600", set: (v) => kept(() => (this.prefs.markColour = String(v))) },
-      { id: "mark-reset", label: "The marker's own amber", help: "The marker back to its colour as it came", kind: "action", button: "Reset", set: () => kept(() => {
-        this.prefs.markColour = "";
-        const i = this.$("#settings").querySelector<HTMLInputElement>('.srow[data-id="mark-colour"] input');
-        if (i) i.value = "#ffd600";
-      }) },
     ];
+  }
+
+  /** A swatches row's Custom picked by its pickers (Custom chosen with them): its tile pressed. */
+  private customPicked(id: string): void {
+    const r = this.settingRows.get(id);
+    if (r) r.value = "custom";
+    const row = this.$("#settings").querySelector<HTMLElement>(`.srow[data-id="${id}"]`);
+    row?.querySelectorAll<HTMLElement>(".sw").forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    if (row) this.subsShown(row);
   }
 
   /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
@@ -3151,8 +3312,9 @@ export class Panel {
         options: colours,
         value: l.colours,
         set: (v) => kept("waspColours", String(v) as WaspColours),
+        // (Custom's two pickers under its tile, while it is picked)
+        under: { custom: { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", options: [["1", "First"], ["2", "Second"]], value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) } },
       },
-      { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
       { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
       { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
       { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
@@ -3165,9 +3327,7 @@ export class Panel {
     const [a, b] = v.split(",");
     this.prefs.waspCustom = [a, b];
     this.prefs.waspColours = "custom";
-    const row = this.settingRows.get("wasp-colours");
-    if (row) row.value = "custom";
-    this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="wasp-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    this.customPicked("wasp-colours");
     this.waspApply();
     this.save();
   }

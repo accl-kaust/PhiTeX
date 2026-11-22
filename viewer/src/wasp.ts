@@ -1,4 +1,4 @@
-// Colour lines, a reading aid (Settings, its own tab), after the scheme of
+// Colour lines, a reading aid (Settings, Colours), after the scheme of
 // WaspLine Reader (github.com/corollari/waspline-reader): the body
 // text's ink coloured by a gradient along each line, its direction
 // alternating line to line, so the end of one line and the start of the

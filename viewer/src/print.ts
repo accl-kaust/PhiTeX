@@ -671,18 +671,33 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
-.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
-.settings > header { padding: 12px 14px 0; }
-/* (the tabs wrap onto a second line when they don't fit: scrolled sideways, with no scrollbar, the last ones were out of reach) */
-.settings .stabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
-.settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+/* Settings: the panel's own rows and the host's, one dialog in every host: a tab per section (one line at any width), sub-headings inside, a search over them all */
+.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; container-type: inline-size; }
+.settings > header { padding: 10px 10px 0 16px; gap: 10px; }
+.settings .sfind { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; margin-left: auto; padding: 0 8px; height: 28px; box-sizing: border-box;
+  border: 1px solid var(--ph-border); border-radius: var(--ph-pill); background: var(--ph-menu); color: var(--ph-fg2); font-weight: 400; cursor: text; }
+.settings .sfind:focus-within { border-color: var(--ph-link); color: var(--ph-fg); }
+.settings .sfind input { all: unset; flex: 1; min-width: 0; font-size: 12px; color: var(--ph-fg); }
+.settings .sfind input::placeholder { color: var(--ph-fg2); }
+.settings .sfind input::-webkit-search-cancel-button { cursor: pointer; }
+/* (the sections share the line: five short names, each as wide as it needs and the room left shared, never wrapped, never scrolled) */
+.settings .stabs { display: flex; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
+.settings .stabs button { all: unset; flex: 1 1 auto; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; padding: 6px 4px 8px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .settings .stabs button:hover { color: var(--ph-fg); }
 .settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
 .settings .stabs button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
-.settings .sbody { overflow: auto; padding: 4px 0 8px; }
+.settings.searching .stabs button { color: var(--ph-fg2); }
+.settings .sbody { position: relative; overflow: auto; padding: 0 0 10px; }
+.settings .snone { padding: 18px 16px 22px; text-align: center; font-size: 12px; }
+/* a sub-heading: small capitals over its rows; while searching, its section's name before it */
+.settings .ssec { display: none; }
+.settings.searching .ssec { display: inline; }
+.settings .sgroup + .sgroup { margin-top: 6px; }
+.settings .ssub { margin: 0; padding: 14px 16px 4px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ph-fg2); }
+.settings.searching .sbody > section + section { border-top: 1px solid var(--ph-border); }
 .settings .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab ctl" "help help" "err err"; align-items: center; column-gap: 16px; padding: 10px 16px; }
-.settings .srow + .srow { border-top: 1px solid var(--ph-border); }
+.settings .sgroup > .srow:not([hidden]) ~ .srow:not([hidden]) { border-top: 1px solid var(--ph-border); }
+.settings .srow[hidden] { display: none; }
 .settings .srow .lab { grid-area: lab; font-weight: 600; min-width: 0; }
 .settings .srow .ctl { grid-area: ctl; justify-self: end; }
 .settings .srow .help { grid-area: help; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--ph-fg2); }
@@ -708,7 +723,8 @@ header:active { cursor: grabbing; }
 .settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
 .settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
 /* Colour lines' tab: the presets as swatches, the strength's slider, Custom's two pickers, the sample */
-.settings .srow.swatches { grid-template-areas: "lab lab" "help help" "picks picks" "err err"; }
+.settings .srow.swatches { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lab" "help" "picks" "err"; }
+.settings .srow.swatches > .ctl, .settings .srow.custom > .ctl { display: none; }
 .settings .swatches .tiles { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
 .settings .sw { all: unset; cursor: pointer; display: grid; gap: 5px; justify-items: center; font-size: 12px; color: var(--ph-fg2); }
 .settings .sw .art { display: grid; gap: 3px; width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: var(--ph-radius); background: #fff; box-shadow: 0 0 0 1px var(--ph-border); }
@@ -719,10 +735,23 @@ header:active { cursor: grabbing; }
 .settings .sw[aria-pressed="true"] .art { box-shadow: 0 0 0 2px var(--ph-accent); }
 .settings .sw:focus-visible .art { outline: 2px solid var(--ph-link); outline-offset: 2px; }
 .settings .sw:disabled { cursor: default; opacity: .55; }
+/* a tile's own row under it (Custom's two pickers), while it is picked */
+.settings .swc { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.settings .srow.sub { display: grid; justify-items: center; gap: 0; padding: 0; border: 0; }
+.settings .srow.sub[hidden] { display: none; }
+.settings .srow.sub .cols { gap: 6px; }
+.settings .srow.sub label { display: grid; justify-items: center; gap: 3px; font-size: 11px; color: var(--ph-fg2); cursor: pointer; }
+.settings .srow.sub .err { margin: 0; font-size: 11px; color: var(--ph-danger); text-align: center; }
+/* a colour's reset beside its picker, while it is not as it came */
+.settings .cols { align-items: center; }
+.settings .rst { all: unset; cursor: pointer; padding: 2px 6px; border-radius: var(--ph-radius); font-size: 12px; color: var(--ph-link); }
+.settings .rst:hover { background: var(--ph-hover); }
+.settings .rst:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.settings .rst[hidden] { display: none; }
 .settings input[type="range"] { width: 180px; accent-color: var(--ph-accent); }
 .settings .cols { display: inline-flex; gap: 8px; }
 .settings .cols input { width: 34px; height: 24px; padding: 0 2px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); background: var(--ph-menu); cursor: pointer; }
-.settings .srow.custom { grid-template-areas: "lab lab" "help help" "picks picks"; }
+.settings .srow.custom { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lab" "help" "picks"; }
 .settings .wsample { grid-area: picks; margin-top: 8px; padding: 12px 16px; border-radius: var(--ph-radius); box-shadow: 0 0 0 1px var(--ph-border); background: #fff; color: #000; isolation: isolate; overflow: hidden; text-align: left; font: 13px/1.45 Georgia, "Times New Roman", serif; }
 .settings .wsample.dark { background: #282828; color: #e1e1e1; }
 .settings .wsample span { position: relative; display: block; width: fit-content; white-space: nowrap; }
@@ -743,6 +772,20 @@ header:active { cursor: grabbing; }
 .settings .switch[aria-checked="true"] i { left: 14px; }
 .settings .switch:disabled { cursor: default; }
 .settings .switch:focus-visible, .settings .seg button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+/* a narrow dialog (a narrow pane): less padding, the tabs smaller */
+@container (max-width: 380px) {
+  .settings > header { padding-left: 12px; }
+  .settings .stabs { padding: 4px 2px 0; }
+  .settings .stabs button { font-size: 12px; padding: 6px 1px 8px; }
+  .settings .srow { padding-left: 12px; padding-right: 12px; }
+  .settings .ssub { padding-left: 12px; }
+  /* (a row's buttons under its label, not squeezing it to a word a line) */
+  .settings .srow.choice, .settings .srow.select, .settings .srow.range { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lab" "help" "ctl" "err"; }
+  .settings .srow.choice .ctl, .settings .srow.select .ctl, .settings .srow.range .ctl { justify-self: start; margin-top: 6px; }
+  .settings .srow.range .ctl, .settings .srow.range input[type="range"] { justify-self: stretch; width: 100%; }
+  .settings .seg { flex-wrap: wrap; border-radius: 12px; }
+  .settings .seg button { padding: 3px 8px; }
+}
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;

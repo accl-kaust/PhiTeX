@@ -208,8 +208,8 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await dark(t, false);
   // (the same settings in the panel's Settings, Changes; Esc closes Settings first, Changes stays)
   await t.q(`(() => { $("#x-settings").click(); return 1; })()`);
-  await t.until(`!$("#settings").hidden && !!$('[data-group="Changes"]')`, "Settings", 5000);
-  await t.click(`[data-group="Changes"]`);
+  await t.until(`!$("#settings").hidden && !!$('#settings [data-section="Changes"]')`, "Settings", 5000);
+  await t.click(`#settings [data-section="Changes"]`);
   await t.until(`/Diff: colours/.test($("#settings").innerText) && /Blame: detail/.test($("#settings").innerText)`, "Settings, Changes: Diff's and Blame's look", 5000);
   await shot("settings-changes-light");
   await dark(t, true);

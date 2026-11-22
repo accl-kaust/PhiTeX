@@ -37,8 +37,8 @@ test("Page colours: presets and Custom recolour the pages by a filter, Dark PDF 
   const pdf0 = await pdfHash();
   await t.click("#b-more");
   await t.click("#x-settings");
-  await t.until(`!!$("#settings [data-group='Page colours']")`, "Settings: Page colours", 5000);
-  await t.click("#settings [data-group='Page colours']");
+  await t.until(`!!$("#settings [data-section='Colours']")`, "Settings: Page colours", 5000);
+  await t.click("#settings [data-section='Colours']");
   assert.deepEqual(await t.q(`$$("#settings [data-id='page-colours'] .sw").map((s) => s.dataset.v)`), ["paper", "sepia", "dark", "contrast", "custom"], "the presets, and Custom");
   assert.equal(await t.q(`$(".win").classList.contains("paged")`), false, "Paper: the pages as printed, no filter");
   await shot("settings-light");
@@ -59,23 +59,23 @@ test("Page colours: presets and Custom recolour the pages by a filter, Dark PDF 
   await sleep(300);
   await t.click("#b-more");
   await t.click("#x-settings");
-  await t.until(`!$("#settings").hidden && !!$("#settings [data-group='Appearance']")`, "Settings", 5000);
-  await t.click("#settings [data-group='Appearance']");
+  await t.until(`!$("#settings").hidden && !!$("#settings [data-section='Colours']")`, "Settings", 5000);
+  await t.click("#settings [data-section='Colours']");
   await t.click("#settings [data-id='dark-pdf'] [data-v='on']");
   // (kept by the watch first, in the user's phitex.toml: then on)
   await t.until(`$(".win").classList.contains("dark-pdf") && !$(".win").classList.contains("paged") && /invert/.test(getComputedStyle($(".slot canvas")).filter)`, "Dark PDF wins: its filter, Page colours' off", 5000);
   await t.click("#settings [data-id='dark-pdf'] [data-v='off']");
   await t.until(`!$(".win").classList.contains("dark-pdf") && $(".win").classList.contains("paged")`, "Dark PDF off: Sepia again", 5000);
   // (Dark: a dark sheet, Colour lines' blend as on Dark PDF's)
-  await t.click("#settings [data-group='Page colours']");
+  await t.click("#settings [data-section='Colours']");
   await t.click("#settings [data-id='page-colours'] .sw[data-v='dark']");
-  await t.click("#settings [data-group='Colour lines']");
+  await t.click("#settings [data-section='Colours']");
   await t.click("#settings [data-id='wasp'] .switch");
   await t.until(`!!$(".phx-wasp")`, "Colour lines drawn", 10000);
   assert.deepEqual(await t.q(`[$(".win").classList.contains("paged-dark"), getComputedStyle($(".phx-wasp")).mixBlendMode]`), [true, "darken"], "Dark: a dark sheet, Colour lines darken as on Dark PDF");
   await t.click("#settings [data-id='wasp'] .switch");
   // (Custom: its two pickers; the marker's colour)
-  await t.click("#settings [data-group='Page colours']");
+  await t.click("#settings [data-section='Colours']");
   await t.q(`(() => { const [a, b] = $$("#settings [data-id='page-custom'] input"); a.value = "#102030"; b.value = "#e0f0a0"; b.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
   await t.q(`(() => { const i = $("#settings [data-id='mark-colour'] input"); i.value = "#00c0ff"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
   const custom = await t.q(`({ pressed: $("#settings [data-id='page-colours'] .sw[data-v='custom']").getAttribute("aria-pressed"), dark: $(".win").classList.contains("paged-dark"), mark: $(".win").style.getPropertyValue("--ph-mark-fill") })`);
@@ -99,8 +99,8 @@ test("Page colours: presets and Custom recolour the pages by a filter, Dark PDF 
   await sleep(300);
   await t.click("#b-more");
   await t.click("#x-settings");
-  await t.until(`!$("#settings").hidden && !!$("#settings [data-group='Page colours']")`, "Settings", 5000);
-  await t.click("#settings [data-group='Page colours']");
+  await t.until(`!$("#settings").hidden && !!$("#settings [data-section='Colours']")`, "Settings", 5000);
+  await t.click("#settings [data-section='Colours']");
   assert.ok(await t.q(`$$("#settings [data-id='page-colours'] .sw").every((s) => s.getBoundingClientRect().right <= $("#settings").getBoundingClientRect().right + 1 && s.offsetWidth > 0)`), "700 px: every preset in view");
   await shot("settings-narrow-light");
   await t.key("Escape", "Escape", 27);
@@ -113,8 +113,8 @@ test("Page colours: presets and Custom recolour the pages by a filter, Dark PDF 
   await sleep(300);
   await t2.click("#b-more");
   await t2.click("#x-settings");
-  await t2.until(`!$("#settings").hidden && !!$("#settings [data-group='Page colours']")`, "Settings", 5000);
-  await t2.click("#settings [data-group='Page colours']");
+  await t2.until(`!$("#settings").hidden && !!$("#settings [data-section='Colours']")`, "Settings", 5000);
+  await t2.click("#settings [data-section='Colours']");
   await t2.click("#settings [data-id='page-colours'] .sw[data-v='paper']");
   assert.deepEqual(await t2.q(`[$(".win").classList.contains("paged"), getComputedStyle($(".slot canvas")).filter]`), [false, "none"], "Paper: the pages as printed");
   assert.deepEqual(t.errors, []);

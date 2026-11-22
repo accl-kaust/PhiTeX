@@ -3115,18 +3115,33 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
-.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
-.settings > header { padding: 12px 14px 0; }
-/* (the tabs wrap onto a second line when they don't fit: scrolled sideways, with no scrollbar, the last ones were out of reach) */
-.settings .stabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
-.settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+/* Settings: the panel's own rows and the host's, one dialog in every host: a tab per section (one line at any width), sub-headings inside, a search over them all */
+.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; container-type: inline-size; }
+.settings > header { padding: 10px 10px 0 16px; gap: 10px; }
+.settings .sfind { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px; margin-left: auto; padding: 0 8px; height: 28px; box-sizing: border-box;
+  border: 1px solid var(--ph-border); border-radius: var(--ph-pill); background: var(--ph-menu); color: var(--ph-fg2); font-weight: 400; cursor: text; }
+.settings .sfind:focus-within { border-color: var(--ph-link); color: var(--ph-fg); }
+.settings .sfind input { all: unset; flex: 1; min-width: 0; font-size: 12px; color: var(--ph-fg); }
+.settings .sfind input::placeholder { color: var(--ph-fg2); }
+.settings .sfind input::-webkit-search-cancel-button { cursor: pointer; }
+/* (the sections share the line: five short names, each as wide as it needs and the room left shared, never wrapped, never scrolled) */
+.settings .stabs { display: flex; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
+.settings .stabs button { all: unset; flex: 1 1 auto; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; padding: 6px 4px 8px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .settings .stabs button:hover { color: var(--ph-fg); }
 .settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
 .settings .stabs button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
-.settings .sbody { overflow: auto; padding: 4px 0 8px; }
+.settings.searching .stabs button { color: var(--ph-fg2); }
+.settings .sbody { position: relative; overflow: auto; padding: 0 0 10px; }
+.settings .snone { padding: 18px 16px 22px; text-align: center; font-size: 12px; }
+/* a sub-heading: small capitals over its rows; while searching, its section's name before it */
+.settings .ssec { display: none; }
+.settings.searching .ssec { display: inline; }
+.settings .sgroup + .sgroup { margin-top: 6px; }
+.settings .ssub { margin: 0; padding: 14px 16px 4px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ph-fg2); }
+.settings.searching .sbody > section + section { border-top: 1px solid var(--ph-border); }
 .settings .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab ctl" "help help" "err err"; align-items: center; column-gap: 16px; padding: 10px 16px; }
-.settings .srow + .srow { border-top: 1px solid var(--ph-border); }
+.settings .sgroup > .srow:not([hidden]) ~ .srow:not([hidden]) { border-top: 1px solid var(--ph-border); }
+.settings .srow[hidden] { display: none; }
 .settings .srow .lab { grid-area: lab; font-weight: 600; min-width: 0; }
 .settings .srow .ctl { grid-area: ctl; justify-self: end; }
 .settings .srow .help { grid-area: help; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--ph-fg2); }
@@ -3152,7 +3167,8 @@ header:active { cursor: grabbing; }
 .settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
 .settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
 /* Colour lines' tab: the presets as swatches, the strength's slider, Custom's two pickers, the sample */
-.settings .srow.swatches { grid-template-areas: "lab lab" "help help" "picks picks" "err err"; }
+.settings .srow.swatches { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lab" "help" "picks" "err"; }
+.settings .srow.swatches > .ctl, .settings .srow.custom > .ctl { display: none; }
 .settings .swatches .tiles { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
 .settings .sw { all: unset; cursor: pointer; display: grid; gap: 5px; justify-items: center; font-size: 12px; color: var(--ph-fg2); }
 .settings .sw .art { display: grid; gap: 3px; width: 100%; box-sizing: border-box; padding: 7px 8px; border-radius: var(--ph-radius); background: #fff; box-shadow: 0 0 0 1px var(--ph-border); }
@@ -3163,10 +3179,23 @@ header:active { cursor: grabbing; }
 .settings .sw[aria-pressed="true"] .art { box-shadow: 0 0 0 2px var(--ph-accent); }
 .settings .sw:focus-visible .art { outline: 2px solid var(--ph-link); outline-offset: 2px; }
 .settings .sw:disabled { cursor: default; opacity: .55; }
+/* a tile's own row under it (Custom's two pickers), while it is picked */
+.settings .swc { display: grid; align-content: start; gap: 8px; min-width: 0; }
+.settings .srow.sub { display: grid; justify-items: center; gap: 0; padding: 0; border: 0; }
+.settings .srow.sub[hidden] { display: none; }
+.settings .srow.sub .cols { gap: 6px; }
+.settings .srow.sub label { display: grid; justify-items: center; gap: 3px; font-size: 11px; color: var(--ph-fg2); cursor: pointer; }
+.settings .srow.sub .err { margin: 0; font-size: 11px; color: var(--ph-danger); text-align: center; }
+/* a colour's reset beside its picker, while it is not as it came */
+.settings .cols { align-items: center; }
+.settings .rst { all: unset; cursor: pointer; padding: 2px 6px; border-radius: var(--ph-radius); font-size: 12px; color: var(--ph-link); }
+.settings .rst:hover { background: var(--ph-hover); }
+.settings .rst:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.settings .rst[hidden] { display: none; }
 .settings input[type="range"] { width: 180px; accent-color: var(--ph-accent); }
 .settings .cols { display: inline-flex; gap: 8px; }
 .settings .cols input { width: 34px; height: 24px; padding: 0 2px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius); background: var(--ph-menu); cursor: pointer; }
-.settings .srow.custom { grid-template-areas: "lab lab" "help help" "picks picks"; }
+.settings .srow.custom { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lab" "help" "picks"; }
 .settings .wsample { grid-area: picks; margin-top: 8px; padding: 12px 16px; border-radius: var(--ph-radius); box-shadow: 0 0 0 1px var(--ph-border); background: #fff; color: #000; isolation: isolate; overflow: hidden; text-align: left; font: 13px/1.45 Georgia, "Times New Roman", serif; }
 .settings .wsample.dark { background: #282828; color: #e1e1e1; }
 .settings .wsample span { position: relative; display: block; width: fit-content; white-space: nowrap; }
@@ -3187,6 +3216,20 @@ header:active { cursor: grabbing; }
 .settings .switch[aria-checked="true"] i { left: 14px; }
 .settings .switch:disabled { cursor: default; }
 .settings .switch:focus-visible, .settings .seg button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+/* a narrow dialog (a narrow pane): less padding, the tabs smaller */
+@container (max-width: 380px) {
+  .settings > header { padding-left: 12px; }
+  .settings .stabs { padding: 4px 2px 0; }
+  .settings .stabs button { font-size: 12px; padding: 6px 1px 8px; }
+  .settings .srow { padding-left: 12px; padding-right: 12px; }
+  .settings .ssub { padding-left: 12px; }
+  /* (a row's buttons under its label, not squeezing it to a word a line) */
+  .settings .srow.choice, .settings .srow.select, .settings .srow.range { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lab" "help" "ctl" "err"; }
+  .settings .srow.choice .ctl, .settings .srow.select .ctl, .settings .srow.range .ctl { justify-self: start; margin-top: 6px; }
+  .settings .srow.range .ctl, .settings .srow.range input[type="range"] { justify-self: stretch; width: 100%; }
+  .settings .seg { flex-wrap: wrap; border-radius: 12px; }
+  .settings .seg button { padding: 3px 8px; }
+}
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;
@@ -4292,7 +4335,7 @@ var HINTS = [
   { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
   { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
   { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
-  { text: "You can pick your favourite loading animation, or turn them off, in Settings \u203A Appearance." },
+  { text: "You can pick your favourite loading animation, or turn them off, in Settings \u203A View." },
   { text: "Donald Knuth began TeX in 1977; its version number gets one more digit of \u03C0 at each release (3.141592653)." }
 ];
 function hintsFor(host2) {
@@ -9559,25 +9602,26 @@ var Changes = class {
   }
   /**
    * The panel's Settings, Changes: the same choices as the popover's look
-   * sections (one place or the other, the same prefs).
+   * sections (one place or the other, the same prefs), Diff's and Blame's
+   * under a sub-heading each.
    */
-  settingRows() {
-    const rows = [];
+  settingGroups() {
+    const groups = [];
     const L = this.look;
     if (this.host.diff) {
-      rows.push(
+      groups.push({ title: "Diff", rows: [
         { id: "chg-colors", label: "Diff: colours", help: "Added and deleted text", kind: "choice", options: Object.entries(DIFF_COLORS).map(([k, v]) => [k, v[2].replace(/ \(.*\)/, "")]), value: L.colors, set: (v) => this.setDiffLook({ colors: v }) },
         { id: "chg-ins", label: "Diff: added text", kind: "choice", options: [["wavy", "Wavy"], ["line", "Underline"], ["mark", "Marker"], ["colour", "Colour"]], value: L.ins, set: (v) => this.setDiffLook({ ins: v }) },
         { id: "chg-del", label: "Diff: deleted text", kind: "choice", options: [["strike", "Struck"], ["mark", "Marker"], ["caret", "Caret only"]], value: L.del, set: (v) => this.setDiffLook({ del: v }) },
         { id: "chg-fig", label: "Diff: changed figure", kind: "choice", options: [["side", "Side by side"], ["over", "Overlay"], ["new", "New only"]], value: L.fig, set: (v) => this.setDiffLook({ fig: v }) },
         { id: "chg-bars", label: "Diff: change bars", help: "A bar beside each changed line (latexdiff's classic marks)", kind: "toggle", value: !!L.bars, set: (v) => this.setDiffLook({ bars: !!v }) },
         { id: "chg-hide", label: "Diff: hide deletions", help: "Deleted text left out of the list and the pages", kind: "toggle", value: this.hide, set: (v) => this.setHide(!!v) }
-      );
+      ] });
     }
     const b = this.blame;
     if (b) {
       const B = b.look;
-      rows.push(
+      groups.push({ title: "Blame", rows: [
         { id: "bl-detail", label: "Blame: detail", kind: "choice", options: [["line", "Line"], ["word", "Word"], ["char", "Character"]], value: B.detail, set: (v) => this.setBlameLook({ detail: v }) },
         { id: "bl-color", label: "Blame: colour lines by", kind: "choice", options: [["author", "Author"], ["age", "Age"]], value: B.color, set: (v) => this.setBlameLook({ color: v }) },
         { id: "bl-ws", label: "Blame: spacing-only edits", kind: "choice", options: [["ignore", "Ignore"], ["count", "Count"]], value: B.ws, set: (v) => this.setBlameLook({ ws: v }) },
@@ -9586,9 +9630,9 @@ var Changes = class {
         { id: "bl-bars", label: "Blame: bars", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v }) },
         { id: "bl-width", label: "Blame: bar width", kind: "choice", options: [["2", "Thin"], ["4", "Medium"], ["7", "Wide"]], value: String(B.width), set: (v) => this.setBlameLook({ width: Number(v) }) },
         { id: "bl-people", label: "Blame: people's colours", kind: "choice", options: [["okabe", "Okabe\u2013Ito"], ["overleaf", "Overleaf's"]], value: B.people, set: (v) => this.setBlameLook({ people: v }) }
-      );
+      ] });
     }
-    return rows;
+    return groups;
   }
   wire() {
     const $ = (s) => this.el.querySelector(s);
@@ -9806,6 +9850,18 @@ var KIND_HELP = {
   font: "Missing characters and substituted fonts",
   other: "Every other warning"
 };
+var SECTIONS = [
+  ["View", ["Preview", "Links", "Loading"]],
+  ["Colours", ["Page colours", "Colour lines"]],
+  ["Build", ["Project", "Builds", "Packages", "Warnings and errors"]],
+  ["Changes", ["Diff", "Blame"]],
+  ["General", ["Updates and tips"]]
+];
+var OLD_GROUPS = { Build: "Builds", "Warnings/Errors": "Warnings and errors", Appearance: "Page colours" };
+function settingsSection(title) {
+  const t = OLD_GROUPS[title] ?? title;
+  return SECTIONS.find(([s, subs]) => s === t || subs.includes(t))?.[0] ?? "General";
+}
 var OVERLEAF_WORDS = {
   badge: "Unofficial \xB7 experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
@@ -9832,6 +9888,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
+var MARK3 = "#ffd600";
 var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20, pageColours: "paper", pageCustom: ["#fbf6e9", "#2a2a2a"], markColour: "" };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
@@ -10618,7 +10675,7 @@ var Panel = class {
       const b = document.createElement("button");
       b.className = "btn";
       b.textContent = e === "pdflatex" ? "Try pdfLaTeX anyway" : `Use ${ENGINES[e].label}${ENGINES[e].ready ? "" : " (coming)"}`;
-      b.title = e === "pdflatex" ? "For this project: pdfLaTeX, whatever its preamble loads" : `For this project from now on (Settings \u2192 Engine for every project)`;
+      b.title = e === "pdflatex" ? "For this project: pdfLaTeX, whatever its preamble loads" : `For this project from now on (Settings \u2192 Build \u2192 Engine for every project)`;
       b.onclick = () => this.ev.onEngine?.(e);
       btns.append(b);
     }
@@ -11822,8 +11879,13 @@ var Panel = class {
   // ---- Settings: the panel's own rows and the host's, one dialog in every host ----
   /** The rows drawn (by data-id): what a click or a change sets. */
   settingRows = /* @__PURE__ */ new Map();
-  /** The Settings dialog shown (drawn anew: the host's values as they are now) or hidden. */
-  async settings(on = this.$("#settings").hidden) {
+  /**
+   * The Settings dialog shown (drawn anew: the host's values as they are now)
+   * or hidden. `at`: the section to show (a sub-heading's title, or a tab's
+   * from before the sections, opens its section there); absent, the last one
+   * shown, else the first.
+   */
+  async settings(on = this.$("#settings").hidden, at) {
     const el = this.$("#settings");
     if (!on) {
       this.tilesGone();
@@ -11832,9 +11894,10 @@ var Panel = class {
     }
     const groups = this.ownSettings();
     for (const g of await this.ev.settings?.() ?? []) {
-      const same = groups.find((x) => x.title === g.title);
+      const title = OLD_GROUPS[g.title] ?? g.title;
+      const same = groups.find((x) => x.title === title);
       if (same) same.rows.push(...g.rows);
-      else groups.push({ title: g.title, rows: [...g.rows] });
+      else groups.push({ title, rows: [...g.rows], section: g.section });
     }
     for (const g of groups) {
       const m = g.rows.findIndex((r) => r.id === "margin"), f = g.rows.findIndex((r) => r.id === "follow");
@@ -11842,29 +11905,83 @@ var Panel = class {
     }
     this.settingRows.clear();
     this.tilesGone();
-    const shown = groups.filter((g) => g.rows.length);
-    const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
-    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
+    const sections = SECTIONS.map(([name, subs]) => {
+      const mine = groups.filter((g) => g.rows.length && (g.section ?? settingsSection(g.title)) === name);
+      return { name, groups: [...subs.map((t) => mine.find((g) => g.title === t)).filter((g) => !!g), ...mine.filter((g) => !subs.includes(g.title))] };
+    }).filter((x) => x.groups.length);
+    if (at) this.settingsTab = settingsSection(at);
+    const k0 = Math.max(0, sections.findIndex((x) => x.name === settingsSection(this.settingsTab)));
+    el.replaceChildren(
+      html`<header>Settings<label class="sfind">${icon2("search", 16)}<input type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search the settings"></label><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><nav class="stabs" role="tablist" aria-label="Sections">${sections.map((x, i) => html`<button type="button" role="tab" id="${`st-${x.name}`}" data-tab="${i}" data-section="${x.name}" aria-selected="${i === k0}">${x.name}</button>`)}</nav><div class="sbody"></div><p class="snone" hidden>No setting matches</p>`
+    );
     const body = el.querySelector(".sbody");
-    shown.forEach((g, i) => {
+    for (const [i, x] of sections.entries()) {
       const sec = document.createElement("section");
       sec.setAttribute("role", "tabpanel");
-      sec.hidden = i !== at;
-      for (const r of g.rows) sec.append(this.settingRow(r));
+      sec.setAttribute("aria-labelledby", `st-${x.name}`);
+      sec.dataset.section = x.name;
+      sec.hidden = i !== k0;
+      for (const g of x.groups) {
+        const box = html`<div class="sgroup" data-group="${g.title}"><h3 class="ssub"><span class="ssec">${`${x.name} \xB7 `}</span>${g.title}</h3></div>`.firstElementChild;
+        for (const r of g.rows) box.append(this.settingRow(r));
+        sec.append(box);
+      }
       body.append(sec);
-    });
+    }
+    const tabs = [...el.querySelectorAll("[data-tab]")];
+    const q = el.querySelector(".sfind input");
+    const show = (k) => {
+      this.settingsTab = sections[k].name;
+      tabs.forEach((b, i) => b.setAttribute("aria-selected", String(i === k)));
+      body.querySelectorAll(":scope > section").forEach((s, i) => s.hidden = i !== k);
+      body.scrollTop = 0;
+    };
     el.querySelector(".stabs").onclick = (e) => {
       const t = e.target.closest("[data-tab]");
       if (!t) return;
-      const k = Number(t.dataset.tab);
-      this.settingsTab = shown[k].title;
-      el.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b === t)));
-      body.querySelectorAll("section").forEach((s, i) => s.hidden = i !== k);
+      if (q.value) q.value = "", this.settingsFind(el, "");
+      show(Number(t.dataset.tab));
+    };
+    const find = () => (this.settingsFind(el, q.value), !q.value && show(Math.max(0, sections.findIndex((x) => x.name === this.settingsTab))));
+    q.oninput = find;
+    q.onkeydown = (e) => {
+      if (e.key !== "Escape" || !q.value) return;
+      q.value = "", find();
+      e.preventDefault();
+      e.stopPropagation();
     };
     el.hidden = false;
+    const sub = at && at !== this.settingsTab ? body.querySelector(`.sgroup[data-group="${CSS.escape(OLD_GROUPS[at] ?? at)}"]`) : null;
+    if (sub) body.scrollTop = sub.offsetTop;
     this.emit();
   }
-  /** The Settings tab last shown (its group's title). */
+  /** The Settings dialog's rows filtered by `text` (each word in a row's label, help or sub-heading), every section at once; empty, as it was. */
+  settingsFind(el, text) {
+    const words3 = text.toLowerCase().split(/\s+/).filter(Boolean);
+    el.classList.toggle("searching", words3.length > 0);
+    let any = false;
+    for (const sec of el.querySelectorAll(".sbody > section")) {
+      let inSec = false;
+      for (const g of sec.querySelectorAll(".sgroup")) {
+        let inGroup = false;
+        const head = `${sec.dataset.section} ${g.dataset.group}`.toLowerCase();
+        for (const row of g.querySelectorAll(":scope > .srow")) {
+          const r = this.settingRows.get(row.dataset.id);
+          const said2 = [head, r?.label, r?.help, r?.disabled, ...Object.values(r?.under ?? {}).flatMap((u) => [u.label, u.help])].join(" ").toLowerCase();
+          const hit = words3.every((w) => said2.includes(w));
+          row.hidden = words3.length > 0 && !hit;
+          inGroup ||= hit;
+        }
+        g.hidden = words3.length > 0 && !inGroup;
+        inSec ||= inGroup;
+      }
+      if (words3.length) sec.hidden = !inSec;
+      any ||= inSec;
+    }
+    el.querySelector(".snone").hidden = !words3.length || any;
+    if (words3.length) el.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-selected", "false"));
+  }
+  /** The Settings section last shown. */
   settingsTab = "";
   /** One row: its label and help, its control, a line for the host's error. */
   settingRow(r) {
@@ -11893,14 +12010,21 @@ var Panel = class {
       row.querySelector(".help").after(grid);
       if (r.tile) for (const b of row.querySelectorAll(".pick")) this.tileShown(b.querySelector(".lk"), (box) => r.tile(b.dataset.v, box));
     } else if (r.kind === "swatches") {
-      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<span class="swc"><button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button></span>`)}</div>`;
       row.querySelector(".help").after(grid);
-      for (const t of row.querySelectorAll(".sw")) r.paint ? r.paint(t.dataset.v, t.querySelector(".art")) : this.waspSwatch(t, t.dataset.v);
+      for (const t of row.querySelectorAll(".sw")) {
+        r.paint ? r.paint(t.dataset.v, t.querySelector(".art")) : this.waspSwatch(t, t.dataset.v);
+        const u = r.under?.[t.dataset.v];
+        if (u) t.after(this.settingSub(u, r.value === t.dataset.v));
+      }
     } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
     else if (r.kind === "colors") {
       const [a, b] = String(r.value ?? "").split(",");
       ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
-    } else if (r.kind === "color") ctl.replaceChildren(html`<span class="cols"><input type="color" value="${String(r.value || "#000000")}" aria-label="${r.label}" disabled="${off}"></span>`);
+    } else if (r.kind === "color")
+      ctl.replaceChildren(
+        html`<span class="cols">${r.reset ? html`<button type="button" class="rst" title="${r.reset.help}" aria-label="${`${r.label}: ${r.reset.help}`}" hidden="${String(r.value ?? "").toLowerCase() === r.reset.to}" disabled="${off}">Reset</button>` : ""}<input type="color" value="${String(r.value || "#000000")}" aria-label="${r.label}" disabled="${off}"></span>`
+      );
     else if (r.kind === "custom") {
       const made2 = r.make?.();
       if (made2) row.querySelector(".help").after(made2);
@@ -11908,12 +12032,37 @@ var Panel = class {
     else ctl.innerHTML = `<span class="val"></span>`, ctl.querySelector(".val").textContent = String(r.value ?? "");
     return row;
   }
+  /** A swatches row's tiles' own rows shown with their tile picked, hidden with it not. */
+  subsShown(row) {
+    for (const c of row.querySelectorAll(".swc")) {
+      const sub = c.querySelector(":scope > .sub");
+      if (sub) sub.hidden = c.querySelector(".sw").getAttribute("aria-pressed") !== "true";
+    }
+  }
+  /** A tile's own row (SettingRow.under), compact under it: its pickers named by its label and help; `on` while its tile is picked. */
+  settingSub(r, on) {
+    this.settingRows.set(r.id, r);
+    const vals = String(r.value ?? "").split(",");
+    const names = (r.options ?? []).map(([, l]) => l);
+    const sub = html`<span class="srow ${r.kind} sub" data-id="${r.id}" title="${r.help ?? ""}" hidden="${!on}"><span class="cols">${vals.map((c, i) => html`<label><input type="color" value="${c || "#000000"}" aria-label="${`${r.label}: ${names[i] ?? i + 1}`}">${names[i] ?? ""}</label>`)}</span><span class="err" hidden></span></span>`;
+    return sub.firstElementChild;
+  }
   /** A row's control used: its new value to the row's set, its error (if any) under it. */
   async settingClicked(e) {
     const t = e.target;
     const row = t.closest(".srow");
     const r = row && this.settingRows.get(row.dataset.id);
     if (!row || !r?.set || r.disabled) return;
+    if (r.reset && e.type === "click" && t.closest(".rst")) {
+      const why2 = r.reset.set();
+      const err2 = row.querySelector(".err");
+      err2.hidden = !why2, err2.textContent = why2 || "";
+      if (why2) return;
+      r.value = r.reset.to;
+      row.querySelector("input[type=color]").value = r.reset.to;
+      row.querySelector(".rst").hidden = true;
+      return;
+    }
     let v;
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
@@ -11940,6 +12089,8 @@ var Panel = class {
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch").setAttribute("aria-checked", String(v === true));
     if (r.kind === "choice" || r.kind === "swatches") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "swatches") this.subsShown(row);
+    if (r.reset) row.querySelector(".rst").hidden = String(v).toLowerCase() === r.reset.to;
     if (r.kind === "picks") {
       const on = new Set(String(v).split(","));
       row.querySelectorAll(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v))));
@@ -11977,8 +12128,10 @@ var Panel = class {
     };
     const keep = ev.onPref ? void 0 : "This host doesn't keep it";
     const preview2 = [];
+    const opening2 = [];
+    const project = [];
     if (this.mainFiles.names.length)
-      preview2.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+      project.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
     preview2.push({
       id: "margin",
       label: "Keep a margin",
@@ -11988,9 +12141,8 @@ var Panel = class {
       value: String(this.prefs.margin),
       set: (v) => (this.prefs.margin = Math.max(0, Math.min(45, Number(v) || 0)), this.marginApply(), this.save())
     });
-    const look2 = [];
-    look2.push(
-      { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
+    const dark = { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) };
+    opening2.push(
       {
         id: "opening",
         label: "Loading animation",
@@ -12011,7 +12163,8 @@ var Panel = class {
         }
       }
     );
-    if (ev.onBoxes) look2.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    const underline = [];
+    if (ev.onBoxes) underline.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     const problems = KINDS.map(([k, name]) => ({
       id: `kind-${k}`,
       label: name,
@@ -12020,7 +12173,7 @@ var Panel = class {
       value: !this.hiddenKinds.has(k),
       set: (on) => void (!!on === this.hiddenKinds.has(k) && this.toggleKind(k))
     }));
-    if (ev.onBoxes) problems.push(look2.splice(look2.findIndex((r) => r.id === "underline"), 1)[0]);
+    problems.push(...underline);
     const build2 = [];
     if (ev.onDebug) build2.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
     build2.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
@@ -12029,14 +12182,14 @@ var Panel = class {
     if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews()) });
     return [
       { title: "Preview", rows: preview2 },
-      { title: "Appearance", rows: look2 },
-      { title: "Page colours", rows: this.pageRows() },
-      { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
-      { title: "Warnings/Errors", rows: problems },
-      { title: "Build", rows: build2 },
-      { title: "Packages", rows: [] },
-      { title: "Changes", rows: this.changes?.settingRows() ?? [] },
+      { title: "Loading", rows: opening2 },
+      { title: "Page colours", rows: [dark, ...this.pageRows()] },
+      { title: "Colour lines", rows: this.waspRows() },
+      { title: "Project", rows: project },
+      { title: "Builds", rows: build2 },
+      { title: "Warnings and errors", rows: problems },
+      ...this.changes?.settingGroups() ?? [],
       { title: "Updates and tips", rows: tips }
     ];
   }
@@ -12052,7 +12205,7 @@ var Panel = class {
     this.waspApply();
     this.pageApply();
   }
-  // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
+  // ---- Colour lines: the reading aid (wasp.ts), in Settings' Colours ----
   /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
   waspLook() {
     const p = this.prefs;
@@ -12187,35 +12340,48 @@ var Panel = class {
       {
         id: "page-colours",
         label: "Page colours",
-        help: "The pages' background and text in other colours, figures too; downloads stay the real PDF. With Dark PDF on, Dark PDF's colours are shown",
+        help: "The pages' background and text in other colours, figures too; downloads keep the PDF's own. While Dark PDF is on, its colours are used instead",
         kind: "swatches",
         options: opts,
         value: l.id,
         paint: (v, art3) => this.pageSwatch(v, art3),
-        set: (v) => kept(() => this.prefs.pageColours = String(v))
+        set: (v) => kept(() => this.prefs.pageColours = String(v)),
+        // (Custom's two pickers under its tile, while it is picked)
+        under: {
+          custom: {
+            id: "page-custom",
+            label: "Custom: page and text",
+            help: "Custom's page colour, then its text colour",
+            kind: "colors",
+            options: [["page", "Page"], ["text", "Text"]],
+            value: (l.id === "custom" ? [l.page, l.text] : DEFAULTS.pageCustom).join(","),
+            set: (v) => kept(() => {
+              const [a, b] = String(v).split(",");
+              this.prefs.pageCustom = [a, b];
+              this.prefs.pageColours = "custom";
+              this.customPicked("page-colours");
+            })
+          }
+        }
       },
       {
-        id: "page-custom",
-        label: "Custom: page and text",
-        help: "Custom's page colour, then its text colour",
-        kind: "colors",
-        value: (l.id === "custom" ? [l.page, l.text] : DEFAULTS.pageCustom).join(","),
-        set: (v) => kept(() => {
-          const [a, b] = String(v).split(",");
-          this.prefs.pageCustom = [a, b];
-          this.prefs.pageColours = "custom";
-          const row = this.settingRows.get("page-colours");
-          if (row) row.value = "custom";
-          this.$("#settings").querySelectorAll('.srow[data-id="page-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
-        })
-      },
-      { id: "mark-colour", label: "Marker", help: "The highlight where your editor's cursor is, and where a jump lands", kind: "color", value: l.mark || "#ffd600", set: (v) => kept(() => this.prefs.markColour = String(v)) },
-      { id: "mark-reset", label: "The marker's own amber", help: "The marker back to its colour as it came", kind: "action", button: "Reset", set: () => kept(() => {
-        this.prefs.markColour = "";
-        const i = this.$("#settings").querySelector('.srow[data-id="mark-colour"] input');
-        if (i) i.value = "#ffd600";
-      }) }
+        id: "mark-colour",
+        label: "Marker",
+        help: "The highlight where your editor's cursor is, and where a jump lands",
+        kind: "color",
+        value: l.mark || MARK3,
+        set: (v) => kept(() => this.prefs.markColour = String(v)),
+        reset: { to: MARK3, help: "Back to the marker's own amber", set: () => kept(() => this.prefs.markColour = "") }
+      }
     ];
+  }
+  /** A swatches row's Custom picked by its pickers (Custom chosen with them): its tile pressed. */
+  customPicked(id) {
+    const r = this.settingRows.get(id);
+    if (r) r.value = "custom";
+    const row = this.$("#settings").querySelector(`.srow[data-id="${id}"]`);
+    row?.querySelectorAll(".sw").forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    if (row) this.subsShown(row);
   }
   /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
   waspRows() {
@@ -12241,9 +12407,10 @@ var Panel = class {
         kind: "swatches",
         options: colours,
         value: l.colours,
-        set: (v) => kept("waspColours", String(v))
+        set: (v) => kept("waspColours", String(v)),
+        // (Custom's two pickers under its tile, while it is picked)
+        under: { custom: { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", options: [["1", "First"], ["2", "Second"]], value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) } }
       },
-      { id: "wasp-custom", label: "Custom colours", help: "Custom's two colours; on Dark PDF, each lightened", kind: "colors", value: l.custom.join(","), set: (v) => this.waspCustomSet(String(v)) },
       { id: "wasp-strength", label: "Strength", help: "Left, a hint of the colour; the middle, as it comes; right, vivid blue and red (each preset's brightest)", kind: "range", max: 200, value: String(Math.round(l.strength * 100)), set: (v) => kept("waspStrength", Number(v)) },
       { id: "wasp-length", label: "Fade length", help: "Left, the colour only near a line's ends; the middle, the whole line one fade; right, the colour held across most of the line", kind: "range", max: 200, value: String(Math.round(l.length * 100)), set: (v) => kept("waspLength", Number(v)) },
       { id: "wasp-text", label: "Which text", help: "All text: headings, captions and footnotes too; never display maths", kind: "choice", options: [["body", "Body text only"], ["all", "All text"]], value: l.text, set: (v) => kept("waspText", v === "all" ? "all" : "body") },
@@ -12255,9 +12422,7 @@ var Panel = class {
     const [a, b] = v.split(",");
     this.prefs.waspCustom = [a, b];
     this.prefs.waspColours = "custom";
-    const row = this.settingRows.get("wasp-colours");
-    if (row) row.value = "custom";
-    this.$("#settings").querySelectorAll('.srow[data-id="wasp-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+    this.customPicked("wasp-colours");
     this.waspApply();
     this.save();
   }
@@ -15603,8 +15768,6 @@ async function watchSettings() {
     {
       title: "Preview",
       rows: [
-        { id: "w-main", label: "Main file", help: project, kind: "info", value: String(at.main ?? "") },
-        { id: "w-engine", label: "Engine", help: "Set `engine` in the project's phitex.toml (or a `% !TEX program` line)", kind: "info", value: String(at.engine ?? "") },
         {
           id: "follow",
           label: "Highlight follows",
@@ -15617,7 +15780,14 @@ async function watchSettings() {
       ]
     },
     {
-      title: "Build",
+      title: "Project",
+      rows: [
+        { id: "w-main", label: "Main file", help: project, kind: "info", value: String(at.main ?? "") },
+        { id: "w-engine", label: "Engine", help: "Set `engine` in the project's phitex.toml (or a `% !TEX program` line)", kind: "info", value: String(at.engine ?? "") }
+      ]
+    },
+    {
+      title: "Builds",
       rows: [
         toggle2("watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does. From the next phitex watch on."),
         toggle2("watch-ask-write", "Ask at quit whether to write the PDF", "When nothing was written while watching, quitting asks whether to write the PDF here. Off: it writes nothing and asks nothing."),
