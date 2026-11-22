@@ -504,7 +504,11 @@ impl<'a> Em<'a> {
         };
         let pair = image(old, self.old) && image(new, self.new) && self.show_del;
         // (the look's: the new image alone, or the old one under it)
-        let fig = if pair { self.fig } else { crate::FigStyle::Side };
+        let fig = if pair {
+            self.fig
+        } else {
+            crate::FigStyle::Side
+        };
         if pair {
             self.push("\\DIFtabularbegin ");
         }

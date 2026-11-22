@@ -73,7 +73,11 @@ fn units(text: &[u8], words: bool, ignore_space: bool) -> (Vec<u64>, Vec<(usize,
             let end = at + l.len();
             let l = l.strip_suffix(b"\r").unwrap_or(l);
             keys.push(if ignore_space {
-                let squeezed: Vec<u8> = l.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect();
+                let squeezed: Vec<u8> = l
+                    .iter()
+                    .copied()
+                    .filter(|c| !c.is_ascii_whitespace())
+                    .collect();
                 h(&squeezed)
             } else {
                 h(l)
@@ -101,7 +105,11 @@ fn units(text: &[u8], words: bool, ignore_space: bool) -> (Vec<u64>, Vec<(usize,
                 j += 1;
             }
         }
-        keys.push(if k == 1 && ignore_space { h(b" ") } else { h(&text[i..j]) });
+        keys.push(if k == 1 && ignore_space {
+            h(b" ")
+        } else {
+            h(&text[i..j])
+        });
         spans.push((i, j));
         i = j;
     }
@@ -112,7 +120,6 @@ fn units(text: &[u8], words: bool, ignore_space: bool) -> (Vec<u64>, Vec<(usize,
 fn blank(text: &[u8], span: (usize, usize)) -> bool {
     text[span.0..span.1].iter().all(u8::is_ascii_whitespace)
 }
-
 
 /// A commit with lines still to place, in the walk's queue: newest
 /// (committer time) first.
@@ -173,7 +180,10 @@ impl Walk<'_> {
     fn keys(&mut self, blob: ObjectId) -> Result<&Vec<u64>, Error> {
         if !self.lines.contains_key(&blob) {
             let data = self.repo.repo.find_object(blob).map_err(git)?.data.clone();
-            self.lines.insert(blob, units(&data, self.opts.words, self.opts.ignore_space).0);
+            self.lines.insert(
+                blob,
+                units(&data, self.opts.words, self.opts.ignore_space).0,
+            );
         }
         Ok(&self.lines[&blob])
     }
@@ -243,7 +253,12 @@ fn moved(old: &[u64], new: &[u64], pairs: &mut HashMap<usize, usize>, words: boo
             let mut best: Option<(usize, usize)> = None;
             for &at in free.get(&new[start]).map_or(&[][..], Vec::as_slice) {
                 let mut len = 0;
-                while start + len < to && at + len < old.len() && old[at + len] == new[start + len] && !used.contains(&(at + len)) && !taken.contains(&(at + len)) {
+                while start + len < to
+                    && at + len < old.len()
+                    && old[at + len] == new[start + len]
+                    && !used.contains(&(at + len))
+                    && !taken.contains(&(at + len))
+                {
                     len += 1;
                 }
                 if len >= 4 && best.is_none_or(|(_, bn)| len > bn) {
@@ -304,7 +319,12 @@ impl Repo {
     ///
     /// If the history cannot be read.
     #[allow(clippy::too_many_lines, reason = "one walk, as git blame's")]
-    pub fn blame_with(&self, path: &str, now: Option<&[u8]>, opts: &BlameOpts) -> Result<Blame, Error> {
+    pub fn blame_with(
+        &self,
+        path: &str,
+        now: Option<&[u8]>,
+        opts: &BlameOpts,
+    ) -> Result<Blame, Error> {
         let full = phitex_diff::flatten::normalize(&format!("{}{path}", self.prefix));
         let mut w = Walk {
             repo: self,
@@ -373,7 +393,8 @@ impl Repo {
                     // (a skipped commit: what it changed passed to its first parent, at the same place in the hunk it changed)
                     if skip && pi == 0 && !lines.is_empty() {
                         let n = w.keys(pblob)?.len();
-                        let mut pairs: Vec<(usize, usize)> = m.iter().map(|(&c, &p)| (c, p)).collect();
+                        let mut pairs: Vec<(usize, usize)> =
+                            m.iter().map(|(&c, &p)| (c, p)).collect();
                         pairs.sort_unstable();
                         let (moved_on, keep): (Vec<_>, Vec<_>) = lines
                             .iter()
@@ -415,7 +436,13 @@ impl Repo {
                         let a = if i > 0 { unit[i - 1] } else { None };
                         let b = unit.get(i + 1).copied().flatten();
                         let best = match (i > 0, i + 1 < unit.len()) {
-                            (true, true) => if time(a) >= time(b) { a } else { b },
+                            (true, true) => {
+                                if time(a) >= time(b) {
+                                    a
+                                } else {
+                                    b
+                                }
+                            }
                             (true, false) => a,
                             (false, true) => b,
                             _ => unit[i],

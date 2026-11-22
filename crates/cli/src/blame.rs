@@ -75,7 +75,13 @@ pub fn sources(root: &Path, main: &str) -> Vec<String> {
                 esc = ch == '\\' && !esc;
                 code.push(ch);
             }
-            for (cmd, ext) in [("\\input", ".tex"), ("\\include", ".tex"), ("\\subfile", ".tex"), ("\\bibliography", ".bib"), ("\\addbibresource", "")] {
+            for (cmd, ext) in [
+                ("\\input", ".tex"),
+                ("\\include", ".tex"),
+                ("\\subfile", ".tex"),
+                ("\\bibliography", ".bib"),
+                ("\\addbibresource", ""),
+            ] {
                 let mut rest = code.as_str();
                 while let Some(i) = rest.find(cmd) {
                     rest = &rest[i + cmd.len()..];
@@ -84,8 +90,14 @@ pub fn sources(root: &Path, main: &str) -> Vec<String> {
                         continue;
                     }
                     let r = rest.trim_start();
-                    let r = if r.starts_with('[') { r.find(']').map_or(r, |j| r[j + 1..].trim_start()) } else { r };
-                    let Some(r) = r.strip_prefix('{') else { continue };
+                    let r = if r.starts_with('[') {
+                        r.find(']').map_or(r, |j| r[j + 1..].trim_start())
+                    } else {
+                        r
+                    };
+                    let Some(r) = r.strip_prefix('{') else {
+                        continue;
+                    };
                     let Some(end) = r.find('}') else { continue };
                     for n in r[..end].split(',') {
                         let n = n.trim().trim_start_matches("./");
@@ -93,7 +105,11 @@ pub fn sources(root: &Path, main: &str) -> Vec<String> {
                             continue;
                         }
                         let with = format!("{n}{ext}");
-                        let pick = if now(root, n).is_some() && (ext != ".tex" || n.contains('.')) { n.to_owned() } else { with };
+                        let pick = if now(root, n).is_some() && (ext != ".tex" || n.contains('.')) {
+                            n.to_owned()
+                        } else {
+                            with
+                        };
                         found.push(pick);
                     }
                 }
@@ -187,7 +203,13 @@ impl Commits {
 
 /// File `name`'s blame as it is now (`bytes`), kept while its bytes and
 /// `HEAD` stay.
-fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8], opts: &BlameOpts) -> Result<Blame, String> {
+fn blame_of(
+    repo: &Repo,
+    head: &str,
+    name: &str,
+    bytes: &[u8],
+    opts: &BlameOpts,
+) -> Result<Blame, String> {
     let h = hash(bytes);
     let key = (name.to_owned(), format!("{opts:?}"));
     if let Some((kh, khead, b)) = kept()
@@ -199,7 +221,9 @@ fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8], opts: &BlameOpts)
     {
         return Ok(b.clone());
     }
-    let b = repo.blame_with(name, Some(bytes), opts).map_err(|e| e.to_string())?;
+    let b = repo
+        .blame_with(name, Some(bytes), opts)
+        .map_err(|e| e.to_string())?;
     kept()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -211,7 +235,11 @@ fn blame_of(repo: &Repo, head: &str, name: &str, bytes: &[u8], opts: &BlameOpts)
 /// git and has one.
 #[must_use]
 pub fn head(root: &Path) -> Option<String> {
-    Repo::discover(root).ok()?.resolve("HEAD").ok().map(|h| h.to_string())
+    Repo::discover(root)
+        .ok()?
+        .resolve("HEAD")
+        .ok()
+        .map(|h| h.to_string())
 }
 
 /// The viewer's `blame` op: `files` (the project's, by their names from
@@ -253,7 +281,11 @@ pub fn files(root: &Path, files: &[String], opts: &BlameOpts) -> Result<Value, S
         if opts.words {
             // (by words: each run's range of the text in UTF-16 units, as the viewer counts them)
             let u16 = utf16_at(&text);
-            let runs: Vec<Value> = b.runs.iter().map(|&(a, e, k)| json!([u16(a), u16(e), c(k)])).collect();
+            let runs: Vec<Value> = b
+                .runs
+                .iter()
+                .map(|&(a, e, k)| json!([u16(a), u16(e), c(k)]))
+                .collect();
             out.insert(name.clone(), json!({"text": text, "runs": runs}));
         } else {
             let lines: Vec<i64> = b.lines.iter().map(|&l| c(l)).collect();
@@ -499,7 +531,16 @@ mod tests {
         std::fs::write(d.join("two.tex"), "Two.\n").unwrap();
         std::fs::write(d.join("refs.bib"), "@misc{a}\n").unwrap();
         std::fs::write(d.join("other.tex"), "Not input.\n").unwrap();
-        assert_eq!(super::sources(&d, "main.tex"), ["main.tex", "ch/one.tex", "ch/three.tex", "two.tex", "refs.bib"]);
+        assert_eq!(
+            super::sources(&d, "main.tex"),
+            [
+                "main.tex",
+                "ch/one.tex",
+                "ch/three.tex",
+                "two.tex",
+                "refs.bib"
+            ]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

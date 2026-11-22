@@ -133,7 +133,11 @@ impl Look {
             subtype: Subtype::parse(&self.subtype).unwrap_or_default(),
             add_color: Color::parse(&self.add_color).ok(),
             del_color: Color::parse(&self.del_color).ok(),
-            style: phitex_diff::Style::parse(self.ins.as_deref(), self.dels.as_deref(), self.fig.as_deref()),
+            style: phitex_diff::Style::parse(
+                self.ins.as_deref(),
+                self.dels.as_deref(),
+                self.fig.as_deref(),
+            ),
             ..phitex_diff::Options::default()
         }
     }
@@ -916,7 +920,15 @@ pub fn agent(
     }
     let c = slot.as_mut().ok_or("no diff")?;
     if look.iter().any(Option::is_some) {
-        let l = c.look_from(&[look[0].clone(), look[1].clone(), look[2].clone(), look[3].clone(), None, None, None]);
+        let l = c.look_from(&[
+            look[0].clone(),
+            look[1].clone(),
+            look[2].clone(),
+            look[3].clone(),
+            None,
+            None,
+            None,
+        ]);
         c.restyle(l, &now, src.as_ref(), main);
     }
     c.build();

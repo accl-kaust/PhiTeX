@@ -1381,7 +1381,18 @@ impl Viewer {
         let page = req.get("page").and_then(index);
         let text = |k: &str| req.get(k).and_then(Value::as_str).map(str::to_owned);
         // (a diff's look: markup, subtype, colours, the viewer's styles)
-        let look = || ["markup", "subtype", "add_color", "del_color", "ins_style", "del_style", "fig_style"].map(text);
+        let look = || {
+            [
+                "markup",
+                "subtype",
+                "add_color",
+                "del_color",
+                "ins_style",
+                "del_style",
+                "fig_style",
+            ]
+            .map(text)
+        };
         let state = || {
             let p = lock(&s.pages);
             let d = lock(&s.diff);

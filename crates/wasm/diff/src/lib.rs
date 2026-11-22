@@ -71,7 +71,11 @@ fn answer(req: &[u8]) -> Value {
         add_color,
         del_color,
         // (the viewer's own look: "ins_style", "del_style", "fig_style")
-        style: phitex_diff::Style::parse(r["ins_style"].as_str(), r["del_style"].as_str(), r["fig_style"].as_str()),
+        style: phitex_diff::Style::parse(
+            r["ins_style"].as_str(),
+            r["del_style"].as_str(),
+            r["fig_style"].as_str(),
+        ),
         ..Options::default()
     };
     let main = r["main"].as_str().unwrap_or("main.tex");

@@ -300,14 +300,22 @@ fn styled(st: Style, add: &str, del: &str, a: &str, d: &str) -> Vec<String> {
     l.extend(COLOR.lines().map(str::to_owned));
     l.extend(FONTS.lines().map(str::to_owned));
     l.push(r"\protected\def\phitexdifhl#1{\leavevmode\bgroup\phitexdifmarkover{\hbox{#1}}\phitexdifon}".into());
-    let band = |c: &str| format!(r"\phitexdifpush{{{}}}\vrule width1bp height.78em depth.24em\phitexdifpop", light(c));
+    let band = |c: &str| {
+        format!(
+            r"\phitexdifpush{{{}}}\vrule width1bp height.78em depth.24em\phitexdifpop",
+            light(c)
+        )
+    };
     let def = |name: &str, body: String| format!("\\providecommand{{\\{name}}}[1]{{{body}}}");
     l.push(def(
         add,
         match st.ins {
             InsStyle::Wavy => format!("\\phitexdifmark{{{a}}}{{\\phitexdifuwave{{#1}}}}"),
             InsStyle::Line => format!("\\phitexdifmark{{{a}}}{{\\phitexdifuline{{#1}}}}"),
-            InsStyle::Mark => format!("\\phitexdifmark{{{a}}}{{\\phitexdifhl{{{}}}{{#1}}}}", band(a)),
+            InsStyle::Mark => format!(
+                "\\phitexdifmark{{{a}}}{{\\phitexdifhl{{{}}}{{#1}}}}",
+                band(a)
+            ),
             InsStyle::Colour => format!("\\phitexdifmark{{{a}}}{{#1}}"),
         },
     ));
@@ -461,7 +469,10 @@ fn units(m: Markup, a: &str, d: &str, colored: bool) -> Vec<String> {
     l.push("\\protected\\def\\phitexdifchangesep{\\ifhmode\\hskip.2em\\relax\\fi}".into());
     // (an image replaced, the look's overlay: the old one in no width, the new one over it)
     l.push("\\mathchardef\\phitexdifobox=31008\\relax".into());
-    l.push("\\providecommand{\\DIFoverbegin}{\\leavevmode\\setbox\\phitexdifobox\\hbox\\bgroup}".into());
+    l.push(
+        "\\providecommand{\\DIFoverbegin}{\\leavevmode\\setbox\\phitexdifobox\\hbox\\bgroup}"
+            .into(),
+    );
     l.push("\\providecommand{\\DIFoverend}{\\egroup\\rlap{\\box\\phitexdifobox}}".into());
     l.push("\\providecommand{\\DIFchangesep}{\\phitexdifchangesep}".into());
     // (a deleted image: as it was where its file is still there, by its
@@ -792,10 +803,27 @@ mod tests {
     #[test]
     fn every_style_balances_and_marks_as_named() {
         use crate::{DelStyle, FigStyle, InsStyle, Style};
-        for ins in [InsStyle::Wavy, InsStyle::Line, InsStyle::Mark, InsStyle::Colour] {
-            for del in [DelStyle::Strike, DelStyle::Mark, DelStyle::Caret, DelStyle::Hide] {
-                let st = Style { ins, del, fig: FigStyle::Side };
-                let o = Options { style: Some(st), ..Options::default() };
+        for ins in [
+            InsStyle::Wavy,
+            InsStyle::Line,
+            InsStyle::Mark,
+            InsStyle::Colour,
+        ] {
+            for del in [
+                DelStyle::Strike,
+                DelStyle::Mark,
+                DelStyle::Caret,
+                DelStyle::Hide,
+            ] {
+                let st = Style {
+                    ins,
+                    del,
+                    fig: FigStyle::Side,
+                };
+                let o = Options {
+                    style: Some(st),
+                    ..Options::default()
+                };
                 let p = dif_preamble(&o, "") + &dif_body(&o, "");
                 for l in p.lines().filter(|l| !l.starts_with('%')) {
                     let depth = l.chars().fold(0i32, |d, c| match c {
@@ -805,12 +833,34 @@ mod tests {
                     });
                     assert_eq!(depth, 0, "{st:?}: {l}");
                 }
-                let add = p.lines().find(|l| l.starts_with("\\providecommand{\\DIFadd}")).unwrap();
-                let dl = p.lines().find(|l| l.starts_with("\\providecommand{\\DIFdel}")).unwrap();
-                assert_eq!(add.contains("\\phitexdifuwave"), ins == InsStyle::Wavy, "{add}");
-                assert_eq!(add.contains("\\phitexdifuline"), ins == InsStyle::Line, "{add}");
-                assert_eq!(add.contains("\\phitexdifhl"), ins == InsStyle::Mark, "{add}");
-                assert_eq!(dl.contains("\\phitexdifsout"), del == DelStyle::Strike, "{dl}");
+                let add = p
+                    .lines()
+                    .find(|l| l.starts_with("\\providecommand{\\DIFadd}"))
+                    .unwrap();
+                let dl = p
+                    .lines()
+                    .find(|l| l.starts_with("\\providecommand{\\DIFdel}"))
+                    .unwrap();
+                assert_eq!(
+                    add.contains("\\phitexdifuwave"),
+                    ins == InsStyle::Wavy,
+                    "{add}"
+                );
+                assert_eq!(
+                    add.contains("\\phitexdifuline"),
+                    ins == InsStyle::Line,
+                    "{add}"
+                );
+                assert_eq!(
+                    add.contains("\\phitexdifhl"),
+                    ins == InsStyle::Mark,
+                    "{add}"
+                );
+                assert_eq!(
+                    dl.contains("\\phitexdifsout"),
+                    del == DelStyle::Strike,
+                    "{dl}"
+                );
                 assert_eq!(dl.contains("\\wedge"), del == DelStyle::Caret, "{dl}");
                 assert_eq!(dl.contains("[1]{}"), del == DelStyle::Hide, "{dl}");
                 assert_eq!(o.shows_deleted(), del != DelStyle::Hide);
@@ -823,6 +873,9 @@ mod tests {
         assert_eq!(Style::parse(None, None, None), None);
         let s = Style::parse(Some("mark"), Some("caret"), Some("over")).unwrap();
         assert_eq!(s.names(), ("mark", "caret", "over"));
-        assert_eq!(Style::parse(Some("?"), None, None).unwrap().names(), ("wavy", "strike", "side"));
+        assert_eq!(
+            Style::parse(Some("?"), None, None).unwrap().names(),
+            ("wavy", "strike", "side")
+        );
     }
 }
