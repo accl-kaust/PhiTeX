@@ -38,6 +38,8 @@ Compare and Blame are now one thing: **± Changes** :)
   person and edit session that typed it, read straight from the project's
   history, with no cap on its length. The history fills in as it loads,
   with progress you can see, and reopening a project is instant.
+- **Fixed:** `files = texlive` finds TeX Live installed with Nix
+  (home-manager's `texliveFull`, `texlive.withPackages`).
 
 ## 1.0.4 (2026-11-17)
 
