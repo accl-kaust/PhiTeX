@@ -350,13 +350,9 @@ fn blame() {
     assert_eq!(skipped.author, "Alice");
 }
 
-/// Blame by words, spacing ignored, moved text and skipped commits (the
-/// viewer's Blame settings): a word Bob changed in Alice's line is Bob's,
-/// the rest Alice's; Carol's spacing-only edit changes no one's words;
-/// Dana's moved line keeps Alice as its writer (or is Dana's, the mover
-/// credited); Bob's commit skipped, his word goes back to Alice.
-#[test]
-fn blame_by_words_moves_and_skips() {
+/// The repository `blame_by_words_moves_and_skips` reads: Alice writes two
+/// lines, Bob changes a word, Carol only spacing, Dana moves a line up.
+fn blame_words_paper() -> PathBuf {
     let root = fixture("blame-words");
     let paper = root.join("paper");
     let commit = |who: &str, msg: &str| {
@@ -395,6 +391,17 @@ fn blame_by_words_moves_and_skips() {
         "A second line, which Alice wrote too.\nThe  slow brown fox jumps over the  lazy dog.\n",
     );
     commit("Dana", "Move the second line up");
+    paper
+}
+
+/// Blame by words, spacing ignored, moved text and skipped commits (the
+/// viewer's Blame settings): a word Bob changed in Alice's line is Bob's,
+/// the rest Alice's; Carol's spacing-only edit changes no one's words;
+/// Dana's moved line keeps Alice as its writer (or is Dana's, the mover
+/// credited); Bob's commit skipped, his word goes back to Alice.
+#[test]
+fn blame_by_words_moves_and_skips() {
+    let paper = blame_words_paper();
     let repo = Repo::discover(&paper).unwrap();
     let text = std::fs::read(paper.join("w.tex")).unwrap();
     let who = |b: &phitex_git::Blame, word: &str| -> Option<String> {
