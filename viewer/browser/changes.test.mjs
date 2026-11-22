@@ -231,6 +231,14 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await shot("picker-dark");
   await click("#chg-done");
   await dark(t, false);
+  // (a diff shown: Stop comparing, in words, and its downloads beside it, never in the look)
+  assert.deepEqual(await t.q(`[$("#chg-stop")?.textContent, $$(".chg-pop .cmpacts [data-dl]").map((b) => b.textContent), $$(".chg-pop .lookbox [data-dl]").length, $("#chg-stop").offsetWidth > 0]`), ["✕ Stop comparing", ["PDF", "diff.tex"], 0, true], "Stop comparing and the downloads under From → To");
+  await shot("stop-light");
+  await dark(t, true);
+  await shot("stop-dark");
+  await dark(t, false);
+  await click("#chg-stop");
+  await t.until(`$(".chg-pop .body .empty b")?.textContent === "Pick a version to compare with" && $(".chg-pop .foot .count").textContent === "No diff yet" && !$("#chg-stop") && !$$("#smarks .change").length && !$("#chg-n").textContent`, "stopped: the pages as they are, no marks, no count, Pick a version", 10000);
   // (✕)
   await click("#chg-x");
   await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-pressed") === "false"`, "✕ closes it", 5000);

@@ -2734,6 +2734,9 @@ header:active { cursor: grabbing; }
 .slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
+/* (Page colours: the pages' white to the page's colour, black to the text's, by a colour matrix (Panel.pageApply); Dark PDF wins) */
+.win > svg.phx-theme { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+.win.paged .slot canvas, .win.paged .peek .pv canvas { filter: url(#phx-page-colours); }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 /* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
@@ -2743,10 +2746,10 @@ header:active { cursor: grabbing; }
 .phx-wasp .wi { stop-color: #000; }
 .phx-wasp .w0 { stop-color: var(--ph-wasp0, #1747d6); }
 .phx-wasp .w1 { stop-color: var(--ph-wasp1, #d0202a); }
-.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
-.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
-.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
-.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp, .win.paged-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi, .win.paged-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0, .win.paged-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1, .win.paged-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
 .zooming .phx-text, .phx-text[data-hold] { display: none; }
@@ -2851,10 +2854,12 @@ header:active { cursor: grabbing; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
-.slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
-  box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
-/* (the text selected on the pages, one block a line: viewer.ts drawSelection) */
-.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; }
+.slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
+  box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
+/* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
+.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; box-shadow: none; }
+/* (on a dark sheet the marker lights the text: multiplied, it went black on black) */
+.win.paged-dark .slot .mark:not(.seltext):not(.fnd), .win.dark-pdf .slot .mark:not(.seltext):not(.fnd), .win.docked.pdf-dark .slot .mark:not(.seltext):not(.fnd) { mix-blend-mode: screen; }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
@@ -8738,6 +8743,11 @@ ${COMMITS_CSS}
 .chg-pop .lookin { overflow: auto; min-height: 0; }
 .chg-pop .lookin[hidden] { display: none; }
 .chg-pop .dls { display: flex; gap: 10px; }
+/* (under From \u2192 To while a diff is chosen: Stop comparing, said in words, and the diff's downloads once it is made) */
+.chg-pop .cmpacts { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; font-size: 12.5px; min-height: 22px; }
+.chg-pop .cmpacts .stop { border: 1px solid var(--phc-line); background: transparent; color: inherit; border-radius: 6px; padding: 2px 8px; cursor: pointer; font: inherit; white-space: nowrap; }
+.chg-pop .cmpacts .stop:hover { background: var(--phc-hover, rgb(0 0 0 / 6%)); }
+.chg-pop .cmpacts .dls { align-items: center; gap: 8px; color: var(--phc-muted); white-space: nowrap; }
 .chg-pop .lnk { border: 0; background: transparent; color: var(--phc-focus); padding: 0; cursor: pointer; font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
 .chg-pop .lnk:disabled { color: var(--phc-muted); text-decoration: none; cursor: default; }
 .chg-pop .filters .hd { margin-left: auto; font-size: 12px; color: var(--phc-muted); white-space: nowrap; flex: none; }
@@ -9329,8 +9339,11 @@ var Changes = class {
     else {
       const p = this.pair;
       const f = p ? this.name(p.from) : null, t = this.name(p ? p.to : null);
-      const field2 = (which, n, clear) => html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-expanded="${String(this.pick === which)}" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}" title="${which === "from" ? "The older version: click to choose it from the history" : "The newer version: click to choose it from the history"}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k || "\xA0"}</code>` : html`<b class="ph2">Choose…</b><code>a version from the history</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Clear From" : "To the working tree"}" title="${which === "from" ? "Clear: compare nothing" : `Back to ${this.host.tree?.title ?? "the working tree"}`}">×</button>` : html`<span class="chev" aria-hidden="true">▾</span>`}</div></div>`;
-      below = html`<div class="ends">${field2("from", f, !!p)}<span class="arrow" aria-hidden="true">→</span>${field2("to", t, !!p?.to)}</div>`;
+      const field2 = (which, n, clear) => html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-expanded="${String(this.pick === which)}" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}" title="${which === "from" ? "The older version: click to choose it from the history" : "The newer version: click to choose it from the history"}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k || "\xA0"}</code>` : html`<b class="ph2">Choose…</b><code>a version from the history</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Stop comparing" : "To the working tree"}" title="${which === "from" ? "Stop comparing: the pages back to the current version" : `Back to ${this.host.tree?.title ?? "the working tree"}`}">×</button>` : html`<span class="chev" aria-hidden="true">▾</span>`}</div></div>`;
+      const can = !!this.host.diff?.download && !!this.ran && !this.busy && !this.error;
+      const dl = can ? html`<span class="dls"><span aria-hidden="true">⤓</span><button type="button" class="lnk" data-dl="pdf" title="Download the diff's PDF">PDF</button><button type="button" class="lnk" data-dl="tex" title="Download the marked-up source, diff.tex">diff.tex</button></span>` : html``;
+      const acts = p ? html`<div class="cmpacts"><button type="button" class="stop" id="chg-stop" title="Stop comparing: the pages back to the current version, the marks and the count cleared">✕ Stop comparing</button>${dl}</div>` : html``;
+      below = html`<div class="ends">${field2("from", f, !!p)}<span class="arrow" aria-hidden="true">→</span>${field2("to", t, !!p?.to)}</div>${acts}`;
     }
     return html`<div class="ph">${ttl}${seg}${below}</div>`;
   }
@@ -9483,7 +9496,6 @@ var Changes = class {
   }
   diffSettings() {
     const L = this.look;
-    const can = !!this.host.diff?.download && !!this.ran && !this.busy;
     return html`<div class="set">
       <div class="opt2"><span>Colours</span><div class="swatches">${Object.entries(DIFF_COLORS).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
       <div class="opt2"><span>Added text</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
@@ -9491,7 +9503,6 @@ var Changes = class {
       <div class="opt2"><span>Changed figure</span>${this.segOf("fig", L.fig, [["side", "Side by side", "The old one beside the new"], ["over", "Overlay", "The old one under the new"], ["new", "New only", "The new one alone"]])}</div>
       <div class="opt2"><span>Change bars</span>${this.segOf("bars", L.bars ? "on" : "off", [["off", "Off", "No bars in the margin"], ["on", "In the margin", "A bar beside each changed line (latexdiff's classic marks)"]])}</div>
       <div class="${`preview i-${L.ins} d-${L.del}${L.bars ? " bars" : ""}`}" aria-label="Preview">We show it <span class="dl">cuts the wait</span> <span class="ins">keeps every edit under 50 ms</span>.</div>
-      ${this.host.diff?.download ? html`<div class="opt2"><span>Download</span><div class="dls"><button type="button" class="lnk" data-dl="pdf" disabled="${!can}" title="${can ? "The diff's PDF" : "Compare two versions first"}">PDF</button><button type="button" class="lnk" data-dl="tex" disabled="${!can}" title="${can ? "The marked-up source, diff.tex" : "Compare two versions first"}">diff.tex</button></div></div>` : ""}
       <button type="button" class="reset" data-reset="diff" title="Diff's look as it came">Reset to defaults</button></div>`;
   }
   /** Blame's commits as seen (a skipped one's name and subject kept). */
@@ -9613,16 +9624,12 @@ var Changes = class {
     for (const b of this.el.querySelectorAll("[data-clr]"))
       b.onclick = (e) => {
         e.stopPropagation();
-        if (b.dataset.clr === "from") {
-          this.pair = null;
-          this.ran = null;
-          this.items = [];
-          this.host.diff?.stop();
-          this.graph?.mark(null, null);
-          this.marks();
-          this.render();
-        } else if (this.pair) this.choose({ from: this.pair.from, to: null }, false);
+        if (b.dataset.clr === "from") this.stopComparing();
+        else if (this.pair) this.choose({ from: this.pair.from, to: null }, false);
       };
+    const stop = $("#chg-stop");
+    if (stop) stop.onclick = () => this.stopComparing();
+    for (const x of this.el.querySelectorAll(".cmpacts [data-dl]")) x.onclick = () => this.host.diff?.download?.(x.dataset.dl);
     for (const b of this.el.querySelectorAll("[data-pg]")) b.onclick = () => this.showPages(b.dataset.pg);
     const prev = $("#chg-prev"), next = $("#chg-next");
     if (prev) prev.onclick = () => this.step(-1);
@@ -9639,6 +9646,27 @@ var Changes = class {
         };
         grip.onpointerup = () => grip.onpointermove = null;
       };
+  }
+  /**
+   * Stop comparing: the diff ended, the pages back to the current version,
+   * its marks and count cleared, and the popover back at "Pick a version".
+   */
+  stopComparing() {
+    this.turn++;
+    this.attrAbort?.abort();
+    this.busy = "";
+    this.prog = void 0;
+    this.diffShown = false;
+    this.pair = null;
+    this.ran = null;
+    this.items = [];
+    this.cur = -1;
+    this.error = "";
+    this.pages = "diff";
+    this.host.diff?.stop();
+    this.graph?.mark(null, null);
+    this.marks();
+    this.render();
   }
   /** The look's controls (the section under the list). */
   wireLook() {
@@ -9660,7 +9688,6 @@ var Changes = class {
       };
     const since = box.querySelector("#chg-since");
     if (since) since.onchange = () => this.setBlameLook({ since: since.value });
-    for (const x of box.querySelectorAll("[data-dl]")) x.onclick = () => this.host.diff?.download?.(x.dataset.dl);
     for (const x of box.querySelectorAll("[data-reset]"))
       x.onclick = () => {
         if (x.dataset.reset === "blame") this.setBlameLook({ ...BLAME_LOOK, skip: [] });
@@ -9805,7 +9832,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20, pageColours: "paper", pageCustom: ["#fbf6e9", "#2a2a2a"], markColour: "" };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -11868,12 +11895,13 @@ var Panel = class {
     } else if (r.kind === "swatches") {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
       row.querySelector(".help").after(grid);
-      for (const t of row.querySelectorAll(".sw")) this.waspSwatch(t, t.dataset.v);
+      for (const t of row.querySelectorAll(".sw")) r.paint ? r.paint(t.dataset.v, t.querySelector(".art")) : this.waspSwatch(t, t.dataset.v);
     } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
     else if (r.kind === "colors") {
       const [a, b] = String(r.value ?? "").split(",");
       ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
-    } else if (r.kind === "custom") {
+    } else if (r.kind === "color") ctl.replaceChildren(html`<span class="cols"><input type="color" value="${String(r.value || "#000000")}" aria-label="${r.label}" disabled="${off}"></span>`);
+    else if (r.kind === "custom") {
       const made2 = r.make?.();
       if (made2) row.querySelector(".help").after(made2);
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
@@ -11893,6 +11921,7 @@ var Panel = class {
     else if (r.kind === "swatches" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
     else if (r.kind === "range" && e.type === "input") v = t.value;
     else if (r.kind === "colors" && e.type === "input") v = [...row.querySelectorAll("input")].map((i) => i.value).join(",");
+    else if (r.kind === "color" && e.type === "input") v = t.value;
     else if (r.kind === "picks" && e.type === "click") {
       const all = t.closest("[data-all]")?.dataset.all, one = t.closest(".pick")?.dataset.v;
       const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
@@ -12001,6 +12030,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview2 },
       { title: "Appearance", rows: look2 },
+      { title: "Page colours", rows: this.pageRows() },
       { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
@@ -12020,6 +12050,7 @@ var Panel = class {
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
     this.waspApply();
+    this.pageApply();
   }
   // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
   /** The aid as the prefs say (values a store kept checked: an older one's, a hand-edited one's). */
@@ -12078,6 +12109,113 @@ var Panel = class {
     art3.classList.toggle("dark", dark);
     const fades = [`${ink2}, ${a}`, `${a}, ${ink2}`, `${ink2}, ${b}`, `${b}, ${ink2}`];
     art3.querySelectorAll("i").forEach((line, n) => line.style.background = `linear-gradient(to right, ${fades[n]})`);
+  }
+  // ---- Page colours: the pages recoloured by a filter over what is drawn (a GPU pass: nothing redrawn, no keystroke's cost) ----
+  /** The colours as the prefs say (values a store kept checked). */
+  pageLook() {
+    const p = this.prefs;
+    const hex = (c, d) => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c.toLowerCase() : d;
+    const id = p.pageColours in PAGE_COLOURS || p.pageColours === "custom" ? p.pageColours : "paper";
+    const custom = Array.isArray(p.pageCustom) ? p.pageCustom : [];
+    const [page, text] = id === "custom" ? [hex(custom[0], DEFAULTS.pageCustom[0]), hex(custom[1], DEFAULTS.pageCustom[1])] : id === "paper" ? ["#ffffff", "#000000"] : PAGE_COLOURS[id];
+    return { id, page, text, mark: hex(p.markColour, "") };
+  }
+  /**
+   * The pages' colours put on: white to the page's colour and black to the
+   * text's, every shade between them by its lightness (an SVG colour
+   * matrix the canvases' CSS filter names: the GPU's, per frame, nothing
+   * drawn again); off for Paper, and under Dark PDF, whose own filter
+   * wins. A page darker than its text is a dark sheet: Colour lines'
+   * blend and an opening's art follow it. The marker's colour in the
+   * panel's variables.
+   */
+  /** What pageApply last put on (it runs at each of a host's layout passes: nothing written again for the same). */
+  pageKey = "";
+  pageApply() {
+    const l = this.pageLook();
+    const on = l.id !== "paper" && !this.sheetDarkPdf();
+    const key = `${on}|${l.page}|${l.text}|${l.mark}`;
+    if (key === this.pageKey) return;
+    this.pageKey = key;
+    const rgb2 = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+    const [bg, fg] = [rgb2(l.page), rgb2(l.text)];
+    const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    if (on) {
+      let svg2 = this.win.querySelector(":scope > svg.phx-theme");
+      if (!svg2) {
+        svg2 = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg2.setAttribute("class", "phx-theme");
+        svg2.setAttribute("aria-hidden", "true");
+        svg2.innerHTML = `<filter id="phx-page-colours" color-interpolation-filters="sRGB"><feColorMatrix type="matrix"/></filter>`;
+        this.win.prepend(svg2);
+      }
+      const row = (c) => {
+        const d = bg[c] - fg[c];
+        return `${(d * 0.2126).toFixed(5)} ${(d * 0.7152).toFixed(5)} ${(d * 0.0722).toFixed(5)} 0 ${fg[c].toFixed(5)}`;
+      };
+      svg2.querySelector("feColorMatrix").setAttribute("values", `${row(0)} ${row(1)} ${row(2)} 0 0 0 1 0`);
+    }
+    this.win.classList.toggle("paged", on);
+    this.win.classList.toggle("paged-dark", on && lum(bg) < lum(fg));
+    const st = this.win.style;
+    if (l.mark) st.setProperty("--ph-mark-fill", `color-mix(in srgb, ${l.mark} 45%, transparent)`), st.setProperty("--ph-mark-line", `color-mix(in srgb, ${l.mark} 85%, transparent)`);
+    else st.removeProperty("--ph-mark-fill"), st.removeProperty("--ph-mark-line");
+    this.$("#settings")?.querySelectorAll('.srow[data-id="page-colours"] .sw').forEach((t) => this.pageSwatch(t.dataset.v, t.querySelector(".art")));
+  }
+  /** Dark PDF's filter on (the user's switch, or Overleaf's own dark PDF when docked). */
+  sheetDarkPdf() {
+    return this.win.classList.contains("dark-pdf") || this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark");
+  }
+  /** A preset's tile: a page's corner in its colours, three lines of its text. */
+  pageSwatch(id, art3) {
+    const l = this.pageLook();
+    const [page, text] = id === "custom" ? [l.id === "custom" ? l.page : DEFAULTS.pageCustom[0], l.id === "custom" ? l.text : DEFAULTS.pageCustom[1]] : id === "paper" ? ["#ffffff", "#000000"] : PAGE_COLOURS[id];
+    art3.style.background = page;
+    art3.style.boxShadow = "inset 0 0 0 1px rgb(127 127 127 / 35%)";
+    art3.querySelectorAll("i").forEach((line, n) => line.style.background = n === 3 ? "transparent" : text);
+  }
+  /** Settings' Page colours: a preset or Custom's two, and the marker's colour. */
+  pageRows() {
+    const l = this.pageLook();
+    const kept = (f) => {
+      f();
+      this.pageApply();
+      this.save();
+    };
+    const opts = [["paper", "Paper"], ["sepia", "Sepia"], ["dark", "Dark"], ["contrast", "High contrast"], ["custom", "Custom"]];
+    return [
+      {
+        id: "page-colours",
+        label: "Page colours",
+        help: "The pages' background and text in other colours, figures too; downloads stay the real PDF. With Dark PDF on, Dark PDF's colours are shown",
+        kind: "swatches",
+        options: opts,
+        value: l.id,
+        paint: (v, art3) => this.pageSwatch(v, art3),
+        set: (v) => kept(() => this.prefs.pageColours = String(v))
+      },
+      {
+        id: "page-custom",
+        label: "Custom: page and text",
+        help: "Custom's page colour, then its text colour",
+        kind: "colors",
+        value: (l.id === "custom" ? [l.page, l.text] : DEFAULTS.pageCustom).join(","),
+        set: (v) => kept(() => {
+          const [a, b] = String(v).split(",");
+          this.prefs.pageCustom = [a, b];
+          this.prefs.pageColours = "custom";
+          const row = this.settingRows.get("page-colours");
+          if (row) row.value = "custom";
+          this.$("#settings").querySelectorAll('.srow[data-id="page-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+        })
+      },
+      { id: "mark-colour", label: "Marker", help: "The highlight where your editor's cursor is, and where a jump lands", kind: "color", value: l.mark || "#ffd600", set: (v) => kept(() => this.prefs.markColour = String(v)) },
+      { id: "mark-reset", label: "The marker's own amber", help: "The marker back to its colour as it came", kind: "action", button: "Reset", set: () => kept(() => {
+        this.prefs.markColour = "";
+        const i = this.$("#settings").querySelector('.srow[data-id="mark-colour"] input');
+        if (i) i.value = "#ffd600";
+      }) }
+    ];
   }
   /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
   waspRows() {
@@ -12206,6 +12344,7 @@ var Panel = class {
   }
   applyDark() {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || this.dark === "theme" && this.hostDark());
+    this.pageApply();
     if (this.waspSample?.isConnected) this.waspApply();
   }
   // ---- Feature tips, each once (own-bar hosts; Overleaf's toolbar has the extension's) ----
@@ -12797,6 +12936,11 @@ var Panel = class {
     this.renderStatus();
     this.nav();
   }
+};
+var PAGE_COLOURS = {
+  sepia: ["#f4ecd8", "#5b4636"],
+  dark: ["#1e1f22", "#d4d4d4"],
+  contrast: ["#000000", "#ffffff"]
 };
 function foldedDetail(text, label) {
   const d = document.createElement("details");

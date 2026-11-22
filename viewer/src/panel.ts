@@ -117,10 +117,13 @@ export interface SettingRow {
    * button (`button` its label); info: `value` shown; swatches: one of
    * `options` as tiles; range: a slider from 0 to `max` (`value` its
    * number as text), set as it moves; colors: two
-   * colour pickers (`value` "#rrggbb,#rrggbb"), set as they move; custom:
+   * colour pickers (`value` "#rrggbb,#rrggbb"), set as they move; color:
+   * one picker (`value` "#rrggbb"), set as it moves; custom:
    * `make`'s element under the help.
    */
-  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info" | "swatches" | "range" | "colors" | "custom";
+  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info" | "swatches" | "range" | "colors" | "color" | "custom";
+  /** A swatches tile's picture drawn in its `art` (absent: Colour lines' own). */
+  paint?(v: string, art: HTMLElement): void;
   /** A choice's or a list's values and labels. */
   options?: [value: string, label: string][];
   value?: boolean | string;
@@ -340,11 +343,20 @@ export interface PanelPrefs {
   waspText: "body" | "all";
   /** The highlight's scroll margin, % of the view's height (0 to 45): Viewer.margin. */
   margin: number;
+  /**
+   * The pages' colours (Settings' Page colours): as printed, a preset, or
+   * Custom's page and text; drawn by a filter over what is drawn, never
+   * the PDF's own (downloads stay the real PDF). Dark PDF, when on, wins.
+   */
+  pageColours: PageColours;
+  pageCustom: [page: string, text: string];
+  /** The marker's colour (where the editor's cursor is, a jump's place): "" the default amber. */
+  markColour: string;
   /** Changes' mode and settings (changes.ts). */
   changes?: Partial<ChangesPrefs>;
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20 };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, wasp: false, waspColours: "classic", waspCustom: ["#1747d6", "#d0202a"], waspStrength: 100, waspLength: 100, waspText: "body", margin: 20, pageColours: "paper", pageCustom: ["#fbf6e9", "#2a2a2a"], markColour: "" };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -2768,12 +2780,13 @@ export class Panel {
     } else if (r.kind === "swatches") {
       const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="sw" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}"><span class="art"><i></i><i></i><i></i><i></i></span>${l}</button>`)}</div>`;
       row.querySelector(".help")!.after(grid);
-      for (const t of row.querySelectorAll<HTMLElement>(".sw")) this.waspSwatch(t, t.dataset.v as WaspColours);
+      for (const t of row.querySelectorAll<HTMLElement>(".sw")) r.paint ? r.paint(t.dataset.v!, t.querySelector<HTMLElement>(".art")!) : this.waspSwatch(t, t.dataset.v as WaspColours);
     } else if (r.kind === "range") ctl.replaceChildren(html`<input type="range" min="0" max="${String(r.max ?? 100)}" step="5" value="${String(r.value ?? "")}" aria-label="${r.label}" disabled="${off}">`);
     else if (r.kind === "colors") {
       const [a, b] = String(r.value ?? "").split(",");
       ctl.replaceChildren(html`<span class="cols"><input type="color" value="${a ?? "#000000"}" aria-label="${r.label}: the first" disabled="${off}"><input type="color" value="${b ?? "#000000"}" aria-label="${r.label}: the second" disabled="${off}"></span>`);
-    } else if (r.kind === "custom") {
+    } else if (r.kind === "color") ctl.replaceChildren(html`<span class="cols"><input type="color" value="${String(r.value || "#000000")}" aria-label="${r.label}" disabled="${off}"></span>`);
+    else if (r.kind === "custom") {
       const made = r.make?.();
       if (made) row.querySelector(".help")!.after(made);
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
@@ -2794,6 +2807,7 @@ export class Panel {
     else if (r.kind === "swatches" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
     else if (r.kind === "range" && e.type === "input") v = (t as HTMLInputElement).value;
     else if (r.kind === "colors" && e.type === "input") v = [...row.querySelectorAll<HTMLInputElement>("input")].map((i) => i.value).join(",");
+    else if (r.kind === "color" && e.type === "input") v = (t as HTMLInputElement).value;
     else if (r.kind === "picks" && e.type === "click") {
       const all = t.closest<HTMLElement>("[data-all]")?.dataset.all, one = t.closest<HTMLElement>(".pick")?.dataset.v;
       const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
@@ -2908,6 +2922,7 @@ export class Panel {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look },
+      { title: "Page colours", rows: this.pageRows() },
       { title: "Colour lines", rows: this.waspRows() },
       { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
@@ -2929,6 +2944,7 @@ export class Panel {
     [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
     if (!p.backs) v.backsOff();
     this.waspApply();
+    this.pageApply();
   }
 
   // ---- Colour lines: the reading aid (wasp.ts), its own Settings tab ----
@@ -2993,6 +3009,119 @@ export class Panel {
     art.classList.toggle("dark", dark);
     const fades = [`${ink}, ${a}`, `${a}, ${ink}`, `${ink}, ${b}`, `${b}, ${ink}`];
     art.querySelectorAll("i").forEach((line, n) => (line.style.background = `linear-gradient(to right, ${fades[n]})`));
+  }
+
+  // ---- Page colours: the pages recoloured by a filter over what is drawn (a GPU pass: nothing redrawn, no keystroke's cost) ----
+
+  /** The colours as the prefs say (values a store kept checked). */
+  private pageLook(): { id: PageColours; page: string; text: string; mark: string } {
+    const p = this.prefs;
+    const hex = (c: unknown, d: string) => (typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c) ? c.toLowerCase() : d);
+    const id: PageColours = p.pageColours in PAGE_COLOURS || p.pageColours === "custom" ? p.pageColours : "paper";
+    const custom = Array.isArray(p.pageCustom) ? p.pageCustom : [];
+    const [page, text] = id === "custom" ? [hex(custom[0], DEFAULTS.pageCustom[0]), hex(custom[1], DEFAULTS.pageCustom[1])] : id === "paper" ? ["#ffffff", "#000000"] : PAGE_COLOURS[id as Exclude<PageColours, "custom" | "paper">];
+    return { id, page, text, mark: hex(p.markColour, "") };
+  }
+
+  /**
+   * The pages' colours put on: white to the page's colour and black to the
+   * text's, every shade between them by its lightness (an SVG colour
+   * matrix the canvases' CSS filter names: the GPU's, per frame, nothing
+   * drawn again); off for Paper, and under Dark PDF, whose own filter
+   * wins. A page darker than its text is a dark sheet: Colour lines'
+   * blend and an opening's art follow it. The marker's colour in the
+   * panel's variables.
+   */
+  /** What pageApply last put on (it runs at each of a host's layout passes: nothing written again for the same). */
+  private pageKey = "";
+
+  private pageApply(): void {
+    const l = this.pageLook();
+    const on = l.id !== "paper" && !this.sheetDarkPdf();
+    const key = `${on}|${l.page}|${l.text}|${l.mark}`;
+    if (key === this.pageKey) return;
+    this.pageKey = key;
+    const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+    const [bg, fg] = [rgb(l.page), rgb(l.text)];
+    const lum = (c: number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    if (on) {
+      let svg = this.win.querySelector<SVGSVGElement>(":scope > svg.phx-theme");
+      if (!svg) {
+        svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "phx-theme");
+        svg.setAttribute("aria-hidden", "true");
+        svg.innerHTML = `<filter id="phx-page-colours" color-interpolation-filters="sRGB"><feColorMatrix type="matrix"/></filter>`;
+        this.win.prepend(svg);
+      }
+      // (out = text + (page − text) × lightness, each channel; alpha kept)
+      const row = (c: number) => { const d = bg[c] - fg[c]; return `${(d * 0.2126).toFixed(5)} ${(d * 0.7152).toFixed(5)} ${(d * 0.0722).toFixed(5)} 0 ${fg[c].toFixed(5)}`; };
+      svg.querySelector("feColorMatrix")!.setAttribute("values", `${row(0)} ${row(1)} ${row(2)} 0 0 0 1 0`);
+    }
+    this.win.classList.toggle("paged", on);
+    this.win.classList.toggle("paged-dark", on && lum(bg) < lum(fg));
+    const st = this.win.style;
+    if (l.mark) (st.setProperty("--ph-mark-fill", `color-mix(in srgb, ${l.mark} 45%, transparent)`), st.setProperty("--ph-mark-line", `color-mix(in srgb, ${l.mark} 85%, transparent)`));
+    else (st.removeProperty("--ph-mark-fill"), st.removeProperty("--ph-mark-line"));
+    this.$("#settings")?.querySelectorAll<HTMLElement>('.srow[data-id="page-colours"] .sw').forEach((t) => this.pageSwatch(t.dataset.v!, t.querySelector<HTMLElement>(".art")!));
+  }
+
+  /** Dark PDF's filter on (the user's switch, or Overleaf's own dark PDF when docked). */
+  private sheetDarkPdf(): boolean {
+    return this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
+  }
+
+  /** A preset's tile: a page's corner in its colours, three lines of its text. */
+  private pageSwatch(id: string, art: HTMLElement): void {
+    const l = this.pageLook();
+    const [page, text] = id === "custom" ? [l.id === "custom" ? l.page : DEFAULTS.pageCustom[0], l.id === "custom" ? l.text : DEFAULTS.pageCustom[1]] : id === "paper" ? ["#ffffff", "#000000"] : PAGE_COLOURS[id as Exclude<PageColours, "custom" | "paper">];
+    art.style.background = page;
+    art.style.boxShadow = "inset 0 0 0 1px rgb(127 127 127 / 35%)";
+    art.querySelectorAll("i").forEach((line, n) => (line.style.background = n === 3 ? "transparent" : text));
+  }
+
+  /** Settings' Page colours: a preset or Custom's two, and the marker's colour. */
+  private pageRows(): SettingRow[] {
+    const l = this.pageLook();
+    const kept = (f: () => void) => {
+      f();
+      this.pageApply();
+      this.save();
+    };
+    const opts: [string, string][] = [["paper", "Paper"], ["sepia", "Sepia"], ["dark", "Dark"], ["contrast", "High contrast"], ["custom", "Custom"]];
+    return [
+      {
+        id: "page-colours",
+        label: "Page colours",
+        help: "The pages' background and text in other colours, figures too; downloads stay the real PDF. With Dark PDF on, Dark PDF's colours are shown",
+        kind: "swatches",
+        options: opts,
+        value: l.id,
+        paint: (v, art) => this.pageSwatch(v, art),
+        set: (v) => kept(() => (this.prefs.pageColours = (String(v) as PageColours))),
+      },
+      {
+        id: "page-custom",
+        label: "Custom: page and text",
+        help: "Custom's page colour, then its text colour",
+        kind: "colors",
+        value: (l.id === "custom" ? [l.page, l.text] : DEFAULTS.pageCustom).join(","),
+        set: (v) =>
+          kept(() => {
+            const [a, b] = String(v).split(",");
+            this.prefs.pageCustom = [a, b];
+            this.prefs.pageColours = "custom";
+            const row = this.settingRows.get("page-colours");
+            if (row) row.value = "custom";
+            this.$("#settings").querySelectorAll<HTMLElement>('.srow[data-id="page-colours"] .sw').forEach((t) => t.setAttribute("aria-pressed", String(t.dataset.v === "custom")));
+          }),
+      },
+      { id: "mark-colour", label: "Marker", help: "The highlight where your editor's cursor is, and where a jump lands", kind: "color", value: l.mark || "#ffd600", set: (v) => kept(() => (this.prefs.markColour = String(v))) },
+      { id: "mark-reset", label: "The marker's own amber", help: "The marker back to its colour as it came", kind: "action", button: "Reset", set: () => kept(() => {
+        this.prefs.markColour = "";
+        const i = this.$("#settings").querySelector<HTMLInputElement>('.srow[data-id="mark-colour"] input');
+        if (i) i.value = "#ffd600";
+      }) },
+    ];
   }
 
   /** Settings' Colour lines: on or off, the colours, the strength, which text, and a sample of them. */
@@ -3143,6 +3272,7 @@ export class Panel {
 
   private applyDark(): void {
     this.win.classList.toggle("dark-pdf", this.dark === "on" || (this.dark === "theme" && this.hostDark()));
+    this.pageApply();
     // (Colour lines' sample and swatches, open in Settings: as the pages are now)
     if (this.waspSample?.isConnected) this.waspApply();
   }
@@ -3829,6 +3959,15 @@ export class Panel {
 }
 
 export type DarkPdf = "off" | "on" | "theme";
+
+/** The pages' colours (Settings' Page colours): as printed, a preset, or the user's. */
+export type PageColours = "paper" | "sepia" | "dark" | "contrast" | "custom";
+/** Each preset's page and text colours. */
+export const PAGE_COLOURS: Record<"sepia" | "dark" | "contrast", [page: string, text: string]> = {
+  sepia: ["#f4ecd8", "#5b4636"],
+  dark: ["#1e1f22", "#d4d4d4"],
+  contrast: ["#000000", "#ffffff"],
+};
 
 /** The packages a first build downloaded, said under its step ("" when all were kept on this machine: none to count). */
 

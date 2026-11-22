@@ -235,6 +235,11 @@ ${COMMITS_CSS}
 .chg-pop .lookin { overflow: auto; min-height: 0; }
 .chg-pop .lookin[hidden] { display: none; }
 .chg-pop .dls { display: flex; gap: 10px; }
+/* (under From → To while a diff is chosen: Stop comparing, said in words, and the diff's downloads once it is made) */
+.chg-pop .cmpacts { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; font-size: 12.5px; min-height: 22px; }
+.chg-pop .cmpacts .stop { border: 1px solid var(--phc-line); background: transparent; color: inherit; border-radius: 6px; padding: 2px 8px; cursor: pointer; font: inherit; white-space: nowrap; }
+.chg-pop .cmpacts .stop:hover { background: var(--phc-hover, rgb(0 0 0 / 6%)); }
+.chg-pop .cmpacts .dls { align-items: center; gap: 8px; color: var(--phc-muted); white-space: nowrap; }
 .chg-pop .lnk { border: 0; background: transparent; color: var(--phc-focus); padding: 0; cursor: pointer; font-size: 12.5px; text-decoration: underline; text-underline-offset: 2px; }
 .chg-pop .lnk:disabled { color: var(--phc-muted); text-decoration: none; cursor: default; }
 .chg-pop .filters .hd { margin-left: auto; font-size: 12px; color: var(--phc-muted); white-space: nowrap; flex: none; }
@@ -891,8 +896,12 @@ export class Changes {
       const p = this.pair;
       const f = p ? this.name(p.from) : null, t = this.name(p ? p.to : null);
       const field = (which: "from" | "to", n: { b: string; k: string } | null, clear: boolean) =>
-        html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-expanded="${String(this.pick === which)}" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}" title="${which === "from" ? "The older version: click to choose it from the history" : "The newer version: click to choose it from the history"}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k || " "}</code>` : html`<b class="ph2">Choose…</b><code>a version from the history</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Clear From" : "To the working tree"}" title="${which === "from" ? "Clear: compare nothing" : `Back to ${this.host.tree?.title ?? "the working tree"}`}">×</button>` : html`<span class="chev" aria-hidden="true">▾</span>`}</div></div>`;
-      below = html`<div class="ends">${field("from", f, !!p)}<span class="arrow" aria-hidden="true">→</span>${field("to", t, !!p?.to)}</div>`;
+        html`<div class="end"><span class="lab">${which === "from" ? "From" : "To"}</span><div class="${`field${this.pick === which ? " picking" : ""}`}" id="${`chg-${which}`}" tabindex="0" role="button" aria-expanded="${String(this.pick === which)}" aria-label="${`${which === "from" ? "From" : "To"}: ${n ? n.b : "choose a version"}`}" title="${which === "from" ? "The older version: click to choose it from the history" : "The newer version: click to choose it from the history"}"><span class="tx">${n ? html`<b>${n.b}</b><code>${n.k || " "}</code>` : html`<b class="ph2">Choose…</b><code>a version from the history</code>`}</span>${clear ? html`<button type="button" class="clr" data-clr="${which}" aria-label="${which === "from" ? "Stop comparing" : "To the working tree"}" title="${which === "from" ? "Stop comparing: the pages back to the current version" : `Back to ${this.host.tree?.title ?? "the working tree"}`}">×</button>` : html`<span class="chev" aria-hidden="true">▾</span>`}</div></div>`;
+      // (a diff chosen: how to stop it, in words, and its files to take away once it is made; never inside the look)
+      const can = !!this.host.diff?.download && !!this.ran && !this.busy && !this.error;
+      const dl = can ? html`<span class="dls"><span aria-hidden="true">⤓</span><button type="button" class="lnk" data-dl="pdf" title="Download the diff's PDF">PDF</button><button type="button" class="lnk" data-dl="tex" title="Download the marked-up source, diff.tex">diff.tex</button></span>` : html``;
+      const acts = p ? html`<div class="cmpacts"><button type="button" class="stop" id="chg-stop" title="Stop comparing: the pages back to the current version, the marks and the count cleared">✕ Stop comparing</button>${dl}</div>` : html``;
+      below = html`<div class="ends">${field("from", f, !!p)}<span class="arrow" aria-hidden="true">→</span>${field("to", t, !!p?.to)}</div>${acts}`;
     }
     return html`<div class="ph">${ttl}${seg}${below}</div>`;
   }
@@ -1060,7 +1069,6 @@ export class Changes {
 
   private diffSettings(): DocumentFragment {
     const L = this.look;
-    const can = !!this.host.diff?.download && !!this.ran && !this.busy;
     return html`<div class="set">
       <div class="opt2"><span>Colours</span><div class="swatches">${(Object.entries(DIFF_COLORS) as [ChangesDiffLook["colors"], [string, string, string]][]).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
       <div class="opt2"><span>Added text</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
@@ -1068,7 +1076,6 @@ export class Changes {
       <div class="opt2"><span>Changed figure</span>${this.segOf("fig", L.fig, [["side", "Side by side", "The old one beside the new"], ["over", "Overlay", "The old one under the new"], ["new", "New only", "The new one alone"]])}</div>
       <div class="opt2"><span>Change bars</span>${this.segOf("bars", L.bars ? "on" : "off", [["off", "Off", "No bars in the margin"], ["on", "In the margin", "A bar beside each changed line (latexdiff's classic marks)"]])}</div>
       <div class="${`preview i-${L.ins} d-${L.del}${L.bars ? " bars" : ""}`}" aria-label="Preview">We show it <span class="dl">cuts the wait</span> <span class="ins">keeps every edit under 50 ms</span>.</div>
-      ${this.host.diff?.download ? html`<div class="opt2"><span>Download</span><div class="dls"><button type="button" class="lnk" data-dl="pdf" disabled="${!can}" title="${can ? "The diff's PDF" : "Compare two versions first"}">PDF</button><button type="button" class="lnk" data-dl="tex" disabled="${!can}" title="${can ? "The marked-up source, diff.tex" : "Compare two versions first"}">diff.tex</button></div></div>` : ""}
       <button type="button" class="reset" data-reset="diff" title="Diff's look as it came">Reset to defaults</button></div>`;
   }
 
@@ -1199,16 +1206,12 @@ export class Changes {
     for (const b of this.el.querySelectorAll<HTMLButtonElement>("[data-clr]"))
       b.onclick = (e) => {
         e.stopPropagation();
-        if (b.dataset.clr === "from") {
-          this.pair = null;
-          this.ran = null;
-          this.items = [];
-          this.host.diff?.stop();
-          this.graph?.mark(null, null);
-          this.marks();
-          this.render();
-        } else if (this.pair) this.choose({ from: this.pair.from, to: null }, false);
+        if (b.dataset.clr === "from") this.stopComparing();
+        else if (this.pair) this.choose({ from: this.pair.from, to: null }, false);
       };
+    const stop = $<HTMLButtonElement>("#chg-stop");
+    if (stop) stop.onclick = () => this.stopComparing();
+    for (const x of this.el.querySelectorAll<HTMLButtonElement>(".cmpacts [data-dl]")) x.onclick = () => this.host.diff?.download?.(x.dataset.dl as "pdf" | "tex");
     for (const b of this.el.querySelectorAll<HTMLButtonElement>("[data-pg]")) b.onclick = () => this.showPages(b.dataset.pg as "diff" | "current");
     const prev = $<HTMLButtonElement>("#chg-prev"), next = $<HTMLButtonElement>("#chg-next");
     if (prev) prev.onclick = () => this.step(-1);
@@ -1226,6 +1229,29 @@ export class Changes {
         };
         grip.onpointerup = () => (grip.onpointermove = null);
       };
+  }
+
+  /**
+   * Stop comparing: the diff ended, the pages back to the current version,
+   * its marks and count cleared, and the popover back at "Pick a version".
+   */
+  private stopComparing(): void {
+    // (a diff still being made: its answers, when they come, are no one's)
+    this.turn++;
+    this.attrAbort?.abort();
+    this.busy = "";
+    this.prog = undefined;
+    this.diffShown = false;
+    this.pair = null;
+    this.ran = null;
+    this.items = [];
+    this.cur = -1;
+    this.error = "";
+    this.pages = "diff";
+    this.host.diff?.stop();
+    this.graph?.mark(null, null);
+    this.marks();
+    this.render();
   }
 
   /** The look's controls (the section under the list). */
@@ -1248,7 +1274,6 @@ export class Changes {
       };
     const since = box.querySelector<HTMLSelectElement>("#chg-since");
     if (since) since.onchange = () => this.setBlameLook({ since: since.value });
-    for (const x of box.querySelectorAll<HTMLButtonElement>("[data-dl]")) x.onclick = () => this.host.diff?.download?.(x.dataset.dl as "pdf" | "tex");
     for (const x of box.querySelectorAll<HTMLButtonElement>("[data-reset]"))
       x.onclick = () => {
         if (x.dataset.reset === "blame") this.setBlameLook({ ...BLAME_LOOK, skip: [] });

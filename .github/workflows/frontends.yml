@@ -108,14 +108,14 @@ jobs:
       # (the watch's own viewer in headless Chrome against this binary: what
       # a person clicks, each test a bug a user reported; it ran nowhere
       # before and drifted from the product)
-      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs, changes.test.mjs)
+      - name: the watch's viewer in a browser (viewer/browser/watch.test.mjs, changes.test.mjs, colours.test.mjs)
         if: ${{ !cancelled() }}
         env:
           PHITEX_BIN: ${{ github.workspace }}/bin/phitex
           CHROMIUM: google-chrome
           # (the runner has no TeX Live: TeX's files from Shelf)
           PHITEX_BROWSER_SHELF: "1"
-        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs phitex/viewer/browser/changes.test.mjs
+        run: node --test --test-concurrency=1 phitex/viewer/browser/watch.test.mjs phitex/viewer/browser/changes.test.mjs phitex/viewer/browser/colours.test.mjs
   browsers:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -222,6 +222,12 @@ jobs:
           # (a project's first build asks for its main file, PhiTeX's pick preselected, kept once
           # answered; a build that stops before a page offers another main file on its card)
           node tools/dev/mock-run.mjs test/scenarios/main-ask.json
+          # (#39: a jump between the PDF and the source both ways, to a far line, into another file,
+          # and from the PDF's own tab ("Open PDF in separate tab"): opened, scrolled to, in view)
+          node tools/dev/mock-run.mjs test/scenarios/jumps.json
+          # (#37: Page colours in the panel's Settings: the filter on the pages, kept, Overleaf's
+          # dark PDF winning, nothing written again at the toolbar's passes)
+          node tools/dev/mock-run.mjs test/scenarios/colours.json
       # (Firefox: its content scripts fetch as the page by content.fetch, whose
       # objects are the page's; a project opened, Compare with a past version and a
       # figure replaced, through that path. Chromium has no content.fetch, so the

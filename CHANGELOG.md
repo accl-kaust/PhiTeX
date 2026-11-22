@@ -37,6 +37,16 @@ Compare and Blame are now one thing: **± Changes** :)
   person and edit session that typed it, read straight from the project's
   history, with no cap on its length. The history fills in as it loads,
   with progress you can see, and reopening a project is instant.
+- **Stop comparing, in one click.** While a diff is shown, ✕ Stop comparing
+  sits right under From → To and puts the pages back to the current
+  version; the diff's PDF and diff.tex download from beside it.
+- **Your own page colours.** Settings, Page colours: Sepia, Dark, High
+  contrast or your own page and text colours, and the marker's colour too.
+  Only the screen changes: downloads stay the real PDF, and Dark PDF still
+  wins while it is on.
+- **Fixed:** on Overleaf, a jump between the PDF and the source now opens
+  the file and scrolls to a line that was off screen, in the separate PDF
+  tab too; text selected on the pages is plain blue.
 
 ## 1.0.4 (2026-11-17)
 

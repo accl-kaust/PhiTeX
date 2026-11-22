@@ -290,6 +290,9 @@ header:active { cursor: grabbing; }
 .slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
+/* (Page colours: the pages' white to the page's colour, black to the text's, by a colour matrix (Panel.pageApply); Dark PDF wins) */
+.win > svg.phx-theme { position: absolute; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+.win.paged .slot canvas, .win.paged .peek .pv canvas { filter: url(#phx-page-colours); }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 /* the reading aid (wasp.ts): bands over the lines, blended: lighten on a white page (black ink takes the colour, the paper stays
@@ -299,10 +302,10 @@ header:active { cursor: grabbing; }
 .phx-wasp .wi { stop-color: #000; }
 .phx-wasp .w0 { stop-color: var(--ph-wasp0, #1747d6); }
 .phx-wasp .w1 { stop-color: var(--ph-wasp1, #d0202a); }
-.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp { mix-blend-mode: darken; }
-.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi { stop-color: #fff; }
-.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
-.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
+.win.dark-pdf .phx-wasp, .win.docked.pdf-dark .phx-wasp, .win.paged-dark .phx-wasp { mix-blend-mode: darken; }
+.win.dark-pdf .phx-wasp .wi, .win.docked.pdf-dark .phx-wasp .wi, .win.paged-dark .phx-wasp .wi { stop-color: #fff; }
+.win.dark-pdf .phx-wasp .w0, .win.docked.pdf-dark .phx-wasp .w0, .win.paged-dark .phx-wasp .w0 { stop-color: var(--ph-wasp0-dark, #6e98ff); }
+.win.dark-pdf .phx-wasp .w1, .win.docked.pdf-dark .phx-wasp .w1, .win.paged-dark .phx-wasp .w1 { stop-color: var(--ph-wasp1-dark, #ff7b72); }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* (out of the layout while a zoom gesture runs, Panel.zoomLay: its glyphs laid out again at every size, most of a frame's layout) */
 .zooming .phx-text, .phx-text[data-hold] { display: none; }
@@ -407,10 +410,12 @@ header:active { cursor: grabbing; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
-.slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
-  box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
-/* (the text selected on the pages, one block a line: viewer.ts drawSelection) */
-.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; }
+.slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
+  box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
+/* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
+.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; box-shadow: none; }
+/* (on a dark sheet the marker lights the text: multiplied, it went black on black) */
+.win.paged-dark .slot .mark:not(.seltext):not(.fnd), .win.dark-pdf .slot .mark:not(.seltext):not(.fnd), .win.docked.pdf-dark .slot .mark:not(.seltext):not(.fnd) { mix-blend-mode: screen; }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
