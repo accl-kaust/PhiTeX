@@ -156,12 +156,14 @@ pub(crate) fn fill_sealed_pages(
             )
             .collect();
         if let Some(&(y, id)) = filled().locked().get(&key) {
+            keep_filled_pieces(v, y, &named);
             out.push(y);
             ids.push(id);
             t_fill += t0.elapsed();
             continue;
         }
         let y = filled_page(v, page, &xs, &units);
+        keep_filled_pieces(v, y, &named);
         // (its identity: what it holds, not its value's id in this store)
         let id = v.digest(y);
         {
@@ -225,6 +227,35 @@ fn window_units(
         }
     }
     Ok(units)
+}
+
+/// The pieces each filled page's sealed lines came from, by the value
+/// store and the filled page's value ([`fill_sealed_pages`]): a DVI or
+/// XDV page's own nodes to the glyph origins' matcher
+/// (`crate::origins::keep_pieces`), as a PDF page's are its record's.
+type FilledPieces = std::sync::Mutex<phitex_defuse::FxHashMap<(u64, u64), Arc<[i64]>>>;
+
+fn filled_pieces_memo() -> &'static FilledPieces {
+    static M: std::sync::OnceLock<FilledPieces> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn keep_filled_pieces(v: &Values, page: ValueId, named: &Arc<[i64]>) {
+    let mut m = filled_pieces_memo().locked();
+    // (the pages of builds gone: dropped wholesale past a bound)
+    if m.len() > 1 << 14 {
+        m.clear();
+    }
+    m.insert((v.instance(), page.raw()), named.clone());
+}
+
+/// The pieces filled page `page`'s sealed lines came from (sorted), where
+/// [`fill_sealed_pages`] filled it.
+pub(crate) fn filled_pieces(v: &Values, page: ValueId) -> Option<Arc<[i64]>> {
+    filled_pieces_memo()
+        .locked()
+        .get(&(v.instance(), page.raw()))
+        .cloned()
 }
 
 /// Page `page` (its elements `xs`) with its sealed lines filled from
@@ -864,6 +895,9 @@ fn dvi_page_kept(
     drop(w.set_tap(None));
     if let Some(g) = out.and_then(|o| o.locked().take()) {
         crate::origins::keep(v.instance(), id, g);
+        if let Some(ps) = filled_pieces(v, page) {
+            crate::origins::keep_pieces(v.instance(), id, &ps);
+        }
     }
     made
 }

@@ -14,35 +14,141 @@ pub use phitex_live::tex::{
     ANY_BYTES, Engine, Fnv, Output, chars, chars_owned, engine, fingerprint,
 };
 
-/// kpathsea as program `progname` of `engine`: `SELFAUTOLOC` is where the
-/// executable lives; if no `texmf.cnf` is reachable from there (a
-/// development build), the location of `tex` on `PATH`.
+/// kpathsea as program `progname` of `engine`, finding TeX Live as the
+/// user's own `tex` does: `SELFAUTOLOC` is where the executable lives; if
+/// no tree resolves from there (a development build), where `tex` on
+/// `PATH` is. A `tex` that is a wrapper giving the real one its
+/// `TEXMFCNF` (nix's TeX Live: a script in the environment's `bin/`, its
+/// `share/texmf/web2c` holding the unpatched `texmf.cnf` whose
+/// `TEXMFROOT` is `$SELFAUTOPARENT`, `/nix/store`) is asked for it
+/// through its `kpsewhich`, wrapped alike ([`wrapped_texmfcnf`]).
 pub fn kpse(progname: &str, engine: &str) -> Kpse {
     let exe = std::env::current_exe()
         .ok()
         .and_then(|e| e.canonicalize().ok());
-    let own = exe.as_ref().and_then(|e| e.parent().map(Path::to_path_buf));
-    if let Some(dir) = &own {
+    let path = std::env::var_os("PATH");
+    let cnf_set = std::env::var_os("TEXMFCNF").is_some_and(|v| !v.is_empty());
+    kpse_in(
+        exe.as_deref(),
+        path.as_deref(),
+        (!cnf_set).then(cache_dir).as_deref(),
+        progname,
+        engine,
+    )
+}
+
+/// [`kpse`] with executable `exe`, search path `path`, and `cache` where
+/// a wrapper's answer is kept (`None`: no wrapper asked, the user's
+/// `TEXMFCNF` set).
+fn kpse_in(
+    exe: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+    cache: Option<&Path>,
+    progname: &str,
+    engine: &str,
+) -> Kpse {
+    let own = exe.and_then(Path::parent);
+    if let Some(dir) = own {
         let mut k = Kpse::new(dir, progname, engine);
-        if k.var_value("TEXMF").is_some() {
+        if resolves(&mut k) {
             return k;
         }
     }
-    let tex_dir = std::env::var_os("PATH").and_then(|p| {
-        std::env::split_paths(&p)
+    // (`tex` on PATH as the shell finds it, a link or a wrapper, and the
+    // file it is)
+    let tex = path.and_then(|p| {
+        std::env::split_paths(p)
             .map(|d| d.join(format!("tex{}", std::env::consts::EXE_SUFFIX)))
-            .filter_map(|t| t.canonicalize().ok())
-            .find(|t| t.is_file() && Some(t) != exe.as_ref())
-            .and_then(|t| t.parent().map(Path::to_path_buf))
+            .filter_map(|t| Some((t.canonicalize().ok()?, t)))
+            .find(|(c, _)| c.is_file() && Some(c.as_path()) != exe)
     });
-    let dir = tex_dir.or(own).unwrap_or_else(|| "/usr/bin".into());
-    Kpse::new(&dir, progname, engine)
+    let Some((real, tex)) = tex else {
+        return Kpse::new(own.unwrap_or(Path::new("/usr/bin")), progname, engine);
+    };
+    let dir = real.parent().unwrap_or(Path::new("/usr/bin"));
+    let mut k = Kpse::new(dir, progname, engine);
+    if resolves(&mut k) {
+        return k;
+    }
+    if let Some(cnf) = cache.and_then(|c| wrapped_texmfcnf(&tex, &real, c)) {
+        let mut w = Kpse::new(dir, progname, engine);
+        w.set_var("TEXMFCNF", &cnf);
+        if resolves(&mut w) {
+            return w;
+        }
+    }
+    k
+}
+
+/// Whether kpathsea `k` finds a tree: a `texmf.cnf` naming `TEXMF`, and
+/// its `TEXMFDIST`, where it names one, a directory. (A `texmf.cnf`
+/// found by its default places but meant for another root names trees
+/// that are not there: nothing resolves, "can't find pdflatex.ini".)
+fn resolves(k: &mut Kpse) -> bool {
+    if k.var_value("TEXMF").is_none() {
+        return false;
+    }
+    k.var_value("TEXMFDIST")
+        .is_none_or(|d| d.is_empty() || os(&d).is_dir())
+}
+
+/// The `TEXMFCNF` the `kpsewhich` beside wrapper `tex` (as `PATH` names
+/// it; `real` the file it is) runs with, the wrapper's own default (the
+/// environment's `TEXMFCNF` unset for it): asked once, kept in `cache`
+/// by the wrapper's file and its time. `None`: no `kpsewhich` there, or
+/// no answer.
+fn wrapped_texmfcnf(tex: &Path, real: &Path, cache: &Path) -> Option<String> {
+    let kw = tex.with_file_name(format!("kpsewhich{}", std::env::consts::EXE_SUFFIX));
+    if !kw.is_file() {
+        return None;
+    }
+    let mtime = std::fs::metadata(real)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let key = Fnv::new()
+        .add(real.as_os_str().as_encoded_bytes())
+        .add(kw.as_os_str().as_encoded_bytes())
+        .add(&mtime.to_le_bytes())
+        .0;
+    let file = cache.join("texlive").join(format!("texmfcnf-{key:016x}"));
+    if let Ok(v) = std::fs::read_to_string(&file)
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    let out = std::process::Command::new(&kw)
+        .arg("-var-value=TEXMFCNF")
+        .env_remove("TEXMFCNF")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let v = String::from_utf8(out.stdout).ok()?.trim_end().to_owned();
+    if v.is_empty() {
+        return None;
+    }
+    // (kept for the next run: written whole, then put in place)
+    if let Some(d) = file.parent()
+        && std::fs::create_dir_all(d).is_ok()
+    {
+        let tmp = file.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, &v)
+            .and_then(|()| std::fs::rename(&tmp, &file))
+            .is_err()
+        {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    Some(v)
 }
 
 /// Whether this machine has a TeX Live kpathsea finds (a `texmf.cnf`
-/// naming `TEXMF`), as [`kpse`] looks for it.
+/// naming `TEXMF`, its trees there), as [`kpse`] looks for it.
 pub fn has_texlive() -> bool {
-    kpse("pdftex", "pdftex").var_value("TEXMF").is_some()
+    resolves(&mut kpse("pdftex", "pdftex"))
 }
 
 /// [`fingerprint`] of the file at `p`, reading only what it needs.
@@ -303,4 +409,110 @@ const FORMATS: [Format; 8] = [
 
 pub(crate) fn os(b: &[u8]) -> std::borrow::Cow<'_, Path> {
     phitex_kpse::path_of(b)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A TeX Live as nix's `texlive.withPackages` makes it (issue #58):
+    /// `env/bin/tex` and `env/bin/kpsewhich` scripts that set
+    /// `TEXMFCNF` (unless set) to the patched `env/share/texmf-var/web2c`,
+    /// `env/share/texmf` a link to the distribution whose `web2c` holds
+    /// kpathsea's own `texmf.cnf` (`TEXMFROOT = $SELFAUTOPARENT`, the
+    /// store), and a profile's `bin/` linking to them.
+    #[test]
+    fn a_wrapped_tex_finds_its_own_tree() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let root = std::env::temp_dir().join(format!("phitex-wrapped-tl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = root.join("store");
+        let (env, dist) = (store.join("env"), store.join("dist"));
+        let patched = env.join("share/texmf-var/web2c");
+        for d in [
+            env.join("bin"),
+            env.join("share"),
+            patched.clone(),
+            dist.join("web2c"),
+            dist.join("tex/latex/hello"),
+            root.join("profile/bin"),
+            root.join("cache"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        symlink(&dist, env.join("share/texmf")).unwrap();
+        let tree =
+            "TEXMF = {!!$TEXMFDIST}\nTEXMFDBS = {!!$TEXMFDIST}\nTEXINPUTS = .;$TEXMF/tex//\n";
+        std::fs::write(
+            dist.join("web2c/texmf.cnf"),
+            format!("TEXMFROOT = $SELFAUTOPARENT\nTEXMFDIST = $TEXMFROOT/texmf-dist\n{tree}"),
+        )
+        .unwrap();
+        std::fs::write(
+            patched.join("texmf.cnf"),
+            format!("TEXMFDIST = {}\n{tree}", dist.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            dist.join("ls-R"),
+            "% ls-R -- filename database for kpathsea; do not change this line.\n\
+             ./:\nweb2c\ntex\n\n./tex:\nlatex\n\n./tex/latex:\nhello\n\n./tex/latex/hello:\nhello.sty\n",
+        )
+        .unwrap();
+        std::fs::write(dist.join("tex/latex/hello/hello.sty"), "").unwrap();
+        let script = |name: &str, body: &str| {
+            let p = env.join("bin").join(name);
+            std::fs::write(
+                &p,
+                format!(
+                    "#!/bin/sh\nexport TEXMFCNF=${{TEXMFCNF-'{}'}}\n{body}\n",
+                    patched.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            symlink(&p, root.join("profile/bin").join(name)).unwrap();
+        };
+        script("tex", "exit 0");
+        script(
+            "kpsewhich",
+            "[ \"$1\" = -var-value=TEXMFCNF ] && echo \"$TEXMFCNF\"",
+        );
+        let path = root.join("profile/bin");
+        let cache = root.join("cache");
+        let find = |k: &mut Kpse| k.find_file(b"hello.sty", Format::Tex, false);
+        // (by `tex`'s place alone: kpathsea's own texmf.cnf, its trees
+        // under the store's parent, none there)
+        let mut k = kpse_in(None, Some(path.as_os_str()), None, "pdftex", "pdftex");
+        assert!(!resolves(&mut k));
+        assert_eq!(find(&mut k), None);
+        // (the wrapper asked: its texmf.cnf, the distribution found)
+        let mut k = kpse_in(
+            None,
+            Some(path.as_os_str()),
+            Some(&cache),
+            "pdftex",
+            "pdftex",
+        );
+        assert!(resolves(&mut k));
+        assert_eq!(
+            k.var_value("TEXMFDIST").map(|d| os(&d).into_owned()),
+            Some(dist.clone())
+        );
+        assert_eq!(
+            find(&mut k).map(|f| os(&f).into_owned()),
+            Some(dist.join("tex/latex/hello/hello.sty"))
+        );
+        // (asked once: the answer kept by the wrapper's file and time)
+        std::fs::write(env.join("bin/kpsewhich"), "#!/bin/sh\nexit 1\n").unwrap();
+        let mut k = kpse_in(
+            None,
+            Some(path.as_os_str()),
+            Some(&cache),
+            "pdftex",
+            "pdftex",
+        );
+        assert!(resolves(&mut k));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

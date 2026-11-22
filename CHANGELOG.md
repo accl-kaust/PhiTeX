@@ -47,6 +47,10 @@ Compare and Blame are now one thing: **± Changes** :)
 - **Fixed:** on Overleaf, a jump between the PDF and the source now opens
   the file and scrolls to a line that was off screen, in the separate PDF
   tab too; text selected on the pages is plain blue.
+- **Fixed:** SyncTeX and the viewer's follow take you to the right copy
+  of text that repeats: clicking equation (2) no longer lands on (1).
+- **Fixed:** `files = texlive` finds TeX Live installed with Nix
+  (home-manager's `texliveFull`, `texlive.withPackages`).
 
 ## 1.0.4 (2026-11-17)
 

@@ -1,0 +1,102 @@
+%!TEX TS-program = pdflatex
+
+\documentclass{article}
+%% Version flag for shared include files
+
+\usepackage{amsmath}
+
+\title{Lorem ipsum dolor sit amet}
+\author{Ann Author}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Aenean commodo ligula
+eget dolor. Aenean massa. Cum sociis natoque penatibus et magnis dis parturient
+montes, nascetur ridiculus mus. Donec quam felis, ultricies nec, pellentesque
+eu, pretium quis, sem. Nulla consequat massa quis enim. Donec pede justo,
+fringilla vel, aliquet nec, vulputate eget, arcu. In enim justo, rhoncus ut,
+imperdiet a, venenatis vitae, justo. Nullam dictum felis eu pede mollis pretium.
+\end{abstract}
+
+
+\section{Introduction}
+\label{sec:introduction}
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Aenean commodo ligula
+eget dolor. Aenean massa. Cum sociis natoque penatibus et magnis dis parturient
+montes, nascetur ridiculus mus. Donec quam felis, ultricies nec, pellentesque
+eu, pretium quis, sem. Nulla consequat massa quis enim. Donec pede justo,
+fringilla vel, aliquet nec, vulputate eget, arcu. In enim justo, rhoncus ut,
+imperdiet a, venenatis vitae, justo. Nullam dictum felis eu pede mollis pretium.
+
+\section{Definition of HCENCone}
+\label{sec:definition}
+
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Aenean commodo ligula
+eget dolor. Aenean massa. Cum sociis natoque penatibus et magnis dis parturient
+montes, nascetur ridiculus mus. Donec quam felis, ultricies nec, pellentesque
+eu, pretium quis, sem. Nulla consequat massa quis enim. Donec pede justo,
+fringilla vel, aliquet nec, vulputate eget, arcu. In enim justo, rhoncus ut,
+imperdiet a, venenatis vitae, justo. Nullam dictum felis eu pede mollis pretium.
+
+\paragraph{The Key Derivation.}
+The master key is a pair \(K_M=(K_a,K_b)\) of blocks.
+First, a block \(L\) is derived from \(K_M\), and from it and \(K_a\) six further blocks, as follows:
+\begin{equation}
+\label{eq:key-derivation}
+ L=E_{K_a}(K_b)\oplus K_a\enspace,\qquad
+ d_j=E_{L\oplus\mathrm{bin}_n(j)}(K_b \oplus K_a)\enspace,\qquad 0\leq j\leq5\enspace.
+\end{equation}
+The six derived blocks have three uses:
+\begin{itemize}
+\item \(h_1 := d_0\) and \(h_2 := d_1\) are the hash keys;
+\item \((K_1,K_2,K_3) := (d_2,d_3,d_4)\) are the base keys of the head construction;
+\item \(K_S := d_5\) is the base key of the stream.
+\end{itemize}
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Aenean commodo ligula
+eget dolor. Aenean massa. Cum sociis natoque penatibus et magnis dis parturient
+montes, nascetur ridiculus mus. Donec quam felis, ultricies nec, pellentesque
+eu, pretium quis, sem. Nulla consequat massa quis enim. Donec pede justo,
+fringilla vel, aliquet nec, vulputate eget, arcu. In enim justo, rhoncus ut,
+imperdiet a, venenatis vitae, justo. Nullam dictum felis eu pede mollis pretium.
+
+
+\newenvironment{colorthis}[1]{\color{#1}}{\ignorespacesafterend}
+
+\paragraph{Alternative Key Derivations.}
+The master key is a pair \(K_M=(K_a,K_b)\) of blocks.
+First, a block \(L\) is derived from \(K_M\), and from it and \(K_a\) six further blocks, as follows:
+\begin{align}
+\label{eq:key-derivation-2}
+L=E_{K_a}(K_b)\enspace,\qquad
+ d_j&=E_{L\oplus\mathrm{bin}_n(j)}(K_a)\oplus K_b\enspace,\qquad 0\leq j\leq5\enspace. \\
+ \label{eq:key-derivation-3}
+ L=E_{K_a}(K_b)\enspace,\qquad
+ d_j&=E_{L}(K_a \oplus\mathrm{bin}_n(j))\oplus K_b\enspace,\qquad 0\leq j\leq5\enspace.
+\end{align}
+
+\paragraph{The Hash.}
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Aenean commodo ligula
+eget dolor. Aenean massa. Cum sociis natoque penatibus et magnis dis parturient
+montes, nascetur ridiculus mus. Donec quam felis, ultricies nec, pellentesque
+eu, pretium quis, sem. Nulla consequat massa quis enim. Donec pede justo,
+fringilla vel, aliquet nec, vulputate eget, arcu. In enim justo, rhoncus ut,
+imperdiet a, venenatis vitae, justo. Nullam dictum felis eu pede mollis pretium.
+\[
+ \textrm{MHASH}_n(h,B_1\Vert\cdots\Vert B_r)=\sum_{i=1}^rB_i\eta^{r-i+1}\enspace,
+\]
+Lorem ipsum dolor sit amet, consectetuer adipiscing elit. Aenean commodo ligula
+eget dolor. Aenean massa. Cum sociis natoque penatibus et magnis dis parturient
+montes, nascetur ridiculus mus. Donec quam felis, ultricies nec, pellentesque
+eu, pretium quis, sem. Nulla consequat massa quis enim. Donec pede justo,
+fringilla vel, aliquet nec, vulputate eget, arcu. In enim justo, rhoncus ut,
+imperdiet a, venenatis vitae, justo. Nullam dictum felis eu pede mollis pretium.
+The mode evaluates this hash under both hash keys and uses the two values separately:
+\[
+ H^s(T,U)=\bigl(H^s_{h_1}(T,U),\,H^s_{h_2}(T,U)\bigr)\in\{0,1\}^{2n}\enspace.
+\]
+
+
+\end{document}
