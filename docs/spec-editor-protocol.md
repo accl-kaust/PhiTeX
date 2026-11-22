@@ -328,7 +328,12 @@ cursor goes the same path, from bytes it makes itself):
   nearest `at`, on the page in view first, and scrolls only when the line
   changed.
 - `select` (with a `range` only): the glyphs from `from..to` marked on
-  every page; `from == to` clears them.
+  every page, drawn at once from the pages' glyphs the viewer has and
+  again as each other page's come (the pages `from` was placed on first);
+  `from == to` clears them. A selection is told as `select` alone, no
+  `follow`: the cursor at its end marked too put the word past the
+  selection on the page (the one its end stands before). An empty
+  `range` is the cursor alone: `follow`, and the `select` that clears.
 
 A client that cannot send `phitex/cursor` (Helix, Zed, Sublime, any LSP
 client without PhiTeX's plugin) gets forward search from a standard
@@ -383,7 +388,7 @@ reveals the range without moving the focus.
 |---|---|---|
 | `phitex.openViewer` | none | the viewer's URL (native: a browser opened) |
 | `phitex.showOnPage` | `[{textDocument: {uri}, position, range?}]` | `null` (as `phitex/cursor`: `follow`, and `select` with a range) |
-| `phitex.rebuild` | none | `null`; a **cold** build: the session's build dropped, the format kept |
+| `phitex.rebuild` | none | `null`; a **cold** build: the session's build dropped, the format kept; built from the start as a fresh session's (no persisted graph loaded), from the editor's buffers (native: the new session is given them), every other file read again |
 | `phitex.stop` | none | `null`; then `phitex/status {state: "stopped"}` and the server ends cleanly (native: exit 0) |
 | `phitex.savePdf` | `[{path}]` | `{path, bytes}`: the last build's PDF written to `path` (absolute, or relative to the root). Wasm (no file system): `[{}]` answers `{bytes, data}`, `data` the PDF in base64, which the client writes |
 | `phitex.clearCache` | `[{scope}]`, `scope` `"build"` (default) \| `"packages"` \| `"all"` | `{freed_bytes}` |

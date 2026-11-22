@@ -2878,6 +2878,114 @@ fn watch_lsp_commands() {
     assert!(status.success(), "the watch ended with {status}");
 }
 
+/// A clean rebuild asked by the editor (`phitex.rebuild`, VS Code's
+/// "Recompile from scratch"; the viewer's Clean rebuild is the same ask)
+/// builds the document as a fresh watch would: from the editor's buffers
+/// (the new session is given them; it read the disk's older text, and the
+/// editor's next change, a range of its buffer, landed in that text), and
+/// without the persisted graph the session before saved. The buffer here
+/// has the labels the disk's text lacks ("Fig.~??" on disk): the PDF the
+/// watch leaves is a clean build's of the buffer, byte for byte.
+#[test]
+fn watch_lsp_clean_rebuild_builds_the_buffers_from_the_start() {
+    use serde_json::json;
+    let _one = one();
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let doc = |label: &str| {
+        let mut t = String::from("\\documentclass{article}\n\\begin{document}\n");
+        for k in 1..=3 {
+            t += &format!(
+                "\\section{{Part {k}}}\nAs Fig.~\\ref{{fig:{k}}} and Fig.~\\ref{{fig:{}}} show, the words hold.\n\\begin{{figure}}[t]\\centering\\rule{{4cm}}{{3cm}}\\caption{{Figure {k}}}\\label{{{label}:{k}}}\\end{{figure}}\n\\clearpage\n",
+                k % 3 + 1
+            );
+        }
+        t + "\\end{document}\n"
+    };
+    let (disk, buffer) = (doc("old"), doc("fig"));
+    let dir = scratch("watch-lsp-clean-rebuild");
+    std::fs::write(dir.join("doc.tex"), &disk).expect("the document");
+    let root = dir.canonicalize().expect("the directory");
+    let mut child = command(bin, &dir)
+        .args(["watch", "--write", "--lsp", "-v", "-j", "2", "doc.tex"])
+        .env("PHITEX_GRAPH", "1")
+        .env("XDG_RUNTIME_DIR", &dir)
+        .env("PHITEX_CACHE_DIR", dir.join("cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {},
+        }}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": format!("file://{}/doc.tex", root.display()), "languageId": "latex", "version": 1, "text": buffer}}}),
+    );
+    let said = |m: &serde_json::Value, what: &str| {
+        m["method"] == "window/logMessage"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|t| t.contains(what))
+    };
+    // (the buffer built, and its graph saved: what a clean rebuild must not take)
+    lsp_until(&rx, &mut seen, |m| said(m, "graph: saved"));
+    seen.clear();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "workspace/executeCommand",
+            "params": {"command": "phitex.rebuild", "arguments": []}}),
+    );
+    lsp_until(&rx, &mut seen, |m| said(m, "a new session"));
+    lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "phitex/status" && m["params"]["state"] == "ready"
+    });
+    assert!(
+        !seen.iter().any(|m| said(m, "graph: loaded")),
+        "the clean rebuild loaded the graph the session before saved: {seen:?}"
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown"}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 3);
+    lsp_send(&mut to, &json!({"jsonrpc": "2.0", "method": "exit"}));
+    let _ = child.wait();
+    let watched = std::fs::read(dir.join("doc.pdf")).expect("the watch's PDF");
+    let clean = scratch("watch-lsp-clean-rebuild-clean");
+    std::fs::write(clean.join("doc.tex"), &buffer).expect("the buffer's text");
+    let out = command(bin, &clean)
+        .args(["build", "doc.tex"])
+        .env("PHITEX_GRAPH", "0")
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = std::fs::read(clean.join("doc.pdf")).expect("the clean PDF");
+    assert!(
+        watched == want,
+        "the clean rebuild's PDF is not a clean build's of the buffer: {}",
+        first_difference(&watched, &want)
+    );
+}
+
 /// `phitex watch --lsp` started by an editor whose root is above the
 /// TeX project (a repository's): no file named, no `phitex.toml`, no
 /// `.tex` file at the root; `initialize` is answered all the same, and the

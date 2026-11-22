@@ -1033,6 +1033,14 @@ impl Session {
         }
     }
 
+    /// The first build made from the start: no persisted graph loaded
+    /// (a clean rebuild asked, docs/spec-persisted-graph.md), every file
+    /// read and every page typeset as a fresh session's with no graph
+    /// saved. Its graph is saved as any build's.
+    pub fn build_clean(&mut self) {
+        self.graph_first = false;
+    }
+
     /// A line about the persisted graph for `-v` ([`Session::graph_notes`]).
     fn note_graph(&self, l: String) {
         self.graph_notes
@@ -1686,6 +1694,9 @@ impl Session {
     /// The next build cold: the engine's build dropped (its format kept
     /// in the store), every file read again (`phitex.rebuild`).
     pub fn forget_build(&mut self) {
+        // (from the start: a graph saved by the document's last session is
+        // not the build to start from either)
+        self.graph_first = false;
         self.reread_all();
         self.stamps
             .lock()

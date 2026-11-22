@@ -571,6 +571,20 @@ impl Server {
         lock(&self.st).docs.get(name).cloned()
     }
 
+    /// The files open in the editor (their names from the root), each with
+    /// its buffer's text: what a new session of the watch is given before
+    /// its first build, as the editor gave the last one.
+    pub fn buffers(&self) -> Vec<(String, String)> {
+        let st = lock(&self.st);
+        let mut v: Vec<(String, String)> = st
+            .docs
+            .iter()
+            .map(|(n, t)| (n.clone(), t.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
     /// The update notice `phitex/status` carries from now on
     /// (`{latest, advisory, lines}`; none: nothing to say), and a status
     /// sent with it once the session has one.

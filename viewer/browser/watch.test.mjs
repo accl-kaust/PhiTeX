@@ -5,7 +5,7 @@
 //   PHITEX_BIN=target/fastdev/phitex node --test --test-concurrency=1 viewer/browser/watch.test.mjs
 import { test, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Browser, SHELF, Watch, project, sleep, git } from "./lib.mjs";
@@ -403,6 +403,51 @@ test("a selection is one block a line; its text has its spaces, no space inside 
   // (find: one mark a match)
   assert.equal((await wordAt(t, "efficient")).n, 3, "three matches, three marks");
   await w.stop();
+});
+
+test("an editor's selection over lines is marked whole on the pages, its range only: no word past its end (VS Code's selection)", async () => {
+  // (a document of many pages, its source in lines as an editor wraps them: the selection on a late page)
+  const words = "alpha beta gamma delta epsilon zeta theta kappa lambda sigma omega river stone cloud field light paper window garden".split(" ");
+  let n = 7;
+  const word = () => words[(n = (n * 31 + 11) % 9973) % words.length];
+  const paras = Array.from({ length: 120 }, (_, k) => {
+    const ws = Array.from({ length: 110 }, word);
+    ws[0] = `p${k}`;
+    const lines = [];
+    for (let i = 0; i < ws.length; i += 12) lines.push(ws.slice(i, i + 12).join(" "));
+    return lines.join("\n") + ".";
+  });
+  const text = doc(paras.join("\n\n"));
+  const dir = realpathSync(project({ "main.tex": text }));
+  const w = new Watch(dir, { args: ["--lsp"] });
+  const lsp = (m) => {
+    const b = JSON.stringify({ jsonrpc: "2.0", ...m });
+    w.proc.stdin.write(`Content-Length: ${Buffer.byteLength(b)}\r\n\r\n${b}`);
+  };
+  const uri = `file://${dir}/main.tex`;
+  lsp({ id: 1, method: "initialize", params: { processId: null, rootUri: `file://${dir}`, initializationOptions: { phitexCursor: true }, capabilities: {} } });
+  lsp({ method: "initialized", params: {} });
+  lsp({ method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "latex", version: 1, text } } });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 20`, "the pages", 240000);
+  // (the build in and the tab joined: the selection made in the document as built, told to the tab)
+  for (const end = Date.now() + 240000; !(w.out.includes(`"state":"ready"`) && w.out.includes("a browser joined")); await sleep(50)) if (Date.now() > end) throw new Error(`no build: ${w.out}`);
+  // (three lines of the 100th paragraph, from inside a word of the first to just before a word of the third, the cursor there)
+  const lines = text.split("\n");
+  const L = lines.indexOf(paras[100].split("\n")[0]) + 1;
+  const start = { line: L, character: 7 };
+  const end = { line: L + 2, character: lines[L + 2].indexOf(" ") + 1 };
+  lsp({ method: "phitex/cursor", params: { textDocument: { uri }, position: end, range: { start, end } } });
+  // (its text, about a line and a half of the page's longer lines: two marks, a line each)
+  await t.until(`$$(".mark.sel").length >= 2`, "the selection's lines marked", 20000);
+  const m = await t.q(`({ sel: $$(".mark.sel").map((e) => e.parentElement.dataset.k + "@" + parseFloat(e.style.top).toFixed(1)), cursor: $$(".mark:not(.sel):not(.fnd):not(.seltext)").length })`);
+  assert.equal(new Set(m.sel).size, m.sel.length, `one mark a line: ${JSON.stringify(m.sel)}`);
+  assert.equal(m.sel.length, 2, `the selection's two lines: ${JSON.stringify(m.sel)}`);
+  assert.equal(m.cursor, 0, "the word the selection's end stands before is not marked");
+  // (the selection ended where it ended: its marks gone, the cursor's word marked)
+  lsp({ method: "phitex/cursor", params: { textDocument: { uri }, position: end, range: { start: end, end } } });
+  await t.until(`$$(".mark.sel").length === 0 && $$(".mark:not(.sel):not(.fnd):not(.seltext)").length === 1`, "the cursor's word alone");
+  w.proc.kill();
 });
 
 test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept for the document (item 1, kinds)", async () => {

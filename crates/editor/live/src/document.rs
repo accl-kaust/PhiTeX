@@ -602,8 +602,10 @@ mod tests {
 
     /// An editor's cursor and selection over the language server
     /// (`phitex/cursor` with a range) reach the viewer as bytes of the
-    /// buffer, the glyph origins' space: `follow` (the cursor, its word,
-    /// its line) and `select`.
+    /// buffer, the glyph origins' space: a selection as `select` alone
+    /// (its range, not the word the cursor at its end stands before), a
+    /// cursor with none as `follow` (its word, its line) and an empty
+    /// `select` (the last selection cleared).
     #[test]
     fn the_cursor_and_selection_reach_the_viewer_in_bytes() {
         let mut d = Document::new(session(&pages(1), Arc::new(Memory::default())), "doc.tex");
@@ -619,11 +621,28 @@ mod tests {
             "textDocument": {"uri": "file:///p/doc.tex", "text": text}}}),
         );
         step(&mut d);
+        // (a selection over "caf\u{e9} ", its end before "au")
+        server.handle(
+            &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
+            "textDocument": {"uri": "file:///p/doc.tex"},
+            "position": {"line": 0, "character": 7},
+            "range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 7}}}}),
+        );
+        let ev = step(&mut d);
+        let select = ev.iter().find(|e| e["event"] == "select").expect("select");
+        assert_eq!(
+            select,
+            &json!({"event": "select", "file": "doc.tex", "from": 2, "to": 8}),
+            "{ev:?}"
+        );
+        assert!(!ev.iter().any(|e| e["event"] == "follow"), "{ev:?}");
+        assert!(!ev.iter().any(|e| e["event"] == "reveal"), "{ev:?}");
+        // (the selection ended, the cursor left at "caf\u{e9}": its word)
         server.handle(
             &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
             "textDocument": {"uri": "file:///p/doc.tex"},
             "position": {"line": 0, "character": 6},
-            "range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 6}}}}),
+            "range": {"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 6}}}}),
         );
         let ev = step(&mut d);
         let follow = ev.iter().find(|e| e["event"] == "follow").expect("follow");
@@ -635,10 +654,9 @@ mod tests {
         let select = ev.iter().find(|e| e["event"] == "select").expect("select");
         assert_eq!(
             select,
-            &json!({"event": "select", "file": "doc.tex", "from": 2, "to": 7}),
+            &json!({"event": "select", "file": "doc.tex", "from": 7, "to": 7}),
             "{ev:?}"
         );
-        assert!(!ev.iter().any(|e| e["event"] == "reveal"), "{ev:?}");
     }
 
     /// A store in memory.

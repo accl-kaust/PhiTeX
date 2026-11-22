@@ -13532,7 +13532,8 @@ var PreviewSession = class {
    * Clean recompile: the project's files as Overleaf has them now, packages
    * that failed or were not found asked for again, and a fresh core session
    * (discovery, first paint, then the incremental program), nothing kept from
-   * the last job but the packages already fetched.
+   * the last job but the packages already fetched: the document's saved graph
+   * not taken either (the open's `clean`), the build made from the start.
    */
   async clean(files) {
     for (const f of Object.keys(this.files)) if (!(f in files) && f !== this.open) delete this.files[f];
@@ -13542,8 +13543,11 @@ var PreviewSession = class {
     this.pkg.failed = [];
     this.texError = void 0;
     this.hashes = [];
+    this.fresh = true;
     return this.reopen();
   }
+  /** The next open from the start (a Clean recompile): the document's saved graph not taken, `{op: "open", clean}`. */
+  fresh = false;
   /** Whether the open's sources used minted (the worker then has its runner). */
   minted = false;
   /** A fresh core session from the texts with every queued edit in. */
@@ -13570,7 +13574,9 @@ var PreviewSession = class {
     this.rcFiles = new Set(Object.keys(rc ?? {}));
     this.rcNotes = [];
     const latexmk = rc && { files: rc, exact: false };
-    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers, latexmk, projectFiles: rc && Object.keys(this.files) });
+    const clean2 = this.fresh;
+    this.fresh = false;
+    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers, latexmk, projectFiles: rc && Object.keys(this.files), clean: clean2 });
     if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "open failed");
     this.sink.connection?.(true);
     if (r.json.building) {
@@ -14032,20 +14038,44 @@ var PreviewSession = class {
    * Bytes [a, b) of `file`'s text selected (the glyph origins' offsets):
    * the glyphs that came from them, on every page, highlighted (an empty
    * selection clears them). [`selectSource`]'s, and an LSP editor's
-   * (`{event: "select"}`).
+   * (`{event: "select"}`). Drawn at once from the pages' glyphs here, then
+   * again as each page not here yet comes (the pages the selection's start
+   * was placed on first), so the whole range shows however many pages a
+   * long document has; a newer selection (or a clear) ends an older one's
+   * asks, which never draw over it.
    */
   async selectBytes(file, a, b) {
     if (!this.opened) return;
+    const gen = ++this.selectGen;
     if (a === b) return this.sink.marks?.([]);
-    const out = [];
-    for (let k = 0; k < Math.max(this.hashes.length, this.pages); k++) {
-      const all = this.cached(k) ?? await this.glyphsOf(k);
+    const hits = /* @__PURE__ */ new Map();
+    const look2 = (k, all) => {
       const hit = all.filter((g) => g.file === file && !g.synth && g.start < b && g.end > a);
-      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
+      if (!hit.length) return false;
+      hits.set(k, boxes(hit, all));
+      return true;
+    };
+    const draw = () => this.sink.marks?.([...hits].sort((x, y) => x[0] - y[0]).map(([k, bx]) => ({ k, boxes: bx })));
+    const missing = [];
+    for (let k = 0; k < Math.max(this.hashes.length, this.pages); k++) {
+      const all = this.cached(k);
+      if (all) look2(k, all);
+      else missing.push(k);
     }
-    this.tr("select\u2192page", { file, a, b, pages: out.map((m) => m.k) });
-    this.sink.marks?.(out);
+    draw();
+    if (missing.length) {
+      const r = await this.untilMade({ op: "page_of", file, at: a }, () => gen !== this.selectGen);
+      if (gen !== this.selectGen) return;
+      const placed = (Array.isArray(r?.json?.pages) ? r?.json?.pages : []).filter((k) => missing.includes(k));
+      for (const k of [...placed, ...missing.filter((k2) => !placed.includes(k2))]) {
+        const all = await this.glyphsOf(k);
+        if (gen !== this.selectGen) return;
+        if (look2(k, all)) draw();
+      }
+    }
+    this.tr("select\u2192page", { file, a, b, pages: [...hits.keys()].sort((x, y) => x - y) });
   }
+  selectGen = 0;
   /**
    * Text selected on the pages ([x, y top, w, h] boxes in PDF points, by
    * page): the editor selects the source it came from (the file most of it
