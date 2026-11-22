@@ -2017,9 +2017,10 @@ impl Viewer {
 /// makes an error is published at its line, the fix clears it and the
 /// pages change; a double-click in the viewer (its `source`) is
 /// `window/showDocument` at that line; `textDocument/documentHighlight`
-/// (answered `[]`) and `phitex/cursor` on a word of the
-/// second page, with a selection, are the viewer's `follow` and `select`
-/// in bytes of the buffer; `shutdown` and `exit` end
+/// (answered `[]`) is the viewer's `follow`; `phitex/cursor` with a
+/// selection on a word of the second page its `select` alone, and the
+/// cursor left there its `follow` and the clearing `select`, in bytes of
+/// the buffer; `shutdown` and `exit` end
 /// the watch with status 0. Nothing but LSP messages on standard output.
 #[test]
 #[allow(clippy::too_many_lines, reason = "one editor's session, in order")]
@@ -2203,14 +2204,37 @@ fn watch_lsp() {
             "word": [start + 13, start + 17], "line": line}),
         "{follow}"
     );
-    // (the editor's cursor on a word of page 2, a selection with it: the
-    // viewer told their bytes in the buffer, the glyph origins' space, in
-    // the origins' name of the file)
+    // (a selection on a word of page 2: the viewer told its bytes in the
+    // buffer, the glyph origins' space, in the origins' name of the file;
+    // the selection alone, not the cursor at its end too)
+    let before = viewer.events.len();
     lsp_send(
         &mut to,
         &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
             "textDocument": {"uri": uri}, "position": at(second, 7),
             "range": {"start": at(second, 5), "end": at(second, 12)},
+        }}),
+    );
+    let select = viewer.until(|v| v["event"] == "select");
+    assert_eq!(
+        select,
+        json!({"event": "select", "file": "doc.tex", "from": start + 5, "to": start + 12}),
+        "{select}"
+    );
+    assert!(
+        viewer.events[before..]
+            .iter()
+            .all(|e| e["event"] != "follow"),
+        "a selection told as the cursor's word too: {:?}",
+        &viewer.events[before..]
+    );
+    // (the selection ended, the cursor in that word: it followed, the
+    // selection cleared)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
+            "textDocument": {"uri": uri}, "position": at(second, 7),
+            "range": {"start": at(second, 7), "end": at(second, 7)},
         }}),
     );
     let follow = viewer.until(|v| v["event"] == "follow");
@@ -2220,11 +2244,11 @@ fn watch_lsp() {
             "word": [start + 5, start + 12], "line": line}),
         "{follow}"
     );
-    let select = viewer.until(|v| v["event"] == "select");
+    let cleared = viewer.until(|v| v["event"] == "select");
     assert_eq!(
-        select,
-        json!({"event": "select", "file": "doc.tex", "from": start + 5, "to": start + 12}),
-        "{select}"
+        cleared,
+        json!({"event": "select", "file": "doc.tex", "from": start + 7, "to": start + 7}),
+        "{cleared}"
     );
     // (a page's origins, made when asked, that page alone: pending
     // until the watch has made them, asked again as a browser asks)
@@ -2892,9 +2916,11 @@ fn watch_lsp_clean_rebuild_builds_the_buffers_from_the_start() {
     let _one = one();
     let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
     let doc = |label: &str| {
+        use std::fmt::Write as _;
         let mut t = String::from("\\documentclass{article}\n\\begin{document}\n");
         for k in 1..=3 {
-            t += &format!(
+            let _ = write!(
+                t,
                 "\\section{{Part {k}}}\nAs Fig.~\\ref{{fig:{k}}} and Fig.~\\ref{{fig:{}}} show, the words hold.\n\\begin{{figure}}[t]\\centering\\rule{{4cm}}{{3cm}}\\caption{{Figure {k}}}\\label{{{label}:{k}}}\\end{{figure}}\n\\clearpage\n",
                 k % 3 + 1
             );
