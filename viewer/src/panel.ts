@@ -2777,7 +2777,8 @@ export class Panel {
       return { name, groups: [...subs.map((t) => mine.find((g) => g.title === t)).filter((g): g is SettingsGroup => !!g), ...mine.filter((g) => !subs.includes(g.title))] };
     }).filter((x) => x.groups.length);
     if (at) this.settingsTab = settingsSection(at);
-    const k0 = Math.max(0, sections.findIndex((x) => x.name === settingsSection(this.settingsTab)));
+    // (none shown yet: the first, View; settingsSection would place "" in General)
+    const k0 = this.settingsTab ? Math.max(0, sections.findIndex((x) => x.name === settingsSection(this.settingsTab))) : 0;
     el.replaceChildren(
       html`<header>Settings<label class="sfind">${icon("search", 16)}<input type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search the settings"></label><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist" aria-label="Sections">${sections.map((x, i) => html`<button type="button" role="tab" id="${`st-${x.name}`}" data-tab="${i}" data-section="${x.name}" aria-selected="${i === k0}">${x.name}</button>`)}</nav><div class="sbody"></div><p class="snone" hidden>No setting matches</p>`,
     );

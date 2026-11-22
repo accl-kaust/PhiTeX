@@ -532,8 +532,8 @@ header:active { cursor: grabbing; }
 .toast .track i { position: absolute; inset: 0 auto 0 0; background: var(--ph-progress); transition: width .25s; }
 .toast .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
 
-/* feature tips: a popover with an arrow at the control it is about */
-.tip { position: absolute; z-index: 30; width: 270px; max-width: calc(100% - 16px); padding: 12px 14px 10px; text-align: left;
+/* feature tips: a popover with an arrow at the control it is about; under the dialogs (a tip left showing never covers Settings) */
+.tip { position: absolute; z-index: 24; width: 270px; max-width: calc(100% - 16px); padding: 12px 14px 10px; text-align: left;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
 .tip::before { content: ""; position: absolute; top: -6px; left: var(--ax, 50%); width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg);
   background: var(--ph-menu); border-left: 1px solid var(--ph-border); border-top: 1px solid var(--ph-border); }

@@ -2976,8 +2976,8 @@ header:active { cursor: grabbing; }
 .toast .track i { position: absolute; inset: 0 auto 0 0; background: var(--ph-progress); transition: width .25s; }
 .toast .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
 
-/* feature tips: a popover with an arrow at the control it is about */
-.tip { position: absolute; z-index: 30; width: 270px; max-width: calc(100% - 16px); padding: 12px 14px 10px; text-align: left;
+/* feature tips: a popover with an arrow at the control it is about; under the dialogs (a tip left showing never covers Settings) */
+.tip { position: absolute; z-index: 24; width: 270px; max-width: calc(100% - 16px); padding: 12px 14px 10px; text-align: left;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: calc(var(--ph-radius) + 2px); box-shadow: 0 6px 20px rgb(0 0 0 / 25%); }
 .tip::before { content: ""; position: absolute; top: -6px; left: var(--ax, 50%); width: 10px; height: 10px; margin-left: -5px; transform: rotate(45deg);
   background: var(--ph-menu); border-left: 1px solid var(--ph-border); border-top: 1px solid var(--ph-border); }
@@ -11910,7 +11910,7 @@ var Panel = class {
       return { name, groups: [...subs.map((t) => mine.find((g) => g.title === t)).filter((g) => !!g), ...mine.filter((g) => !subs.includes(g.title))] };
     }).filter((x) => x.groups.length);
     if (at) this.settingsTab = settingsSection(at);
-    const k0 = Math.max(0, sections.findIndex((x) => x.name === settingsSection(this.settingsTab)));
+    const k0 = this.settingsTab ? Math.max(0, sections.findIndex((x) => x.name === settingsSection(this.settingsTab))) : 0;
     el.replaceChildren(
       html`<header>Settings<label class="sfind">${icon2("search", 16)}<input type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search the settings"></label><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><nav class="stabs" role="tablist" aria-label="Sections">${sections.map((x, i) => html`<button type="button" role="tab" id="${`st-${x.name}`}" data-tab="${i}" data-section="${x.name}" aria-selected="${i === k0}">${x.name}</button>`)}</nav><div class="sbody"></div><p class="snone" hidden>No setting matches</p>`
     );
