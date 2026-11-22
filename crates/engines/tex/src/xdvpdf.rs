@@ -263,6 +263,10 @@ struct Walk {
     offsets: (i32, i32),
     size: (i32, i32),
     specials: Vec<Option<Vec<u8>>>,
+    /// The pieces its sealed lines came from
+    /// ([`crate::assemble::filled_pieces`]): its own nodes to the glyph
+    /// origins' matcher.
+    pieces: Option<Arc<[i64]>>,
 }
 
 impl Walk {
@@ -285,6 +289,7 @@ impl Walk {
             offsets: crate::assemble::dvi_offsets(v, page),
             size: crate::assemble::xdv_page_size(v, page),
             specials,
+            pieces: crate::assemble::filled_pieces(v, page),
         }
     }
 }
@@ -310,6 +315,9 @@ fn walk(w: &mut DviWriter, p: &Walk, defs: &Defs, origins: Option<u64>) -> Optio
     drop(w.set_tap(None));
     if let (Some(inst), Some(g)) = (origins, out.and_then(|o| o.locked().take())) {
         crate::origins::keep(inst, p.id, g);
+        if let Some(ps) = &p.pieces {
+            crate::origins::keep_pieces(inst, p.id, ps);
+        }
     }
     let ops = w.take_ops();
     r.ok().map(|()| ops)

@@ -38,6 +38,8 @@ Compare and Blame are now one thing: **± Changes** :)
   person and edit session that typed it, read straight from the project's
   history, with no cap on its length. The history fills in as it loads,
   with progress you can see, and reopening a project is instant.
+- **Fixed:** SyncTeX and the viewer's follow take you to the right copy
+  of text that repeats: clicking equation (2) no longer lands on (1).
 - **Fixed:** `files = texlive` finds TeX Live installed with Nix
   (home-manager's `texliveFull`, `texlive.withPackages`).
 

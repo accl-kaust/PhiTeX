@@ -2661,6 +2661,162 @@ fn input_file(head: &str, tag: &str) -> String {
     format!("\\section{{{head}}}\n{}\n", s.join(" "))
 }
 
+/// `SyncTeX`'s answers, as the glyph origins give them (the records of
+/// `JOB.synctex.gz`, `phitex_live::synctex`, and the viewer's
+/// `Build::nearest`), against `pdflatex -synctex=1`'s for
+/// `latex/synctex/NAME.tex` (`NAME.answers`, scripts/bless-synctex.sh;
+/// NAME.pdf its PDF): each `view` line's glyphs on no page pdfTeX does not
+/// put the line on, and on one of its boxes; at each `edit` word the
+/// nearest glyph's line within one of pdfTeX's, which has the word; at
+/// each `span` word of a display the nearest glyph's line one of its
+/// environment's.
+#[allow(clippy::too_many_lines)]
+fn synctex_answers(name: &str) {
+    let dir = common::fixtures().join("latex/synctex");
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(dir.join(format!("{name}.pdf"))).expect("the oracle");
+    let answers = common::read(&dir.join(format!("{name}.answers")));
+    let opts = Options {
+        origins: true,
+        ..pdf_opts(name, &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), &src);
+    if let Some(d) = common::first_difference(&b.output().0, &want) {
+        panic!("{name} with origins: pdf {d}");
+    }
+    let lines: Vec<&str> = src.split('\n').collect();
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(src.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let line_of = |at: u32| starts.partition_point(|&s| s <= at as usize);
+    let me = format!("{name}.tex");
+    // (the files named once the pages' origins are asked for)
+    let pages = b.all_page_origins();
+    let files = b.origin_files();
+    // (the document's name as the build was given it, `./NAME.tex`)
+    let mine = |f: &str| f.trim_start_matches("./") == me;
+    let fi = files.iter().position(|f| mine(f));
+    let fi = fi.unwrap_or_else(|| panic!("{me} among the origins' files {files:?}"));
+    let fi = u32::try_from(fi).unwrap();
+    // (each glyph of the document: page (from 1), line, x, y)
+    let mut glyphs: Vec<(usize, usize, f32, f32)> = Vec::new();
+    for (k, p) in pages.iter().enumerate() {
+        let p = p.as_ref().expect("every page's origins");
+        for i in 0..p.len() {
+            if p.file[i] == fi {
+                glyphs.push((k + 1, line_of(p.start[i]), p.x[i], p.y[i]));
+            }
+        }
+    }
+    let alnum = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let num = |s: &str| s.parse::<f32>().expect("a number");
+    let mut boxes: std::collections::BTreeMap<usize, Vec<(usize, [f32; 4])>> =
+        std::collections::BTreeMap::new();
+    let mut bad = Vec::new();
+    let (mut edits, mut spans) = (0, 0);
+    for a in answers.lines().filter(|l| !l.starts_with('#')) {
+        let f: Vec<&str> = a.split(' ').collect();
+        match f[0] {
+            "view" => boxes.entry(f[1].parse().unwrap()).or_default().push((
+                f[2].parse().unwrap(),
+                [num(f[3]), num(f[4]), num(f[5]), num(f[6])],
+            )),
+            "edit" => {
+                edits += 1;
+                let (k, want): (usize, usize) = (f[1].parse().unwrap(), f[4].parse().unwrap());
+                let got = b
+                    .nearest(k - 1, num(f[2]), num(f[3]))
+                    .filter(|g| mine(&g.0))
+                    .map(|g| line_of(g.1));
+                let w = alnum(f[5].trim_end_matches('-'));
+                let ok = got.is_some_and(|l| {
+                    l.abs_diff(want) <= 1 && alnum(lines.get(l - 1).unwrap_or(&"")).contains(&w)
+                });
+                if !ok {
+                    bad.push(format!(
+                        "edit at page {k} ({}, {}) `{}`: line {got:?}, pdfTeX's {want}",
+                        f[2], f[3], f[5]
+                    ));
+                }
+            }
+            "span" => {
+                spans += 1;
+                let k: usize = f[1].parse().unwrap();
+                let (l0, l1): (usize, usize) = (f[4].parse().unwrap(), f[5].parse().unwrap());
+                let got = b
+                    .nearest(k - 1, num(f[2]), num(f[3]))
+                    .filter(|g| mine(&g.0))
+                    .map(|g| line_of(g.1));
+                if !got.is_some_and(|l| (l0..=l1).contains(&l)) {
+                    bad.push(format!(
+                        "span at page {k} ({}, {}) `{}`: line {got:?}, not {l0}..={l1}",
+                        f[2], f[3], f[6]
+                    ));
+                }
+            }
+            x => panic!("{name}.answers: {x}?"),
+        }
+    }
+    for (l, bs) in &boxes {
+        let mine: Vec<&(usize, usize, f32, f32)> = glyphs.iter().filter(|g| g.1 == *l).collect();
+        for g in &mine {
+            if !bs.iter().any(|b| b.0 == g.0) {
+                bad.push(format!(
+                    "view {l}: a glyph on page {} at ({}, {}), pdfTeX's pages {:?}",
+                    g.0,
+                    g.2,
+                    g.3,
+                    bs.iter().map(|b| b.0).collect::<Vec<_>>()
+                ));
+            }
+        }
+        let inside = mine.iter().any(|g| {
+            bs.iter().any(|(k, [x0, y0, x1, y1])| {
+                *k == g.0
+                    && (x0 - 6.0..=x1 + 6.0).contains(&g.2)
+                    && (y0 - 2.0..=y1 + 2.0).contains(&g.3)
+            })
+        });
+        if !inside {
+            bad.push(format!("view {l}: no glyph in pdfTeX's boxes {bs:?}"));
+        }
+    }
+    eprintln!(
+        "{name}: {} view lines, {edits} edit words, {spans} spans, {} failures",
+        boxes.len(),
+        bad.len()
+    );
+    assert!(
+        bad.is_empty(),
+        "{name}'s SyncTeX answers:\n{}",
+        bad.join("\n")
+    );
+}
+
+/// [`synctex_answers`] of issue #59's document: an abstract, sections,
+/// a paragraph said five times, an equation and an align of the same
+/// terms. Its second page's glyphs took the first copies' lines (the
+/// align's, equation (1)'s): the editor's equations (2) and (3) went to
+/// (1).
+#[test]
+fn latex_synctex_repeated_text() {
+    synctex_answers("mwe");
+}
+
+/// [`synctex_answers`] of displays (equation, align, gather, multline,
+/// `\\[`, inline math, displays after a page's break) in one paragraph
+/// over three pages: a page's number matched to a superscript's digit on
+/// a later page gave that digit's line a record at the page's foot.
+#[test]
+fn latex_synctex_displays() {
+    synctex_answers("displays");
+}
+
 /// [`input_origins`]: chapters that are `\\input` files (one inside
 /// another), main text around them.
 #[test]

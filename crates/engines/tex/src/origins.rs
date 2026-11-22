@@ -1000,9 +1000,11 @@ impl Src<'_> {
     }
 }
 
-/// The match of page `g` against the nodes of `ix`.
-pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
-    match_page_until(g, ix, &|_| false).expect("never stopped")
+/// The match of page `g` against the nodes of `ix`; `own` says which
+/// nodes (by place) are the page's own, those of the pieces its sealed
+/// lines came from ([`keep_pieces`]): of equal texts, theirs.
+pub(crate) fn match_page(g: &PageGlyphs, ix: &Index, own: &dyn Fn(u32) -> bool) -> Matched {
+    match_page_until(g, ix, own, &|_| false).expect("never stopped")
 }
 
 /// [`match_page`], given up (`None`) once `stop` says so, between its
@@ -1012,6 +1014,7 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
 pub(crate) fn match_page_until(
     g: &PageGlyphs,
     ix: &Index,
+    own: &dyn Fn(u32) -> bool,
     stop: &dyn Fn(bool) -> bool,
 ) -> Option<Matched> {
     // the glyphs, one a node (its first code)
@@ -1105,6 +1108,22 @@ pub(crate) fn match_page_until(
         .collect();
     // which nodes: the shingles' votes
     let mut votes: FxHashMap<u32, f64> = FxHashMap::default();
+    // (a shingle's vote split among the nodes that have it; where some
+    // of them are the page's own, among those: a text repeated in the
+    // document (a paragraph said again, an equation's terms in another
+    // display) is the copy whose lines the page shows. Split among all,
+    // the cluster of the earlier copies outweighed the page's own and
+    // took its words: issue #59, equations (2) and (3) on (1)'s lines)
+    let mut vote = |mut ns: Vec<u32>| {
+        if ns.len() > 1 && ns.iter().any(|&n| own(n)) {
+            ns.retain(|&n| own(n));
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let w = 1.0 / ns.len() as f64;
+        for n in ns {
+            *votes.entry(n).or_default() += w;
+        }
+    };
     // (four words in a row, and four of five with one of the middle
     // left out: a run of glyphs no source word gives, a cross-reference's
     // `??`, a counter, between them)
@@ -1112,25 +1131,17 @@ pub(crate) fn match_page_until(
         .windows(4)
         .map(shingle)
         .chain(whash.windows(5).flat_map(skip_one));
+    let mut any = false;
     for sh in page_shingles {
         if let Some(ns) = ix.shingle_nodes(sh) {
-            let ns: Vec<u32> = ns.collect();
-            #[allow(clippy::cast_precision_loss)]
-            let w = 1.0 / ns.len() as f64;
-            for n in ns {
-                *votes.entry(n).or_default() += w;
-            }
+            any = true;
+            vote(ns.collect());
         }
     }
-    if votes.is_empty() {
+    if !any {
         for &h in &whash {
             if let Some(ns) = ix.single_nodes(h) {
-                let ns: Vec<u32> = ns.collect();
-                #[allow(clippy::cast_precision_loss)]
-                let w = 1.0 / ns.len() as f64;
-                for n in ns {
-                    *votes.entry(n).or_default() += w;
-                }
+                vote(ns.collect());
             }
         }
     }
@@ -1542,12 +1553,56 @@ pub(crate) fn match_page_until(
     // one after it in order themselves: not its own, left; a subfigure's
     // `(b)` matched to a TikZ node's name, the word unique in both,
     // between the words of a figure's text)
+    // (and the page's last word so matched, with no word matched after
+    // it, on a line of its own: a page's number or a running foot's
+    // counter, matched to a digit of the sources past the page's text,
+    // a later page's `x^2`, which gave that line a record at this page's
+    // foot)
     let ran: Vec<usize> = (0..words.len()).filter(|&w| word_done[w]).collect();
+    let line_alone = |wi: usize| {
+        let gl = |a: u32| &glyphs[glyph_atoms.partition_point(|&(_, e)| e <= a)];
+        let Some(&a) = words[wi].first() else {
+            return false;
+        };
+        let g = gl(a);
+        words.iter().enumerate().all(|(k, w)| {
+            k == wi
+                || w.first().is_none_or(|&b| {
+                    let h = gl(b);
+                    (h.v - g.v).abs() > g.size.max(h.size)
+                })
+        })
+    };
+    let unmatch = |wi: usize,
+                   matched_atoms: &mut [Option<(u32, u32, u32)>],
+                   word_done: &mut [bool],
+                   src_used: &mut FxHashMap<(u32, u32), usize>,
+                   word_src: &mut [Option<WordSpan>]| {
+        for &a in &words[wi] {
+            matched_atoms[a as usize] = None;
+        }
+        word_done[wi] = false;
+        if let Some((first, last)) = word_src[wi] {
+            src_used.remove(&first);
+            src_used.remove(&last);
+        }
+        word_src[wi] = None;
+    };
     for wi in 0..words.len() {
         if !word_done[wi] || !alone[wi] {
             continue;
         }
         let at = ran.partition_point(|&w| w < wi);
+        if ran.get(at + 1).is_none() && wi + 1 == words.len() && line_alone(wi) {
+            unmatch(
+                wi,
+                &mut matched_atoms,
+                &mut word_done,
+                &mut src_used,
+                &mut word_src,
+            );
+            continue;
+        }
         let (Some(&pw), Some(&nw)) = (at.checked_sub(1).and_then(|i| ran.get(i)), ran.get(at + 1))
         else {
             continue;
@@ -1558,13 +1613,13 @@ pub(crate) fn match_page_until(
             continue;
         };
         if before <= after && !(before <= first && last <= after) {
-            for &a in &words[wi] {
-                matched_atoms[a as usize] = None;
-            }
-            word_done[wi] = false;
-            src_used.remove(&first);
-            src_used.remove(&last);
-            word_src[wi] = None;
+            unmatch(
+                wi,
+                &mut matched_atoms,
+                &mut word_done,
+                &mut src_used,
+                &mut word_src,
+            );
         }
     }
     // the characters left between two matched ones of one node: matched
@@ -2683,6 +2738,9 @@ struct Made {
     texts: Vec<Option<Arc<str>>>,
     bytes: Mutex<FxHashMap<u32, Arc<Bytes>>>,
     canon: OnceLock<(Vec<u32>, Vec<u32>)>,
+    /// Per node of the index, the piece whose lines its text is set in
+    /// ([`Ctx::own`]), made at the first ask.
+    owners: OnceLock<Vec<i64>>,
 }
 
 impl std::ops::Deref for Ctx<'_> {
@@ -2899,6 +2957,7 @@ impl State {
             texts,
             bytes: Mutex::new(FxHashMap::default()),
             canon: OnceLock::new(),
+            owners: OnceLock::new(),
         });
         if inp.key != 0 {
             *self.made.locked() = Some((inp.key, m.clone()));
@@ -2926,7 +2985,8 @@ impl State {
         {
             return Some(m);
         }
-        let m = Arc::new(match_page_until(g, &cx.index, stop)?);
+        let own = cx.own(id);
+        let m = Arc::new(match_page_until(g, &cx.index, &own, stop)?);
         let mut all = self.matches.locked();
         if all.len() > 1 << 16 {
             all.clear();
@@ -2937,6 +2997,54 @@ impl State {
 }
 
 impl Ctx<'_> {
+    /// Per node of the index (in the document's order), the piece whose
+    /// lines its text is set in: the node's own where some page's lines
+    /// came from it, else the one before it (a paragraph's text after a
+    /// display, a node the paragraph begun in an earlier one goes on in);
+    /// `i64::MIN` before the first.
+    fn owners(&self) -> &[i64] {
+        self.m.owners.get_or_init(|| {
+            let mut all: Vec<i64> = {
+                let memo = piece_memo().locked();
+                self.inp
+                    .shown
+                    .iter()
+                    .filter_map(|&id| memo.get(&(self.inp.inst, id)).cloned())
+                    .flat_map(|ps| ps.to_vec())
+                    .collect()
+            };
+            all.sort_unstable();
+            all.dedup();
+            let mut cur = i64::MIN;
+            self.index
+                .nodes
+                .iter()
+                .map(|nd| {
+                    if let Some(sp) = self.spans.get(&nd.raw)
+                        && all.binary_search(&sp.of.cast_signed()).is_ok()
+                    {
+                        cur = sp.of.cast_signed();
+                    }
+                    cur
+                })
+                .collect()
+        })
+    }
+
+    /// Which nodes (by place in the index) are page `id`'s own: those set
+    /// in the lines of a piece its sealed lines came from ([`keep_pieces`],
+    /// [`Ctx::owners`]; none kept, none).
+    fn own(&self, id: u64) -> impl Fn(u32) -> bool + '_ {
+        let pieces = piece_memo().locked().get(&(self.inp.inst, id)).cloned();
+        let owners = pieces.as_ref().map(|_| self.owners());
+        move |n: u32| match (&pieces, owners) {
+            (Some(ps), Some(os)) => os
+                .get(n as usize)
+                .is_some_and(|o| ps.binary_search(o).is_ok()),
+            _ => false,
+        }
+    }
+
     fn bytes(&self, file: u32) -> Arc<Bytes> {
         if let Some(b) = self.bytes.locked().get(&file) {
             return b.clone();
@@ -3085,7 +3193,7 @@ fn answer_until(
     // one made from nothing kept, the page matched again)
     let check = |how: &str, o: &PageOrigins| {
         if crate::exec::env_flag!("PHITEX_ORIGINS_CHECK") {
-            let m = match_page(&g, &cx.index);
+            let m = match_page(&g, &cx.index, &cx.own(id));
             let nodes: Vec<Option<(Span, bool)>> = m
                 .nodes
                 .iter()
@@ -3745,7 +3853,7 @@ mod tests {
     /// The source range (offsets in its node's text) of each glyph of
     /// `g` placed, not synthesized, in the page's order of its glyphs.
     fn placed(g: &PageGlyphs, ix: &Index) -> Vec<(u32, u32)> {
-        let m = match_page(g, ix);
+        let m = match_page(g, ix, &|_| false);
         m.orgs
             .iter()
             .zip(&g.codes)
@@ -3835,7 +3943,7 @@ mod tests {
         }
         drop(r);
         let g = out.lock().unwrap().take().unwrap();
-        let m = match_page(&g, &ix);
+        let m = match_page(&g, &ix, &|_| false);
         let nodes: Vec<u64> = m
             .orgs
             .iter()
@@ -3916,7 +4024,7 @@ mod tests {
         natives(&mut r, &[("2", 150 * PT)], v);
         drop(r);
         let g = out.lock().unwrap().take().unwrap();
-        let m = match_page(&g, &ix);
+        let m = match_page(&g, &ix, &|_| false);
         // (each native word, a node of its glyphs: its text, and where it
         // was placed: node, bytes)
         let shown: Vec<(String, At)> = m

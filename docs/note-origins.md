@@ -180,11 +180,19 @@ none.
    shows (a label) does not break them (hashes, weighted by how rare they are; built
    when origins are first asked for, per text version, nodes an edit
    made indexed again): the page's nodes are the run of nodes in
-   document order holding most of its weight; a tie between equal texts
-   goes to the nodes of the page's sealed lines' pieces
-   (`PagePiece::pieces`, kept already), then to the nodes after page
-   k-1's. (para4000's text is a 50-word vocabulary: single words are
-   not rare there, 4-word shingles are.)
+   document order holding most of its weight. A shingle several nodes
+   have votes for the page's own among them, and is split among all
+   only where none is: the nodes set in the lines of the pieces its
+   sealed lines came from (`PagePiece::pieces`; a DVI or XDV page's
+   from its page as `assemble::fill_sealed_pages` filled it), a node
+   no page's lines name being set in the lines of the piece before it
+   (a paragraph's text after a display, `Ctx::owners`). A paragraph
+   said again later, an equation's terms in a later display, are the
+   copy the page shows (issue #59: split among all, the earlier copies'
+   cluster outweighed the page's own and took its words, and the
+   editor's equations (2) and (3) went to (1)). A page whose pieces are
+   not known votes as before. (para4000's text is a 50-word vocabulary:
+   single words are not rare there, 4-word shingles are.)
 4. **Alignment.** Patience diff of the page's words against the
    candidates' words (the heaviest cluster of voting nodes, widened by
    up to three short nodes on each side: a heading, an environment's
@@ -211,7 +219,10 @@ none.
    once matched to their occurrence (a node's text, too short for a run
    of three), and the words next to them; a word the first pass matched
    alone, out of the sources' order of the matched words on both sides
-   of it, unmatched (a subfigure's `(b)` matched to a TikZ node's name).
+   of it, unmatched (a subfigure's `(b)` matched to a TikZ node's name);
+   and the page's last word, so matched, on a line of its own,
+   unmatched (a page's number matched to a later page's `x^2`, which
+   put that line's record at this page's foot; it is synthesized, 5.).
    Last, the characters left between two matched ones of one node
    (`footnote*` against `footnote\footnote*`).
 
