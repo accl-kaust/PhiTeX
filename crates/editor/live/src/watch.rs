@@ -189,9 +189,18 @@ impl Edits {
                 select,
             } => {
                 if let Some(v) = viewer {
-                    v.follow(&file, at, word, line);
-                    if let Some((a, b)) = select {
-                        v.select(&file, a, b);
+                    // (a selection is shown as itself, its range: the
+                    // cursor at its end marked too put a word past the
+                    // selection on the page, the one the end stood
+                    // before, as Overleaf's editor never does)
+                    match select {
+                        Some((a, b)) if a != b => v.select(&file, a, b),
+                        _ => {
+                            v.follow(&file, at, word, line);
+                            if let Some((a, b)) = select {
+                                v.select(&file, a, b);
+                            }
+                        }
                     }
                 }
                 return Applied::Nothing;

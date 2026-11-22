@@ -87,6 +87,9 @@ struct Kept {
     /// The session's output files, for a quit that does not wait
     /// ([`Here::out`]).
     out: Arc<Mutex<Option<session::WayOut>>>,
+    /// The next session asked for as a clean rebuild ([`CLEAN`]): its
+    /// first build loads no persisted graph.
+    clean: bool,
 }
 
 /// What the last build read ([`phitex_live::session::Session::watched`]):
@@ -1352,6 +1355,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         asking: Arc::default(),
         reading: false,
         out: Arc::default(),
+        clean: false,
     };
     let (mut t, mut o) = (t.clone(), o.clone());
     loop {
@@ -1414,6 +1418,11 @@ fn reconfigured(
     }
     Some((t2, o2, dir))
 }
+
+/// Why a new session starts when a clean rebuild is asked (the viewer's
+/// Clean rebuild, the editor's `phitex.rebuild`): built from the start, no
+/// persisted graph loaded.
+const CLEAN: &str = "a clean rebuild was asked";
 
 /// One session of the watch, on target `t`: its builds until the watch
 /// ends, or the editor's settings call for another (its target and
@@ -1576,6 +1585,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         });
     spin.done();
     s.keep_graphs(t.graph);
+    if std::mem::take(&mut kept.clean) {
+        s.build_clean();
+    }
     // (no log laid out after a build; the PDF file appended an update
     // section after each edit, the exact file written when idle, but
     // with `--exact`)
@@ -2139,6 +2151,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     };
     // (the editor's buffers, as Unicode text, by file name)
     let mut edits = Edits::new(&main_rel, &main_file);
+    // (the editor's buffers as the last session had them: a new session (a
+    // clean rebuild, the settings changed) builds what the editor shows,
+    // not the disk's older text, and the editor's next change, a range of
+    // its buffer, lands where it was made)
+    if let Some(l) = &lsp {
+        for (file, text) in l.buffers() {
+            let _ = edits.apply(&mut s, None, Ask::SetFile { file, text });
+        }
+    }
     let mut builds = 0usize;
     // (`--report`: the session's account, written again after each build)
     let mut account = o.report.map(|full| crate::report::Report::new(t, o, full));
@@ -3693,10 +3714,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 // again, this session builds cold)
                                 match modern::resolve_again(o) {
                                     Ok((t2, dir)) => {
-                                        next = Some((
-                                            (t2, o.clone(), dir),
-                                            "a clean rebuild was asked",
-                                        ));
+                                        next = Some(((t2, o.clone(), dir), CLEAN));
                                     }
                                     Err(e) => {
                                         ui.error(&e);
@@ -3729,6 +3747,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 ui.error(&e);
             }
             let ((t2, o2, dir), why) = n;
+            kept.clean = why == CLEAN;
             ui.line(&st.dim(&format!("phitex watch: {why}: a new session")));
             if let Err(e) = std::env::set_current_dir(&dir) {
                 ui.error(&format!("can't enter {}: {e}", dir.display()));

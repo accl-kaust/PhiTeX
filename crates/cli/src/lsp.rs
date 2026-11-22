@@ -824,6 +824,31 @@ impl Lsp {
         std::mem::take(&mut *lock(&self.watch.asks))
     }
 
+    /// The editors' buffers, by file: each file open in one, with the text
+    /// of the client that wrote it last (else the first that has it open).
+    /// A new session of the watch (a clean rebuild, the settings changed)
+    /// starts from them: the editor sent them to the session before, and
+    /// sends only its changes from now on.
+    pub fn buffers(&self) -> Vec<(String, String)> {
+        let servers = self.watch.servers();
+        let writers = lock(&self.watch.writers).clone();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (_, s) in &servers {
+            for (name, text) in s.buffers() {
+                if out.iter().any(|(n, _)| *n == name) {
+                    continue;
+                }
+                let text = writers
+                    .get(&name)
+                    .and_then(|w| servers.iter().find(|(id, _)| id == w))
+                    .and_then(|(_, s)| s.text(&name))
+                    .unwrap_or(text);
+                out.push((name, text));
+            }
+        }
+        out
+    }
+
     /// Whether file `name` is open in the editor (its buffer owns it: the
     /// disk's changes of it are not read).
     pub fn owns(&self, name: &str) -> bool {
