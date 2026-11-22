@@ -1270,11 +1270,10 @@ TeX run; the PDF stays byte-identical.
   the pages; each page gets its bars as its glyphs come, and a build blames
   nothing again unless a file's text changed; the history's head (`info`
   `head`, Overleaf's newest version by one `/updates` read) is asked only
-  when Blame is shown again (its tab, the popover opened or unfolded, the
+  when Blame is shown again (its tab, the popover opened, the
   browser tab back). Its words are a reader's (`readerWords`: runs of
   letters; no numbers, control sequences, comments, options, key=value,
-  names, TikZ paths). The popover folds to its title row (kept), the marks
-  and the card live. The badge: Diff, the diff's changes; Blame, the
+  names, TikZ paths). The badge: Diff, the diff's changes; Blame, the
   people who wrote this version; none when there is nothing to count. Diff: From → To (a commit, a tag, your last
   visit; the working tree), the changes listed by place with kind filters,
   `]`/`[` through them, Hide deletions; From and To open the commit picker

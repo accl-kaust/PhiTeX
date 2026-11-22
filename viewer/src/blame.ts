@@ -1226,7 +1226,7 @@ export class Blame {
   private againHead = false;
 
   /**
-   * Blame shown to the user again (its tab, the popover opened or unfolded,
+   * Blame shown to the user again (its tab, the popover opened,
    * the browser tab back): the texts compared, and the history asked once
    * whether it moved ("not saved yet" saved since); nothing more when not.
    */

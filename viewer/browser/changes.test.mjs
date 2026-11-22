@@ -400,11 +400,20 @@ function framesOf(ev) {
   const durs = tasks.map((e) => e.dur / 1000).sort((a, b) => a - b);
   const long = tasks.filter((e) => e.dur > 16700).map((e) => ({ ms: +(e.dur / 1000).toFixed(1), ...split(e) }));
   const raster = ev.filter((e) => e.pid === pid && e.name === "RasterTask" && inWin(e)).map((e) => e.dur / 1000).sort((a, b) => a - b);
-  return { seconds: +((t1 - t0) / 1e6).toFixed(2), moves: moves.length, vsyncs: begins, drawn: draws.length, dropped, frameGapMs: { p50: q(gaps, 0.5), p95: q(gaps, 0.95), max: q(gaps, 1) }, mainTaskMs: { p50: q(durs, 0.5), p95: q(durs, 0.95), max: q(durs, 1) }, over16ms: long, rasterMs: { p95: q(raster, 0.95), max: q(raster, 1) } };
+  // (what is ours, by the main thread's own CPU time (tdur), not the wall clock a loaded runner stretches: each
+  // move's dispatch (its handlers, and any style or layout they force), the style, layout and paint per move, and
+  // the layerizes: their count against the frames begun, their time per move)
+  const cpu = (e) => (e.tdur ?? e.dur) / 1000;
+  const sum = (names) => main.filter((e) => names.includes(e.name)).reduce((n, e) => n + cpu(e), 0);
+  const moveCpu = moves.map(cpu).sort((a, b) => a - b);
+  const layerize = main.filter((e) => e.name === "Layerize").map(cpu).sort((a, b) => a - b);
+  const per = (names) => +(sum(names) / moves.length).toFixed(3);
+  const perMove = { script: { p95: q(moveCpu, 0.95), max: q(moveCpu, 1) }, style: per(kinds.style), layout: per(kinds.layout), paint: per(kinds.paint.filter((n) => n !== "Layerize")), layerize: { n: layerize.length, frames: begins, p50: q(layerize, 0.5), perMove: per(["Layerize"]), max: q(layerize, 1) } };
+  return { perMove, seconds: +((t1 - t0) / 1e6).toFixed(2), moves: moves.length, vsyncs: begins, drawn: draws.length, dropped, frameGapMs: { p50: q(gaps, 0.5), p95: q(gaps, 0.95), max: q(gaps, 1) }, mainTaskMs: { p50: q(durs, 0.5), p95: q(durs, 0.95), max: q(durs, 1) }, over16ms: long, rasterMs: { p95: q(raster, 0.95), max: q(raster, 1) } };
 }
 
 /** A 3 s pointer sweep over the pages from their top (a move every 16 ms, the wheel now and then), traced: its frames (framesOf). */
-async function sweep(t, name) {
+async function sweep(t, name, wheel = true) {
   await t.q(`(() => { $("#stage").scrollTop = 0; return 1; })()`);
   await sleep(1500);
   const st = await t.q(`(() => { const r = $("#stage").getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()`);
@@ -412,7 +421,7 @@ async function sweep(t, name) {
     for (let i = 0, t0 = Date.now(); Date.now() - t0 < 3000; i++) {
       const fx = (i % 60) / 60, r = Math.floor(i / 60);
       await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: st[0] + st[2] * (0.1 + 0.5 * (r % 2 ? 1 - fx : fx)), y: st[1] + st[3] * (0.2 + 0.7 * ((i % 37) / 37)) });
-      if (i % 20 === 19) await t.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: st[0] + st[2] * 0.3, y: st[1] + st[3] * 0.5, deltaX: 0, deltaY: 300 });
+      if (wheel && i % 20 === 19) await t.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: st[0] + st[2] * 0.3, y: st[1] + st[3] * 0.5, deltaX: 0, deltaY: 300 });
       await sleep(16);
     }
   });
@@ -420,7 +429,7 @@ async function sweep(t, name) {
   return framesOf(ev);
 }
 
-test("Blame on a 16-page paper: words as a reader counts them, said as partial till every file is in; a 3 s traced pointer sweep with no long frame; the card a dwell after the hover", async () => {
+test("Blame on a 16-page paper: words as a reader counts them, said as partial till every file is in; a 3 s traced pointer sweep, Blame's own work per move small; the card a dwell after the hover", async () => {
   const { dir, expected } = longPaper();
   const w = new Watch(dir, { home });
   const t = await browser.tab(await w.url());
@@ -429,6 +438,7 @@ test("Blame on a 16-page paper: words as a reader counts them, said as partial t
   if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
   // (the pages' own frames under the sweep, Blame off: what Blame's are measured against)
   const base = await sweep(t, "blame-off");
+  const still = (await sweep(t, "still-off", false)).perMove;
   await t.click("#b-changes");
   // (the summary's head as it changes: partial, said so, till every file is in)
   await t.q(`(() => { const seen = (globalThis.__heads = []); new MutationObserver(() => { const h = $(".chg-pop .sec h3 span")?.textContent; if (h && seen.at(-1) !== h) seen.push(h); }).observe($(".chg-pop"), { subtree: true, childList: true, characterData: true }); return 1; })()`);
@@ -440,30 +450,49 @@ test("Blame on a 16-page paper: words as a reader counts them, said as partial t
   assert.ok(n >= expected && n <= expected * 1.02 + 10, `words: ${n}, the reader's ${expected} (no numbers, no drawing)`);
   assert.deepEqual(await t.q(`$$(".chg-pop .prow .nm > span:first-child").map((e) => e.textContent).sort()`), ["Bob", "Carol", "Lina", "Mary"]);
   await t.until(`$$(".slot .bl-bar:not(.bl-wait)").length > 40`, "the bars", 30000);
-  // (folded: the pages free, the marks on)
-  await t.click("#chg-fold");
-  assert.ok(await t.q(`$(".chg-pop").classList.contains("folded") && $(".chg-pop").getBoundingClientRect().height < 130`), "folded to its title row");
-  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-folded-light.png"));
+  // (the title row: the title centred over the popover, ⚙ and ✕ at the right, no fold)
+  assert.ok(await t.q(`(() => { const p = $(".chg-pop").getBoundingClientRect(), h = $(".chg-pop .ttl h2").getBoundingClientRect(); return !$("#chg-fold") && Math.abs((h.left + h.right) / 2 - (p.left + p.right) / 2) < 2 && $("#chg-gear").getBoundingClientRect().left > h.right; })()`), "the title centred, ⚙ and ✕ at the right, no fold");
+  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-title-light.png"));
   await dark(t, true);
-  if (process.env.PHITEX_SHOTS) (await sleep(300), await t.shot(join(process.env.PHITEX_SHOTS, "watch-folded-dark.png")));
+  if (process.env.PHITEX_SHOTS) (await sleep(300), await t.shot(join(process.env.PHITEX_SHOTS, "watch-title-dark.png")));
   await dark(t, false);
   // (the same 3 s sweep, Blame on: its frames against the pages' own)
   const f = await sweep(t, "blame-on");
   console.log(`# traced sweep, Blame off: ${JSON.stringify(base)}`);
   console.log(`# traced sweep, Blame on:  ${JSON.stringify(f)}`);
   assert.ok(!f.error && !base.error, f.error ?? base.error);
-  assert.ok(f.dropped <= base.dropped, `no frame dropped for Blame: ${f.dropped} against ${base.dropped}`);
-  assert.ok(f.mainTaskMs.p95 <= base.mainTaskMs.p95 + 4, `Blame's frames' work: p95 ${f.mainTaskMs.p95} ms against ${base.mainTaskMs.p95} ms`);
-  assert.ok(f.over16ms.length <= base.over16ms.length + 2, `Blame adds no long frames: ${JSON.stringify(f.over16ms)} against ${JSON.stringify(base.over16ms)}`);
+  // (bounds a frame's budget at most, with room for a runner's CPU at half this box's speed: under 24 busy loops
+  // here the move's task stayed under 2 ms, style, layout and paint under 0.5 ms a move, the card's task 6.5 ms)
+  // (the frames above are the runner's as much as ours: logged, not asserted. What is Blame's own: the pointer
+  // alone over still pages, the wheel left out, so every bit of style, layout, paint and layerize is the hover's;
+  // by the main thread's CPU time, not the wall clock or the frames a loaded runner stretches and drops)
+  const { perMove: on } = await sweep(t, "still-on", false);
+  console.log(`# per move, the pointer alone, Blame off: ${JSON.stringify(still)}`);
+  console.log(`# per move, the pointer alone, Blame on:  ${JSON.stringify(on)}`);
+  assert.ok(on.script.max <= 8, `each move's own task, its handlers and what they force: ${JSON.stringify(on.script)} ms`);
+  assert.ok(on.style + on.layout + on.paint <= 2, `style, layout and paint per move: ${JSON.stringify(on)} ms`);
+  assert.ok(on.layerize.n <= on.layerize.frames + 2 && on.layerize.p50 <= still.layerize.p50 + 1, `no layerize of its own per move, none of every layer: ${JSON.stringify(on.layerize)} against ${JSON.stringify(still.layerize)}`);
   // (the hover to the card: its dwell, then drawn)
   const line = await t.q(`(() => { const b = $$(".slot .bl-bar:not(.bl-wait)").find((b) => { const r = b.getBoundingClientRect(); return r.top > 150 && r.bottom < innerHeight - 200 && r.height > 4; }); const r = b.getBoundingClientRect(); return [r.right + 80, r.top + r.height / 2]; })()`);
   await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: line[1] });
   await t.until(`$(".blcard").hidden`, "no card", 5000);
   await t.q(`(() => { const card = $(".blcard"); globalThis.__hc = null; let t0 = null; addEventListener("pointermove", (e) => (t0 ??= e.timeStamp), { capture: true }); new MutationObserver(() => { if (!card.hidden && globalThis.__hc === null && t0 !== null) globalThis.__hc = performance.now() - t0; }).observe(card, { attributes: true, childList: true }); return 1; })()`);
-  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: line[0], y: line[1] });
-  const hc = await t.until(`globalThis.__hc`, "the card", 5000);
-  console.log(`# hover to card: ${hc.toFixed(0)} ms (a 180 ms dwell, then drawn)`);
-  assert.ok(hc >= 170 && hc < 260, `hover to card ${hc} ms`);
+  // (traced: the dwell is ours, the wall clock after it the runner's; what the card costs is its main thread's CPU
+  // time from the hover to the card shown, every task in between)
+  let hc = 0;
+  const ev = await t.trace(async () => {
+    await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: line[0], y: line[1] });
+    hc = await t.until(`globalThis.__hc`, "the card", 5000);
+  });
+  const mv = ev.find((e) => e.name === "EventDispatch" && /^(pointermove|mousemove)$/.test(e.args?.data?.type ?? ""));
+  // (the task that showed it: the dwell's timer, the last to fire before the card's observer saw it, hc after the move)
+  const at = (mv?.ts ?? 0) + hc * 1000, main = ev.filter((e) => mv && e.pid === mv.pid && e.tid === mv.tid && e.ph === "X");
+  const fired = main.filter((e) => e.name === "TimerFire" && e.ts >= mv.ts + 150000 && e.ts <= at + 3000).sort((x, y) => y.ts - x.ts)[0];
+  const shown = fired && main.find((e) => (e.name === "RunTask" || e.name === "ThreadControllerImpl::RunTask") && e.ts <= fired.ts && e.ts + e.dur >= fired.ts + fired.dur);
+  const work = shown ? (shown.tdur ?? shown.dur) / 1000 : Infinity;
+  console.log(`# hover to card: ${hc.toFixed(0)} ms (a 180 ms dwell, then drawn), the task that drew it ${work.toFixed(1)} ms of CPU`);
+  assert.ok(hc >= 170, `the card not before its dwell: ${hc} ms`);
+  assert.ok(work <= 16, `the card drawn in one task within a frame's budget after its dwell: ${work.toFixed(1)} ms`);
   assert.deepEqual(t.errors, []);
   await w.stop();
 });

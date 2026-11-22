@@ -63,8 +63,6 @@ export interface ChangesPrefs {
   blame: BlameLook;
   hide: boolean;
   kinds: string[];
-  /** Folded to its title row and the Diff/Blame switch, the pages free, the marks on. */
-  folded?: boolean;
 }
 
 /** A change as the list shows it: its kind and place, its text before and after, and who made it where the host can tell. */
@@ -180,13 +178,10 @@ ${COMMITS_CSS}
 .chg-pop button { font: inherit; color: inherit; }
 .chg-pop button:focus-visible, .chg-pop input:focus-visible, .chg-pop [tabindex]:focus-visible { outline: 2px solid var(--phc-focus); outline-offset: 1px; }
 .chg-pop .ph { padding: 10px 12px 12px; display: grid; gap: 10px; border-bottom: 1px solid var(--phc-line); }
-.chg-pop .ttl { display: grid; grid-template-columns: 28px 1fr 28px 28px; align-items: center; gap: 4px; }
+/* (the title centred over the popover, ⚙ and ✕ at the right: two even sides, nothing held empty on the left) */
+.chg-pop .ttl { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 4px; }
 .chg-pop .ttl h2 { margin: 0; font-size: 14px; text-align: center; grid-column: 2; }
-.chg-pop .ttl .fold { grid-column: 1; }
-/* (folded: its title row and the Diff/Blame switch only, the pages beside it free; the marks stay) */
-.chg-pop.folded > :not(.ph):not(.grip) { display: none !important; }
-.chg-pop.folded .ph > :not(.ttl):not(.seg) { display: none !important; }
-.chg-pop.folded .ph { padding-bottom: 10px; border-bottom: 0; }
+.chg-pop .ttl .acts { grid-column: 3; justify-self: end; display: flex; gap: 4px; }
 .chg-pop .ib2 { border: 0; background: transparent; color: var(--phc-muted); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 15px; display: grid; place-items: center; }
 .chg-pop .ib2:hover, .chg-pop .ib2[aria-pressed="true"] { background: var(--phc-chip); color: var(--phc-fg); }
 .chg-pop .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--phc-chip); border-radius: 8px; padding: 2px; }
@@ -363,9 +358,6 @@ export class Changes {
   private kinds: Set<string>;
   /** The look's section (under the list) open. */
   private lookOpen = false;
-  /** Folded to its title row (kept): the pages it marks free to read. */
-  private folded = false;
-  private foldScroll = 0;
   /** The picker shown, opened from which field. */
   private pick: "from" | "to" | null = null;
   private pair: Pair | null = null;
@@ -452,7 +444,8 @@ export class Changes {
     if (k.mode) this.mode = k.mode === "blame" && this.blame ? "blame" : this.host.diff ? "diff" : "blame";
     this.look = { ...DIFF_LOOK, ...k.diff };
     this.hide = !!k.hide;
-    this.folded = !!k.folded;
+    // (a "folded" kept by the build that had a fold: gone, never read; the next save drops it, this one at once)
+    if ("folded" in k) queueMicrotask(() => this.save());
     this.kinds = new Set(k.kinds?.length ? k.kinds : KINDS);
     if (this.blame && k.blame) this.blame.look = { ...BLAME_LOOK, ...k.blame, skip: [...(k.blame.skip ?? [])] };
     this.applyColors();
@@ -461,7 +454,7 @@ export class Changes {
 
   /** The look kept. */
   private save(): void {
-    this.p.savePrefs({ mode: this.mode, diff: this.look, blame: this.blame?.look ?? BLAME_LOOK, hide: this.hide, kinds: [...this.kinds], folded: this.folded });
+    this.p.savePrefs({ mode: this.mode, diff: this.look, blame: this.blame?.look ?? BLAME_LOOK, hide: this.hide, kinds: [...this.kinds] });
   }
 
   /**
@@ -523,32 +516,7 @@ export class Changes {
     }
   }
 
-  /**
-   * Folded to its title row and the Diff/Blame switch (`on`), or unfolded;
-   * kept. The marks and Blame's card stay live; Esc and ✕ still close it.
-   */
-  fold(on: boolean): void {
-    if (on === this.folded) return;
-    this.folded = on;
-    this.save();
-    if (!this.open) return;
-    // (in place: the lists and the focus left as they are, only hidden; their scroll put back)
-    const body = this.el.querySelector<HTMLElement>(".body");
-    if (on && body) this.foldScroll = body.scrollTop;
-    this.el.classList.toggle("folded", on);
-    if (!on && body) body.scrollTop = this.foldScroll;
-    const b = this.el.querySelector<HTMLElement>("#chg-fold");
-    if (b) {
-      b.textContent = on ? "▸" : "▾";
-      b.setAttribute("aria-expanded", String(!on));
-      b.setAttribute("aria-label", on ? "Unfold Changes" : "Fold Changes");
-      b.title = on ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept";
-    }
-    this.place();
-    if (!on) this.historyMoved();
-  }
-
-  /** Blame shown (opened, unfolded, its tab, the browser tab back): the history asked whether it moved since, once (no polling). */
+  /** Blame shown (opened, its tab, the browser tab back): the history asked whether it moved since, once (no polling). */
   private historyMoved(): void {
     if (this.open && this.mode === "blame" && this.blameAsked) this.blame?.refreshHistory();
   }
@@ -877,7 +845,6 @@ export class Changes {
     const was = this.el.dataset.view;
     const view = `${this.mode}${this.pick ? "-pick" : ""}`;
     this.el.dataset.view = view;
-    this.el.classList.toggle("folded", this.folded);
     this.el.replaceChildren(html`<div class="grip" title="Drag to make it wider or narrower"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.lookBox()}${this.foot()}`);
     this.renderProg();
     this.renderBody();
@@ -917,7 +884,7 @@ export class Changes {
 
   private head(): DocumentFragment {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><button type="button" class="ib2 fold" id="chg-fold" aria-expanded="${String(!this.folded)}" aria-label="${this.folded ? "Unfold Changes" : "Fold Changes"}" title="${this.folded ? "Unfold: the list and its controls again" : "Fold to this row: the pages beside it free to read, the marks kept"}">${this.folded ? "▸" : "▾"}</button><h2>Changes</h2><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></div>`;
+    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
     let below: DocumentFragment;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
@@ -1200,7 +1167,6 @@ export class Changes {
   private wire(): void {
     const $ = <T extends HTMLElement>(s: string) => this.el.querySelector<T>(s);
     $("#chg-x")!.onclick = () => this.off();
-    $("#chg-fold")!.onclick = () => this.fold(!this.folded);
     const look = () => {
       this.lookOpen = !this.lookOpen;
       this.render();

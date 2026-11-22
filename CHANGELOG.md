@@ -16,8 +16,7 @@ Compare and Blame are now one thing: **± Changes** :)
   ✕, or Esc) to close it; it stays open while you work on the pages beside
   it, and nothing is read until you pick a version or switch to Blame.
   Diff and Blame sit side by side in it, each with its look right under
-  the list (and in Settings), kept for next time. Fold it to its title
-  row to read the marked pages beside it; the marks stay on.
+  the list (and in Settings), kept for next time.
 - **Diff from anywhere to anywhere.** Pick From and To in a commit graph
   coloured by branch: click one end and then the other, drag a range,
   double-click a commit to see just its changes, or start from your last
