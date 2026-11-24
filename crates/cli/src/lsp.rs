@@ -523,7 +523,7 @@ fn includer(file: &Path) -> Option<PathBuf> {
 
 /// The main file to build in `root` when nothing names one: the one
 /// `.tex` file there with a `\documentclass`, `main.tex` among several.
-fn find_main(root: &Path) -> Option<String> {
+pub(crate) fn find_main(root: &Path) -> Option<String> {
     let mut found: Vec<String> = std::fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
@@ -688,6 +688,16 @@ impl Lsp {
             wants_main: false,
             pending: Mutex::default(),
         }
+    }
+
+    /// How many clients are attached over the socket now (editors, and
+    /// `phitex session` while it asks).
+    pub fn attached(&self) -> usize {
+        self.watch
+            .servers()
+            .iter()
+            .filter(|(id, _)| *id != 0)
+            .count()
     }
 
     /// Whether an editor runs this watch on standard input and output
@@ -1020,6 +1030,15 @@ fn listen(watch: &Arc<Watch>) {
         attached(&w, &first, input, out);
     });
     if let Err(e) = opened {
+        // (one `phitex session start` started: no use to anyone, said in
+        // its log and ended, for `start` to say at once)
+        if std::env::var_os("PHITEX_SESSION_START").is_some() {
+            eprintln!(
+                "phitex watch: `phitex session` cannot reach this watch: its socket or its discovery file could not be made: {e}"
+            );
+            crate::attach::forget();
+            std::process::exit(crate::EXIT_INTERNAL);
+        }
         // (a watch that cannot be attached to is still a watch)
         for (_, s) in watch.servers() {
             s.log(2, &format!("phitex watch: editors cannot attach: {e}"));

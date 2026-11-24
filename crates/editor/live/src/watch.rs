@@ -348,14 +348,154 @@ pub fn tex_text(s: &str) -> String {
 /// places, each a whole problem (the viewer's `Problem`: its line, the
 /// culprit underlined, TeX's context and help), else the transcript's.
 pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
-    kinds(items(s, r, log))
+    let mut v = items(s, r, log);
+    if v.iter().any(|d| unplaced(s, d)) {
+        // (a watch's report has no log made: the session's transcript)
+        let text = r.log_text();
+        let text = if text.is_empty() {
+            s.transcript()
+        } else {
+            text
+        };
+        in_their_files(s, &mut v, &text);
+    }
+    citations(s, &mut v);
+    kinds(v)
 }
 
 /// The diagnostics a build left for later ([`Report::diagnostics_pending`])
 /// for the viewer, made now ([`Session::diagnostics_now`]): as
 /// [`diagnostics`] gives a build's own.
 pub fn late_diagnostics(s: &Session, ds: &[phitex_tex::Diagnostic]) -> Vec<Value> {
-    kinds(placed(s, ds))
+    let mut v = placed(s, ds);
+    if v.iter().any(|d| unplaced(s, d)) {
+        in_their_files(s, &mut v, &s.transcript());
+    }
+    citations(s, &mut v);
+    kinds(v)
+}
+
+/// The key an undefined citation's warning names: LaTeX's "Citation
+/// `KEY' on page N undefined", natbib's and biblatex's alike.
+fn cited(message: &str) -> Option<&str> {
+    let rest = message
+        .split_once("Citation `")
+        .or_else(|| message.split_once("Citation '"))?
+        .1;
+    let key = rest.split_once('\'')?.0;
+    (message.contains("undefined") && !key.is_empty()).then_some(key)
+}
+
+/// An undefined citation's warning says why: its key is not in the
+/// databases the build names (`refs.bib`), or none is named; BibTeX's own
+/// warning of the same key ("I didn't find a database entry") is the same
+/// problem, said once. A key a database has (BibTeX not run since): left
+/// as it is.
+fn citations(s: &Session, v: &mut Vec<Value>) {
+    let keys: Vec<String> = v
+        .iter()
+        .filter(|d| d["severity"] == "warning")
+        .filter_map(|d| cited(d["message"].as_str().unwrap_or("")).map(str::to_owned))
+        .collect();
+    if keys.is_empty() {
+        return;
+    }
+    let dbs = s.bib_databases();
+    let texts: Vec<String> = dbs
+        .iter()
+        .map(|f| {
+            s.source(f)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    let has = |key: &str| {
+        texts.iter().any(|t| {
+            t.match_indices(key).any(|(i, _)| {
+                let before = t[..i].trim_end();
+                let after = t[i + key.len()..].trim_start();
+                (before.ends_with('{') || before.ends_with('(')) && after.starts_with(',')
+            })
+        })
+    };
+    v.retain(|d| {
+        let m = d["message"].as_str().unwrap_or("");
+        !(m.starts_with("bibtex warning: I didn't find a database entry for")
+            && keys.iter().any(|k| m.contains(&format!("\"{k}\""))))
+    });
+    for d in v.iter_mut().filter(|d| d["severity"] == "warning") {
+        let m = d["message"].as_str().unwrap_or("").to_owned();
+        let Some(key) = cited(&m) else { continue };
+        if has(key) {
+            continue;
+        }
+        let why = if dbs.is_empty() {
+            "no bibliography database is named (\\bibliography, \\addbibresource)".to_owned()
+        } else {
+            format!("{key} is not in {}", dbs.join(", "))
+        };
+        let first = m
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_end()
+            .trim_end_matches('.');
+        let rest: String = m.lines().skip(1).fold(String::new(), |mut r, l| {
+            r.push('\n');
+            r.push_str(l);
+            r
+        });
+        d["message"] = json!(format!("{first}: {why}{rest}"));
+    }
+}
+
+/// Whether diagnostic `d` is a warning the engine could place nowhere
+/// but the main file's start: one written with no line where no file was
+/// read (an output routine's).
+fn unplaced(s: &Session, d: &Value) -> bool {
+    let main = s.job.path.to_string_lossy();
+    let main = main.trim_start_matches("./");
+    d["severity"] == "warning"
+        && d["line"].as_u64().is_none_or(|l| l <= 1)
+        && d["file"].as_str().map(|f| f.trim_start_matches("./")) == Some(main)
+        && !crate::problems::names_its_line(d["message"].as_str().unwrap_or(""))
+}
+
+/// The warnings the engine placed at the main file's start for want of a
+/// place ([`unplaced`]) moved to the file TeX was reading as it wrote
+/// them, as the transcript `log` has it ([`crate::problems::warning_files`]),
+/// with no line (TeX gives none): "`h' float specifier changed to `ht'"
+/// in the `\input` file whose float it is, not main.tex:1.
+fn in_their_files(s: &Session, v: &mut [Value], log: &str) {
+    if !v.iter().any(|d| unplaced(s, d)) {
+        return;
+    }
+    let mut seen = crate::problems::warning_files(log);
+    for d in v.iter_mut() {
+        let msg = d["message"].as_str().unwrap_or("").to_owned();
+        let first = msg.lines().next().unwrap_or("").trim_end().to_owned();
+        // (the log's line is the message's first, cut at its width)
+        let Some(k) = seen
+            .iter()
+            .position(|(m, _)| *m == first || (m.len() >= 60 && first.starts_with(m.as_str())))
+        else {
+            continue;
+        };
+        let (_, file) = seen.remove(k);
+        if !unplaced(s, d) {
+            continue;
+        }
+        let file = file.trim_start_matches("./").to_owned();
+        let main = s.job.path.to_string_lossy();
+        if file == main.trim_start_matches("./") {
+            continue;
+        }
+        d["file"] = json!(file);
+        d["line"] = Value::Null;
+        d["range"] = json!([0, 0]);
+        d["col"] = Value::Null;
+        d["excerpt"] = Value::Null;
+    }
 }
 
 /// A build's errors given at once (its diagnostics left for later,

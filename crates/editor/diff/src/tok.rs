@@ -81,6 +81,18 @@ fn put(kids: &[Green], at: usize, text: &str, out: &mut Vec<Lx>) {
         let (a, b) = (pos, pos + c.len());
         pos = b;
         match c.kind() {
+            // (`\` at a line's end: TeX's `\^^M`, its line end read as
+            // the line's own; the line after it is a line of its own, a
+            // blank one a `\par`, as the paragraph cutter cuts there. The
+            // line end a lexeme apart, so that a blank line is two of them
+            // here as everywhere: with it in the control symbol, a blank
+            // line after it was white space, and the whole text read one
+            // paragraph where the live diff, by the CST's paragraphs, read
+            // two)
+            K::Cs if text[a..b].ends_with('\n') => {
+                out.push(Lx::Cs(a, b - 1));
+                out.push(Lx::Nl(b - 1, b));
+            }
             K::Cs => out.push(Lx::Cs(a, b)),
             K::Space => out.push(Lx::Space(a, b)),
             K::Newline => out.push(Lx::Nl(a, b)),
@@ -852,9 +864,7 @@ fn definition(lx: &[Lx], i: usize, text: &str) -> Option<usize> {
         for k in t + 1..lx.len() {
             match lx[k] {
                 Lx::Group { .. } => return Some(k + 1),
-                Lx::Nl(..) if lx.get(k + 1).is_some_and(|l| matches!(l, Lx::Nl(..))) => {
-                    return None;
-                }
+                Lx::Nl(..) if blank_after(lx, k) => return None,
                 _ => {}
             }
         }
@@ -904,12 +914,24 @@ fn skip_spaces(lx: &[Lx], mut i: usize) -> usize {
     i
 }
 
+/// Whether the line end at `k` begins a blank line: the next line holds
+/// only spaces, if anything, before its own end (where the CST cuts a
+/// paragraph, and the live diff reads its paragraphs apart: a token read
+/// across it whole, by an optional argument looked for, was cut there
+/// live).
+fn blank_after(lx: &[Lx], k: usize) -> bool {
+    lx[k + 1..]
+        .iter()
+        .find(|l| !matches!(l, Lx::Space(..)))
+        .is_some_and(|l| matches!(l, Lx::Nl(..)))
+}
+
 /// The next `c` from `i` on this level, before a blank line.
 fn find_char(lx: &[Lx], i: usize, text: &str, c: &str) -> Option<usize> {
     for k in i..lx.len() {
         match lx[k] {
             Lx::Char(a, b) if &text[a..b] == c => return Some(k),
-            Lx::Nl(..) if lx.get(k + 1).is_some_and(|l| matches!(l, Lx::Nl(..))) => return None,
+            Lx::Nl(..) if blank_after(lx, k) => return None,
             _ => {}
         }
     }
