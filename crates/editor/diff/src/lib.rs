@@ -1221,6 +1221,20 @@ mod tests {
     }
 
     #[test]
+    fn a_control_space_ends_inside_the_markup() {
+        // (the run's space after `e.g.\` is the control space's own: kept
+        // inside, else `\}` escapes the markup's closing brace and the
+        // run reads to the file's end: a diff that built no page)
+        let d = run(
+            "Find it as before.\n",
+            "Start it with the address, e.g.\\ \\textbf{x} here.\n",
+        );
+        let b = body(&d);
+        assert!(b.contains("e.g.\\ }"), "{b}");
+        assert!(!b.contains("e.g.\\}"), "{b}");
+    }
+
+    #[test]
     fn text_command_inside() {
         let d = run("\\section{Intro}\nText.\n", "\\section{Overview}\nText.\n");
         assert_eq!(

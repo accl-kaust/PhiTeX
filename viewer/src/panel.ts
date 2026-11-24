@@ -34,7 +34,8 @@ import { Calm, SheetLine, Tally, fetchedLine, type Fetched, type Said } from "./
 import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } from "./wasp.ts";
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 import { BLAME_CSS, Blame, type BlameHost } from "./blame.ts";
-import { CHANGES_BUTTON_CSS, Changes, type ChangesHost, type ChangesPrefs } from "./changes.ts";
+import { CHANGES_BUTTON_CSS, Changes, DELETED_CSS, type ChangesHost, type ChangesPrefs } from "./changes.ts";
+import { MENU_CSS } from "./ctxmenu.ts";
 import type { PageSel } from "./sync.ts";
 import { machineLine } from "./machine.ts";
 
@@ -632,7 +633,7 @@ export class Panel {
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
       html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
     const style = document.createElement("style");
-    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame || opts.changes ? BLAME_CSS + CHANGES_BUTTON_CSS : "");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS + (opts.review ? REVIEW_CSS : "") + (opts.blame || opts.changes ? BLAME_CSS + CHANGES_BUTTON_CSS + DELETED_CSS : "") + (opts.blame || opts.changes || opts.review ? MENU_CSS : "");
     const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
@@ -797,21 +798,54 @@ export class Panel {
           else this.msg("Not on the pages (no text of it was typeset)", false, true);
         });
     };
-    this.$("#stage").addEventListener("pointerdown", () => {
-      this.menu(null);
-      this.diagnostics(false);
-      this.settings(false);
-      this.$("#about").hidden = true;
-    });
-    this.root.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key !== "Escape") return;
+    // (a press outside an open menu, the problems, or a dialog closes it: anywhere, the host's page too (the path
+    // crosses the shadow roots), never on the menu's own button (its toggle); a press, not a click, so a drag begun
+    // inside and let go outside closes nothing. A host's own toggle pressed (Overleaf's ⚙) sees it closed by this
+    // press and leaves it closed: pressClosed, till the press's click is done)
+    document.addEventListener("pointerdown", (e) => {
+      const path = e.composedPath();
+      this.pressClosed = null;
+      // (a feature tip's own buttons: the tip's, nothing else closes)
+      if (path.some((n) => n instanceof Element && n.classList.contains("tip"))) return;
+      for (const [b, m] of this.menus) {
+        const el = this.$(m);
+        if (el.hidden || path.includes(el) || path.includes(this.$(b))) continue;
+        if (m === "#logs") this.diagnostics(false);
+        else (el.hidden = true), this.$(b).setAttribute("aria-expanded", "false");
+      }
+      for (const d of this.root.querySelectorAll<HTMLElement>(".dialog:not([hidden])")) {
+        if (path.includes(d)) continue;
+        this.pressClosed = d;
+        if (d.id === "settings") void this.settings(false);
+        else d.hidden = true;
+      }
+    }, { capture: true });
+    addEventListener("click", () => (this.pressClosed = null));
+    // (Esc closes the topmost thing open, one a press: a card or a menu at the pointer (their own handlers, first), a
+    // dialog, a menu or popover (Changes' its own), then a side (the review, the contents); then the pages' highlights.
+    // In a text field it is the field's: the review's boxes let go of the focus, their words kept (a draft is never lost))
+    const esc = (e: Event, inside: boolean) => {
+      if ((e as KeyboardEvent).key !== "Escape" || e.defaultPrevented) return;
+      const t = e.composedPath()[0] as HTMLElement | undefined;
+      if (t?.matches?.("textarea, input:not([type=checkbox]):not([type=radio]):not([type=button]), [contenteditable=true]")) {
+        if (t.closest(".rside")) (t.blur(), e.preventDefault());
+        return;
+      }
       const open = this.root.querySelector<HTMLElement>(".dialog:not([hidden])");
       if (!open && this.changes?.open) return;
       // (taken: Changes, under the dialog, leaves this Esc alone)
-      if (open) (open.hidden = true), e.preventDefault();
-      else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
+      if (open) (open.id === "settings" ? void this.settings(false) : (open.hidden = true)), e.preventDefault();
+      else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null), this.diagnostics(false), e.preventDefault();
+      else if (!inside) return;
+      else if (this.review?.isOpen) this.review.open(false), e.preventDefault();
+      else if (this.contents && this.win.classList.contains("side-on")) this.side(false), e.preventDefault();
       else if (!this.escapeProblems()) this.unmark();
-    });
+    };
+    this.root.addEventListener("keydown", (e) => esc(e, true));
+    // (Esc with the focus in the host's page (Overleaf's editor): what is open of the panel's closes, as Changes does;
+    // nothing open, the key is the host's)
+    // (the focus nowhere (the page's body: the watch's page is the panel) is the panel's too)
+    document.addEventListener("keydown", (e) => !e.composedPath().includes(this.root.host) && esc(e, !document.activeElement || document.activeElement === document.body));
     this.$("#gonex").onclick = () => this.dismissOffline();
     addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("unacked") && this.dismissOffline());
     // (a click on the dimmed pages takes the lost connection in, and does nothing else: no jump, no selection)
@@ -863,15 +897,17 @@ export class Panel {
     if (opts.blame) {
       // (Blame's "What this commit changed" is Changes' Diff of it; a merged commit's branch from Changes' graph)
       const host: BlameHost = { ...opts.blame, compare: opts.changes?.diff ? (c) => this.changes?.diffCommit(c) : opts.blame.compare, via: opts.blame.via ?? ((c) => this.changes?.via(c.id) ?? null) };
-      const bl = (this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark(), msg: (t, err) => this.msg(t, !!err, true), avoid: () => this.changes?.box() ?? null }, host));
+      const bl = (this.blame = new Blame({ root: this.root, stage: this.$("#stage"), pageSize: () => this.viewer.pageSize(), dark: () => this.sheetDark() || this.win.classList.contains("paged-dark"), msg: (t, err) => this.msg(t, !!err, true), avoid: () => this.changes?.box() ?? null }, host));
       // (the pages drawn dark or light again: the bars' colours with them)
-      let dark = this.sheetDark();
-      new MutationObserver(() => dark !== this.sheetDark() && ((dark = this.sheetDark()), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
+      // (a dark sheet: Dark PDF, or Page colours darker than their text)
+      const darkNow = () => this.sheetDark() || this.win.classList.contains("paged-dark");
+      let dark = darkNow();
+      new MutationObserver(() => dark !== darkNow() && ((dark = darkNow()), bl.redraw())).observe(this.win, { attributes: true, attributeFilter: ["class"] });
     }
     if (opts.changes || opts.blame) {
       const host: ChangesHost = opts.changes ?? { log: async () => "No history here" };
       this.changes = new Changes(
-        { win: this.win, root: this.root, prefs: () => this.prefs.changes, savePrefs: (c) => ((this.prefs.changes = c), this.save()), msg: (t, err) => this.msg(t, !!err, true) },
+        { win: this.win, root: this.root, prefs: () => this.prefs.changes, savePrefs: (c) => ((this.prefs.changes = c), this.save()), msg: (t, err) => this.msg(t, !!err, true), settings: (at) => void this.settings(true, at), stage: this.$("#stage"), pageSize: () => this.viewer.pageSize() },
         host,
         this.blame ?? null,
       );
@@ -941,6 +977,8 @@ export class Panel {
 
   /** The menus and popovers by their buttons. */
   private menus: [string, string][] = [];
+  /** The dialog the current press closed (outside it), till its click is done: a toggle pressed then leaves it shut. */
+  private pressClosed: HTMLElement | null = null;
   /** Notes and changes (opts.review). */
   review?: Review;
   /** Blame over the pages (opts.blame): shown by Changes' Blame. */
@@ -1169,8 +1207,10 @@ export class Panel {
   busy(on: boolean): void {
     if (!on) this.queued = false;
     this.buildSince = on ? this.buildSince || performance.now() : 0;
-    // (the strip over the last pages: none while a build runs, said once one settles without a page)
-    if (this.lastStatus) this.stale(this.lastStatus);
+    // (the strip over the last pages: none while a build runs, said once one settles without a page:
+    // by the status that follows its end, not by the one from before it, which may be of no page
+    // yet (a diff's first build: its pages shown before its first page, the strip flashed))
+    if (on && this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
 
@@ -2787,8 +2827,10 @@ export class Panel {
    * from before the sections, opens its section there); absent, the last one
    * shown, else the first.
    */
-  async settings(on = this.$("#settings").hidden, at?: string): Promise<void> {
+  async settings(on?: boolean, at?: string): Promise<void> {
     const el = this.$("#settings");
+    // (toggled: open unless open, or closed by the press that toggles it, outside it)
+    on ??= el.hidden && this.pressClosed !== el;
     if (!on) {
       this.tilesGone();
       if (!el.hidden) (el.hidden = true), this.emit();
@@ -3246,6 +3288,9 @@ export class Panel {
     this.win.classList.toggle("paged", on);
     this.win.classList.toggle("paged-dark", on && lum(bg) < lum(fg));
     const st = this.win.style;
+    // (the sheet's colour, for what is drawn over it in the page's own colour: Blame's veil)
+    if (on) st.setProperty("--ph-sheet", l.page);
+    else st.removeProperty("--ph-sheet");
     if (l.mark) (st.setProperty("--ph-mark-fill", `color-mix(in srgb, ${l.mark} 45%, transparent)`), st.setProperty("--ph-mark-line", `color-mix(in srgb, ${l.mark} 85%, transparent)`));
     else (st.removeProperty("--ph-mark-fill"), st.removeProperty("--ph-mark-line"));
     this.$("#settings")?.querySelectorAll<HTMLElement>('.srow[data-id="page-colours"] .sw').forEach((t) => this.pageSwatch(t.dataset.v!, t.querySelector<HTMLElement>(".art")!));
@@ -3558,6 +3603,8 @@ export class Panel {
     let target = this.$(t.at);
     // (a control hidden at this width: the menu that holds it)
     if (!target || !target.offsetParent) target = this.$("#b-more");
+    // (its control open already (a click before the tip came): used, so seen; the next one, under none of it)
+    if (target.getAttribute("aria-expanded") === "true") return this.tip(i + 1);
     target.classList.add("ringed");
     // (the control it points at used: the tip has done its work and goes, the tour
     // with it; left open, it covered what the control opened, Compare's Next)

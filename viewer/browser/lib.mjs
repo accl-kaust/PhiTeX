@@ -235,7 +235,7 @@ export class Tab {
   }
   /** The element's centre, in view; fails if another element is on top of it (a person could not click it). */
   async point(sel) {
-    const r = await this.q(`(() => { const e = $(${JSON.stringify(sel)}); if (!e) return { no: "none" }; e.scrollIntoView({ block: "nearest", inline: "nearest" }); const b = e.getBoundingClientRect(); if (!b.width || !b.height) return { no: "not shown" }; const x = b.left + b.width / 2, y = b.top + b.height / 2; let t = document.elementFromPoint(x, y); while (t?.shadowRoot) { const i = t.shadowRoot.elementFromPoint(x, y); if (!i || i === t) break; t = i; } return { x, y, on: e === t || e.contains(t) || t?.contains(e) && false, top: t ? (t.id || t.className || t.tagName) : "" }; })()`);
+    const r = await this.q(`(() => { const e = $(${JSON.stringify(sel)}); if (!e) return { no: "none" }; e.scrollIntoView({ block: "nearest", inline: "nearest" }); const b = e.getBoundingClientRect(); if (!b.width || !b.height) return { no: "not shown" }; const x = b.left + b.width / 2, y = b.top + b.height / 2; let t = document.elementFromPoint(x, y); while (t?.shadowRoot) { const i = t.shadowRoot.elementFromPoint(x, y); if (!i || i === t) break; t = i; } return { x, y, on: e === t || e.contains(t) || t?.contains(e) && false, top: t ? (t.id || (typeof t.className === "string" ? t.className : t.getAttribute("class")) || t.tagName) + " in " + (t.closest("[id]")?.id ?? t.getRootNode().host?.id ?? "") : "" }; })()`);
     if (r.no) throw new Error(`click ${sel}: ${r.no}`);
     if (!r.on) throw new Error(`click ${sel}: covered by ${r.top}`);
     return r;

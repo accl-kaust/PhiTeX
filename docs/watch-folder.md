@@ -93,6 +93,7 @@ chosen with `1`–`9` (`a` or `0`: all again):
 | --- | --- |
 | `1`–`9`, `a` | choose a document, or all |
 | `r`, Enter | build again now |
+| Ctrl-R | clean rebuild: start over from scratch |
 | `p`, `w`, `s` | errors, warnings, how the build went (as in `phitex watch FILE`) |
 | `o` | open the folder (or the chosen document) in the browser |
 | `c`, `h` | clear the screen, list the keys |

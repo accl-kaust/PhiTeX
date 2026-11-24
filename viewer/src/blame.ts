@@ -1,10 +1,21 @@
 // Blame on the page: who last changed what the pages show, drawn over them
-// (an overlay only: no build, no new TeX run, the PDF as it is). A bar in
-// the margin of each printed line, coloured by the line's commit (its age,
-// its author, or whether it changed since a tag, a date or a commit), an
-// optional tint over the words, and a card on hover: the commit's subject,
-// hash, author, age and source lines, with Compare with before this commit,
-// Show in editor and Copy hash. Text not committed yet is hatched grey.
+// (an overlay only: no build, no new TeX run, the PDF as it is). Every
+// printed line coloured while Blame is on, by its writer or its age, in
+// the style chosen: a soft wash behind its words (the default), the words
+// themselves coloured, or a bar in the margin. A line hovered gets its card
+// after a dwell (the commit's subject, hash, author, age and source lines,
+// with What this commit changed, Show in editor and Copy hash) and its
+// commit's or writer's lines picked out everywhere, the rest set back; a
+// person or a commit clicked in Changes' lists does the same, and keeps it.
+// Text not committed yet is hatched grey (or left out).
+//
+// Drawn once a page, when its blame comes: two SVGs over the page, one
+// blended with it (the wash: multiply, or screen on dark pages; the words'
+// colour: lighten, or darken), one plain (the veil that sets lines back,
+// the bars, the placeholders), their rects grouped by commit. A highlight
+// toggles classes on the groups (style only, no rect made or moved); no box
+// of its own per line, no fade: positioned boxes and their fades were a
+// layer each, and the pointer paid for them at every move.
 //
 // Where a printed line came from is the pages' glyph origins (sync.ts):
 // each glyph's source bytes, a line of its file; a macro's glyphs are its
@@ -853,16 +864,17 @@ export interface BlameLook extends Omit<BlameOpts, "progress" | "signal"> {
   wip: "show" | "hide";
   /** Lines older than this dimmed: "off", or "SECONDS:label" (a tag's time, a date). */
   since: string;
-  /** The words tinted: off, the paragraph under the pointer, everywhere. */
-  tint: "off" | "hover" | "all";
+  /** How the lines are coloured: a wash behind the words, the words themselves, or a bar in the margin. */
+  style: "wash" | "text" | "bar";
+  /** Bar's margin. */
   bars: "left" | "right";
-  /** The bars' width, px. */
+  /** Bar's width, in the page's points (Thin 2, Medium 4, Wide 7). */
   width: number;
   people: "okabe" | "overleaf";
   ages: "violet" | "warm" | "grey";
 }
 
-export const BLAME_LOOK: BlameLook = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", tint: "hover", bars: "left", width: 4, people: "okabe", ages: "violet" };
+export const BLAME_LOOK: BlameLook = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", style: "wash", bars: "left", width: 4, people: "okabe", ages: "violet" };
 
 /** The age ramps, newest first, light pages' and dark pages' (Under a day, a week, a month, six months; older: none). */
 export const AGE_RAMPS: Record<BlameLook["ages"], { name: string; light: string[]; dark: string[] }> = {
@@ -887,29 +899,37 @@ export function lookOf(m: Model, c: number, look: Pick<BlameLook, "color" | "age
   return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
 }
 
+/** A line's wash: its colour at its weight (Age: newer stronger), a little stronger on a dark page, whose screen blend is lighter. */
+export function washOf(l: { color: string; tint: number }, dark: boolean): string {
+  const a = Math.min(1, (l.tint / 0.16) * (dark ? 0.34 : 0.3));
+  const hex = /^#([0-9a-f]{6})$/i.exec(l.color);
+  if (hex) return `#${hex[1]}${Math.round(a * 255).toString(16).padStart(2, "0")}`;
+  return `color-mix(in srgb, ${l.color} ${Math.round(a * 100)}%, transparent)`;
+}
+
 /** The time "changed since" names (seconds), or null: off. */
 export const sinceTime = (since: string): number | null => (since && since !== "off" ? Number(since.split(":")[0]) : null);
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export const BLAME_CSS = `
-.slot .bl { position: absolute; pointer-events: none; }
-.slot svg.bl-hsvg { left: 0; top: 0; width: 100%; height: 100%; overflow: visible; }
-.slot svg.bl-hsvg .bl { position: static; }
-.slot .bl-bar { border-radius: 1px; }
-.slot .bl-tint { border-radius: 1px; }
-.slot .bl-hatch { background-image: repeating-linear-gradient(45deg, rgb(154 160 166 / 85%) 0 1.5px, rgb(154 160 166 / 18%) 1.5px 4px) !important; }
-.slot .bl-wait { background: repeating-linear-gradient(0deg, rgb(154 160 166 / 45%) 0 2px, transparent 2px 4px); opacity: .7; }
-.slot .bl-wash { background: rgb(255 255 255 / 62%); }
-.win.dark-pdf .slot .bl-wash, .slot.dark .bl-wash { background: rgb(20 22 26 / 58%); }
-.slot .bl-dim { opacity: .28; }
-@media (prefers-reduced-motion: no-preference) {
-  /* (backwards only: done, no effect is left on each bar; a fill kept a compositor effect per bar, hundreds on a long paper, and every frame's layerizing paid for them) */
-  .slot .bl-in { animation: bl-in .22s ease-out backwards; }
-  .slot .bl-wait { animation: bl-wait 1.4s ease-in-out infinite; }
-}
-@keyframes bl-in { from { opacity: 0; } }
-@keyframes bl-wait { 50% { opacity: .3; } }
+.slot svg.bl { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+/* (the wash behind the words: multiply on a light page, its ink stays ink; screen on a dark one) */
+.slot svg.bl-paint { mix-blend-mode: multiply; }
+/* (the words' own colour: lighten on a light page, the ink takes the colour and the paper stays; darken on a dark one) */
+.slot svg.bl-paint.s-text { mix-blend-mode: lighten; }
+.win.dark-pdf .slot svg.bl-paint, .win.docked.pdf-dark .slot svg.bl-paint, .win.paged-dark .slot svg.bl-paint { mix-blend-mode: screen; }
+.win.dark-pdf .slot svg.bl-paint.s-text, .win.docked.pdf-dark .slot svg.bl-paint.s-text, .win.paged-dark .slot svg.bl-paint.s-text { mix-blend-mode: darken; }
+/* (the veil that sets lines back, in the page's own colour; drawn only where it is up: a highlight's others, lines older than "changed since") */
+.slot svg.bl-marks { --bl-veil: #fff; }
+.win.paged .slot svg.bl-marks { --bl-veil: var(--ph-sheet, #fff); }
+.win.dark-pdf .slot svg.bl-marks, .win.docked.pdf-dark .slot svg.bl-marks { --bl-veil: #2c2e33; }
+/* (by its opacity alone, not its visibility: an SVG shape's visibility changed lays it out again, its opacity only paints it) */
+.slot svg.bl .v { fill: var(--bl-veil); fill-opacity: 0; }
+.slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { fill-opacity: .55; }
+.slot svg.bl.hl g:not(.on) .v.o { fill-opacity: .7; }
+.slot svg.bl-paint.hl g:not(.on) { fill-opacity: .35; }
+.slot svg.bl-marks.hl g:not(.on) .b { fill-opacity: .3; }
 .blcard { position: fixed; z-index: 30; width: min(300px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 10px; box-shadow: 0 10px 30px rgb(15 25 40 / 18%); padding: 10px 12px; font-size: 13px; line-height: 1.45; }
 .blcard[hidden] { display: none; }
 .blcard .h { display: flex; gap: 8px; align-items: center; font-weight: 600; }
@@ -1045,8 +1065,6 @@ export function readerWords(t: string): number[] {
   return out;
 }
 
-/** A printed line's key on its page (the same line drawn again is not new). */
-const segKey = (k: number, s: Seg) => `${k}:${Math.round(s.x0)}:${Math.round(s.y0)}`;
 
 /** Blame over the pages: its state, the pages' marks, the card. Its controls are the Changes popover's (changes.ts). */
 export class Blame {
@@ -1072,8 +1090,6 @@ export class Blame {
   private again: ReturnType<typeof setTimeout> | undefined;
   /** The history's head the blame was worked out at (the host's, where it says). */
   private head: string | undefined;
-  /** Each line's marks first drawn when (ms): drawn again within the fade, the fade goes on where it was. */
-  private drawn = new Map<string, number>();
   private abort: AbortController | undefined;
   private listeners: (() => void)[] = [];
   /** The last look the blame was worked out with (its host's part): another one reads again. */
@@ -1096,8 +1112,9 @@ export class Blame {
     this.card.addEventListener("pointerleave", (e) => gone(e, p.stage));
     p.stage.addEventListener("click", (e) => this.click(e));
     this.card.addEventListener("click", (e) => this.act(e));
-    p.root.addEventListener("keydown", (e) => {
-      if ((e as KeyboardEvent).key === "Escape" && (this.pinned || this.hover) && !this.card.hidden) (this.pinned = null), this.over(null), e.stopPropagation();
+    // (Esc: the card first, the topmost thing open; on the document, so it holds whatever has the focus, the page's body too)
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && (this.pinned || this.hover) && !this.card.hidden) (this.pinned = null), this.over(null), e.stopPropagation(), e.preventDefault();
     }, { capture: true });
   }
 
@@ -1131,6 +1148,30 @@ export class Blame {
    * sources are read again quietly (only what changed is blamed again); the
    * first time, the sources are blamed from the history: no page needed.
    */
+  private warmed = false;
+  /**
+   * The card laid out once, unseen, when the main thread is next idle after
+   * Blame turns on: its first layout finds its fonts and shapes its words
+   * (15 ms on a 16-page paper, 1 ms every time after), work the first
+   * hover's task would otherwise do.
+   */
+  private warm(): void {
+    if (this.warmed) return;
+    this.warmed = true;
+    const go = () => {
+      const c = document.createElement("div");
+      c.className = "blcard";
+      c.setAttribute("aria-hidden", "true");
+      c.style.cssText = "visibility:hidden;left:-10000px;top:0";
+      c.replaceChildren(html`<div class="h"><span class="av">AB</span>A writer</div><div class="meta">now · <code>0123abc</code></div><div class="sub">A subject</div><div class="via">via a branch</div><div class="src">main.tex:1–2</div><div class="acts"><button type="button">Show in editor</button></div>`);
+      this.card.after(c);
+      void c.offsetWidth;
+      c.remove();
+    };
+    if (typeof requestIdleCallback === "function") requestIdleCallback(go);
+    else setTimeout(go, 0);
+  }
+
   toggle(on = !this.on): void {
     if (on === this.on) return;
     this.on = on;
@@ -1139,8 +1180,9 @@ export class Blame {
       this.pinned = this.hover = null;
       this.card.hidden = true;
       clearTimeout(this.dwell);
+      this.hl = null;
+      this.hlKey = "";
       this.clear();
-      this.drawn.clear();
       this.mapped.clear();
       return;
     }
@@ -1155,6 +1197,7 @@ export class Blame {
       this.pagesSoon();
     });
     this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    this.warm();
     if (this.m && this.worked === this.workKey()) {
       void this.mapPages();
       this.checkTexts(true, true);
@@ -1175,9 +1218,18 @@ export class Blame {
   focus(kind: "person" | "commit", key: string | number | null): void {
     if (kind === "person") (this.focusP = this.focusP === key ? null : (key as string | null)), (this.focusC = null);
     else (this.focusC = this.focusC === key ? null : (key as number | null)), (this.focusP = null);
-    this.drawAll();
+    this.highlight();
     this.emit(true);
     if (kind === "commit" && this.focusC !== null) this.reveal(this.focusC);
+  }
+
+  /** The person or commit picked out in the lists let go (Esc): whether one was. */
+  unfocus(): boolean {
+    if (this.focusP === null && this.focusC === null) return false;
+    this.focusP = this.focusC = null;
+    this.highlight();
+    this.emit(true);
+    return true;
   }
 
   /** The first printed line of commit `c` brought into view. */
@@ -1562,133 +1614,166 @@ export class Blame {
     return this.m ? lookOf(this.m, c, this.look, this.p.dark(), this.colors) : null;
   }
 
-  /** Whether a line is set back: another person's or commit's picked out, or older than "changed since". */
-  private dimmed(c: number): boolean {
-    const m = this.m;
-    if (!m) return false;
-    const x = c >= 0 ? m.commits[c] : null;
-    if (this.focusP !== null && (x ? authorKey(x) : "") !== this.focusP) return true;
-    if (this.focusC !== null && c !== this.focusC) return true;
+  /** Whether commit `c`'s lines are older than "changed since" (set back, uncoloured). */
+  private old(c: number): boolean {
+    const x = c >= 0 ? this.m?.commits[c] : null;
     const since = sinceTime(this.look.since);
     return since !== null && !!x && x.time <= since;
   }
 
-  private clear(): void {
-    for (const e of this.p.stage.querySelectorAll(".slot .bl")) e.remove();
+  /** The person (an author key, "" not committed) commit `c` is. */
+  private personOf(c: number): string {
+    const x = c >= 0 ? this.m?.commits[c] : null;
+    return x ? authorKey(x) : "";
   }
 
-  /** Every page drawn again (a look, a focus). */
+  private clear(): void {
+    for (const e of this.p.stage.querySelectorAll(".slot > .bl")) e.remove();
+    this.groups.clear();
+  }
+
+  /** Every page drawn again (a look, the pages' colours). */
   private drawAll(): void {
     if (!this.on || !this.m) return this.clear();
     for (const k of this.segs.keys()) this.drawPage(k);
   }
 
-  /** Page `k`'s bars, washes and tints (the hover's tint apart: drawn alone as the pointer moves). */
+  /** Each page's SVGs and their groups by commit (a highlight toggles their classes). */
+  private groups = new Map<number, { svgs: SVGSVGElement[]; by: Map<number, SVGGElement[]> }>();
+
+  /**
+   * Page `k`'s colours, drawn once (its blame come, a look changed): the
+   * wash or the words' colour in one SVG blended with the page, the veil,
+   * bars and placeholders in another, each run's rects in its commit's
+   * group. The highlight in force put on at once.
+   */
   private drawPage(k: number): void {
     const slot = this.slot(k);
     if (!slot) return;
-    for (const e of slot.querySelectorAll(".bl")) e.remove();
+    for (const e of slot.querySelectorAll(":scope > .bl")) e.remove();
+    this.groups.delete(k);
     const segs = this.segs.get(k);
     if (!this.on || (!this.m && !this.waits.get(k)?.length) || !segs) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
-    const pct = (v: number, of: number) => `${(v / of) * 100}%`;
-    const bw = Math.max(1, this.look.width);
-    const now = performance.now();
-    const frag = document.createDocumentFragment();
+    const style = this.look.style === "text" || this.look.style === "bar" ? this.look.style : "wash";
+    const f = (v: number) => (Math.round(v * 100) / 100).toString();
+    const rect = (x: number, y: number, rw: number, rh: number, rest: string) => `<rect x="${f(x)}" y="${f(y)}" width="${f(Math.max(0, rw))}" height="${f(Math.max(0, rh))}" ${rest}/>`;
+    const paint = new Map<number, string[]>(), marks = new Map<number, string[]>();
+    const put = (to: Map<number, string[]>, c: number, r: string) => (to.get(c) ?? to.set(c, []).get(c)!).push(r);
     const right = this.index.get(k)?.right ?? new Map<number, number>();
+    const bw = Math.max(1, this.look.width);
+    const hatch = `url(#blh-${k})`;
+    let hatched = false;
     for (const s of segs) {
-      const lk = this.shade(s.c);
-      const key = segKey(k, s);
-      const t0 = this.drawn.get(key) ?? now;
-      this.drawn.set(key, t0);
-      const fade = now - t0 < 220 ? " bl-in" : "";
-      const delay = fade ? `${-(now - t0)}ms` : "";
-      const dim = this.dimmed(s.c);
-      if (dim) {
-        const wsh = document.createElement("div");
-        wsh.className = `bl bl-wash${fade}`;
-        Object.assign(wsh.style, { left: pct(s.x0 - 1, w), top: pct(s.y0, h), width: pct(s.x1 - s.x0 + 2, w), height: pct(s.y1 - s.y0, h), animationDelay: delay });
-        frag.append(wsh);
+      // (the line's box, a little over its glyphs: the lines' washes nearly meet, never overlap)
+      const y0 = s.y0 - 0.5, y1 = s.y1 + 0.5;
+      if (style === "bar") {
+        put(marks, s.c, rect(s.x0 - 1, y0, s.x1 - s.x0 + 2, y1 - y0, `class="${this.old(s.c) ? "v o" : "v"}"`));
+        const lk = this.old(s.c) ? null : this.shade(s.c);
+        if (!lk) continue;
+        hatched ||= !!lk.hatch;
+        const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 4 : s.bx + 4 - bw;
+        put(marks, s.c, rect(x, s.y0 + 0.5, bw, s.y1 - s.y0 - 1, `class="b" fill="${lk.hatch ? hatch : lk.color}"`));
+        continue;
       }
-      if (!lk) continue;
-      if (!dim && this.look.tint === "all") frag.append(...this.tints(s, w, h, dark));
-      const b = document.createElement("div");
-      b.className = `bl bl-bar${lk.hatch ? " bl-hatch" : ""}${dim ? " bl-dim" : ""}${fade}`;
-      const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 5 : s.bx + 3 - bw;
-      Object.assign(b.style, { left: pct(x, w), width: `${bw}px`, top: pct(s.y0 + 0.5, h), height: pct(s.y1 - s.y0 - 1, h), background: lk.color, animationDelay: delay });
-      frag.append(b);
-    }
-    for (const l of this.waits.get(k) ?? []) {
-      const b = document.createElement("div");
-      b.className = "bl bl-bar bl-wait";
-      Object.assign(b.style, { left: pct(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 3 - bw, w), width: `${bw}px`, top: pct(l.y0 + 0.5, h), height: pct(l.y1 - l.y0 - 1, h) });
-      frag.append(b);
-    }
-    slot.append(frag);
-    if ((this.pinned ?? this.hover)?.k === k) this.drawHover();
-  }
-
-  /** A line's tint over its words, by writer. */
-  private tints(s: Seg, w: number, h: number, dark: boolean, cls = "bl-tint"): HTMLElement[] {
-    const pct = (v: number, of: number) => `${(v / of) * 100}%`;
-    const out: HTMLElement[] = [];
-    const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
-    for (const [a, b, c] of runs) {
-      const l = this.shade(c);
-      if (!l) continue;
-      const t = document.createElement("div");
-      t.className = `bl ${cls}${l.hatch ? " bl-hatch" : ""}`;
-      // (its strength in its colour's alpha, not an opacity: an opacity is an effect of its own on every tint, and every
-      // hover's tints came and went as effects, the whole page's layers worked out again each time)
-      const a2 = l.hatch ? 100 : Math.round(100 * Math.min(1, dark ? l.tint * 1.3 : l.tint));
-      Object.assign(t.style, { left: pct(a - 1, w), top: pct(s.y0, h), width: pct(b - a + 2, w), height: pct(s.y1 - s.y0, h), background: l.hatch ? l.color : `color-mix(in srgb, ${l.color} ${a2}%, transparent)` });
-      out.push(t);
-    }
-    return out;
-  }
-
-  /** The paragraph under the pointer tinted ("under the pointer"), alone: the rest of the page left as it is. */
-  /** The hover's tints now on a page (removed by the next hover, not looked for across every page). */
-  private htints: Element[] = [];
-
-  private drawHover(): void {
-    for (const e of this.htints) e.remove();
-    this.htints = [];
-    const f = this.pinned ?? this.hover;
-    if (!f || !this.on || this.look.tint !== "hover") return;
-    const slot = this.slot(f.k);
-    if (!slot) return;
-    const { w, h } = this.p.pageSize();
-    const dark = this.p.dark();
-    // (in one SVG over the page, made once per page: its rects come and go inside it, never boxes of their own; a
-    // positioned box each was a layer each, and every hover had the whole stage's layers worked out again)
-    let svg = slot.querySelector<SVGSVGElement>(":scope > svg.bl-hsvg");
-    if (!svg) {
-      svg = document.createElementNS(SVG_NS, "svg");
-      svg.setAttribute("class", "bl bl-hsvg");
-      svg.setAttribute("preserveAspectRatio", "none");
-      slot.append(svg);
-    }
-    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-    for (const s of this.segs.get(f.k) ?? []) {
-      if (s.para !== f.s.para || this.dimmed(s.c)) continue;
       const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
       for (const [a, b, c] of runs) {
-        const l = this.shade(c);
-        if (!l) continue;
-        const r = document.createElementNS(SVG_NS, "rect");
-        r.setAttribute("class", "bl bl-tint bl-htint");
-        r.setAttribute("x", String(a - 1));
-        r.setAttribute("y", String(s.y0));
-        r.setAttribute("width", String(b - a + 2));
-        r.setAttribute("height", String(s.y1 - s.y0));
-        r.setAttribute("fill", l.hatch ? UNCOMMITTED : l.color);
-        r.setAttribute("fill-opacity", String(l.hatch ? 0.35 : Math.min(1, dark ? l.tint * 1.3 : l.tint)));
-        this.htints.push(r);
+        const old = this.old(c);
+        put(marks, c, rect(a - 1, y0, b - a + 2, y1 - y0, `class="${old ? "v o" : "v"}"`));
+        const lk = old ? null : this.shade(c);
+        if (!lk) continue;
+        hatched ||= !!lk.hatch;
+        put(paint, c, rect(a - 1, y0, b - a + 2, y1 - y0, `fill="${lk.hatch ? hatch : style === "text" ? lk.color : washOf(lk, dark)}"`));
       }
     }
-    svg.append(...this.htints);
+    // (the files still being worked out: a quiet grey bar on their lines)
+    for (const l of this.waits.get(k) ?? []) put(marks, -2, rect(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 4 - bw, l.y0 + 0.5, bw, l.y1 - l.y0 - 1, `class="w" fill="${UNCOMMITTED}" fill-opacity=".45"`));
+    // (not committed: grey stripes, behind the words (the wash), across them (their colour), or the bar's)
+    const defs = hatched ? `<defs><pattern id="blh-${k}" patternUnits="userSpaceOnUse" width="3" height="3" patternTransform="rotate(45)"><rect width="1.3" height="3" fill="${UNCOMMITTED}"${style === "wash" ? ` fill-opacity="${dark ? 0.5 : 0.6}"` : ""}/></pattern></defs>` : "";
+    const by = new Map<number, SVGGElement[]>();
+    const svg = (cls: string, groups: Map<number, string[]>, withDefs: boolean) => {
+      const el = document.createElementNS(SVG_NS, "svg");
+      el.setAttribute("class", cls);
+      el.setAttribute("viewBox", `0 0 ${w} ${h}`);
+      el.setAttribute("preserveAspectRatio", "none");
+      el.setAttribute("aria-hidden", "true");
+      el.innerHTML = (withDefs ? defs : "") + [...groups].map(([c, rs]) => `<g data-c="${c}">${rs.join("")}</g>`).join("");
+      for (const g of el.querySelectorAll<SVGGElement>(":scope > g")) {
+        const c = Number(g.dataset.c);
+        (by.get(c) ?? by.set(c, []).get(c)!).push(g);
+      }
+      return el;
+    };
+    const svgs = [...(paint.size ? [svg(`bl bl-paint s-${style}`, paint, style !== "bar")] : []), svg("bl bl-marks", marks, style === "bar")];
+    slot.append(...svgs);
+    this.groups.set(k, { svgs, by });
+    this.lit(k);
+  }
+
+  /** The lines picked out now: a person's or a commit's in Changes' lists (kept), else the hovered line's (its card up). */
+  private picked(): { person: string } | { commit: number } | null {
+    if (this.focusP !== null) return { person: this.focusP };
+    if (this.focusC !== null) return { commit: this.focusC };
+    return this.hl;
+  }
+
+  /** The hovered line's commit or writer picked out (by the colour shown: Age a commit's, Author a person's), while its card is up. */
+  private hl: { person: string } | { commit: number } | null = null;
+  private hlKey = "";
+
+  /** Pages whose highlight is still to be marked (the ones out of view), a few at each idle moment. */
+  private unlit = new Set<number>();
+  private idle = 0;
+
+  /**
+   * The highlight changed: every page's groups marked, nothing drawn
+   * again. The pages in view at once (in the hover's own task: its card's
+   * budget), the others when the main thread is idle, before they can be
+   * scrolled to: restyling every page's rects at once cost a hover 50 ms
+   * on a 16-page paper.
+   */
+  private highlight(): void {
+    const key = JSON.stringify(this.picked());
+    if (key === this.hlKey) return;
+    this.hlKey = key;
+    const box = this.p.stage.getBoundingClientRect();
+    this.unlit.clear();
+    for (const k of this.groups.keys()) {
+      const slot = this.slot(k);
+      const r = slot ? this.rectOf(slot, k) : null;
+      if (r && r.bottom >= box.top - 200 && r.top <= box.bottom + 200) this.lit(k);
+      else this.unlit.add(k);
+    }
+    if (!this.unlit.size || this.idle) return;
+    const ric = (f: (d: { timeRemaining(): number }) => void) => (typeof requestIdleCallback === "function" ? requestIdleCallback(f) : setTimeout(() => f({ timeRemaining: () => 8 }), 0));
+    const step = (d: { timeRemaining(): number }) => {
+      this.idle = 0;
+      for (const k of this.unlit) {
+        if (d.timeRemaining() < 2) break;
+        this.unlit.delete(k);
+        this.lit(k);
+      }
+      if (this.unlit.size) this.idle = ric(step) as number;
+    };
+    this.idle = ric(step) as number;
+  }
+
+  /** Page `k`'s groups as the highlight says: the picked ones `on`, the SVGs `hl` (the rest set back) while one is. */
+  private lit(k: number): void {
+    const g = this.groups.get(k);
+    if (!g) return;
+    const p = this.picked();
+    for (const s of g.svgs) s.classList.toggle("hl", !!p);
+    for (const [c, gs] of g.by) {
+      const on = !!p && ("commit" in p ? c === p.commit : c >= -1 && this.personOf(c) === p.person);
+      for (const x of gs) x.classList.toggle("on", on);
+    }
+  }
+
+  /** Whether a press is Blame's own (on the pages while it is on: a line's card; on the card): Changes stays open for it. */
+  takesPress(path: EventTarget[]): boolean {
+    return this.on && (path.includes(this.p.stage) || path.includes(this.card));
   }
 
   /** Each page's box, read once after a scroll or a resize (not on every pointer move). */
@@ -1763,7 +1848,6 @@ export class Blame {
 
   /** The line under the pointer changed: its paragraph's tint (only when that changes), the card after a short dwell. */
   private over(a: { k: number; s: Seg } | null, x?: number, y?: number): void {
-    const was = this.hover;
     this.hover = a;
     clearTimeout(this.dwell);
     if (!a) this.card.hidden = true;
@@ -1772,7 +1856,13 @@ export class Blame {
       if (!this.card.hidden) this.show(a, x, y);
       else this.dwell = setTimeout(() => this.hover === a && this.show(a, x, y), 180);
     }
-    if (was?.s.para !== a?.s.para || was?.k !== a?.k) this.drawHover();
+    if (!a) this.pick(null);
+  }
+
+  /** The line whose card is up picked out with its kind (`a`; null: none): its commit's lines by Age, its writer's by Author. */
+  private pick(a: { k: number; s: Seg } | null): void {
+    this.hl = !a ? null : this.look.color === "age" ? { commit: a.s.c } : { person: this.personOf(a.s.c) };
+    this.highlight();
   }
 
   private click(e: MouseEvent): void {
@@ -1787,7 +1877,6 @@ export class Blame {
     this.hover = a;
     clearTimeout(this.dwell);
     this.show(a, e.clientX, e.clientY);
-    this.drawHover();
   }
 
   /** What the card shows now (its line's commit and source): drawn again only when that changes. */
@@ -1835,6 +1924,9 @@ export class Blame {
       this.card.style.left = `${x + this.cardShift[0]}px`;
       this.card.style.top = `${y + this.cardShift[1]}px`;
     }
+    // (its lines picked out last: the card measured and placed first, so no read of it restyles every rect
+    // the highlight's classes touched in this task; they are restyled once, as the frame is drawn)
+    this.pick(a);
   }
   private cardSize: [number, number] = [300, 120];
   private avoidBox: DOMRect | null = null;

@@ -109,7 +109,7 @@ const counted = `/^\\d+ changes?$/.test($(".chg-pop .foot .count")?.textContent 
 const asked = `globalThis.__ops.filter((o) => /^(blame|diff_)/.test(o))`;
 const dark = (t, on) => t.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: on ? "dark" : "light" }] });
 
-test("Changes, Diff: the tip once; a hover does nothing; a click opens it, starting nothing; the pointer and clicks beside it leave it open; the picker's rules; the look inline and in Settings; Esc and ✕", async () => {
+test("Changes, Diff: the tip once; a hover does nothing; a click opens it, starting nothing; a press outside closes it, a drag from inside does not; the picker's rules; the look at the top and in Settings; closed, the diff stays on the pages till Stop comparing; Esc and ✕", async () => {
   const { w, t, shot, click } = await opened({ tips: true });
   // (the tip, once: the old Compare's and Blame's seen, the Changes one still shown)
   await t.until(`!$(".tip").hidden && /Changes/.test($(".tip h4").textContent)`, "the Changes tip", 10000);
@@ -131,11 +131,25 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   assert.deepEqual(await t.q(asked), [], "opened: nothing asked of the watch");
   assert.ok(await t.q(`[...$(".chg-pop").querySelectorAll("button")].filter((x) => x.offsetParent).every((x) => x.title || x.getAttribute("aria-label"))`), "every control says what it does");
   await shot("empty-light");
-  // (the pointer over the pages, a click on them: still open)
+  // (the look at the top of the list, open: no fold anywhere)
+  assert.ok(await t.q(`(() => { const l = $("#chg-look"), b = $(".chg-pop .body"); return !!l && l.offsetHeight > 0 && b.firstElementChild === l && !$(".chg-pop .lookbox, .chg-pop .lookhead, .chg-pop details"); })()`), "Diff's look at the top, open, no fold");
+  // (the pointer over the pages: still open; a drag begun inside it and let go on the pages: still open)
   await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 60, y: 400 });
+  await sleep(300);
+  assert.equal(await t.q(`$(".chg-pop").hidden`), false, "the pointer gone: still open");
+  const ins = await t.point(".chg-pop .ttl h2");
+  await t.drag(ins.x, ins.y, 60, 400);
+  await sleep(300);
+  assert.equal(await t.q(`$(".chg-pop").hidden`), false, "a drag from inside let go on the pages: still open");
+  // (a press on the pages: closed; on the bar beside it: closed too)
   await t.mouse(60, 400);
-  await sleep(500);
-  assert.equal(await t.q(`$(".chg-pop").hidden`), false, "the pointer gone, a click on the pages: still open");
+  await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-pressed") === "false"`, "a press on the pages closes it", 5000);
+  await click("#b-changes");
+  await t.until(`!$(".chg-pop").hidden`, "open again", 5000);
+  await t.mouse(...(await t.q(`(() => { const r = $("#pgn").getBoundingClientRect(); return [r.left + 2, r.top + r.height / 2]; })()`)));
+  await t.until(`$(".chg-pop").hidden`, "a press on the bar closes it", 5000);
+  await click("#b-changes");
+  await t.until(`!$(".chg-pop").hidden`, "open again", 5000);
   // (the picker: the merge's two lanes, main's chain one colour, the branch another)
   await click("#chg-start");
   await t.until(`$$(".phx-commits .row[data-i]").length >= 6`, "the commits");
@@ -195,12 +209,14 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await t.until(`$('.chg-pop [data-pg="current"]').getAttribute("aria-pressed") === "true"`, "D: the current version's pages", 5000);
   await t.key("d", "KeyD", 68);
   await t.until(`$('.chg-pop [data-pg="diff"]').getAttribute("aria-pressed") === "true"`, "D again: the diff's", 5000);
-  // (the look, inline under the list: the colour-blind-safe preset, the marker, change bars; kept)
-  await click("#chg-lookhead");
-  assert.equal(await t.q(`!$("#chg-look").hidden && ${view} === "diff" && $$(".chg-pop .citem").length > 0`), true, "the look under the list, the list still there");
+  // (the look at the top of the list: ⚙ goes to it, marked a moment; the colour-blind-safe preset, the marker; kept)
+  await t.q(`(() => { $(".chg-pop .body").scrollTop = 1e6; return 1; })()`);
+  await click("#chg-gear");
+  await t.until(`$(".chg-pop .body").scrollTop === 0 && $("#chg-look").classList.contains("mark")`, "⚙: the look at the top, marked", 5000);
+  assert.equal(await t.q(`${view} === "diff" && $$(".chg-pop .citem").length > 0`), true, "the look above the list, the list still there");
   await click(`[data-look="colors"][data-v="safe"]`);
   await click(`[data-look="ins"][data-v="mark"]`);
-  assert.equal(await t.q(`$(".chg-pop .preview").className`), "preview i-mark d-strike");
+  assert.equal(await t.q(`$('#chg-look [data-look="ins"][data-v="mark"]').getAttribute("aria-pressed")`), "true");
   assert.equal(await t.q(`getComputedStyle($(".chg-pop")).getPropertyValue("--chg-add").trim()`), "#0072B2");
   await shot("look-diff-light");
   await dark(t, true);
@@ -210,20 +226,33 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await t.q(`(() => { $("#x-settings").click(); return 1; })()`);
   await t.until(`!$("#settings").hidden && !!$('#settings [data-section="Changes"]')`, "Settings", 5000);
   await t.click(`#settings [data-section="Changes"]`);
-  await t.until(`/Diff: colours/.test($("#settings").innerText) && /Blame: detail/.test($("#settings").innerText)`, "Settings, Changes: Diff's and Blame's look", 5000);
+  await t.until(`/Diff: colours/.test($("#settings").innerText) && /Blame: detail/.test($("#settings").innerText) && /Blame: style/.test($("#settings").innerText)`, "Settings, Changes: Diff's and Blame's look, Blame's style", 5000);
   await shot("settings-changes-light");
   await dark(t, true);
   await shot("settings-changes-dark");
   await dark(t, false);
   await t.key("Escape", "Escape", 27);
   assert.deepEqual(await t.q(`[$("#settings").hidden, $(".chg-pop").hidden]`), [true, false], "Esc closes Settings first");
-  await click(`[data-reset="diff"]`);
-  await click("#chg-lookhead");
-  // (Esc closes it; opened again, the list at once)
+  // (All settings… from the look: Settings at Changes; a press in it leaves the popover open under it)
+  await click("#chg-all");
+  await t.until(`!$("#settings").hidden && /Diff: colours/.test($("#settings").innerText)`, "All settings…: Settings, Changes", 5000);
+  await t.click(`#settings [data-id="chg-reset"] button`);
+  assert.equal(await t.q(`$(".chg-pop").hidden`), false, "a press in Settings leaves Changes open");
   await t.key("Escape", "Escape", 27);
-  await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-pressed") === "false"`, "Esc closes it", 5000);
+  // (Esc closes it, the diff left on the pages and the button pressed; opened again, the list at once, nothing built again)
+  const ops = await t.q(`globalThis.__ops.length`);
+  await t.key("Escape", "Escape", 27);
+  await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-expanded") === "false"`, "Esc closes it", 5000);
+  assert.deepEqual(await t.q(`[$("#b-changes").getAttribute("aria-pressed"), $("#b-changes").classList.contains("chg-comparing"), !!$("#chg-n").textContent, /^Comparing /.test($("#b-changes").title)]`), ["true", true, true, true], "closed with a diff shown: the button pressed, its count, its title says so");
+  assert.ok(!(await t.q(`globalThis.__ops.slice(${ops}).includes("diff_show")`)), "closed: the diff's pages stay (no diff_show current)");
+  await shot("closed-comparing-light");
   await click("#b-changes");
   assert.ok(await t.q(`$$(".chg-pop .citem").length > 0`), "opened again: the list at once");
+  assert.ok(!(await t.q(`globalThis.__ops.slice(${ops}).some((o) => o === "diff_start")`)), "opened again: the same comparison, nothing rebuilt");
+  // (closed by a press on the pages: the diff stays there too)
+  await t.mouse(60, 400);
+  await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-pressed") === "true"`, "a press on the pages: closed, the diff kept", 5000);
+  await click("#b-changes");
   // (dark)
   await dark(t, true);
   await shot("diff-dark");
@@ -232,13 +261,14 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await click("#chg-done");
   await dark(t, false);
   // (a diff shown: Stop comparing, in words, and its downloads beside it, never in the look)
-  assert.deepEqual(await t.q(`[$("#chg-stop")?.textContent, $$(".chg-pop .cmpacts [data-dl]").map((b) => b.textContent), $$(".chg-pop .lookbox [data-dl]").length, $("#chg-stop").offsetWidth > 0]`), ["✕ Stop comparing", ["PDF", "diff.tex"], 0, true], "Stop comparing and the downloads under From → To");
+  assert.deepEqual(await t.q(`[$("#chg-stop")?.textContent, $$(".chg-pop .cmpacts [data-dl]").map((b) => b.textContent), $$(".chg-pop #chg-look [data-dl]").length, $("#chg-stop").offsetWidth > 0]`), ["✕ Stop comparing", ["PDF", "diff.tex"], 0, true], "Stop comparing and the downloads under From → To");
   await shot("stop-light");
   await dark(t, true);
   await shot("stop-dark");
   await dark(t, false);
   await click("#chg-stop");
   await t.until(`$(".chg-pop .body .empty b")?.textContent === "Pick a version to compare with" && $(".chg-pop .foot .count").textContent === "No diff yet" && !$("#chg-stop") && !$$("#smarks .change").length && !$("#chg-n").textContent`, "stopped: the pages as they are, no marks, no count, Pick a version", 10000);
+  assert.ok(!(await t.q(`$("#b-changes").classList.contains("chg-comparing")`)), "stopped: the button no longer says comparing");
   // (✕)
   await click("#chg-x");
   await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-pressed") === "false"`, "✕ closes it", 5000);
@@ -257,25 +287,66 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await w.stop();
 });
 
-test("Changes, Blame: asked by its half; who wrote this version; the merged commit's card; skip and since; the pointer swept with no long task; a rebuild blames nothing again", async () => {
+test("Changes, Blame: asked by its half; every line coloured (a wash, by default), each style; its look at the top, ⚙ to it; who wrote this version; a person, a commit or a hover picks out their lines; skip from a commit's row, kept; the merged commit's card; a rebuild blames nothing again", async () => {
   const { w, t, shot, click } = await opened();
   await click("#b-changes");
   await sleep(500);
   assert.deepEqual(await t.q(asked), [], "opened: nothing asked");
   await click(`[data-m="blame"]`);
-  await t.until(`$$(".slot .bl-bar:not(.bl-wait)").length >= 8 && $$(".chg-pop .prow").length >= 5`, "the bars and the people", 60000);
+  const paint = `$$(".slot svg.bl-paint rect")`;
+  await t.until(`${paint}.length >= 8 && $$(".chg-pop .prow").length >= 5`, "the lines coloured and the people", 60000);
   assert.ok(await t.q(`${asked}.includes("blame")`), "Blame asked once its half was clicked");
+  // (Wash by default: one blended SVG a page, its rects grouped by commit; no box of its own per line)
+  assert.deepEqual(await t.q(`[$$(".slot svg.bl-paint.s-wash").length > 0, getComputedStyle($(".slot svg.bl-paint")).mixBlendMode, $$(".slot div.bl").length, $('#chg-look [data-look="style"][data-v="wash"]').getAttribute("aria-pressed")]`), [true, "multiply", 0, "true"], "Wash on by default, blended behind the words");
   const people = () => t.q(`$$(".chg-pop .prow .nm > span:first-child").map((e) => e.textContent).sort()`);
   assert.deepEqual(await people(), ["Alice", "Bob", "Carol", "Lina", "Mary", "Not committed"]);
   assert.deepEqual(await t.q(`[$("#chg-n").textContent, /The number: 5 people wrote this version/.test($("#b-changes").title)]`), ["5", true], "Blame's badge: the people who wrote this version, as the title says");
   assert.match(await t.q(`$(".chg-pop .sec h3 span").textContent`), /· [\d,]+ words$/, "counted in the sources' words");
-  assert.ok(await t.q(`$$(".slot .bl-bar.bl-hatch").length >= 1`), "the sentence not committed hatched");
-  assert.ok(await t.q(`$$(".slot .bl-bar").some((b) => b.getBoundingClientRect().height > 30)`), "the figure's picture: a bar of its own (its image's last commit)");
+  assert.ok(await t.q(`$$('.slot svg.bl-paint rect[fill^="url(#blh-"]').length >= 1`), "the sentence not committed hatched");
+  assert.ok(await t.q(`${paint}.some((r) => r.getBoundingClientRect().height > 30)`), "the figure's picture: a wash of its own (its image's last commit)");
+  // (the look at the top, open, no fold: Colour by, Style, Not committed; no pinned footer)
+  assert.ok(await t.q(`(() => { const l = $("#chg-look"); return $(".chg-pop .body").firstElementChild === l && ["color", "style", "wip"].every((k) => l.querySelector('[data-look="' + k + '"]')) && !$(".chg-pop .lookbox, .chg-pop .lookhead, .chg-pop .skips, .chg-pop details, .chg-pop > .foot"); })()`), "Blame's look at the top, open; no fold, no footer");
   await shot("blame-author-light");
-  // (a person clicked: their lines picked out)
+  await dark(t, true);
+  await shot("blame-author-dark");
+  await dark(t, false);
+  // (⚙ goes to it, marked a moment)
+  await t.q(`(() => { $(".chg-pop .body").scrollTop = 1e6; return 1; })()`);
+  await click("#chg-gear");
+  await t.until(`$(".chg-pop .body").scrollTop === 0 && $("#chg-look").classList.contains("mark")`, "⚙: the look at the top, marked", 5000);
+  // (each style: the words' own colour, blended lighten; a bar in the margin, no blend; back to the wash)
+  await click(`#chg-look [data-look="style"][data-v="text"]`);
+  await t.until(`$$(".slot svg.bl-paint.s-text rect").length >= 8 && getComputedStyle($(".slot svg.bl-paint")).mixBlendMode === "lighten"`, "Text: the words coloured", 10000);
+  await shot("blame-text-light");
+  await click(`#chg-look [data-look="style"][data-v="bar"]`);
+  await t.until(`!$(".slot svg.bl-paint") && $$(".slot svg.bl-marks rect.b").length >= 8`, "Bar: a bar a line", 10000);
+  assert.ok(await t.q(`$$(".slot svg.bl-marks rect.b").every((r) => r.getBoundingClientRect().width >= 4)`), "the bars thicker than the old 4 px");
+  await shot("blame-bar-light");
+  await click(`#chg-look [data-look="color"][data-v="age"]`);
+  await t.until(`!!$("#chg-look .ramp")`, "Age: its ramp", 5000);
+  await shot("blame-age-bar-light");
+  await click(`#chg-look [data-look="style"][data-v="wash"]`);
+  await shot("blame-age-wash-light");
+  await click(`#chg-look [data-look="color"][data-v="author"]`);
+  await t.until(`$$(".slot svg.bl-paint.s-wash rect").length >= 8`, "back to the wash", 10000);
+  // (not committed hidden, then hatched again)
+  await click(`#chg-look [data-look="wip"][data-v="hide"]`);
+  await t.until(`!$$('.slot svg.bl-paint rect[fill^="url(#blh-"]').length`, "not committed: not marked", 10000);
+  await click(`#chg-look [data-look="wip"][data-v="show"]`);
+  await t.until(`$$('.slot svg.bl-paint rect[fill^="url(#blh-"]').length >= 1`, "not committed: hatched again", 10000);
+  // (a person clicked: their lines picked out, the rest set back; kept till clicked again or Esc)
+  const lit = `($$(".slot svg.bl.hl").length > 0 && $$(".slot svg.bl-paint g.on").length > 0)`;
   await click(`.chg-pop .prow`);
-  assert.ok(await t.q(`$$(".slot .bl-wash").length > 0`), "the others' lines washed");
-  await click(`.chg-pop .prow`);
+  await t.until(lit, "a person's lines picked out", 5000);
+  await sleep(400);
+  assert.ok(await t.q(lit), "kept");
+  await shot("blame-person-light");
+  await t.key("Escape", "Escape", 27);
+  await t.until(`!$$(".slot svg.bl.hl").length && !$(".chg-pop").hidden`, "Esc lets the person go, the popover stays", 5000);
+  await click(`.chg-pop .crow`);
+  await t.until(lit, "a commit's lines picked out", 5000);
+  await click(`.chg-pop .crow`);
+  await t.until(`!$$(".slot svg.bl.hl").length`, "clicked again: every line again", 5000);
   assert.equal(await t.q(`$$(".chg-pop .crow small").filter((s) => s.textContent.includes("lina/related-work")).length`), 1, "the merged commit named by its branch");
   // (the pointer swept over the pages for 2 s, Blame on: no long task, frames on time)
   const st = await t.q(`(() => { const r = $("#stage").getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; })()`);
@@ -289,20 +360,23 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   const sw = await t.q(`(() => { const w = globalThis.__sweep; w.stop = true; const fr = w.frames.slice(1).sort((a, b) => a - b); return { long: w.long, p95: Math.round(fr[Math.floor(fr.length * 0.95)] ?? 0) }; })()`);
   assert.deepEqual(sw.long, [], `no long task while the pointer swept: ${JSON.stringify(sw)}`);
   assert.ok(sw.p95 <= 34, `frames on time while the pointer swept: ${JSON.stringify(sw)}`);
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 3, y: 3 });
   await t.q(`(() => { $("#stage").scrollTop = 0; return 1; })()`);
   await sleep(300);
   // (a rebuild, every page drawn again: no blame asked again, the lists' nodes the same ones)
   await t.q(`(() => { $$(".chg-pop .prow, .chg-pop .crow").forEach((e) => (e.__kept = 1)); globalThis.__ops.length = 0; return 1; })()`);
   const before = (await t.q(`document.title`)) ?? "";
-  await click("#go");
+  // (Rebuild asked with no press outside the popover: a press on the bar would close it, Blame with it)
+  await t.q(`(() => { $("#go").click(); return 1; })()`);
   await t.until(`globalThis.__ops.includes("rebuild")`, "the rebuild asked", 5000);
   await sleep(2500);
   await t.until(`document.title.endsWith("· Built")`, "built again", 120000);
   await sleep(1500);
   assert.ok(!(await t.q(`globalThis.__ops.includes("blame")`)), `no blame again after a rebuild (${before}): ${JSON.stringify(await t.q("globalThis.__ops"))}`);
   assert.ok(await t.q(`$$(".chg-pop .prow, .chg-pop .crow").every((e) => e.__kept === 1)`), "the lists' nodes the same ones: no flash");
-  assert.ok(await t.q(`$$(".slot .bl-bar:not(.bl-wait)").length >= 8`), "the pages' bars, mapped again");
-  // (Lina's line: the card, after a short dwell, says where it was written and merged)
+  await t.until(`${paint}.length >= 8`, "the pages coloured, mapped again", 10000).catch(async (e) => { throw new Error(`${e.message}: ${await t.q(`JSON.stringify({ slots: $$(".slot").length, bl: $$(".slot .bl").map((x) => x.getAttribute("class") + ":" + x.querySelectorAll("rect").length), canv: $$(".slot canvas").length })`)}`); });
+  // (Lina's line hovered: the card after a short dwell, where it was written and merged; her commit's lines picked out
+  // (Author: her lines), the rest set back; the pointer gone, all as before)
   await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = "Lina wrote"; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
   await t.until(`!!$(".mark.fnd")`, "Lina's paragraph found", 10000);
   await sleep(500);
@@ -313,6 +387,7 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   assert.match(card, /Related work/, card);
   assert.match(card, /On lina\/related-work, merged into main \([0-9a-f]{7}\)/, card);
   assert.match(card, /What this commit changed\s*Show in editor\s*Copy hash/, card);
+  await t.until(lit, "the hovered line's writer picked out", 5000);
   assert.equal(await t.q(`$(".chg-pop").hidden`), false, "the popover still open beside the card");
   await shot("blame-card-light");
   const short = await t.q(`$(".blcard .meta code").textContent`);
@@ -320,25 +395,68 @@ test("Changes, Blame: asked by its half; who wrote this version; the merged comm
   await t.until(`${view} === "diff" && ${to} === ${JSON.stringify(short)}`, "What this commit changed: Diff, the commit against its parent", 10000);
   await t.until(counted, "its changes", 120000);
   await click(`[data-m="blame"]`);
-  // (Blame's look, inline: Bob's commit skipped, his lines go to who wrote them before (Carol); since the tag)
-  await click("#chg-lookhead");
-  await shot("look-blame-light");
-  assert.ok(await t.q(`$$(".chg-pop .skips label").every((l) => l.querySelector("span").scrollWidth <= l.querySelector("span").clientWidth + 1 && /: skipped, its lines go/.test(l.title))`), "Skip commits: whole rows, full titles");
-  const bob = await t.q(`$$(".chg-pop [data-skip]").findIndex((x) => /Bob's paragraph/.test(x.closest("label").textContent))`);
-  assert.ok(bob >= 0, "Bob's commit offered to skip");
-  await t.q(`(() => { const x = $$(".chg-pop [data-skip]")[${bob}]; x.click(); return 1; })()`);
-  await t.q(`(() => { const s = $("#chg-since"); s.value = [...s.options].find((o) => /submitted/.test(o.textContent)).value; s.dispatchEvent(new Event("change")); return 1; })()`);
-  await click(`[data-look="bars"][data-v="right"]`);
-  await t.until(`$$(".chg-pop .prow").length > 0 && !$$(".chg-pop .prow .nm > span:first-child").some((e) => e.textContent === "Bob")`, "Bob's lines gone to who wrote them before", 60000);
-  assert.ok(await t.q(`$$(".slot .bl-wash").length > 0`), `since the tag: the lines older than it washed ${JSON.stringify(await t.q(`({ since: $("#chg-since")?.value, slots: $$(".slot").length, bars: $$(".slot .bl-bar").length, wash: $$(".slot .bl-wash").length, dim: $$(".slot .bl-dim").length, head: $(".chg-pop .sec h3 span")?.textContent, crows: $$(".chg-pop .crow small").map((s) => s.textContent).join(" | ") })`))}`);
-  await shot("blame-since-light");
+  await t.until(`$$(".chg-pop .crw .skipb").length >= 4`, "the commits, each with its Skip", 30000);
+  // (Bob's commit skipped from its row: his lines go to who wrote them before (Carol); the row stays, said skipped)
+  const bobRow = `$$(".chg-pop .crw").find((r) => /Bob's paragraph/.test(r.textContent))`;
+  await t.q(`(() => { ${bobRow}.querySelector(".skipb").click(); return 1; })()`);
+  await t.until(`$$(".chg-pop .prow").length > 0 && !$$(".chg-pop .prow .nm > span:first-child").some((e) => e.textContent === "Bob") && ${bobRow}?.classList.contains("skipped") && ${bobRow}.querySelector(".skipb").getAttribute("aria-pressed") === "true"`, "Bob's lines gone to who wrote them before, his row said skipped", 60000);
+  await shot("blame-skipped-light");
   await dark(t, true);
-  await t.q(`(() => { $(".win").classList.add("dark-pdf"); return 1; })()`);
-  await shot("look-blame-dark");
-  await t.q(`(() => { $(".win").classList.remove("dark-pdf"); return 1; })()`);
+  await shot("blame-skipped-dark");
   await dark(t, false);
-  await click(`[data-reset="blame"]`);
-  await click("#chg-lookhead");
+  // (kept: a new tab, Blame asked, the commit still skipped; taken back from its row there)
+  const t2 = await browser.tab(await w.url());
+  await t2.until(`document.title.endsWith("· Built")`, "the build", 240000);
+  if (await t2.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t2.click(".tip [data-t=skip]");
+  await t2.click("#b-changes");
+  await t2.until(`!$(".chg-pop").hidden`, "open", 5000);
+  if (await t2.q(`!!$("#chg-blame-go")`)) await t2.click("#chg-blame-go");
+  await t2.until(`!!${bobRow}?.classList.contains("skipped")`, "the skip kept", 60000);
+  await t2.q(`(() => { ${bobRow}.querySelector(".skipb").click(); return 1; })()`);
+  await t2.until(`$$(".chg-pop .prow .nm > span:first-child").some((e) => e.textContent === "Bob") && !${bobRow}?.classList.contains("skipped")`, "taken back: Bob's lines his again", 60000);
+  // (changed since the tag, from Settings: the lines older than it set back, uncoloured)
+  await t.q(`(() => { $("#x-settings").click(); return 1; })()`);
+  await t.until(`!$("#settings").hidden && !!$('#settings [data-section="Changes"]')`, "Settings", 5000);
+  await t.click(`#settings [data-section="Changes"]`);
+  await t.until(`!!$('#settings [data-id="bl-since"] select')`, "Blame: changed since", 5000);
+  await t.q(`(() => { const s = $('#settings [data-id="bl-since"] select'); s.value = [...s.options].find((o) => /submitted/.test(o.textContent)).value; s.dispatchEvent(new Event("change", { bubbles: true })); return 1; })()`);
+  await t.key("Escape", "Escape", 27);
+  await t.until(`$$(".slot svg.bl-marks rect.v.o").length > 0`, "since the tag: the lines older than it set back", 10000);
+  await shot("blame-since-light");
+  // (the pages' own colours, from Settings: Sepia (a light sheet: the wash multiplied), Dark (a dark one: screened, the
+  // veil the sheet's colour), Dark PDF; each looked at in the wash and the words' colour)
+  const set = async (id, v) => {
+    await t.q(`(() => { if ($("#settings").hidden) $("#x-settings").click(); return 1; })()`);
+    await t.until(`!$("#settings").hidden`, "Settings", 5000);
+    // (its row in whichever section has it: each section shown in turn till it is there)
+    await t.until(`(() => { const b = $('#settings [data-id="${id}"] [data-v="${v}"]'); if (b) return (b.click(), true); const ss = $$("#settings [data-section]"); const i = ss.findIndex((s) => s.getAttribute("aria-selected") === "true" || s.getAttribute("aria-pressed") === "true"); ss[(i + 1) % ss.length]?.click(); return false; })()`, `Settings: ${id} ${v}`, 10000);
+    await t.key("Escape", "Escape", 27);
+    await t.until(`$("#settings").hidden`, "Settings closed", 5000);
+  };
+  const blend = `getComputedStyle($(".slot svg.bl-paint")).mixBlendMode`;
+  await set("page-colours", "sepia");
+  await t.until(`$(".win").classList.contains("paged") && ${blend} === "multiply"`, "Sepia: the wash multiplied", 5000);
+  await shot("blame-sepia-light");
+  await click(`#chg-look [data-look="style"][data-v="text"]`);
+  await t.until(`${blend} === "lighten"`, "Sepia: the words coloured", 5000);
+  await shot("blame-sepia-text-light");
+  await set("page-colours", "dark");
+  await t.until(`$(".win").classList.contains("paged-dark") && ${blend} === "darken"`, "Dark pages: the words' colour darkened in", 5000);
+  await shot("blame-darkpages-text-light");
+  await click(`#chg-look [data-look="style"][data-v="wash"]`);
+  await t.until(`${blend} === "screen"`, "Dark pages: the wash screened", 5000);
+  await shot("blame-darkpages-light");
+  await set("page-colours", "paper");
+  await dark(t, true);
+  await set("dark-pdf", "on");
+  await t.until(`$(".win").classList.contains("dark-pdf") && ${blend} === "screen"`, "Dark PDF: the wash screened", 5000);
+  await shot("blame-darkpdf-dark");
+  await set("dark-pdf", "off");
+  await dark(t, false);
+  await t.q(`(() => { $("#x-settings").click(); return 1; })()`);
+  await t.until(`!$("#settings").hidden && !!$('#settings [data-id="bl-reset"] button')`, "Settings", 5000);
+  await t.click(`#settings [data-id="bl-reset"] button`);
+  await t.key("Escape", "Escape", 27);
   await click("#chg-x");
   assert.equal(await t.q(`$$(".slot .bl").length`), 0, "closed: nothing over the pages");
   assert.deepEqual(t.errors, []);
@@ -457,7 +575,7 @@ test("Blame on a 16-page paper: words as a reader counts them, said as partial t
   const n = +(await t.q(`$(".chg-pop .sec h3 span").textContent.match(/· ([\\d,]+) words$/)[1].replace(/,/g, "")`));
   assert.ok(n >= expected && n <= expected * 1.02 + 10, `words: ${n}, the reader's ${expected} (no numbers, no drawing)`);
   assert.deepEqual(await t.q(`$$(".chg-pop .prow .nm > span:first-child").map((e) => e.textContent).sort()`), ["Bob", "Carol", "Lina", "Mary"]);
-  await t.until(`$$(".slot .bl-bar:not(.bl-wait)").length > 40`, "the bars", 30000);
+  await t.until(`$$(".slot svg.bl-paint rect").length > 40`, "the lines coloured", 30000);
   // (the title row: the title centred over the popover, ⚙ and ✕ at the right, no fold)
   assert.ok(await t.q(`(() => { const p = $(".chg-pop").getBoundingClientRect(), h = $(".chg-pop .ttl h2").getBoundingClientRect(); return !$("#chg-fold") && Math.abs((h.left + h.right) / 2 - (p.left + p.right) / 2) < 2 && $("#chg-gear").getBoundingClientRect().left > h.right; })()`), "the title centred, ⚙ and ✕ at the right, no fold");
   if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-title-light.png"));
@@ -481,7 +599,7 @@ test("Blame on a 16-page paper: words as a reader counts them, said as partial t
   assert.ok(on.style + on.layout + on.paint <= 2, `style, layout and paint per move: ${JSON.stringify(on)} ms`);
   assert.ok(on.layerize.n <= on.layerize.frames + 2 && on.layerize.p50 <= still.layerize.p50 + 1, `no layerize of its own per move, none of every layer: ${JSON.stringify(on.layerize)} against ${JSON.stringify(still.layerize)}`);
   // (the hover to the card: its dwell, then drawn)
-  const line = await t.q(`(() => { const b = $$(".slot .bl-bar:not(.bl-wait)").find((b) => { const r = b.getBoundingClientRect(); return r.top > 150 && r.bottom < innerHeight - 200 && r.height > 4; }); const r = b.getBoundingClientRect(); return [r.right + 80, r.top + r.height / 2]; })()`);
+  const line = await t.q(`(() => { const b = $$(".slot svg.bl-paint rect").find((b) => { const r = b.getBoundingClientRect(); return r.top > 150 && r.bottom < innerHeight - 200 && r.height > 4; }); const r = b.getBoundingClientRect(); return [r.left + 20, r.top + r.height / 2]; })()`);
   await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: line[1] });
   await t.until(`$(".blcard").hidden`, "no card", 5000);
   await t.q(`(() => { const card = $(".blcard"); globalThis.__hc = null; let t0 = null; addEventListener("pointermove", (e) => (t0 ??= e.timeStamp), { capture: true }); new MutationObserver(() => { if (!card.hidden && globalThis.__hc === null && t0 !== null) globalThis.__hc = performance.now() - t0; }).observe(card, { attributes: true, childList: true }); return 1; })()`);

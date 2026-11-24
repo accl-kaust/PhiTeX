@@ -406,11 +406,16 @@ const blame: BlameHost = {
 
 // ---- Changes: the history (`diff_log`), the diff (the watch's diff ops, view.rs), the last visit ----
 
+/** A box on the diff's pages, as the watch places it: its page (from 0), x0, y0, x1, y1 (points from the page's top left). */
+type Placed = [number, number, number, number, number];
+
 /** The watch's diff state (the `diff` op's answer, the `diff` event's). */
-type DiffState = { shown?: boolean; base?: string; to?: string; label?: string; changes?: (DiffChange & { page?: number; y?: number })[]; built?: boolean; error?: string };
+type DiffState = { shown?: boolean; base?: string; to?: string; label?: string; changes?: (DiffChange & { page?: number; y?: number; box?: Placed | null; del_box?: Placed | null })[]; built?: boolean; error?: string; errors?: number; error_text?: string | null };
 
 let diffState: DiffState = {};
 let diffWait: ((d: DiffState) => void) | undefined;
+/** The diff's error said last (said again only when it changes). */
+let diffSaid = "";
 let counted: ((c: DiffChange[]) => void) | undefined;
 const ask = async (op: object) => {
   const r = await sock.request(op);
@@ -477,6 +482,17 @@ const runner: ChangesRunner = {
   goto: (k) => void gotoChange(k),
   download: (what) => save(`diff.${what}`),
   restyle: (l, hide) => void ask({ op: "diff_restyle", ...lookFields(l, hide) }).catch(() => undefined),
+  // (each change's box on page k and its deleted part's, as the watch placed them)
+  marks: (k) =>
+    (diffState.changes ?? []).flatMap((c, i) => {
+      const b = c.box?.[0] === k ? c.box : null, d = c.del_box?.[0] === k ? c.del_box : null;
+      const box = (b ?? d)?.slice(1) as [number, number, number, number] | undefined;
+      return box ? [{ n: i + 1, k, box, ...(d ? { del: d.slice(1) as [number, number, number, number] } : {}) }] : [];
+    }),
+  source: (n) => {
+    const c = diffState.changes?.[n - 1];
+    if (c) void sock.request({ op: "source", file: c.new.file, start: c.new.start, end: c.new.end });
+  },
   stop: () => ((wanted = undefined), panel.diffMarks([]), void ask({ op: "diff_stop" }).catch(() => undefined)),
 };
 
@@ -736,6 +752,10 @@ sock.onEvent((e: any) => {
   else counted?.(diffState.changes);
   // (a change gone to while the diff was typeset: there now, placed)
   if (diffState.built && wanted !== undefined) void gotoChange(wanted);
+  // (the marked-up document stopped on an error: said, once a build, not left as a page that never comes)
+  const stopped = diffState.built && diffState.errors ? `The diff's document stopped: ${diffState.error_text ?? `${diffState.errors} errors`}` : "";
+  if (stopped && stopped !== diffSaid) panel.msg(stopped, true, true);
+  diffSaid = stopped;
 });
 
 // ---- Printing: the PDF, not this page ----

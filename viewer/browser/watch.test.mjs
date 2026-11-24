@@ -204,7 +204,7 @@ test("Next change goes to the page of that change; Diff's settings float over th
   assert.deepEqual(box, { pos: "fixed", over: true }, "a popover over the pages, not a column beside them");
   // (a look chosen: its preview at once, the diff typeset again in it)
   await t.click(`[data-look="ins"][data-v="mark"]`);
-  await t.until(`$(".chg-pop .preview").classList.contains("i-mark")`, "the marker look");
+  await t.until(`$('#chg-look [data-look="ins"][data-v="mark"]').getAttribute("aria-pressed") === "true"`, "the marker look");
   await w.stop();
 });
 
@@ -896,6 +896,141 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   assert.deepEqual([pins[id("Above")], pins[id("Two columns")], pins[id("Right")]], ["1", "2", "3"], `the pins in reading order: ${JSON.stringify(pins)}`);
   const cards = await t.q(`$$(".rside .card.note").map((c) => [c.dataset.id, c.querySelector(".num")?.textContent])`);
   assert.deepEqual(cards, [[id("Above"), "1"], [id("Two columns"), "2"], [id("Right"), "3"]], "the list in the same order, the same numbers");
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});
+
+/** A right-click at (x, y): the browser's contextmenu event there. */
+async function rightClick(t, x, y) {
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  await t.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "right", clickCount: 1 });
+  await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "right", clickCount: 1 });
+}
+
+/** The screen point of the first character `ch` the pages' text layer has, or null (a page's expression). */
+const charAt = (ch, inLine = "") =>
+  `(() => { for (const x of $$(".slot .phx-text text")) { const i = x.textContent.indexOf(${JSON.stringify(ch)}); if (i < 0 || !x.firstChild || !x.textContent.includes(${JSON.stringify(inLine)})) continue; const r = document.createRange(); r.setStart(x.firstChild, i); r.setEnd(x.firstChild, i + 1); const b = r.getBoundingClientRect(); if (b.width) return [b.left + b.width / 2, b.top + b.height / 2]; } return null; })()`;
+
+test("Compare: an added run ending in a control space (e.g.\\ ) builds the diff's pages (it shipped none); closed, the diff stays; deleted text the pages leave out has its card on hover, pinned by a click; a right-click on a change shows it in the list (diff, no page; caret card; its menu)", async () => {
+  const before = doc("Lost your address? Find it again as in Lab~1 (\\texttt{ifconfig} in the console).\n\n\\begin{tabular}{ll}\nPort & 8080 \\\\\nHost & alpha \\\\\n\\end{tabular}\n\n\\begin{figure}[h]\\centering\\rule{2cm}{1cm}\\caption{The old set-up.}\\end{figure}\n\nThe old words that go away now.\n\nA paragraph that stays as it is.");
+  const after = doc("Start it again with the address, e.g.\\ \\texttt{bank 10.0.0.1}. Then find the address.\n\n\\begin{tabular}{ll}\nPort & 8443 \\\\\nHost & beta \\\\\n\\end{tabular}\n\n\\begin{figure}[h]\\centering\\rule{3cm}{1cm}\\caption{The new set-up.}\\end{figure}\n\nThe old words now.\n\nA paragraph that stays as it is.");
+  const dir = project({ "main.tex": before });
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "one");
+  const w = new Watch(dir, { home });
+  w.write("main.tex", after);
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0 && document.title.endsWith("· Built")`, "the pages", 240000);
+  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
+  await t.click("#b-changes");
+  await t.until(`!$(".chg-pop").hidden`, "the popover");
+  await t.click("#chg-start");
+  await t.until(`$$(".phx-commits .row[data-i]").length > 0`, "the commits");
+  await t.click(".phx-commits .row[data-i='0']");
+  // (the strip "the last complete render" never up, not for a frame: the diff's pages shown before its first build ends)
+  await t.q(`(() => { globalThis.__stale = 0; new MutationObserver(() => $("#stage").classList.contains("stale") && globalThis.__stale++).observe($("#stage"), { attributes: true, attributeFilter: ["class"] }); return 1; })()`);
+  await t.click(".phx-commits .row:not([data-i]):not(.skel)");
+  await t.until(`/^\\d+ changes$/.test($(".chg-pop .foot [aria-live]")?.textContent ?? "")`, "the diff's changes", 120000);
+  // (the diff's pages made: its PDF, no "last complete render" over the current ones)
+  await t.until(`fetch(new URL("diff.pdf", location.href)).then((r) => r.ok)`, "the diff's PDF made", 120000);
+  await sleep(1500);
+  assert.equal(await t.q(`$("#stage").classList.contains("stale")`), false, "the diff's pages shown, not the last complete render");
+  assert.equal(await t.q(`globalThis.__stale`), 0, "no 'last complete render' strip at any time, not even a flash");
+  // (Caret only: the deleted words leave a caret; the popover closed (Esc), the diff stays)
+  await t.click(`#chg-look [data-look="del"][data-v="caret"]`);
+  await t.until(`fetch(new URL("diff.tex", location.href)).then((r) => r.text()).then((x) => /scriptstyle\\\\wedge/.test(x))`, "the caret look", 60000);
+  await t.key("Escape", "Escape", 27);
+  await t.until(`$(".chg-pop").hidden && $("#b-changes").getAttribute("aria-pressed") === "true"`, "closed, the diff kept", 5000);
+  const caret = await t.until(charAt("∧", "old words"), "the deleted words' caret on the page", 60000).catch(() => null);
+  assert.ok(caret, "the caret's glyph in the text layer");
+  // (hovered: after the dwell, the card says what was deleted, struck in the deletion's colour)
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: caret[0], y: caret[1] });
+  await t.until(`!!$(".blcard.delcard") && !$(".blcard.delcard").hidden`, "the deleted text's card", 10000);
+  const card = await t.q(`({ text: $(".blcard.delcard .dtx").textContent, deco: getComputedStyle($(".blcard.delcard .dtx")).textDecorationLine })`);
+  assert.match(card.text, /that go away/, JSON.stringify(card));
+  assert.equal(card.deco, "line-through");
+  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-deleted-card-light.png"));
+  // (clicked: pinned, the pointer gone; Esc lets it go)
+  await t.mouse(caret[0], caret[1]);
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 300 });
+  await sleep(400);
+  assert.equal(await t.q(`$(".blcard.delcard").hidden`), false, "pinned by a click");
+  await t.key("Escape", "Escape", 27);
+  await t.until(`$(".blcard.delcard").hidden`, "Esc: the card gone", 5000);
+  // (a right-click on the change: its menu, Show in the list and Go to source; Esc closes it; Show in the list opens the popover at it)
+  await rightClick(t, caret[0], caret[1]);
+  await t.until(`!!$(".phx-ctx")`, "the menu", 5000);
+  assert.deepEqual(await t.q(`$$(".phx-ctx button").map((b) => b.textContent)`), ["Show in the list", "Go to source"]);
+  await t.key("ArrowDown", "ArrowDown", 40);
+  assert.equal(await t.q(`$(".phx-ctx").getRootNode().activeElement?.textContent`), "Go to source", "↓ moves in it");
+  await t.key("Escape", "Escape", 27);
+  await t.until(`!$(".phx-ctx")`, "Esc closes the menu", 5000);
+  await rightClick(t, caret[0], caret[1]);
+  await t.until(`!!$(".phx-ctx")`, "the menu again", 5000);
+  await t.click(".phx-ctx button");
+  await t.until(`!$(".chg-pop").hidden && !!$(".chg-pop .citem.cur") && /that go away/.test($(".chg-pop .citem.cur").textContent)`, "Show in the list: the popover at the change", 5000);
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});
+
+test("the review: a right-click on an agent's change accepts or rejects it as its card's buttons do; Esc closes the review's side, a note's words kept (review menu, Esc)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const at = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  execFileSync(process.env.PHITEX_BIN ?? "phitex", ["config", "experimental-review", "on"], { env: { ...process.env, HOME: at, XDG_CONFIG_HOME: join(at, ".config") } });
+  const filler = Array.from({ length: 30 }, (_, i) => `Filler paragraph ${i} keeps the two changes apart, so each is a change of its own.\n\n`).join("");
+  const text = (a, b) => doc(`Alpha ${a} gamma is the first sentence.\n\n${filler}Delta ${b} is the last one.`);
+  // (the project in git before the watch: its index the review's baseline)
+  const dir = project({ "main.tex": text("beta", "epsilon zeta") });
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "one");
+  const w = new Watch(dir, { home: at });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
+  await waitBuild(w, 1);
+  // (the agent's edits: a word replaced, words deleted)
+  w.write("main.tex", text("brandnew", "zeta"));
+  await t.until(`$$(".slot .rv.h-add").length > 0 && $$(".slot .rv.h-del").length > 0`, "the changes marked on the pages", 120000);
+  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
+  await t.click("#b-review");
+  await t.until(`!!$('.rside [data-tab="changes"]')`, "the review's side", 5000);
+  await t.click('.rside [data-tab="changes"]');
+  await t.until(`$$(".rside .card.hunk").length === 2`, "two changes listed", 10000).catch(async (e) => { throw new Error(`${e.message}: ${await t.q(`JSON.stringify({ cards: $$(".rside .card").map((c) => c.className), side: $(".rside")?.innerText.slice(0, 600) })`)}`); });
+  // (a mark's place once the pages are at rest: the review's side opening fits them to the narrower stage a moment
+  // later, its marks drawn again there; the same box twice 200 ms apart)
+  const mark = async (cls) => {
+    let last = "";
+    for (const end = Date.now() + 10000; ; await sleep(200)) {
+      const now = await t.q(`(() => { const m = $(".slot .rv.${cls}"); if (!m) return ""; m.scrollIntoView({ block: "center" }); const b = m.getBoundingClientRect(); return JSON.stringify([b.left + Math.min(4, b.width / 2), b.top + b.height / 2]); })()`);
+      if (now && now === last) return JSON.parse(now);
+      assert.ok(Date.now() < end, `the ${cls} mark at rest`);
+      last = now;
+    }
+  };
+  // (a right-click on the new word: Accept, Reject, Show in the list, Go to source; Accept as the card's button)
+  // (a feature tip over the pages put away first: a right-click on it is the tip's)
+  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
+  const add = await mark("h-add");
+  await rightClick(t, add[0], add[1]);
+  await t.until(`!!$(".phx-ctx")`, "the menu", 5000);
+  assert.deepEqual(await t.q(`$$(".phx-ctx button").map((b) => b.textContent)`), ["Accept", "Reject", "Show in the list", "Go to source"]);
+  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-review-menu-light.png"));
+  await t.click(".phx-ctx button.accept");
+  await t.until(`$$(".rside .card.hunk").length === 1 && !$$(".slot .rv.h-add").length`, "accepted: its card and its mark gone", 30000);
+  assert.match(w.read("main.tex"), /brandnew/, "accepted: the file keeps the agent's word");
+  // (a right-click on the deletion's caret: Reject, the file gets the words back)
+  const del = await mark("h-del");
+  await rightClick(t, del[0], del[1]);
+  await t.until(`!!$(".phx-ctx")`, "the menu", 5000);
+  await t.click(".phx-ctx button.reject");
+  await t.until(`!$$(".rside .card.hunk").length`, "rejected: no change left", 30000);
+  for (const end = Date.now() + 20000; !/epsilon zeta/.test(w.read("main.tex")); await sleep(100)) assert.ok(Date.now() < end, "rejected: the deleted words back in the file");
+  await t.until(`$$(".slot .phx-text text").some((x) => /epsilon/.test(x.textContent))`, "the pages again with the words", 60000);
+  // (Esc closes the review's side; in a note's box Esc lets go of the focus, the words kept)
+  await t.click(`.rside [data-tab="notes"]`);
+  await t.key("Escape", "Escape", 27);
+  await t.until(`!$(".win").classList.contains("review-on")`, "Esc closes the review's side", 5000);
   assert.deepEqual(t.errors, []);
   await w.stop();
 });

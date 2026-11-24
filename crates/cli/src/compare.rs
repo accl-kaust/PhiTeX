@@ -189,6 +189,10 @@ pub struct Compare {
     /// Each change's box on the page it is first shown on (points from
     /// the page's top left: x0, y0, x1, y1) and that page (from 0).
     boxes: Vec<Option<(usize, [f32; 4])>>,
+    /// Each change's deleted part's box (its caret, its struck words) on
+    /// the page its first glyph is on: what the viewer's card for deleted
+    /// text and its menu hit-test.
+    del_boxes: Vec<Option<(usize, [f32; 4])>>,
     /// The diff's own outputs written (`JOB-diff.*`), for the watcher.
     pub wrote: Vec<(PathBuf, u64)>,
     /// Whether its outputs are written into the folder (the watch's
@@ -203,6 +207,30 @@ pub struct Compare {
     split: bool,
     /// How its session began (a copy of the document's build, or why not).
     pub began: String,
+}
+
+/// The deleted parts of a change's markup `r` in the marked-up text: each
+/// `\DIFdelbegin` (or its float's) to its `\DIFdelend`.
+fn del_spans(tex: &str, r: std::ops::Range<usize>) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let Some(t) = tex.get(r.clone()) else {
+        return out;
+    };
+    let mut at = 0;
+    // (a range that starts inside its deleted part, after its `\DIFdelbegin`: that part from the range's start)
+    if let Some(e) = t.find("\\DIFdelend")
+        && t.find("\\DIFdelbegin").is_none_or(|b| e < b)
+    {
+        out.push((r.start, r.start + e));
+        at = e + 1;
+    }
+    while let Some(b) = t[at..].find("\\DIFdelbegin") {
+        let s = at + b;
+        let e = t[s..].find("\\DIFdelend").map_or(t.len(), |e| s + e);
+        out.push((r.start + s, r.start + e));
+        at = e.max(s + 1);
+    }
+    out
 }
 
 /// The main file's flattened text in `files`.
@@ -305,6 +333,7 @@ impl Compare {
             origins: None,
             places: Vec::new(),
             boxes: Vec::new(),
+            del_boxes: Vec::new(),
             wrote: Vec::new(),
             write,
             bufs: HashMap::new(),
@@ -466,7 +495,9 @@ impl Compare {
         self.report = Some(r);
         let raw = self.session.origins();
         self.places = raw.as_ref().map_or_else(Vec::new, |o| self.places_of(o));
-        self.boxes = raw.as_ref().map_or_else(Vec::new, |o| self.boxes_of(o));
+        (self.boxes, self.del_boxes) = raw
+            .as_ref()
+            .map_or_else(Default::default, |o| self.boxes_of(o));
         self.origins = raw.map(|o| self.mapped(&o));
         self.report.as_ref()
     }
@@ -575,10 +606,24 @@ impl Compare {
     }
 
     /// Each change's box on the page its first glyph is on: the glyphs of
-    /// its markup there.
-    fn boxes_of(&self, o: &phitex_live::view::Origins) -> Vec<Option<(usize, [f32; 4])>> {
-        let changes = &self.live.out().changes;
+    /// its markup there; and its deleted part's (the glyphs between its
+    /// `\DIFdelbegin` and `\DIFdelend`: a caret, struck words).
+    #[allow(clippy::type_complexity, reason = "two lists of the same boxes")]
+    fn boxes_of(
+        &self,
+        o: &phitex_live::view::Origins,
+    ) -> (
+        Vec<Option<(usize, [f32; 4])>>,
+        Vec<Option<(usize, [f32; 4])>>,
+    ) {
+        let d = self.live.out();
+        let changes = &d.changes;
         let mut out: Vec<Option<(usize, [f32; 4])>> = vec![None; changes.len()];
+        let mut del: Vec<Option<(usize, [f32; 4])>> = vec![None; changes.len()];
+        let spans: Vec<Vec<(usize, usize)>> = changes
+            .iter()
+            .map(|c| del_spans(&d.tex, c.out.clone()))
+            .collect();
         let ours: Vec<Option<usize>> = o.files.iter().map(|f| self.file_of(f)).collect();
         for (k, p) in o.pages.iter().enumerate() {
             let Some(p) = p else { continue };
@@ -589,19 +634,32 @@ impl Compare {
                 let Some(a) = self.flat_at(f, p.start[i] as usize) else {
                     continue;
                 };
+                // (a deletion's caret is made by the markup's macros, no
+                // text of its own: its glyph is placed at the next call,
+                // the added part's \DIFadd; a made glyph there is the
+                // deleted part's)
+                let n = (p.end[i] - p.start[i]) as usize;
+                let caret =
+                    p.is_synth(i) && matches!(d.tex.get(a..a + n), Some("\\DIFadd" | "\\DIFaddFL"));
                 let mut c = changes.partition_point(|c| c.out.end <= a);
                 while c < changes.len() && changes[c].out.start <= a {
                     let g = glyph_box(p, i);
-                    match &mut out[c] {
-                        None => out[c] = Some((k, g)),
+                    let put = |slot: &mut Option<(usize, [f32; 4])>| match slot {
+                        None => *slot = Some((k, g)),
                         Some((page, b)) if *page == k => *b = union(*b, g),
                         Some(_) => {}
+                    };
+                    put(&mut out[c]);
+                    if spans[c].iter().any(|&(s, e)| a >= s && a < e)
+                        || (!spans[c].is_empty() && caret)
+                    {
+                        put(&mut del[c]);
                     }
                     c += 1;
                 }
             }
         }
-        out
+        (out, del)
     }
 
     /// Where what line `line` (from 1) of the user's file `file` made is on
@@ -755,11 +813,27 @@ impl Compare {
     }
 
     /// The viewer's diff state: `{shown, base, to, label, changes, look,
-    /// errors, built}`.
+    /// errors, error_text, built}`.
     pub fn state(&self, shown: bool) -> Value {
         let changes = &self.live.out().changes;
-        let list: Value = serde_json::from_str(&phitex_diff::changes_json(changes, &self.places))
-            .unwrap_or_else(|_| json!([]));
+        let mut list: Value =
+            serde_json::from_str(&phitex_diff::changes_json(changes, &self.places))
+                .unwrap_or_else(|_| json!([]));
+        // (each change's box on the diff's pages, and its deleted part's: the
+        // viewer's card for deleted text not shown, its right-click menu)
+        let r = |x: f32| (f64::from(x) * 100.0).round() / 100.0;
+        let bx = |b: Option<&Option<(usize, [f32; 4])>>| match b.copied().flatten() {
+            Some((k, b)) => json!([k, r(b[0]), r(b[1]), r(b[2]), r(b[3])]),
+            None => Value::Null,
+        };
+        if let Some(a) = list.as_array_mut() {
+            for (i, c) in a.iter_mut().enumerate() {
+                if let Some(o) = c.as_object_mut() {
+                    o.insert("box".into(), bx(self.boxes.get(i)));
+                    o.insert("del_box".into(), bx(self.del_boxes.get(i)));
+                }
+            }
+        }
         json!({
             "shown": shown,
             "base": self.rev,
@@ -768,6 +842,9 @@ impl Compare {
             "changes": list,
             "look": self.look.json(),
             "errors": self.report.as_ref().map_or(0, |r| r.out.errors.len()),
+            // (the first error's line, for the viewer to say when the
+            // marked-up document ships no page)
+            "error_text": self.report.as_ref().and_then(|r| r.out.errors.first()).map(|e| e.lines().next().unwrap_or_default().trim_start_matches("error: ").to_owned()),
             "built": self.built(),
         })
     }
