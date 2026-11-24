@@ -1,0 +1,25 @@
+\documentclass{article}
+\newcommand\seedline[2]{#2 seeds, each turned #1 degrees.}
+\begin{document}
+\section{Knobs}
+Each figure has its knobs at its top: one number changed, the figure drawn again.
+
+\begin{figure}[h]
+\centering
+\def\seedangle{222.5}% KNOB: degrees between seeds
+\def\seeds{140}%   KNOB: how many seeds
+\fbox{\seedline{\seedangle}{\seeds}}
+\caption{\seeds{} seeds, each turned \seedangle{} degrees from the last.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\gdef\terms  {6}% KNOB: number of terms
+\global\let\knob=\relax
+\newcommand*\sumof[1]{the sum of #1 terms (6)}
+\fbox{\sumof{\terms}}
+\caption{A square wave and \sumof{\terms}.}
+\end{figure}
+
+A paragraph after the figures, \terms{} as defined globally.
+\end{document}

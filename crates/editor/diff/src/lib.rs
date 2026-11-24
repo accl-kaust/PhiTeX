@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 pub use flatten::{Flat, flatten};
 pub use live::{Live, Place, Stats, changes_json, places};
-pub use look::{dif_body, dif_preamble};
+pub use look::{LOADS, dif_body, dif_preamble};
 pub use sig::{Class, EnvKind, EnvSig, Sig, Signatures};
 
 /// A set of files: a project, at one version. Paths are relative to the
@@ -1232,6 +1232,41 @@ mod tests {
         let b = body(&d);
         assert!(b.contains("e.g.\\ }"), "{b}");
         assert!(!b.contains("e.g.\\}"), "{b}");
+    }
+
+    #[test]
+    fn a_definition_changes_whole() {
+        // (a definition's body changed: the whole definition replaced, the
+        // old one commented out; apart, `\def` stayed common and defined
+        // the markup's `\DIFdelbeginFL`, every figure after it broken)
+        let fig = |n: &str, m: &str| {
+            format!(
+                "\\begin{{figure}}[H]\n\\centering\n\\def\\angle{{{n}}}% KNOB\n\\gdef\\seeds  {{{m}}}\n\\global\\let\\x=\\y{n}\n\\newcommand\\knob[1]{{#1 {m}}}\n\\chardef\\c={m}\n\\caption{{At \\angle.}}\n\\end{{figure}}\n"
+            )
+        };
+        let d = run(&fig("472.5", "4"), &fig("222.5", "7"));
+        let b = body(&d);
+        assert!(
+            !b.contains("\\def\\DIF") && !b.contains("\\gdef\\DIF"),
+            "{b}"
+        );
+        assert!(
+            !b.contains("\\newcommand\\DIF") && !b.contains("\\chardef\\DIF"),
+            "{b}"
+        );
+        for new in [
+            "\\def\\angle{222.5}",
+            "\\gdef\\seeds  {7}",
+            "\\newcommand\\knob[1]{#1 7}",
+            "\\chardef\\c=7",
+        ] {
+            let at = b.find(new).unwrap_or_else(|| panic!("{new} in {b}"));
+            // (in force: not on a comment line)
+            let line = &b[b[..at].rfind('\n').map_or(0, |i| i + 1)..at];
+            assert!(!line.contains('%'), "{new} commented in {b}");
+        }
+        assert!(b.contains("\\def\\angle{472.5}"), "{b}");
+        assert!(!d.changes.is_empty(), "no change found");
     }
 
     #[test]

@@ -491,6 +491,13 @@ impl<'a> Reader<'a> {
             };
             return (Kind::Unsafe, Pos::at(q), None);
         }
+        // (a definition: the command, what it defines and its body, one
+        // unit; apart, a changed body left `\def` common and marked
+        // `\x{old}` → `\x{new}`, and the markup's `\DIFdelbegin` was
+        // what `\def` defined: a compare's pages, none)
+        if let Some(q) = definition(lx, p.i, self.text) {
+            return (Kind::Unsafe, Pos::at(q), None);
+        }
         let Some(sig) = self.sigs.cmd(name) else {
             // (unknown: the groups and brackets right after it)
             let q = greedy_args(lx, p.i + 1, self.text);
@@ -769,6 +776,132 @@ fn greedy_args(lx: &[Lx], mut i: usize, text: &str) -> usize {
             _ => return i,
         }
     }
+}
+
+/// TeX's definitions, by what follows the command: the control sequence
+/// defined, then its parameter text and body (`\def`), what it is made
+/// equal to (`\let`), its number (`\chardef`), or LaTeX's arguments
+/// (`\newcommand\x[1]{…}`).
+const DEF_BODY: &[&str] = &["def", "gdef", "edef", "xdef"];
+const DEF_LET: &[&str] = &["let", "futurelet"];
+const DEF_NUMBER: &[&str] = &[
+    "chardef",
+    "mathchardef",
+    "countdef",
+    "dimendef",
+    "skipdef",
+    "muskipdef",
+    "toksdef",
+];
+const DEF_LATEX: &[&str] = &[
+    "newcommand",
+    "renewcommand",
+    "providecommand",
+    "DeclareRobustCommand",
+    "DeclareMathOperator",
+    "NewDocumentCommand",
+    "RenewDocumentCommand",
+    "ProvideDocumentCommand",
+    "DeclareDocumentCommand",
+    "NewExpandableDocumentCommand",
+    "newrobustcmd",
+    "renewrobustcmd",
+    "providerobustcmd",
+    "newlength",
+    "newcount",
+    "newdimen",
+    "newskip",
+    "newtoks",
+    "newbox",
+    "newsavebox",
+    "newif",
+];
+/// Prefixes of a definition (`\global\def`, `\protected\long\def`).
+const DEF_PREFIX: &[&str] = &["global", "long", "protected", "outer"];
+
+/// Where the definition whose command is lexeme `i` ends (past its last
+/// lexeme), or `None` if lexeme `i` begins none: a control sequence
+/// defined is in the unit with its command, its body too, so that a
+/// change anywhere in it replaces the whole definition (the old one
+/// commented out, the new one in force), never leaving the command apart
+/// to define the markup's own macros.
+#[allow(clippy::many_single_char_names)]
+fn definition(lx: &[Lx], i: usize, text: &str) -> Option<usize> {
+    let Lx::Cs(a, b) = lx[i] else { return None };
+    let name = &text[a + 1..b];
+    // (the control sequence defined: the next lexeme past spaces, a
+    // control sequence or an active character)
+    let target = |k: usize| {
+        let k = skip_spaces(lx, k);
+        match lx.get(k) {
+            Some(Lx::Cs(..)) => Some(k),
+            Some(Lx::Char(a, b)) if &text[*a..*b] == "~" => Some(k),
+            _ => None,
+        }
+    };
+    if DEF_PREFIX.contains(&name) {
+        let k = skip_spaces(lx, i + 1);
+        return match lx.get(k) {
+            Some(Lx::Cs(..)) => definition(lx, k, text),
+            _ => None,
+        };
+    }
+    if DEF_BODY.contains(&name) {
+        let t = target(i + 1)?;
+        // (the parameter text, up to the body's group, in this paragraph)
+        for k in t + 1..lx.len() {
+            match lx[k] {
+                Lx::Group { .. } => return Some(k + 1),
+                Lx::Nl(..) if lx.get(k + 1).is_some_and(|l| matches!(l, Lx::Nl(..))) => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    if DEF_LET.contains(&name) {
+        let t = target(i + 1)?;
+        let mut k = skip_spaces(lx, t + 1);
+        if matches!(lx.get(k), Some(Lx::Char(a, b)) if &text[*a..*b] == "=") {
+            k = skip_spaces(lx, k + 1);
+        }
+        // (the meaning taken: one lexeme; `\futurelet`'s two)
+        let n = if name == "let" { 1 } else { 2 };
+        return Some((k + n).min(lx.len()));
+    }
+    if DEF_NUMBER.contains(&name) {
+        let t = target(i + 1)?;
+        let mut k = skip_spaces(lx, t + 1);
+        if matches!(lx.get(k), Some(Lx::Char(a, b)) if &text[*a..*b] == "=") {
+            k = skip_spaces(lx, k + 1);
+        }
+        return Some(match lx.get(k) {
+            Some(Lx::Word(..)) => k + 1,
+            _ => k,
+        });
+    }
+    if DEF_LATEX.contains(&name) {
+        // (`\newcommand*`; the name braced or not, the arguments after it)
+        let mut k = i + 1;
+        if matches!(lx.get(k), Some(Lx::Char(a, b)) if &text[*a..*b] == "*") {
+            k += 1;
+        }
+        let k = match target(k) {
+            Some(t) => t + 1,
+            None => k,
+        };
+        return Some(greedy_args(lx, k, text).max(i + 1));
+    }
+    None
+}
+
+/// Past spaces (not line ends).
+fn skip_spaces(lx: &[Lx], mut i: usize) -> usize {
+    while matches!(lx.get(i), Some(Lx::Space(..))) {
+        i += 1;
+    }
+    i
 }
 
 /// The next `c` from `i` on this level, before a blank line.
