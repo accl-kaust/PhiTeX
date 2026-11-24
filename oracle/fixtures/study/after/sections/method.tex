@@ -1,0 +1,18 @@
+\section{Method}\label{sec:method}
+Let $f\colon [0,1]^2 \to \mathbb{R}_{\ge 0}$ be the heat map and let
+$x_1,\dots,x_n$ be the probe locations. After $k$ probes we fit the estimate
+\begin{equation}\label{eq:estimate}
+  \hat f_k(x) = \sum_{i=1}^{k} w_i(x)\, f(x_i),
+  \qquad \sum_{i=1}^{k} w_i(x) = 1,
+\end{equation}
+and choose the next probe where the local variation of $\hat f_k$ is largest.
+
+\subsection{Error bound}\label{sec:bound}
+Suppose $f$ is $L$-Lipschitz and supported on $s$ disks of radius $r$.
+Then the greedy rule reaches error $\varepsilon$ after
+$O\!\left(s \log(1/\varepsilon)\right)$ probes, against
+$O\!\left(\varepsilon^{-2}\right)$ for uniform sampling~\cite{donoho2006}.
+
+The proof follows the covering argument of~\cite{candes2006}: each hot spot is
+found after a bounded number of probes, and the remaining probes refine the
+estimate (\ref{eq:estimate}) inside the disks.
