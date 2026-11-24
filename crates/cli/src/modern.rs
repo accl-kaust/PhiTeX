@@ -12,7 +12,7 @@ use std::time::Duration;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Args, ColorChoice, Parser, Subcommand};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::config;
 use crate::session::{self, Job, Report, Session, Status};
@@ -49,6 +49,19 @@ pdflatex's 1); 2 PhiTeX could not start: a usage error, a wrong setting,
 a file not found, no TeX Live; 3 PhiTeX failed: the engine stopped, a
 file could not be written, the network (upgrade, Shelf). Standard error
 says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
+
+/// `phitex` and `phitex --help`'s first lines: the loop an agent (or
+/// anyone) edits a document in.
+const AGENTS: &str = "\
+For agents: phitex session start main.tex; edit; phitex session wait;
+phitex session problems; phitex session png --label <label>; phitex session stop";
+
+/// `phitex build --help`'s last lines: the session, for builds again and
+/// again.
+const BUILD_AFTER_HELP: &str = "\
+Building again and again while editing? `phitex session start` keeps a watch running: each
+rebuild is incremental, `phitex session problems` lists the problems at file:line, `phitex
+session png LABEL` draws a figure, table or equation as a PNG.";
 
 /// `phitex session --help`'s last lines: which watch, and the engine.
 const SESSION_AFTER_HELP: &str = "\
@@ -146,6 +159,7 @@ pub fn version_text() -> &'static str {
 #[command(
     name = "phitex",
     bin_name = "phitex",
+    before_help = AGENTS,
     version = crate::version(),
     long_version = version_text(),
     about = "PhiTeX: LaTeX that updates as you type",
@@ -169,7 +183,9 @@ enum Sub {
     /// Build the PDF (its reruns, BibTeX, biber and makeindex included)
     ///
     /// The document is built to its fixpoint as latexmk builds it, the
-    /// tools run in process.
+    /// tools run in process. Its warnings are listed as file:line:
+    /// message.
+    #[command(after_help = BUILD_AFTER_HELP)]
     Build {
         /// The main .tex file (default: phitex.toml's `main`)
         #[arg(value_name = "FILE")]
@@ -202,8 +218,9 @@ enum Sub {
         #[command(flatten)]
         watch: WatchArgs,
     },
-    /// A running watch, for you and your agent: start, wait, problems,
-    /// notes, changes (`phitex session --help`)
+    /// Incremental rebuilds for you and your agent: problems at
+    /// file:line, PNG crops of figures, tables and equations (`phitex
+    /// session --help`)
     ///
     /// Each verb finds the watch running in this folder
     /// (docs/spec-editor-protocol.md §9): `phitex session start` runs one
@@ -232,6 +249,32 @@ enum Sub {
         /// (default: the one running here)
         #[arg(long, value_name = "PID|URL", global = true)]
         session: Option<String>,
+    },
+    /// Draw a page, or a figure, table or equation by its label, as a PNG
+    ///
+    /// A look at the pages without a watch to keep: the document built
+    /// (a running watch of it used, else one started for this and ended
+    /// after), then page N, or what LABEL labels cropped, written as a PNG
+    /// (.phitex/png/, or -o PATH); its path printed. `phitex session png`
+    /// does the same in a running session, quicker.
+    Png {
+        /// The main .tex file (default: phitex.toml's `main`, or the one
+        /// with a \documentclass here)
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+        /// Page N (from 1)
+        #[arg(long, value_name = "N", conflicts_with = "label")]
+        page: Option<usize>,
+        /// What \label{LABEL} labels (a figure or table with its caption,
+        /// an equation, a theorem), cropped
+        #[arg(long, value_name = "LABEL", required_unless_present = "page")]
+        label: Option<String>,
+        /// Write the PNG to PATH
+        #[arg(short = 'o', long = "out", value_name = "PATH")]
+        out: Option<String>,
+        /// Pixels per inch
+        #[arg(long, value_name = "N", default_value_t = 150)]
+        dpi: u32,
     },
     /// What is new in this version
     News,
@@ -602,6 +645,25 @@ impl Cli {
             Some(Sub::Session { verb, session }) => {
                 o.command = Some(Command::Session);
                 o.session = Some((verb, session));
+            }
+            Some(Sub::Png {
+                file,
+                page,
+                label,
+                out,
+                dpi,
+            }) => {
+                o.command = Some(Command::Session);
+                o.session = Some((
+                    crate::session_cmd::Verb::Look {
+                        file,
+                        page,
+                        label,
+                        out,
+                        dpi,
+                    },
+                    None,
+                ));
             }
             Some(Sub::Completions { shell }) => {
                 let mut cmd = <Cli as clap::CommandFactory>::command();
@@ -1292,9 +1354,24 @@ pub fn report(
     for w in &r.warnings {
         ui.warning(w);
     }
-    let warnings: usize = crate::warnings::summarize(&text).iter().map(|g| g.1).sum();
+    // (the problems as `phitex session problems` has them: the engine's,
+    // each at its file and line, one count for both)
+    let problems = phitex_live::watch::diagnostics(s, r, &log.display().to_string());
+    let warned: Vec<&Value> = problems
+        .iter()
+        .filter(|p| p["severity"] == "warning")
+        .collect();
+    let warnings = warned.len();
     let run = r.runs.last().cloned().unwrap_or_default();
     if summary {
+        let listed: Vec<Value> = problems
+            .iter()
+            .filter(|p| p["severity"] == "warning" || p["severity"] == "error")
+            .map(|p| {
+                json!({"file": p["file"].as_str().map(|f| f.trim_start_matches("./")),
+                       "line": p["line"], "kind": p["kind"], "message": p["message"]})
+            })
+            .collect();
         ui.event(&json!({
         "event": "build",
         "why": run.why,
@@ -1306,25 +1383,38 @@ pub fn report(
         "rounds": run.rounds,
         "errors": r.out.errors,
         "warnings": warnings,
+        "problems": listed,
         "diagnostics": r.engine_diagnostics(),
         "engine_warnings": r.warnings,
         "log": log.display().to_string(),
         }));
     }
-    let warn = crate::warnings::lines(&text, o.verbose > 0);
-    if !warn.is_empty() && !o.quiet {
-        ui.line(&format!(
-            "{}: {} ({})",
-            st.yellow("warnings"),
-            warn.iter()
-                .filter(|l| !l.starts_with(' '))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", "),
-            log.display()
-        ));
-        for l in warn.iter().filter(|l| l.starts_with(' ')) {
-            ui.line(&st.dim(l));
+    // (the warnings a line each, `file:line: message`: the first
+    // WARNINGS_SHOWN, -v every one)
+    if !warned.is_empty() && !o.quiet {
+        let all = o.verbose > 0 || ui.verbose > 0;
+        let shown = if all { warned.len() } else { WARNINGS_SHOWN };
+        for p in warned.iter().take(shown) {
+            ui.line(&warning_line(p, st));
+        }
+        if warned.len() > shown {
+            ui.line(&st.dim(&format!(
+                "  … {} more warnings (-v lists them all; the log: {})",
+                warned.len() - shown,
+                log.display()
+            )));
+        }
+        // (the layout's: a page to look at)
+        if warned.iter().any(|p| {
+            p["kind"] == "overfull"
+                || p["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("float specifier changed"))
+        }) {
+            ui.line(&st.dim(&format!(
+                "  see the pages: phitex png {} --page N (or --label LABEL) draws one as a PNG",
+                t.file
+            )));
         }
     }
     if !summary {
@@ -1342,6 +1432,23 @@ pub fn report(
         runs: r.runs.len(),
         engine: (!job.ini).then_some(t.engine.name),
     });
+}
+
+/// How many warnings `build` lists (`-v`: every one).
+const WARNINGS_SHOWN: usize = 20;
+
+/// A warning as `build` lists it, as `phitex session problems` does:
+/// `file:line: message` (its first line; a warning TeX gives no line,
+/// `file: message`).
+fn warning_line(p: &Value, st: crate::ui::Style) -> String {
+    let file = p["file"].as_str().unwrap_or("").trim_start_matches("./");
+    let place = match (file, p["line"].as_u64()) {
+        ("", _) => String::new(),
+        (f, Some(l)) => format!("{f}:{l}: "),
+        (f, None) => format!("{f}: "),
+    };
+    let m = p["message"].as_str().unwrap_or("");
+    format!("{place}{}", st.yellow(m.lines().next().unwrap_or("")))
 }
 
 /// Copy the written PDF into `dir`.

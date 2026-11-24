@@ -132,7 +132,16 @@ impl Cache {
                 self.dir.display()
             ));
         }
-        self.dir.starts_with(std::env::temp_dir()).then(|| {
+        if tex::cache_is_local() {
+            return Some(format!(
+                "the user's cache cannot be written: this project's is used, {}",
+                self.dir.display()
+            ));
+        }
+        // (a cache in the temporary folder for want of a home: not one
+        // PHITEX_CACHE_DIR names)
+        let named = std::env::var_os("PHITEX_CACHE_DIR").is_some_and(|d| !d.is_empty());
+        (!named && self.dir.starts_with(std::env::temp_dir())).then(|| {
             format!(
                 "the cache is in {} (no $HOME): it may not last (PHITEX_CACHE_DIR sets it)",
                 self.dir.display()

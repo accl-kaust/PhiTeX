@@ -57,6 +57,13 @@ Compare and Blame are now one thing: **± Changes** :)
   manager of the folder in your browser: click any .tex file and it builds
   in a tab of its own, switch documents from the Files panel or with
   Ctrl+P, and keep two side by side.
+- **Warnings where they are.** `phitex build` lists each warning as
+  `file:line: message`, the first 20 (`-v` all), and `--json` gives them
+  as a `problems` list. A missing citation says which key is not in which
+  .bib file, and a warning about a float names the file the float is in.
+- **A page as a picture.** `phitex png paper.tex --page 3` draws a page as
+  a PNG, and `--label fig:results` crops just that figure, table or
+  equation: a quick look without opening the PDF.
 - **Ctrl+R in the terminal** starts a clean rebuild from scratch, as
   Clean rebuild does in the viewer (`h` lists it with the other keys).
 - **Fixed:** on Overleaf, a jump between the PDF and the source now opens

@@ -524,6 +524,11 @@ pub struct BuildRec {
     pub diags_pending: bool,
     /// The PDF file it wrote, if any.
     pub pdf: Option<String>,
+    /// Why it was built ([`BuildFacts::why`]).
+    pub why: String,
+    /// Its place among the builds the hub was told of, from 1: a new
+    /// session (a clean rebuild) numbers its builds from 1 again.
+    pub seq: u64,
 }
 
 /// The files build `b` read that an editor holds now with other text
@@ -595,6 +600,9 @@ pub struct BuildFacts {
     pub diags_pending: bool,
     pub diags: Option<Vec<Value>>,
     pub pdf: Option<String>,
+    /// Why it was built, as the watch says it ("main.tex changed",
+    /// "asked: every input read again, 1 of 41 changed", "cold").
+    pub why: String,
 }
 
 /// A hunk now: [`rt::Hunk`] in a file, named.
@@ -728,6 +736,8 @@ pub struct Hub {
     ask: Mutex<Option<Arc<Asker>>>,
     quit: Mutex<Option<Arc<Quit>>>,
     editors: Mutex<Option<Arc<Editors>>>,
+    /// When the watch was last used ([`Hub::used`]; none: not yet).
+    used: Mutex<Option<Instant>>,
 }
 
 static HUB: OnceLock<Arc<Hub>> = OnceLock::new();
@@ -812,6 +822,20 @@ impl Hub {
     pub fn end(&self) {
         lock(&self.st).ended = true;
         self.cv.notify_all();
+    }
+
+    /// The watch is used now: a request on its socket, a build, a browser
+    /// or an editor connected ([`Hub::idle`]).
+    pub fn used(&self) {
+        *lock(&self.used) = Some(Instant::now());
+        crate::attach::touch();
+    }
+
+    /// How long the watch has gone unused (since it started, if never).
+    pub fn idle(&self) -> Duration {
+        static START: OnceLock<Instant> = OnceLock::new();
+        let start = *START.get_or_init(Instant::now);
+        lock(&self.used).unwrap_or(start).elapsed()
     }
 
     /// Edits made on the disk taken as accepted (`review-accept-disk`), as
@@ -912,14 +936,28 @@ impl Hub {
     /// A build is in (after the viewers were told): its record made from
     /// what the engine was given, the files followed brought up to date.
     pub fn built(&self, f: BuildFacts) {
+        self.used();
         let editors = self.editors();
         let mut st = lock(&self.st);
         let mut read = HashMap::new();
         for p in &f.paths {
-            if let Some(n) = name_in(&st.root, Path::new(p))
-                && let Some(h) = st.fed.get(&n)
-            {
-                read.insert(n, Some(*h));
+            let Some(n) = name_in(&st.root, Path::new(p)) else {
+                continue;
+            };
+            // (a file the engine was not given: a build that went on from
+            // a saved graph found it as it was, by its key, and read it
+            // not; its text is the disk's, hashed once)
+            let h = if let Some(h) = st.fed.get(&n) {
+                Some(*h)
+            } else {
+                let h = std::fs::read(st.root.join(&n)).ok().map(|b| hash(&b));
+                if let Some(h) = h {
+                    st.fed.insert(n.clone(), h);
+                }
+                h
+            };
+            if let Some(h) = h {
+                read.insert(n, Some(h));
             }
         }
         if let (main, Some(b)) = &f.main {
@@ -940,6 +978,8 @@ impl Hub {
             read,
             diags_pending: f.diags_pending,
             pdf: f.pdf,
+            why: f.why,
+            seq: st.builds.back().map_or(1, |b| b.seq + 1),
         };
         if let Some(d) = f.diags {
             st.diags = (f.n, d);
@@ -1083,6 +1123,7 @@ impl Hub {
     /// A `phitex/*` request on the attach socket (§9.1): its result, or
     /// none (no such method).
     pub fn request(&self, method: &str, p: &Value) -> Option<Result<Value, Fail>> {
+        self.used();
         Some(match method {
             "phitex/session/status" => Ok(self.status(false)),
             "phitex/session/wait" => self.wait(p),
@@ -1153,6 +1194,7 @@ impl Hub {
             "superseded_by": superseded.and(latest),
             "pages": b.map(|b| b.pages),
             "ms": b.map(|b| b.ms),
+            "why": b.map(|b| b.why.clone()),
             "pdf": b.and_then(|b| b.pdf.clone()),
             "viewer": st.viewer,
             "main": st.main,
@@ -1183,6 +1225,7 @@ impl Hub {
     }
 
     fn problems(&self, p: &Value) -> Value {
+        let editors = self.editors();
         let st = lock(&self.st);
         let errors = p["errors"].as_bool().unwrap_or(false);
         let warnings = p["warnings"].as_bool().unwrap_or(false);
@@ -1206,7 +1249,19 @@ impl Hub {
             })
             .cloned()
             .collect();
-        json!({"build": st.diags.0, "problems": list})
+        // (the problems are build `diags.0`'s: stale where a later build
+        // is in, or the files changed since it read them)
+        let latest = st.builds.back();
+        let stale = latest.is_none_or(|b| b.n != st.diags.0)
+            || latest.is_some_and(|b| {
+                Hub::now_hashes(&st, editors.as_deref())
+                    .iter()
+                    .any(|(n, w)| {
+                        let r = b.read.get(n).copied().flatten();
+                        r != w.disk && (r.is_none() || r != w.buffer)
+                    })
+            });
+        json!({"build": st.diags.0, "stale": stale, "latest": latest.map(|b| b.n), "problems": list})
     }
 
     /// The files the last build read as they are now: each one's hash on
@@ -1305,6 +1360,20 @@ impl Hub {
                         let mut v = Hub::status_of(&st, st.builds.back(), warnings);
                         v["timed_out"] = json!(true);
                         v["held"] = json!(held);
+                        // (the files no build has read as they are now)
+                        let mut unread: Vec<&String> = want
+                            .iter()
+                            .filter(|(n, w)| {
+                                let r = st
+                                    .builds
+                                    .back()
+                                    .and_then(|b| b.read.get(*n).copied().flatten());
+                                r != w.disk && (r.is_none() || r != w.buffer)
+                            })
+                            .map(|(n, _)| n)
+                            .collect();
+                        unread.sort();
+                        v["unread"] = json!(unread);
                         if let Some(b) = st.builds.back() {
                             v["sources"] = sources_json(&sources(&st, editors.as_deref(), b));
                         }
@@ -1377,7 +1446,9 @@ impl Hub {
     }
 
     fn rebuild(&self, p: &Value) -> Result<Value, Fail> {
-        let n0 = lock(&self.st).builds.back().map_or(0, |b| b.n);
+        // (by the hub's count, not the build's number: a clean rebuild
+        // is a new session, its builds numbered from 1 again)
+        let n0 = lock(&self.st).builds.back().map_or(0, |b| b.seq);
         let editors = self.editors();
         self.ask_watch(if p["clean"].as_bool().unwrap_or(false) {
             Ask::Cold
@@ -1389,7 +1460,7 @@ impl Hub {
             if st.ended {
                 return Err(ended());
             }
-            if let Some(b) = st.builds.back().filter(|b| b.n > n0) {
+            if let Some(b) = st.builds.back().filter(|b| b.seq > n0) {
                 let mut v = Hub::status_of(&st, Some(b), false);
                 v["sources"] = sources_json(&sources(&st, editors.as_deref(), b));
                 return Ok(v);
@@ -3822,6 +3893,7 @@ mod tests {
             diags_pending: false,
             diags: Some(Vec::new()),
             pdf: None,
+            why: String::new(),
         }
     }
 
@@ -4011,6 +4083,57 @@ mod tests {
         let v = w.join().expect("joined").expect("answered");
         assert_eq!(v["build"], 3, "{v}");
         assert_eq!(v["sources"], json!([]), "{v}");
+    }
+
+    /// A build that went on from a saved graph is given no file it found
+    /// unchanged: what it read is still each file's text on disk (`png`
+    /// and `where` look for a label in it; empty, they found none).
+    #[test]
+    fn a_build_from_a_saved_graph_read_the_files_on_disk() {
+        let d = project(&[("main.tex", DOC), ("ch.tex", "Chapter.\n")]);
+        let h = Hub::default();
+        h.start(&d, "main.tex", true, false);
+        h.built(facts(1, &["main.tex", "ch.tex"]));
+        let st = lock(&h.st);
+        let read = &st.builds.back().expect("a build").read;
+        assert_eq!(
+            read.get("ch.tex"),
+            Some(&Some(hash(b"Chapter.\n"))),
+            "{read:?}"
+        );
+    }
+
+    /// `problems` says when its problems are an earlier build's: the
+    /// files changed since it read them (a `wait` timed out meanwhile).
+    #[test]
+    fn problems_say_when_they_are_stale() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let v = h.problems(&json!({}));
+        assert_eq!(v["stale"], false, "{v}");
+        std::fs::write(d.join("main.tex"), DOC.replace("quick", "slow")).expect("saved");
+        let v = h.problems(&json!({}));
+        assert_eq!(v["stale"], true, "{v}");
+        assert_eq!(v["build"], 1, "{v}");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let v = h.problems(&json!({}));
+        assert_eq!(v["stale"], false, "{v}");
+    }
+
+    /// A clean rebuild is a new session, its builds numbered from 1 again:
+    /// `rebuild` returns with it, not waiting for a number past the old.
+    #[test]
+    fn rebuild_returns_with_a_new_sessions_first_build() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = Arc::new(hub_on(&d, &["main.tex"]));
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let h2 = h.clone();
+        let w = std::thread::spawn(move || h2.rebuild(&json!({"clean": true})));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!w.is_finished());
+        rebuilt(&h, &d, 1, &["main.tex"]);
+        let v = w.join().expect("joined").expect("answered");
+        assert_eq!(v["build"], 1, "{v}");
     }
 
     /// Every request waiting on the watch is answered once it ends, before
