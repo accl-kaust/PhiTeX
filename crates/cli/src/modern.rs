@@ -206,9 +206,10 @@ enum Sub {
     /// watch FILE` would (its nearest phitex.toml or .latexmkrc applied);
     /// the viewer's Files panel and Ctrl+P switch documents. Nothing is
     /// built until a document is opened; builds run one at a time with
-    /// all the threads; a document whose tabs are all closed stays warm
-    /// until --memory is used up. Keys act on every open document, or on
-    /// the one chosen with 1-9 (a: all again).
+    /// all the threads; the page's Running list stops one (Stop, Stop
+    /// all), and one no tab shows stops by itself after --auto-stop (5m;
+    /// -1: never) or past --memory. Terminal: ↑ ↓ highlight a document,
+    /// Enter opens it, x stops it, r p w s Ctrl-R act on it.
     Watch {
         /// The main .tex file (default: phitex.toml's `main`; with --lsp,
         /// the editor's), or a folder to browse
@@ -517,6 +518,26 @@ struct WatchArgs {
     /// viewed first (default: a quarter of this machine's memory)
     #[arg(long, value_name = "SIZE", value_parser = parse_size, hide_short_help = true)]
     memory: Option<u64>,
+    /// watch DIR: how long a document keeps running once no tab shows it,
+    /// then it stops and its memory is freed (default 5m; 30s, 10m, 1h;
+    /// -1: never)
+    #[arg(long, value_name = "DURATION", value_parser = parse_auto_stop, allow_hyphen_values = true, hide_short_help = true)]
+    auto_stop: Option<AutoStop>,
+}
+
+/// `--auto-stop`'s value: a wait, or never (`-1`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutoStop(pub Option<Duration>);
+
+/// `--auto-stop`'s value: `-1` never, else a time such as 30s or 10m (0:
+/// at once).
+fn parse_auto_stop(s: &str) -> Result<AutoStop, String> {
+    if s.trim() == "-1" {
+        return Ok(AutoStop(None));
+    }
+    crate::session_cmd::duration(s)
+        .map(|d| AutoStop(Some(d.unwrap_or(Duration::ZERO))))
+        .map_err(|e| format!("{e}; -1: never"))
 }
 
 /// A size such as `4GB`, `512MiB` or `1000000` (bytes).
@@ -580,6 +601,9 @@ pub struct Options {
     pub lsp: bool,
     /// watch DIR: the memory its sessions may keep together (`--memory`).
     pub memory: Option<u64>,
+    /// watch DIR: how long a document no tab shows keeps running
+    /// (`--auto-stop`: none given; `Some(None)`: never).
+    pub auto_stop: Option<Option<Duration>>,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,
     pub synctex: Option<bool>,
@@ -743,6 +767,7 @@ impl WatchArgs {
         o.lsp = w.lsp;
         o.editor = w.editor;
         o.memory = w.memory;
+        o.auto_stop = w.auto_stop.map(|a| a.0);
     }
 }
 
@@ -2310,6 +2335,29 @@ mod tests {
     /// `watch` (before or after the file), the watch's after `watch`
     /// alone; one where it means nothing is refused, not ignored. -v,
     /// -q, -y, --json and --color anywhere.
+    #[test]
+    /// `--auto-stop`: a time, or `-1` for never (not taken for a flag).
+    #[test]
+    fn auto_stop_values() {
+        let a = |x: &[&str]| parse(&v(x)).map(|o| o.auto_stop);
+        assert_eq!(a(&["watch", "--auto-stop", "-1", "."]).unwrap(), Some(None));
+        assert_eq!(a(&["watch", "--auto-stop=-1", "."]).unwrap(), Some(None));
+        assert_eq!(
+            a(&["watch", "--auto-stop", "10m", "."]).unwrap(),
+            Some(Some(Duration::from_secs(600)))
+        );
+        assert_eq!(
+            a(&["watch", ".", "--auto-stop", "30s"]).unwrap(),
+            Some(Some(Duration::from_secs(30)))
+        );
+        assert_eq!(a(&["watch", "."]).unwrap(), None);
+        assert!(a(&["watch", "--auto-stop", "-2", "."]).is_err());
+        assert!(a(&["watch", "--auto-stop", "soon", "."]).is_err());
+        // (`--idle` keeps its meaning: the exact PDF's wait, in ms)
+        let o = parse(&v(&["watch", "--idle", "500", "--auto-stop", "-1", "."])).unwrap();
+        assert_eq!(o.idle, Duration::from_millis(500));
+    }
+
     #[test]
     fn options_where_they_mean_something() {
         for line in [

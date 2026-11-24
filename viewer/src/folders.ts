@@ -13,9 +13,17 @@ export interface DocState {
   pages: number;
   /** Browser tabs showing it now. */
   tabs: number;
-  /** Its session runs (shown, or kept warm); false: ended. */
+  /** Its session runs (shown, or kept warm); false: stopped. */
   live: boolean;
   message: string | null;
+  /** No tab shows it: when it stops by itself (ms since 1970); null: it doesn't. */
+  stops_at?: number | null;
+}
+
+/** A document whose session runs: the Running strip's row. */
+export interface RunningDoc extends DocState {
+  path: string;
+  id: string;
 }
 
 export type Kind = "dir" | "tex" | "pdf" | "image" | "other";
@@ -40,6 +48,8 @@ export interface Folder {
   /** The folder shown, from the root ("" the root). */
   dir: string;
   entries: FileEntry[];
+  /** Every document whose session runs, wherever it is (the Running strip). */
+  running?: RunningDoc[];
 }
 
 export type SortKey = "name" | "mtime";
@@ -84,13 +94,21 @@ export function filterEntries(entries: readonly FileEntry[], q: string): FileEnt
   return n ? entries.filter((e) => e.name.toLowerCase().includes(n)) : [...entries];
 }
 
-export type Tone = "none" | "busy" | "ok" | "bad";
+export type Tone = "none" | "busy" | "ok" | "bad" | "idle";
+
+/** How long until `at` (ms since 1970), as the strip says it: "4 min", "20 s". */
+export function untilWords(at: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((at - now) / 1000));
+  return s >= 60 ? `${Math.ceil(s / 60)} min` : `${s} s`;
+}
 
 /** A document's state as the list says it: its words, its tone, and a longer line for its title. */
-export function stateOf(d: DocState | undefined): { text: string; tone: Tone; title: string } | null {
+export function stateOf(d: DocState | undefined, now = Date.now()): { text: string; tone: Tone; title: string } | null {
   if (!d) return null;
-  const where = d.tabs > 1 ? `open in ${d.tabs} tabs` : d.tabs === 1 ? "open in a tab" : d.live ? "no tab open: kept ready, it builds when shown again" : "closed: opening it builds it again";
+  const where = d.tabs > 1 ? `open in ${d.tabs} tabs` : d.tabs === 1 ? "open in a tab" : d.live ? "no tab open: kept ready, it builds when shown again" : "stopped: opening it builds it again";
   const s = (text: string, tone: Tone, more = "") => ({ text, tone, title: [more, where].filter(Boolean).join(" · ") });
+  if (!d.live) return s("Stopped", "none", d.message ?? "");
+  if (d.tabs === 0 && typeof d.stops_at === "number") return s(`No viewer · stops in ${untilWords(d.stops_at, now)}`, "idle", "No tab shows it: it stops by itself, freeing its memory, unless one opens it first");
   switch (d.build) {
     case "building":
       return s("Building…", "busy");

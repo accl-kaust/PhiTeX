@@ -734,3 +734,279 @@ fn a_folder_watch_of_many_folders_starts_at_once_and_watches_what_is_shown() {
     assert_eq!(off["folders"], 1, "{off}");
     w.quit();
 }
+
+/// The Running strip's rows, as the folder's listing carries them: each
+/// running document's path, build and tabs.
+fn running(v: &Value) -> Vec<(String, String, u64)> {
+    v["running"]
+        .as_array()
+        .expect("running")
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap_or("").to_owned(),
+                d["build"].as_str().unwrap_or("").to_owned(),
+                d["tabs"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
+fn id(rel: &str) -> String {
+    format!("{:012x}", fnv(rel.as_bytes()) & 0xffff_ffff_ffff)
+}
+
+/// The Running strip lists the documents running with their state and
+/// tabs; Stop ends one (its tabs cut), Stop all every one, `x` on a pipe
+/// the one it names; a stopped document opened again starts and builds.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_folder_watch_lists_whats_running_and_stops_it() {
+    let base = scratch("stop");
+    let root = base.join("docs");
+    write(
+        &root,
+        &[("a/main.tex", &doc("A.")), ("b/main.tex", &doc("B."))],
+    );
+    let mut w = Watch::start(&root, &home(&base), &[]);
+    let mut ix = w.socket("ws");
+    let top = ask(&mut ix, json!({"op": "list", "dir": ""}));
+    assert!(running(&top).is_empty(), "{top}");
+    assert!(
+        w.get(&format!("d/{}/?path=a/main.tex", id("a/main.tex")))
+            .0
+            .contains("200")
+    );
+    let mut tab_a = w.socket(&format!("d/{}/ws", id("a/main.tex")));
+    assert!(
+        w.get(&format!("d/{}/?path=b/main.tex", id("b/main.tex")))
+            .0
+            .contains("200")
+    );
+    for d in ["a/main.tex", "b/main.tex"] {
+        let b = w
+            .seen_or_next(|v| v["event"] == "build" && v["doc"] == d, 300)
+            .unwrap_or_else(|| panic!("{d}'s build"));
+        assert_eq!(b["ok"], true, "{b}");
+    }
+    // (both in the strip, built, a in one tab)
+    let v = read_until(&mut ix, |v| {
+        v["event"] == "folder" && running(v).iter().filter(|r| r.1 == "ok").count() == 2
+    });
+    assert_eq!(
+        running(&v),
+        [
+            ("a/main.tex".to_owned(), "ok".to_owned(), 1),
+            ("b/main.tex".to_owned(), "ok".to_owned(), 0)
+        ],
+        "{v}"
+    );
+    assert_eq!(v["running"][0]["pages"], 1, "{v}");
+    // (Stop on b's row: gone from the strip, its session ended)
+    ix.send(tungstenite::Message::text(
+        json!({"op": "stop", "path": "b/main.tex"}).to_string(),
+    ))
+    .expect("stop");
+    let v = read_until(&mut ix, |v| v["event"] == "folder" && running(v).len() == 1);
+    assert_eq!(running(&v)[0].0, "a/main.tex", "{v}");
+    w.seen_or_next(
+        |v| v["event"] == "session" && v["doc"] == "b/main.tex" && v["ended"] == "stopped",
+        30,
+    )
+    .expect("b stopped");
+    w.seen_or_next(
+        |v| v["event"] == "session" && v["doc"] == "b/main.tex" && v["running"] == false,
+        60,
+    )
+    .expect("b's session gone");
+    // (b opened again: started, built)
+    let builds = w
+        .seen
+        .iter()
+        .filter(|v| v["event"] == "build" && v["doc"] == "b/main.tex")
+        .count();
+    assert!(
+        w.get(&format!("d/{}/?path=b/main.tex", id("b/main.tex")))
+            .0
+            .contains("200")
+    );
+    w.next(|v| v["event"] == "build" && v["doc"] == "b/main.tex", 300)
+        .expect("b built again");
+    assert_eq!(
+        w.seen
+            .iter()
+            .filter(|v| v["event"] == "build" && v["doc"] == "b/main.tex")
+            .count(),
+        builds + 1
+    );
+    let v = read_until(&mut ix, |v| v["event"] == "folder" && running(v).len() == 2);
+    assert_eq!(running(&v)[1].1, "ok", "{v}");
+    // (Stop all: nothing running, a's tab cut)
+    ix.send(tungstenite::Message::text(
+        json!({"op": "stop-all"}).to_string(),
+    ))
+    .expect("stop all");
+    let v = read_until(&mut ix, |v| v["event"] == "folder" && running(v).is_empty());
+    assert!(running(&v).is_empty(), "{v}");
+    tab_a
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("a timeout");
+    while tab_a.read().is_ok() {}
+    for d in ["a/main.tex", "b/main.tex"] {
+        w.seen_or_next(
+            |v| v["event"] == "session" && v["doc"] == d && v["ended"] == "stopped",
+            30,
+        )
+        .unwrap_or_else(|| panic!("{d} stopped"));
+    }
+    // (a tab of a stopped document is not let in until it is opened again)
+    let (s, _, _) = w.get(&format!("d/{}/ping", id("a/main.tex")));
+    assert!(s.contains("503"), "{s}");
+    // (x on a pipe, naming a: a opened again, then stopped)
+    assert!(
+        w.get(&format!("d/{}/?path=a/main.tex", id("a/main.tex")))
+            .0
+            .contains("200")
+    );
+    w.next(|v| v["event"] == "build" && v["doc"] == "a/main.tex", 300)
+        .expect("a built again");
+    let stops = w
+        .seen
+        .iter()
+        .filter(|v| v["event"] == "session" && v["doc"] == "a/main.tex" && v["ended"] == "stopped")
+        .count();
+    w.key("x a/main.tex");
+    w.next(
+        |v| v["event"] == "session" && v["doc"] == "a/main.tex" && v["ended"] == "stopped",
+        30,
+    )
+    .expect("x stopped a");
+    assert_eq!(
+        w.seen
+            .iter()
+            .filter(|v| v["event"] == "session"
+                && v["doc"] == "a/main.tex"
+                && v["ended"] == "stopped")
+            .count(),
+        stops + 1
+    );
+    w.quit();
+}
+
+/// A document no tab shows stops by itself after `--auto-stop`; a tab
+/// opened again before then cancels it; `--auto-stop -1` never stops it.
+#[test]
+fn a_folder_watch_stops_a_document_nobody_looks_at() {
+    let base = scratch("autostop");
+    let root = base.join("docs");
+    write(
+        &root,
+        &[("a/main.tex", &doc("A.")), ("b/main.tex", &doc("B."))],
+    );
+    let mut w = Watch::start(&root, &home(&base), &["--auto-stop", "2s"]);
+    let mut ix = w.socket("ws");
+    let _ = ask(&mut ix, json!({"op": "list", "dir": ""}));
+    // (a shown, then its tab closed: stops after 2 s)
+    assert!(
+        w.get(&format!("d/{}/?path=a/main.tex", id("a/main.tex")))
+            .0
+            .contains("200")
+    );
+    let tab = w.socket(&format!("d/{}/ws", id("a/main.tex")));
+    w.seen_or_next(|v| v["event"] == "build" && v["doc"] == "a/main.tex", 300)
+        .expect("a's build");
+    drop(tab);
+    let t0 = Instant::now();
+    let v = w
+        .next(
+            |v| v["event"] == "session" && v["doc"] == "a/main.tex" && v["auto_stop"].is_number(),
+            30,
+        )
+        .expect("a's auto-stop set");
+    assert_eq!(v["auto_stop"], 2.0, "{v}");
+    let strip = read_until(&mut ix, |v| {
+        v["event"] == "folder"
+            && v["running"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|d| d["stops_at"].is_number()))
+    });
+    assert_eq!(strip["running"][0]["tabs"], 0, "{strip}");
+    w.next(
+        |v| v["event"] == "session" && v["doc"] == "a/main.tex" && v["ended"] == "idle",
+        30,
+    )
+    .expect("a stopped by itself");
+    let took = t0.elapsed();
+    assert!(
+        took >= Duration::from_millis(1800) && took < Duration::from_secs(20),
+        "{took:?}"
+    );
+    // (b shown, its tab closed, and a tab back within the wait: kept)
+    assert!(
+        w.get(&format!("d/{}/?path=b/main.tex", id("b/main.tex")))
+            .0
+            .contains("200")
+    );
+    let tab = w.socket(&format!("d/{}/ws", id("b/main.tex")));
+    w.seen_or_next(|v| v["event"] == "build" && v["doc"] == "b/main.tex", 300)
+        .expect("b's build");
+    drop(tab);
+    w.next(
+        |v| v["event"] == "session" && v["doc"] == "b/main.tex" && v["auto_stop"].is_number(),
+        30,
+    )
+    .expect("b's auto-stop set");
+    let tab = w.socket(&format!("d/{}/ws", id("b/main.tex")));
+    w.next(
+        |v| {
+            v["event"] == "session"
+                && v["doc"] == "b/main.tex"
+                && v["auto_stop"].is_null()
+                && v.get("auto_stop").is_some()
+        },
+        30,
+    )
+    .expect("b's auto-stop cancelled");
+    let stopped = w.next(
+        |v| v["event"] == "session" && v["doc"] == "b/main.tex" && v.get("ended").is_some(),
+        5,
+    );
+    assert!(
+        stopped.is_none(),
+        "b stopped though shown again: {stopped:?}"
+    );
+    drop(tab);
+    w.quit();
+    // (--auto-stop -1: a no tab shows keeps running)
+    let mut w = Watch::start(&root, &home(&base), &["--auto-stop", "-1"]);
+    let mut ix = w.socket("ws");
+    let _ = ask(&mut ix, json!({"op": "list", "dir": ""}));
+    assert!(
+        w.get(&format!("d/{}/?path=a/main.tex", id("a/main.tex")))
+            .0
+            .contains("200")
+    );
+    let tab = w.socket(&format!("d/{}/ws", id("a/main.tex")));
+    w.seen_or_next(|v| v["event"] == "build" && v["doc"] == "a/main.tex", 300)
+        .expect("a's build");
+    drop(tab);
+    w.next(
+        |v| v["event"] == "session" && v["doc"] == "a/main.tex" && v["connected"] == false,
+        30,
+    )
+    .expect("a's tab gone");
+    let gone = w.next(
+        |v| v.get("auto_stop").is_some() || v.get("ended").is_some(),
+        5,
+    );
+    assert!(gone.is_none(), "--auto-stop -1 stopped it: {gone:?}");
+    let v = ask(&mut ix, json!({"op": "list", "dir": ""}));
+    assert_eq!(
+        running(&v),
+        [("a/main.tex".to_owned(), "ok".to_owned(), 0)],
+        "{v}"
+    );
+    assert!(v["running"][0]["stops_at"].is_null(), "{v}");
+    w.quit();
+}

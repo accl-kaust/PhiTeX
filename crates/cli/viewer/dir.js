@@ -92,10 +92,16 @@ function filterEntries(entries, q) {
   const n = q.trim().toLowerCase();
   return n ? entries.filter((e) => e.name.toLowerCase().includes(n)) : [...entries];
 }
-function stateOf(d) {
+function untilWords(at, now = Date.now()) {
+  const s = Math.max(0, Math.round((at - now) / 1e3));
+  return s >= 60 ? `${Math.ceil(s / 60)} min` : `${s} s`;
+}
+function stateOf(d, now = Date.now()) {
   if (!d) return null;
-  const where = d.tabs > 1 ? `open in ${d.tabs} tabs` : d.tabs === 1 ? "open in a tab" : d.live ? "no tab open: kept ready, it builds when shown again" : "closed: opening it builds it again";
+  const where = d.tabs > 1 ? `open in ${d.tabs} tabs` : d.tabs === 1 ? "open in a tab" : d.live ? "no tab open: kept ready, it builds when shown again" : "stopped: opening it builds it again";
   const s = (text, tone, more = "") => ({ text, tone, title: [more, where].filter(Boolean).join(" \xB7 ") });
+  if (!d.live) return s("Stopped", "none", d.message ?? "");
+  if (d.tabs === 0 && typeof d.stops_at === "number") return s(`No viewer \xB7 stops in ${untilWords(d.stops_at, now)}`, "idle", "No tab shows it: it stops by itself, freeing its memory, unless one opens it first");
   switch (d.build) {
     case "building":
       return s("Building\u2026", "busy");
@@ -287,6 +293,14 @@ var FolderLink = class {
     this.dir = dir;
     this.send({ op: "list", dir });
   }
+  /** Document `path`'s session stopped (its memory freed); opened again, it starts again. */
+  stop(path) {
+    this.send({ op: "stop", path });
+  }
+  /** Every running document's session stopped. */
+  stopAll() {
+    this.send({ op: "stop-all" });
+  }
   /** Every document of the folder (quick open). */
   find() {
     return new Promise((ok) => {
@@ -360,6 +374,7 @@ var FileList = class {
   <button type="button" class="fm-ib fm-sort" title="Sort" aria-label="Sort"></button>
 </div>
 <div class="fm-note" role="status" hidden></div>
+<section class="fm-run" aria-label="Running" hidden><header><b>Running</b><span class="fm-run-n"></span><span class="fm-grow"></span><button type="button" class="fm-btn fm-stopall" title="Stop every document: their sessions end, their memory is freed">Stop all</button></header><div class="fm-run-list"></div></section>
 <div class="fm-head" role="presentation">
   <span class="fm-c-icon"></span>
   <button type="button" class="fm-h" data-sort="name">Name<span class="fm-dir"></span></button>
@@ -381,6 +396,7 @@ var FileList = class {
     this.head = $(".fm-head");
     this.sortBtn = $(".fm-sort");
     this.upBtn.onclick = () => this.goUp();
+    $(".fm-stopall").onclick = () => this.link.stopAll();
     $(".fm-qo").onclick = () => host2.quickOpen();
     this.sortBtn.onclick = () => this.sortBy(this.by === "name" ? "mtime" : "name", this.by === "name");
     this.head.addEventListener("click", (e) => {
@@ -495,7 +511,51 @@ var FileList = class {
     this.note.className = `fm-note ${tone}`;
     this.note.textContent = text ?? "";
   }
+  /** The running documents as last told, and the strip's clock (its "stops in" counted down while one has it). */
+  running = [];
+  runTick;
+  /** The Running strip (the index's): a row a running document, its state, its tabs, Stop; Stop all. Hidden with none. */
+  drawRunning() {
+    const box = this.el.querySelector(".fm-run");
+    const run = this.host.compact ? [] : this.running;
+    box.hidden = !run.length;
+    const counting = run.some((d) => d.tabs === 0 && typeof d.stops_at === "number");
+    if (counting && !this.runTick) this.runTick = setInterval(() => this.drawRunning(), 15e3);
+    if (!counting && this.runTick) clearInterval(this.runTick), this.runTick = void 0;
+    if (!run.length) return;
+    box.querySelector(".fm-run-n").textContent = String(run.length);
+    box.querySelector(".fm-run-list").replaceChildren(
+      ...run.map((d) => {
+        const st = stateOf(d);
+        const row = document.createElement("div");
+        row.className = "fm-run-row";
+        row.dataset.path = d.path;
+        const a = document.createElement("a");
+        a.className = "fm-run-name";
+        a.href = this.host.docHref(d.id, d.path);
+        a.title = `Open ${d.path} (${MOD}+click: in a new tab)`;
+        a.append(fileIcon("tex", 16), Object.assign(document.createElement("span"), { textContent: d.path }));
+        const state = document.createElement("span");
+        state.className = `fm-badge tone-${st.tone}`;
+        state.title = st.title;
+        state.append(document.createElement("i"), st.text);
+        const tabs = document.createElement("span");
+        tabs.className = "fm-run-tabs";
+        tabs.textContent = d.tabs === 0 ? "no tab" : d.tabs === 1 ? "1 tab" : `${d.tabs} tabs`;
+        const stop = document.createElement("button");
+        stop.type = "button";
+        stop.className = "fm-btn fm-stop";
+        stop.textContent = "Stop";
+        stop.title = `Stop ${d.path}: its session ends and its memory is freed; open it again to start it`;
+        stop.onclick = () => (stop.disabled = true, this.link.stop(d.path));
+        row.append(a, state, tabs, stop);
+        return row;
+      })
+    );
+  }
   show(f) {
+    this.running = f.running ?? [];
+    this.drawRunning();
     const moved = !this.folder || this.folder.dir !== f.dir;
     this.folder = f;
     this.root = f.root;
@@ -886,6 +946,21 @@ a.fm-row { cursor: pointer; }
 .fm-badge.tone-busy { color: var(--ph-warning); }
 .fm-badge.tone-busy i { animation: fm-pulse 1s ease-in-out infinite; }
 .fm-badge.tone-none { color: var(--ph-fg2); }
+.fm-badge.tone-idle { color: var(--fm-idle, #5b7bb0); }
+.fm-run { margin: 10px 14px 4px; border: 1px solid var(--ph-border); border-radius: 8px; background: var(--ph-stage); overflow: hidden; }
+.fm-run header { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--ph-border); font-size: 12px; color: var(--ph-fg2); text-transform: uppercase; letter-spacing: .4px; }
+.fm-run header b { font-weight: 650; }
+.fm-run-n { min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--ph-hover); color: var(--ph-fg); font-weight: 650; text-align: center; letter-spacing: 0; }
+.fm-run .fm-btn { margin: 0; background: var(--ph-bar); padding: 3px 12px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.fm-run .fm-btn:disabled { opacity: .5; cursor: default; }
+.fm-run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 64px auto; align-items: center; column-gap: 12px; padding: 5px 8px 5px 12px; border-top: 1px solid var(--ph-border); }
+.fm-run-row:first-child { border-top: 0; }
+.fm-run-name { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--ph-fg); text-decoration: none; font-weight: 550; }
+.fm-run-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm-run-name svg { color: var(--ph-link, var(--ph-accent)); }
+.fm-run-name:hover span { text-decoration: underline; }
+.fm-run-name:focus-visible { outline: 2px solid var(--ph-accent); border-radius: 4px; }
+.fm-run-tabs { color: var(--ph-fg2); font-size: 12px; white-space: nowrap; text-align: right; }
 .fm-badge.ended { opacity: .6; }
 .fm-badge.shown i { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 30%, transparent); }
 @keyframes fm-pulse { 50% { opacity: .25; } }
@@ -918,6 +993,10 @@ a.fm-row { cursor: pointer; }
   .fm-sort { display: inline-flex; }
   .fm-bar { gap: 4px; }
   .fm-qo kbd { display: none; }
+  .fm-run-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 4px; }
+  .fm-run-row .fm-badge { grid-column: 1; justify-self: start; }
+  .fm-run-tabs { display: none; }
+  .fm-run-row .fm-stop { grid-row: 1 / span 2; grid-column: 2; }
 }
 /* (the viewer's Files column) */
 .fm.compact { --fm-row: 30px; }
@@ -1770,7 +1849,7 @@ function typing(e) {
 var style = document.createElement("style");
 style.textContent = `
 :root { ${WATCH} --fm-ok: #1f8a4c; --fm-folder: #d08a12; color-scheme: light; }
-@media (prefers-color-scheme: dark) { :root { ${WATCH_DARK} --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; color-scheme: dark; } }
+@media (prefers-color-scheme: dark) { :root { ${WATCH_DARK} --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-idle: #8fb3ec; --fm-pdf: #f0786d; --fm-image: #5cc48c; color-scheme: dark; } }
 html, body { margin: 0; height: 100%; background: var(--ph-bar); color: var(--ph-fg); }
 * { box-sizing: border-box; }
 .top { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 16px; border-bottom: 1px solid var(--ph-border); background: var(--ph-stage); font: 13px/1 var(--ph-font); }

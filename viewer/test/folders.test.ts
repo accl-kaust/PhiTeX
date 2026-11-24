@@ -7,7 +7,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { counts, crumbs, filterEntries, fuzzy, rank, runs, sizeOf, sortEntries, stateOf, up, when, type FileEntry } from "../src/folders.ts";
+import { untilWords, counts, crumbs, filterEntries, fuzzy, rank, runs, sizeOf, sortEntries, stateOf, up, when, type FileEntry } from "../src/folders.ts";
 
 const e = (name: string, kind: FileEntry["kind"], mtime = 0): FileEntry => ({ name, path: name, kind, mtime, size: 0 });
 
@@ -41,7 +41,14 @@ test("a document's state in words", () => {
   assert.equal(stateOf({ ...d, build: "waiting" })!.text, "Waiting…");
   assert.equal(stateOf({ ...d, build: "none" })!.text, "Not built");
   assert.match(stateOf({ ...d, tabs: 0 })!.title, /kept ready/);
-  assert.match(stateOf({ ...d, tabs: 0, live: false })!.title, /closed/);
+  assert.equal(stateOf({ ...d, tabs: 0, live: false })!.text, "Stopped");
+  const now = 1_000_000;
+  const idle = stateOf({ ...d, tabs: 0, stops_at: now + 250_000 }, now)!;
+  assert.deepEqual([idle.text, idle.tone], ["No viewer · stops in 5 min", "idle"]);
+  assert.equal(stateOf({ ...d, tabs: 0, stops_at: now + 20_000 }, now)!.text, "No viewer · stops in 20 s");
+  // (a tab back: its build's state again)
+  assert.equal(stateOf({ ...d, tabs: 1, stops_at: now + 20_000 }, now)!.text, "Built · 3 pages");
+  assert.equal(untilWords(now - 5, now), "0 s");
 });
 
 test("times, sizes and counts, short and fixed", () => {

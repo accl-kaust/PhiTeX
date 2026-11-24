@@ -73,39 +73,66 @@ given (`-j N`, the `threads` setting, else the default): the cores are
 never oversubscribed. A save in one document while another builds
 waits for that build, and its viewer and the file manager say so.
 
-## Closing, memory
+## Running documents: stopping them
 
-There are no timers. A document's last tab closed, it stops building
-and stays warm: opened again, it builds what changed meanwhile, as an
-edit. The documents kept warm may use the memory `--memory SIZE` allows
-together (default: a quarter of the machine's memory; measured on
-Linux). Past it, the least recently viewed of those no tab shows end and
-give their memory back. Opened again, an ended document starts from its
-saved graph, or with a clean build.
+Above the files, the file manager shows what is running: a **Running**
+strip with a row for each document whose session runs, wherever it is
+in the folder. Each row has the document's path (a link to it), its
+state (Building, Waiting, Built · N pages, N errors, or No viewer ·
+stops in N min), how many tabs show it, and **Stop**; **Stop all** stops
+every one. The strip follows the sessions live and is hidden while
+nothing runs. In a document's Files column, each running document has a
+small dot in the same colours.
+
+A stopped document is torn down: its session ends and its memory is
+given back, and a tab still showing it waits. Open it again (a click,
+or reload its tab) and it starts as any document does, from its saved
+graph where it has one.
+
+A document's last tab closed, it stops building (what changes meanwhile
+is kept) and keeps running for `--auto-stop DURATION`, 5 minutes by
+default (`--auto-stop 30s`, `--auto-stop 1h`; `--auto-stop -1`: never),
+then stops by itself. A tab opened again before then cancels it and
+builds what changed, as an edit. `--idle MS` keeps its own meaning: the
+time without an edit before the exact PDF file is written.
+
+Besides, the documents running together may use the memory `--memory
+SIZE` allows (default: a quarter of the machine's memory; measured on
+Linux). Past it, the least recently viewed of those no tab shows stop
+first.
 
 ## The terminal
 
-The terminal prints the folder's address, then one status line for each
-open document. The keys act on every open document, or on the one
-chosen with `1`–`9` (`a` or `0`: all again):
+The terminal prints the folder's address, then a tree: the folder's
+line, and a line for each document opened in this run with its state,
+the same words as the Running strip (and `stopped`), and its tabs. It is
+redrawn in place as states change. ↑ and ↓ move a highlight through
+the tree; the keys act on the highlighted document, or on every running
+document when the folder's line is highlighted:
 
 | Key | What it does |
 | --- | --- |
-| `1`–`9`, `a` | choose a document, or all |
-| `r`, Enter | build again now |
+| ↑ ↓ | highlight a document (the top line: every open document) |
+| Enter | open the highlighted document in the browser |
+| `r` | build again now |
 | Ctrl-R | clean rebuild: start over from scratch |
+| `x` | stop it: its session ends, its memory is freed |
 | `p`, `w`, `s` | errors, warnings, how the build went (as in `phitex watch FILE`) |
-| `o` | open the folder (or the chosen document) in the browser |
+| `o` | open the folder in the browser |
 | `c`, `h` | clear the screen, list the keys |
-| `q`, Ctrl-C | quit, every session with it |
+| `q`, Ctrl-C | quit, every session with it; the terminal put back as it was |
 
-On a pipe, a line is a key, optionally followed by a document's path:
-`r paper/main.tex` rebuilds that document alone.
+On a pipe (no terminal), nothing is drawn in place and no key is read
+raw: a line is a key, optionally followed by a document's path, as
+`r paper/main.tex` (rebuild it), `x paper/main.tex` (stop it), `quit`.
 
 With `--json`, each document's events come on standard output with a
 `"doc"` field naming it (its path from the folder), beside the folder's
 own: `viewer` (the address), `watching` (how many folders are watched
-now), `session` (connected, disconnected, ended,
-`"ended": "memory"`), `queued` (a build waiting for another's) and `turn` (a build holding the one turn, then letting it go).
+now), `session` (connected or not; `"auto_stop"`: seconds until it stops
+by itself, null when a tab came back; `"ended"`: `stopped` by hand,
+`idle`, or `memory`; `"running": false` once its session is gone),
+`queued` (a build waiting for another's) and `turn` (a build holding the
+one turn, then letting it go).
 
 `phitex watch --lsp` takes one file, as before. VS Code is not covered.

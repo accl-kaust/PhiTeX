@@ -28,20 +28,24 @@
 //!   port and token known only here). The viewer asks for everything by
 //!   relative address, so it is the single-file watch's page unchanged;
 //!   it finds the folder's file manager at `../../ws` for its Files panel.
-//! - **Lifetime, no timers.** A document builds on a change while a tab
-//!   shows it. Its last tab closed, it stops building (`pause`: changes
-//!   kept) and stays warm: back, it builds what changed meanwhile, an
-//!   edit's build. The sessions kept together may use [`Shared::budget`]
-//!   of memory; past it, the least recently viewed of those no tab shows
-//!   end. Opened again, an ended one starts from its saved graph, or a
+//! - **Lifetime.** A document builds on a change while a tab shows it.
+//!   Its last tab closed, it stops building (`pause`: changes kept) and
+//!   stays warm for `--auto-stop` (5 min by default; `-1`: for ever),
+//!   then stops: its session ends and its memory is given back. A tab
+//!   back first, it builds what changed meanwhile, an edit's build. The
+//!   sessions kept together may use [`Shared::budget`] of memory; past
+//!   it, the least recently viewed of those no tab shows stop first. The
+//!   file manager's Running strip and the terminal's `x` stop one by
+//!   hand. Opened again, a stopped one starts from its saved graph, or a
 //!   clean build.
 //! - **Threads.** The sessions build one at a time, each with every
 //!   thread the watch was given ([`crate::watch::TURNS`]): the cores the
 //!   user gave are never oversubscribed. A save in one document while
 //!   another builds waits, and says so.
-//! - **The terminal.** The index's address, then a status line an open
-//!   document; the keys act on every open document, or on the one chosen
-//!   with `1`-`9` (`a`: all again).
+//! - **The terminal.** The index's address, then a tree: a line a
+//!   document opened this run, with its state; ↑ ↓ highlight one and the
+//!   keys act on it (the folder's line highlighted: on every open
+//!   document); Enter opens it in the browser, `x` stops it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -50,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use notify::{RecursiveMode, Watcher as _};
 use serde_json::{Value, json};
@@ -67,12 +71,13 @@ const SCRIPT: &[u8] = include_bytes!("../viewer/dir.js");
 /// The keys, for `h`.
 pub const HELP: &[(&str, &str)] = &[
     (
-        "1-9",
-        "the keys below go to that document (its status line's number)",
+        "↑ ↓",
+        "highlight a document (the top line: every open document)",
     ),
-    ("a, 0", "the keys below go to every open document again"),
-    ("r, Enter", "build again now"),
+    ("Enter", "open the highlighted document in the browser"),
+    ("r", "build it again now"),
     ("Ctrl-R", "clean rebuild: start over from scratch"),
+    ("x", "stop it: its session ends, its memory freed"),
     ("p", "show the last build's errors again"),
     (
         "w",
@@ -82,14 +87,27 @@ pub const HELP: &[(&str, &str)] = &[
         "s",
         "how the build went, now and after every build (again: hide it)",
     ),
-    (
-        "o",
-        "open the folder in the browser (or the chosen document)",
-    ),
+    ("o", "open the folder in the browser"),
     ("c", "clear the screen"),
     ("h, ?", "these keys"),
     ("q, Ctrl-C", "quit, every document's session with it"),
 ];
+
+/// A wait as people say it: 5 min, 30 s.
+fn span(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 60 && s % 60 == 0 {
+        format!("{} min", s / 60)
+    } else if s >= 1 {
+        format!("{s} s")
+    } else {
+        format!("{} ms", d.as_millis())
+    }
+}
+
+/// How long a document no tab shows keeps running by default
+/// (`--auto-stop`).
+pub const AUTO_STOP: Duration = Duration::from_secs(5 * 60);
 
 /// At most this many files are listed for quick open (a home folder
 /// watched by mistake is not walked for ever).
@@ -408,6 +426,11 @@ struct Doc {
     ok: Option<bool>,
     busy: String,
     last_error: Option<String>,
+    /// No tab shows it: when it stops by itself (`--auto-stop`), and the
+    /// wait's number (a tab back, or a stop, makes it another: the wait
+    /// that ends finds it changed and does nothing).
+    stops_at: Option<SystemTime>,
+    idle: u64,
 }
 
 impl Doc {
@@ -427,6 +450,8 @@ impl Doc {
             ok: None,
             busy: String::new(),
             last_error: None,
+            stops_at: None,
+            idle: 0,
         }
     }
 
@@ -455,15 +480,45 @@ impl Doc {
         }
     }
 
+    /// Its session runs, and is not ending.
+    fn live(&self) -> bool {
+        self.run.as_ref().is_some_and(|r| !r.stopping)
+    }
+
     fn json(&self) -> Value {
         json!({
             "build": if self.queued { "waiting" } else { self.build },
             "errors": self.errors,
             "pages": self.pages,
             "tabs": self.tabs.len(),
-            "live": self.run.is_some(),
+            "live": self.live(),
             "message": self.message,
+            "stops_at": self.stops_at.and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| u64::try_from(d.as_millis()).unwrap_or(0)),
         })
+    }
+
+    /// Its state in words, as the file manager's strip says it.
+    fn words(&self, now: SystemTime) -> String {
+        if !self.live() {
+            return "stopped".to_owned();
+        }
+        if let Some(t) = self.stops_at.filter(|_| self.tabs.is_empty()) {
+            let left = t.duration_since(now).unwrap_or_default().as_secs();
+            return if left >= 60 {
+                format!("No viewer · stops in {} min", left.div_ceil(60))
+            } else {
+                format!("No viewer · stops in {left} s")
+            };
+        }
+        match (self.queued, self.build) {
+            (true, _) => "Waiting…".to_owned(),
+            (_, "building") => "Building…".to_owned(),
+            (_, "ok") if self.pages == 1 => "Built · 1 page".to_owned(),
+            (_, "ok") => format!("Built · {} pages", self.pages),
+            (_, "errors") if self.errors == 1 => "1 error".to_owned(),
+            (_, "errors") => format!("{} errors", self.errors),
+            _ => "Starting…".to_owned(),
+        }
     }
 }
 
@@ -486,6 +541,10 @@ struct State {
 /// What wakes the watch's loop.
 enum Ev {
     Changed,
+    /// ↑ (-1) or ↓ (1) on the terminal: the highlight moved.
+    Move(i32),
+    /// Enter on the terminal.
+    Enter,
     /// A key, or a line on a pipe (its key, and the document it names).
     Key(Key, Option<String>),
 }
@@ -512,6 +571,8 @@ pub struct Shared {
     ui: Ui,
     /// The memory the sessions may keep together, in bytes.
     budget: u64,
+    /// How long a document no tab shows keeps running (none: for ever).
+    auto_stop: Option<Duration>,
 }
 
 impl Shared {
@@ -618,8 +679,10 @@ pub fn session_args(args: &[String], dir: &str) -> Vec<String> {
         if Some(k) != at {
             match a.as_str() {
                 "--open" | "--json" => {}
-                "--port" | "--memory" => k += 1,
-                _ if a.starts_with("--port=") || a.starts_with("--memory=") => {}
+                "--port" | "--memory" | "--auto-stop" => k += 1,
+                _ if a.starts_with("--port=")
+                    || a.starts_with("--memory=")
+                    || a.starts_with("--auto-stop=") => {}
                 _ => v.push(a.clone()),
             }
         }
@@ -683,22 +746,48 @@ fn enforce_budget(sh: &Shared, st: &mut State) {
         if total <= sh.budget {
             break;
         }
-        if let Some(d) = st.docs.get_mut(&r) {
-            d.stop();
-            d.message = Some("ended to free memory: opened again, it builds again".to_owned());
-            sh.ui.line(&sh.ui.st.dim(&format!(
-                "{r}: ended, the open documents' memory past {} (opened again, it builds again)",
+        stop_doc(
+            sh,
+            st,
+            &r,
+            "memory",
+            &format!(
+                "stopped: the open documents' memory past {}",
                 bytesize::ByteSize::b(sh.budget).display().si()
-            )));
-            sh.ui
-                .event(&json!({"event": "session", "doc": r, "ended": "memory"}));
-            total = total.saturating_sub(m);
-            ended = true;
-        }
+            ),
+        );
+        total = total.saturating_sub(m);
+        ended = true;
     }
     if ended {
         sh.changed(st);
     }
+}
+
+/// Document `rel` stopped (`why`: "stopped" by hand, "idle", "memory";
+/// `said` on the terminal): its session ends and its memory is given
+/// back, its tabs cut and not let in again until it is opened again,
+/// when it starts as any document does (from its saved graph).
+fn stop_doc(sh: &Shared, st: &mut State, rel: &str, why: &str, said: &str) -> bool {
+    let Some(d) = st.docs.get_mut(rel).filter(|d| d.live()) else {
+        return false;
+    };
+    d.stop();
+    d.cut();
+    d.held = true;
+    d.on = false;
+    d.stops_at = None;
+    d.idle += 1;
+    d.message = Some(format!("{said}: opened again, it builds again"));
+    sh.ui.line(
+        &sh.ui
+            .st
+            .dim(&format!("{rel}: {said} (opened again, it builds again)")),
+    );
+    sh.ui
+        .event(&json!({"event": "session", "doc": rel, "ended": why}));
+    sh.changed(st);
+    true
 }
 
 /// Document `rel`'s session started (generation `epoch`): its messages read
@@ -876,6 +965,12 @@ fn connect(sh: &Arc<Shared>, rel: &str, asked: bool) -> Result<(), String> {
     }
     let d = st.docs.entry(rel.to_owned()).or_insert_with(Doc::new);
     d.viewed = clock;
+    // (shown again: its auto-stop off)
+    if d.stops_at.take().is_some() {
+        d.idle += 1;
+        sh.ui
+            .event(&json!({"event": "session", "doc": rel, "auto_stop": null}));
+    }
     if asked {
         d.held = false;
     }
@@ -906,18 +1001,45 @@ fn connect(sh: &Arc<Shared>, rel: &str, asked: bool) -> Result<(), String> {
 
 /// Document `rel`'s last tab gone: no builds, its session kept warm while
 /// the budget allows.
-fn disconnect(sh: &Shared, st: &mut State, rel: &str) {
+fn disconnect(sh: &Arc<Shared>, st: &mut State, rel: &str) {
     st.clock += 1;
     let clock = st.clock;
     let Some(d) = st.docs.get_mut(rel) else {
         return;
     };
     d.viewed = clock;
-    if d.on && d.run.as_ref().is_some_and(|r| !r.stopping) {
+    if d.on && d.live() {
         d.send("pause");
         d.on = false;
         sh.ui
             .event(&json!({"event": "session", "doc": rel, "connected": false}));
+        // (no viewer left: it stops by itself after --auto-stop, unless a
+        // tab comes back first)
+        if let Some(wait) = sh.auto_stop {
+            d.idle += 1;
+            d.stops_at = Some(SystemTime::now() + wait);
+            let (idle, rel, s) = (d.idle, rel.to_owned(), sh.clone());
+            sh.ui
+                .event(&json!({"event": "session", "doc": rel, "auto_stop": wait.as_secs_f64()}));
+            std::thread::spawn(move || {
+                std::thread::sleep(wait);
+                let mut st = lock(&s.st);
+                if st
+                    .docs
+                    .get(&rel)
+                    .is_some_and(|d| d.idle == idle && d.tabs.is_empty())
+                {
+                    let after = span(wait);
+                    stop_doc(
+                        &s,
+                        &mut st,
+                        &rel,
+                        "idle",
+                        &format!("stopped: no viewer for {after}"),
+                    );
+                }
+            });
+        }
     }
     sh.changed(st);
     enforce_budget(sh, st);
@@ -1292,7 +1414,22 @@ fn folder(sh: &Shared, dir: &str) -> Result<Value, String> {
         "root": root_name(&sh.root.path),
         "dir": dir,
         "entries": out,
+        "running": running_json(&st),
     }))
+}
+
+/// The documents whose session runs, for the file manager's Running strip.
+fn running_json(st: &State) -> Vec<Value> {
+    st.docs
+        .iter()
+        .filter(|(_, d)| d.live())
+        .map(|(r, d)| {
+            let mut v = d.json();
+            v["path"] = json!(r);
+            v["id"] = json!(doc_id(r));
+            v
+        })
+        .collect()
 }
 
 fn root_name(p: &Path) -> String {
@@ -1340,6 +1477,22 @@ fn index_socket(sh: &Arc<Shared>, mut sock: WebSocket<TcpStream>, doc: Option<St
                                 json!({"event": "error", "dir": want, "message": e}).to_string(),
                             ),
                         }
+                    }
+                    // (the Running strip's Stop, and Stop all)
+                    "stop" => {
+                        let rel = req["path"].as_str().unwrap_or("");
+                        let mut st = lock(&sh.st);
+                        (!stop_doc(sh, &mut st, rel, "stopped", "stopped")).then(|| {
+                            json!({"event": "error", "message": format!("{rel} is not running")})
+                                .to_string()
+                        })
+                    }
+                    "stop-all" => {
+                        let mut st = lock(&sh.st);
+                        for r in running(&st) {
+                            stop_doc(sh, &mut st, &r, "stopped", "stopped");
+                        }
+                        None
                     }
                     "find" => {
                         let files: Vec<Value> = sh
@@ -1437,31 +1590,96 @@ fn line_of(l: &str) -> (Key, Option<String>) {
     (key, doc)
 }
 
+/// A key read on a terminal, its escape sequence decoded.
+#[derive(Debug, PartialEq, Eq)]
+enum Input {
+    Up,
+    Down,
+    Enter,
+    Char(char),
+}
+
+/// A terminal's bytes to keys: ↑ and ↓ (`ESC [ A`, `ESC O A`, …), Enter,
+/// and the other characters (UTF-8 put together); other escape
+/// sequences, ← → and the function keys among them, dropped whole.
+#[derive(Default)]
+struct Decoder {
+    /// An escape sequence's bytes so far, or a character's.
+    seq: Vec<u8>,
+}
+
+impl Decoder {
+    fn push(&mut self, b: u8) -> Option<Input> {
+        if self.seq.first() == Some(&0x1b) {
+            self.seq.push(b);
+            match (self.seq.len(), b) {
+                (2, b'[' | b'O') => return None,
+                // (ESC alone, then another key: that key)
+                (2, _) => {
+                    self.seq.clear();
+                    return self.push(b);
+                }
+                (_, b'A') => {
+                    self.seq.clear();
+                    return Some(Input::Up);
+                }
+                (_, b'B') => {
+                    self.seq.clear();
+                    return Some(Input::Down);
+                }
+                (_, b) if b.is_ascii_alphabetic() || b == b'~' => {
+                    self.seq.clear();
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+        if b == 0x1b {
+            self.seq = vec![b];
+            return None;
+        }
+        if b == b'\r' || b == b'\n' {
+            self.seq.clear();
+            return Some(Input::Enter);
+        }
+        self.seq.push(b);
+        match std::str::from_utf8(&self.seq) {
+            Ok(t) => {
+                let c = t.chars().next();
+                self.seq.clear();
+                c.map(Input::Char)
+            }
+            Err(e) if e.error_len().is_some() || self.seq.len() >= 4 => {
+                self.seq.clear();
+                None
+            }
+            Err(_) => None,
+        }
+    }
+}
+
 /// Standard input's keys (a terminal's) or lines (a pipe's), to `tx`. A
 /// terminal's end quits; a pipe's does not (as `phitex watch FILE`).
 fn read_keys(tx: &mpsc::Sender<Ev>, raw: bool) {
     if raw {
-        let mut bytes = std::io::stdin().lock().bytes();
-        while let Some(Ok(b)) = bytes.next() {
-            if b == 0x1b {
-                if let Some(Ok(b'[' | b'O')) = bytes.next() {
-                    for b in bytes.by_ref() {
-                        if b.as_ref()
-                            .map_or(true, |b| b.is_ascii_alphabetic() || *b == b'~')
-                        {
-                            break;
-                        }
+        let mut dec = Decoder::default();
+        for b in std::io::stdin().lock().bytes() {
+            let Ok(b) = b else { break };
+            let ev = match dec.push(b) {
+                None => continue,
+                Some(Input::Up) => Ev::Move(-1),
+                Some(Input::Down) => Ev::Move(1),
+                Some(Input::Enter) => Ev::Enter,
+                Some(Input::Char(c)) => match Key::of(c) {
+                    Some(Key::Suspend) => {
+                        keys::suspend();
+                        continue;
                     }
-                }
-                continue;
-            }
-            let k = Key::of(char::from(b));
-            if k == Some(Key::Suspend) {
-                keys::suspend();
-                continue;
-            }
-            let k = k.unwrap_or(Key::Other(char::from(b)));
-            if tx.send(Ev::Key(k, None)).is_err() {
+                    Some(k) => Ev::Key(k, None),
+                    None => continue,
+                },
+            };
+            if tx.send(ev).is_err() {
                 return;
             }
         }
@@ -1477,63 +1695,68 @@ fn read_keys(tx: &mpsc::Sender<Ev>, raw: bool) {
     }
 }
 
-/// The documents with a session, in their status lines' order (the
-/// numbers `1`-`9` choose).
+/// The documents whose session runs.
 fn running(st: &State) -> Vec<String> {
     st.docs
         .iter()
-        .filter(|(_, d)| d.run.as_ref().is_some_and(|r| !r.stopping))
+        .filter(|(_, d)| d.live())
         .map(|(r, _)| r.clone())
         .collect()
 }
 
-/// The status lines: the watch's, then one an open document.
-fn statuses(sh: &Shared, chosen: Option<&str>, shown_dir: &str) {
-    let st = lock(&sh.st);
-    let open = running(&st);
-    let shown = st.docs.values().filter(|d| !d.tabs.is_empty()).count();
-    let mut lines = vec![(
-        match (open.len(), chosen) {
-            (0, _) => format!("{shown_dir} · no document open: pick one in the browser"),
-            (n, None) => {
-                format!("{shown_dir} · {n} open, {shown} in a tab · keys to all (1-9: one)")
+/// The documents of the terminal's tree: every one opened this run, in
+/// order, each with its state in words and whether it is well.
+fn rows(st: &State, now: SystemTime) -> Vec<(String, String, usize, Option<bool>)> {
+    st.docs
+        .iter()
+        .map(|(r, d)| {
+            let ok = if d.live() { d.ok } else { None };
+            (r.clone(), d.words(now), d.tabs.len(), ok)
+        })
+        .collect()
+}
+
+/// The terminal's tree (the status lines under what is printed): the
+/// folder's line, then a line a document opened this run with its state,
+/// the highlighted one marked (`cursor`: 0 the folder's line, every open
+/// document, `k` the k-th document).
+fn tree(
+    shown_dir: &str,
+    docs: &[(String, String, usize, Option<bool>)],
+    cursor: usize,
+) -> Vec<(String, Option<bool>)> {
+    let open = docs.iter().filter(|d| d.1 != "stopped").count();
+    let mark = |k: usize| if k == cursor { "▸" } else { " " };
+    let head = if docs.is_empty() {
+        format!("{shown_dir} · no document open yet: pick one in the browser")
+    } else {
+        format!(
+            "{}{shown_dir} · {open} open{} · ↑↓ highlight, Enter open, x stop",
+            mark(0),
+            if cursor == 0 {
+                " · keys act on all"
+            } else {
+                ""
             }
-            (n, Some(c)) => {
-                format!("{shown_dir} · {n} open, {shown} in a tab · keys to {c} (a: all)")
-            }
-        },
-        None,
-    )];
-    for (k, r) in open.iter().enumerate() {
-        let d = &st.docs[r];
-        let what = if d.queued {
-            "waiting for another document's build".to_owned()
-        } else if d.busy.is_empty() {
-            d.status.clone()
-        } else {
-            d.busy.clone()
+        )
+    };
+    let mut out = vec![(head, None)];
+    let width = docs.iter().map(|d| d.0.chars().count()).max().unwrap_or(0);
+    for (k, (r, words, tabs, ok)) in docs.iter().enumerate() {
+        let tabs = match tabs {
+            0 => String::new(),
+            1 => " · 1 tab".to_owned(),
+            n => format!(" · {n} tabs"),
         };
-        let shown = match d.tabs.len() {
-            0 if d.on => "opening".to_owned(),
-            0 => "no tab, kept warm".to_owned(),
-            1 => "1 tab".to_owned(),
-            n => format!("{n} tabs"),
-        };
-        let mark = if chosen == Some(r.as_str()) {
-            "▸"
-        } else {
-            " "
-        };
-        // (its own line names its file first: said once, by its path here)
-        let name = r.rsplit('/').next().unwrap_or(r);
-        let what = match what.strip_prefix(name).and_then(|w| w.strip_prefix(" · ")) {
-            _ if what.is_empty() => "starting".to_owned(),
-            Some(rest) => rest.to_owned(),
-            None => what,
-        };
-        lines.push((format!("{mark}{} {r} · {what} · {shown}", k + 1), d.ok));
+        let pad = " ".repeat(width - r.chars().count());
+        out.push((format!("{} {r}{pad}  {words}{tabs}", mark(k + 1)), *ok));
     }
-    drop(st);
+    out
+}
+
+/// The status lines drawn (in place, below what is printed).
+fn statuses(sh: &Shared, cursor: usize, shown_dir: &str) {
+    let lines = tree(shown_dir, &rows(&lock(&sh.st), SystemTime::now()), cursor);
     sh.ui.statuses(&lines);
 }
 
@@ -1579,6 +1802,7 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
         tx: Mutex::new(tx.clone()),
         ui: ui.clone(),
         budget: o.memory.unwrap_or_else(default_budget),
+        auto_stop: o.auto_stop.unwrap_or(Some(AUTO_STOP)),
     });
     {
         let s = sh.clone();
@@ -1648,7 +1872,9 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
     if raw {
         ui.keys("h: keys");
     }
-    let mut chosen: Option<String> = None;
+    // (the highlighted line: 0 the folder's, every open document; k the
+    // k-th document of the tree)
+    let mut cursor = 0usize;
     let quit = |sh: &Shared| -> ! {
         ui.finish();
         keys::restore();
@@ -1667,17 +1893,31 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
         std::process::exit(0);
     };
     loop {
-        statuses(&sh, chosen.as_deref(), &shown_dir);
+        statuses(&sh, cursor, &shown_dir);
         let Ok(ev) = rx.recv() else { quit(&sh) };
-        let Ev::Key(k, doc) = ev else { continue };
-        // (the documents a key acts on: the one named, else the one
-        // chosen, else every open one)
+        let docs: Vec<String> = lock(&sh.st).docs.keys().cloned().collect();
+        cursor = cursor.min(docs.len());
+        let highlighted = cursor.checked_sub(1).and_then(|k| docs.get(k)).cloned();
+        let (k, doc) = match ev {
+            Ev::Changed => continue,
+            Ev::Move(by) => {
+                cursor = cursor.saturating_add_signed(by as isize).min(docs.len());
+                continue;
+            }
+            // (Enter: the highlighted document opened in the browser)
+            Ev::Enter => (Key::Open, highlighted.clone()),
+            // (o: the folder; the other keys: the highlighted document)
+            Ev::Key(Key::Open, doc) => (Key::Open, doc),
+            Ev::Key(k, doc) => (k, doc.or_else(|| highlighted.clone())),
+        };
+        // (the documents a key acts on: the one named or highlighted, else
+        // every open one)
         let targets = |st: &State| -> Vec<String> {
-            match doc.as_ref().or(chosen.as_ref()) {
+            match &doc {
                 Some(r) => st
                     .docs
                     .get(r)
-                    .filter(|d| d.run.is_some())
+                    .filter(|d| d.live())
                     .map(|_| r.clone())
                     .into_iter()
                     .collect(),
@@ -1686,19 +1926,15 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
         };
         match k {
             Key::Quit => quit(&sh),
-            Key::Other(c @ '1'..='9') => {
-                let k = c as usize - '1' as usize;
-                match running(&lock(&sh.st)).get(k) {
-                    Some(r) => {
-                        ui.line(&st.dim(&format!("keys go to {r} now (a: to every document)")));
-                        chosen = Some(r.clone());
-                    }
-                    None => ui.line(&format!("phitex watch: no document {c} open")),
+            Key::Other('x' | 'X') => {
+                let mut s = lock(&sh.st);
+                let ts = targets(&s);
+                if ts.is_empty() {
+                    ui.line("phitex watch: nothing running to stop");
                 }
-            }
-            Key::Other('a' | 'A' | '0') => {
-                chosen = None;
-                ui.line(&st.dim("keys go to every open document now"));
+                for r in ts {
+                    stop_doc(&sh, &mut s, &r, "stopped", "stopped");
+                }
             }
             Key::Rebuild | Key::CleanRebuild | Key::Problems | Key::Warnings | Key::Summary => {
                 let line = match k {
@@ -1711,7 +1947,16 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
                 let mut s = lock(&sh.st);
                 let ts = targets(&s);
                 if ts.is_empty() {
-                    ui.line("phitex watch: no document open (pick one in the browser)");
+                    ui.line(
+                        match &doc {
+                            Some(r) => {
+                                format!("phitex watch: {r} is not running (open it in the browser)")
+                            }
+                            None => "phitex watch: no document open (pick one in the browser)"
+                                .to_owned(),
+                        }
+                        .as_str(),
+                    );
                 }
                 for r in &ts {
                     if let Some(d) = s.docs.get_mut(r) {
@@ -1720,9 +1965,9 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
                 }
             }
             Key::Open => {
-                let target = chosen
+                let target = doc
                     .as_ref()
-                    .map(|r| format!("{}d/{}/", sh.url, doc_id(r)));
+                    .map(|r| format!("{}d/{}/?path={}", sh.url, doc_id(r), escape(r)));
                 let u = target.unwrap_or_else(|| sh.url.clone());
                 if !crate::view::open_browser(&u) {
                     ui.warning(&format!("could not start a browser: open {u}"));
@@ -1777,7 +2022,17 @@ mod tests {
         assert_eq!(
             session_args(
                 &v(&[
-                    "watch", "-j", "4", "--open", "--port", "2000", "--memory", "1GB", "."
+                    "watch",
+                    "-j",
+                    "4",
+                    "--open",
+                    "--port",
+                    "2000",
+                    "--memory",
+                    "1GB",
+                    "--auto-stop",
+                    "-1",
+                    "."
                 ]),
                 "."
             ),
@@ -1787,6 +2042,117 @@ mod tests {
             session_args(&v(&["watch", "-o", "out", "out", "--json"]), "out"),
             v(&["watch", "-o", "out"])
         );
+    }
+
+    /// ↑ and ↓ in both of a terminal's forms, Enter as CR or LF, letters
+    /// and a UTF-8 character whole; ← →, F1 and Delete dropped whole.
+    #[test]
+    fn terminal_keys_decoded() {
+        let keys = |bytes: &[u8]| {
+            let mut d = Decoder::default();
+            bytes.iter().filter_map(|&b| d.push(b)).collect::<Vec<_>>()
+        };
+        assert_eq!(keys(b"\x1b[A\x1b[B"), [Input::Up, Input::Down]);
+        assert_eq!(keys(b"\x1bOA\x1bOB"), [Input::Up, Input::Down]);
+        assert_eq!(keys(b"\r\n"), [Input::Enter, Input::Enter]);
+        assert_eq!(
+            keys(b"x\x12q"),
+            [Input::Char('x'), Input::Char('\x12'), Input::Char('q')]
+        );
+        assert_eq!(keys(b"\x1b[C\x1b[D\x1bOP\x1b[3~r"), [Input::Char('r')]);
+        assert_eq!(keys(b"\x1b[1;5A"), [Input::Up]);
+        assert_eq!(keys("é".as_bytes()), [Input::Char('é')]);
+        // (Esc alone, then a key: the key)
+        assert_eq!(keys(b"\x1bx"), [Input::Char('x')]);
+    }
+
+    /// The terminal's tree: the folder's line, a line a document with its
+    /// state (the strip's words), names aligned, the highlight's mark.
+    #[test]
+    fn the_terminal_tree() {
+        let rows = vec![
+            (
+                "a/main.tex".to_owned(),
+                "Built · 3 pages".to_owned(),
+                1,
+                Some(true),
+            ),
+            (
+                "b/paper.tex".to_owned(),
+                "2 errors".to_owned(),
+                2,
+                Some(false),
+            ),
+            (
+                "c.tex".to_owned(),
+                "No viewer · stops in 4 min".to_owned(),
+                0,
+                Some(true),
+            ),
+            ("d.tex".to_owned(), "stopped".to_owned(), 0, None),
+        ];
+        let t = tree(".", &rows, 2);
+        let lines: Vec<&str> = t.iter().map(|l| l.0.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                " . · 3 open · ↑↓ highlight, Enter open, x stop",
+                "  a/main.tex   Built · 3 pages · 1 tab",
+                "▸ b/paper.tex  2 errors · 2 tabs",
+                "  c.tex        No viewer · stops in 4 min",
+                "  d.tex        stopped",
+            ]
+        );
+        assert_eq!(t[2].1, Some(false));
+        assert_eq!(t[4].1, None);
+        assert!(
+            tree(".", &rows, 0)[0]
+                .0
+                .starts_with("▸. · 3 open · keys act on all")
+        );
+        assert_eq!(
+            tree(".", &[], 0)[0].0,
+            ". · no document open yet: pick one in the browser"
+        );
+    }
+
+    /// A document's state in words, as the strip and the tree say it.
+    #[test]
+    fn a_documents_words() {
+        let now = SystemTime::now();
+        let mut d = Doc::new();
+        assert_eq!(d.words(now), "stopped");
+        let mut w = d;
+        w.run = Some(Running {
+            stdin: None,
+            pid: 0,
+            epoch: 0,
+            url: None,
+            stopping: false,
+        });
+        assert_eq!(w.words(now), "Starting…");
+        w.build = "building";
+        assert_eq!(w.words(now), "Building…");
+        w.queued = true;
+        assert_eq!(w.words(now), "Waiting…");
+        w.queued = false;
+        w.build = "ok";
+        w.pages = 3;
+        assert_eq!(w.words(now), "Built · 3 pages");
+        w.build = "errors";
+        w.errors = 1;
+        assert_eq!(w.words(now), "1 error");
+        w.stops_at = Some(now + Duration::from_secs(250));
+        assert_eq!(w.words(now), "No viewer · stops in 5 min");
+        w.stops_at = Some(now + Duration::from_secs(20));
+        assert_eq!(w.words(now), "No viewer · stops in 20 s");
+        d = w;
+        if let Some(r) = d.run.as_mut() {
+            r.stopping = true;
+        }
+        assert_eq!(d.words(now), "stopped");
+        assert_eq!(span(Duration::from_secs(300)), "5 min");
+        assert_eq!(span(Duration::from_secs(30)), "30 s");
     }
 
     #[test]

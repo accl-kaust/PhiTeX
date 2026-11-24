@@ -805,7 +805,7 @@ let folderDoc: string | undefined;
   // (the watch's own keys in the keys' help, `?`: a folder's document has its Files and quick open)
   panel.addKeys([
     ...(m
-      ? ([["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"]] as [string, string][])
+      ? ([["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] as [string, string][])
       : ([["Ctrl+P", "print the PDF"]] as [string, string][])),
     ["`", "the terminal"],
   ]);
@@ -1258,8 +1258,8 @@ function filesColumnCss(): string {
 .fcol-head svg { fill: currentColor; }
 .ib#b-files svg { fill: currentColor; }
 .ib#b-files[aria-pressed=true] { color: var(--ph-accent); }
-@media (prefers-color-scheme: dark) { .win.watch:not(.light) .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; } }
-.win.watch.dark .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; }
+@media (prefers-color-scheme: dark) { .win.watch:not(.light) .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; --fm-idle: #8fb3ec; } }
+.win.watch.dark .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; --fm-idle: #8fb3ec; }
 @container (max-width: 640px) { .fcol { position: absolute; inset: 0 auto 0 0; z-index: 6; width: min(300px, 86%); box-shadow: 4px 0 18px rgb(0 0 0 / 22%); } }
 `;
 }

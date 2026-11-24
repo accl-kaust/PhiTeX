@@ -12,7 +12,7 @@ import { typing } from "../../../viewer/src/keys.ts";
 const style = document.createElement("style");
 style.textContent = `
 :root { ${WATCH} --fm-ok: #1f8a4c; --fm-folder: #d08a12; color-scheme: light; }
-@media (prefers-color-scheme: dark) { :root { ${WATCH_DARK} --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; color-scheme: dark; } }
+@media (prefers-color-scheme: dark) { :root { ${WATCH_DARK} --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-idle: #8fb3ec; --fm-pdf: #f0786d; --fm-image: #5cc48c; color-scheme: dark; } }
 html, body { margin: 0; height: 100%; background: var(--ph-bar); color: var(--ph-fg); }
 * { box-sizing: border-box; }
 .top { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 16px; border-bottom: 1px solid var(--ph-border); background: var(--ph-stage); font: 13px/1 var(--ph-font); }

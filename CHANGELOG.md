@@ -57,6 +57,11 @@ Compare and Blame are now one thing: **± Changes** :)
   manager of the folder in your browser: click any .tex file and it builds
   in a tab of its own, switch documents from the Files panel or with
   Ctrl+P, and keep two side by side.
+- **See what's running, and stop it.** The folder's page lists the
+  documents building with their state and tabs, with Stop beside each
+  (and Stop all); one nobody is looking at stops by itself after 5
+  minutes and gives its memory back (`--auto-stop 10m`, or `-1` to keep
+  it). In the terminal, ↑ ↓ pick a document and `x` stops it.
 - **Warnings where they are.** `phitex build` lists each warning as
   `file:line: message`, the first 20 (`-v` all), and `--json` gives them
   as a `problems` list. A missing citation says where it is cited and that
