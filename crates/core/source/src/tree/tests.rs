@@ -150,3 +150,23 @@ fn random_edits() {
         assert_eq!(after[s.at + s.inserted..], before[s.at + s.removed..]);
     }
 }
+
+/// A verbatim environment's optional argument left open, and a `]` put
+/// paragraphs after it by an edit: the edit cuts as a parse of the new
+/// text does. A `[` is the paragraph's own (TeX ends an optional argument
+/// at a blank line): read on to the `]` paragraphs later, the whole text
+/// made the environment a verbatim run to the end, where the edit, cut
+/// again from the edited paragraph, kept them apart (a live diff's body
+/// ended otherwise than the whole diff's: phitex-diff's random edits,
+/// `look_code`).
+#[test]
+fn a_verbatim_option_is_its_paragraphs() {
+    let src = "\\begin{lstlisting}[lan\nint x;\n\\end{lstlisting}\n\nPara two.\n\nPara with a here.\n\nLast.\n";
+    let at = src.find("a here").unwrap() + 2;
+    check_edit(src, at, 0, "\\] ");
+    // (and the option closed in its paragraph: a run, to its \end)
+    let at = src.find("[lan").unwrap() + 4;
+    check_edit(src, at, 0, "guage=C]");
+    let t = Tree::parse(&src.replace("[lan", "[language=C]"));
+    assert!(t.paras()[0].text().ends_with("\\end{lstlisting}\n\n"));
+}
