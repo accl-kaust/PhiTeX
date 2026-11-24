@@ -56,6 +56,13 @@ const AGENTS: &str = "\
 For agents: phitex session start main.tex; edit; phitex session wait;
 phitex session problems; phitex session png --label <label>; phitex session stop";
 
+/// `phitex build --help`'s last lines: the session, for builds again and
+/// again.
+const BUILD_AFTER_HELP: &str = "\
+Building again and again while editing? `phitex session start` keeps a watch running: each
+rebuild is incremental, `phitex session problems` lists the problems at file:line, `phitex
+session png LABEL` draws a figure, table or equation as a PNG.";
+
 /// `phitex session --help`'s last lines: which watch, and the engine.
 const SESSION_AFTER_HELP: &str = "\
 Any running `phitex watch` is one, also one started in your own terminal: the one whose folder
@@ -178,11 +185,7 @@ enum Sub {
     /// The document is built to its fixpoint as latexmk builds it, the
     /// tools run in process. Its warnings are listed as file:line:
     /// message.
-    ///
-    /// Building again and again while editing? `phitex session start`
-    /// keeps a watch running: each rebuild is incremental, `phitex session
-    /// problems` lists the problems at file:line, `phitex session png
-    /// LABEL` draws a figure, table or equation as a PNG.
+    #[command(after_help = BUILD_AFTER_HELP)]
     Build {
         /// The main .tex file (default: phitex.toml's `main`)
         #[arg(value_name = "FILE")]
@@ -246,6 +249,32 @@ enum Sub {
         /// (default: the one running here)
         #[arg(long, value_name = "PID|URL", global = true)]
         session: Option<String>,
+    },
+    /// Draw a page, or a figure, table or equation by its label, as a PNG
+    ///
+    /// A look at the pages without a watch to keep: the document built
+    /// (a running watch of it used, else one started for this and ended
+    /// after), then page N, or what LABEL labels cropped, written as a PNG
+    /// (.phitex/png/, or -o PATH); its path printed. `phitex session png`
+    /// does the same in a running session, quicker.
+    Png {
+        /// The main .tex file (default: phitex.toml's `main`, or the one
+        /// with a \documentclass here)
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
+        /// Page N (from 1)
+        #[arg(long, value_name = "N", conflicts_with = "label")]
+        page: Option<usize>,
+        /// What \label{LABEL} labels (a figure or table with its caption,
+        /// an equation, a theorem), cropped
+        #[arg(long, value_name = "LABEL", required_unless_present = "page")]
+        label: Option<String>,
+        /// Write the PNG to PATH
+        #[arg(short = 'o', long = "out", value_name = "PATH")]
+        out: Option<String>,
+        /// Pixels per inch
+        #[arg(long, value_name = "N", default_value_t = 150)]
+        dpi: u32,
     },
     /// What is new in this version
     News,
@@ -616,6 +645,25 @@ impl Cli {
             Some(Sub::Session { verb, session }) => {
                 o.command = Some(Command::Session);
                 o.session = Some((verb, session));
+            }
+            Some(Sub::Png {
+                file,
+                page,
+                label,
+                out,
+                dpi,
+            }) => {
+                o.command = Some(Command::Session);
+                o.session = Some((
+                    crate::session_cmd::Verb::Look {
+                        file,
+                        page,
+                        label,
+                        out,
+                        dpi,
+                    },
+                    None,
+                ));
             }
             Some(Sub::Completions { shell }) => {
                 let mut cmd = <Cli as clap::CommandFactory>::command();

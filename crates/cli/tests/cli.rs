@@ -6313,16 +6313,12 @@ impl PngSession {
                 .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
                 .collect(),
         };
-        let mut args = vec![
-            "session",
-            "start",
-            main,
-            "--timeout",
-            "10m",
-            "--",
-            "--no-view",
-            "--synctex",
-        ];
+        // (no main: the session finds it)
+        let mut args = vec!["session", "start"];
+        if !main.is_empty() {
+            args.push(main);
+        }
+        args.extend(["--timeout", "10m", "--", "--no-view", "--synctex"]);
         args.extend_from_slice(extra);
         let out = s.phitex(&args);
         assert!(
@@ -9194,4 +9190,277 @@ fn session_list_from_another_sessions_folder_and_versions() {
         let e = String::from_utf8_lossy(&out.stderr);
         assert!(e.contains(&want), "{e}");
     }
+}
+
+/// The study's project in small: a main file that `\input`s a section
+/// with two figures, a citation no database has, refs.bib.
+fn study_project(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    std::fs::create_dir_all(dir.join("sections")).expect("a folder");
+    std::fs::write(
+        dir.join("main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nIntro text \\cite{nokey}.\n\\input{sections/results}\n\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n",
+    )
+    .expect("main.tex");
+    std::fs::write(
+        dir.join("refs.bib"),
+        "@article{known,\n  author={A},\n  title={T},\n  journal={J},\n  year={2000}\n}\n",
+    )
+    .expect("refs.bib");
+    let paras = (0..40).fold(String::new(), |mut t, i| {
+        let _ = write!(
+            t,
+            "Paragraph {i} of the results, with words enough to fill a line or two of the page.\n\n"
+        );
+        t
+    });
+    std::fs::write(
+        dir.join("sections/results.tex"),
+        format!(
+            "\\section{{Results}}\\label{{sec:r}}\nSee Figure~\\ref{{fig:a}}.\n\\begin{{figure}}[h]\n\\centering\\rule{{0.5\\textwidth}}{{0.7\\textheight}}\n\\caption{{First.}}\\label{{fig:a}}\n\\end{{figure}}\n\\begin{{figure}}[h]\n\\centering\\rule{{0.5\\textwidth}}{{0.5\\textheight}}\n\\caption{{Second.}}\\label{{fig:b}}\n\\end{{figure}}\n{paras}"
+        ),
+    )
+    .expect("results.tex");
+    dir
+}
+
+/// The usability study's session bugs: `session start` with no file
+/// finds the main file; its problems are the build's, one list and one
+/// count (`build` said 8 where the session said 10), a missing citation
+/// names refs.bib, a float's warning is not blamed on main.tex:1; `where`
+/// and `png` take the label either way; `rebuild` says it read every
+/// input again and built what changed, `rebuild --clean` returns; an input
+/// replaced by a rename (sed -i, an editor's or a script's atomic save) is
+/// built.
+#[test]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+fn session_study_bugs() {
+    use serde_json::json;
+    let _one = one();
+    let dir = study_project("session-study");
+    // (no file named: main.tex, the one with a \documentclass)
+    let s = PngSession::start(&dir, "", &[]);
+    let st = s.json(&["status"]);
+    assert_eq!(st["main"], "main.tex", "{st}");
+    let p = s.json(&["problems", "--warnings"]);
+    let list = p["problems"].as_array().expect("problems").clone();
+    let says = |needle: &str| {
+        list.iter()
+            .any(|x| x["message"].as_str().is_some_and(|m| m.contains(needle)))
+    };
+    assert!(says("nokey is not in refs.bib"), "{p}");
+    assert!(!says("I didn't find a database entry"), "{p}");
+    for x in &list {
+        if x["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("float specifier"))
+        {
+            assert!(
+                !(x["file"] == "main.tex" && x["line"] == 1),
+                "a float's warning blamed on main.tex:1: {x}"
+            );
+        }
+    }
+    // (build: the same warnings, a line each, the same count)
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "main.tex", "-o", "out", "--json"])
+        .output()
+        .expect("phitex build runs");
+    let ev: serde_json::Value = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["event"] == "build")
+        .expect("the build event");
+    assert_eq!(
+        ev["warnings"].as_u64(),
+        Some(list.len() as u64),
+        "{ev}\n{p}"
+    );
+    let built: Vec<&serde_json::Value> = ev["problems"]
+        .as_array()
+        .expect("problems")
+        .iter()
+        .filter(|x| x["kind"] != "error")
+        .collect();
+    assert_eq!(built.len(), list.len(), "{ev}");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "main.tex", "-o", "out"])
+        .output()
+        .expect("phitex build runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("main.tex:3: LaTeX Warning: Citation `nokey'")
+            && said.contains("is not in refs.bib"),
+        "{said}"
+    );
+    // (the label either way)
+    let a = s.phitex(&["session", "where", "fig:a"]);
+    let b = s.phitex(&["session", "where", "--label", "fig:a"]);
+    assert!(a.status.success() && b.status.success(), "{a:?} {b:?}");
+    assert_eq!(a.stdout, b.stdout);
+    let png = s.phitex(&["session", "png", "fig:a"]);
+    assert!(png.status.success(), "{png:?}");
+    // (rebuild: incremental, said; --clean returns)
+    let r = s.json(&["rebuild"]);
+    assert!(
+        r["why"]
+            .as_str()
+            .is_some_and(|w| w.contains("every input read again, ")),
+        "{r}"
+    );
+    let t0 = Instant::now();
+    let clean = s.phitex(&["session", "rebuild", "--clean"]);
+    assert!(clean.status.success(), "{clean:?}");
+    assert!(t0.elapsed() < Duration::from_secs(300));
+    // (an input replaced by a rename: built)
+    let path = dir.join("sections/results.tex");
+    let text = std::fs::read_to_string(&path).expect("it");
+    let tmp = dir.join("sections/.results.tex.tmp");
+    std::fs::write(&tmp, text.replace("See Figure", "See now Figure")).expect("written");
+    std::fs::rename(&tmp, &path).expect("renamed over");
+    let w = s.json(&["wait", "--timeout", "60s"]);
+    assert_ne!(w["timed_out"], true, "{w}");
+    assert_eq!(w["sources"], json!([]), "{w}");
+}
+
+/// `session start` where a watch cannot be had (its sessions folder
+/// read-only, as in Codex's sandbox) says so at once, and `phitex build`;
+/// a watch it started that is gone without `session stop` (ended with
+/// the sandboxed command that started it) is said so by the next verb.
+#[test]
+fn session_start_where_it_cannot_run_and_a_watch_gone() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _one = one();
+    let dir = study_project("session-sandbox");
+    let ro = dir.with_extension("ro");
+    let _ = std::fs::remove_dir_all(&ro);
+    std::fs::create_dir_all(&ro).expect("a folder");
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+    let t0 = Instant::now();
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["session", "start", "main.tex"])
+        .env("XDG_RUNTIME_DIR", &ro)
+        .output()
+        .expect("it runs");
+    let _ = std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700));
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{e}");
+    assert!(t0.elapsed() < Duration::from_secs(20), "{e}");
+    assert!(e.contains("phitex build"), "{e}");
+    // (a watch gone under it)
+    let s = PngSession::start(&dir, "main.tex", &[]);
+    let pid = discovery_in(&s.run)["pid"].as_u64().expect("its pid");
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    std::thread::sleep(Duration::from_millis(300));
+    let out = s.phitex(&["session", "status"]);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{e}");
+    assert!(e.contains("ended without `phitex session stop`"), "{e}");
+}
+
+/// A watch with no terminal that no one uses ends itself after its bound
+/// (here 2 s), and says so to the next verb; `session list` shows each
+/// watch's idle time.
+#[test]
+fn session_idle_watch_ends_itself() {
+    let _one = one();
+    let dir = study_project("session-idle");
+    let s = PngSession::start_with(&dir, "main.tex", &[], &[("PHITEX_WATCH_IDLE_SECS", "3")]);
+    let pid = discovery_in(&s.run)["pid"].as_u64().expect("its pid");
+    let listed = s.phitex(&["session", "list"]);
+    let o = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        o.lines()
+            .any(|l| l.contains(&format!("pid {pid}")) && l.contains(" idle ")),
+        "{o}"
+    );
+    let t0 = Instant::now();
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        assert!(
+            t0.elapsed() < Duration::from_secs(120),
+            "the idle watch did not end"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let out = s.phitex(&["session", "status"]);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        e.contains("ended itself") && e.contains("unused for"),
+        "{e}"
+    );
+}
+
+/// Where the user's cache cannot be written (a sandbox's read-only home),
+/// the project's .phitex/cache is the cache, said, not none (every build
+/// cold).
+#[test]
+fn a_read_only_cache_falls_back_to_the_projects() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _one = one();
+    let dir = scratch("cache-read-only");
+    let home = dir.join("home-cache");
+    std::fs::create_dir_all(&home).expect("a folder");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\catcode`\\{=1 \\catcode`\\}=2 \\shipout\\hbox{A}\\end\n",
+    )
+    .expect("doc.tex");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "--ini", "doc.tex"])
+        .env_remove("PHITEX_CACHE_DIR")
+        .env("XDG_CACHE_HOME", &home)
+        .output()
+        .expect("it runs");
+    let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(dir.join(".phitex/cache").is_dir(), "{e}");
+    assert!(!e.contains("built again every run"), "{e}");
+}
+
+/// `phitex png` with no watch running: the document built by a watch
+/// started for it, page N or a label's part drawn, the watch ended after.
+#[test]
+fn phitex_png_without_a_session() {
+    let _one = one();
+    let dir = study_project("phitex-png");
+    let run = dir.with_extension("run");
+    let _ = std::fs::remove_dir_all(&run);
+    std::fs::create_dir_all(&run).expect("a runtime folder");
+    let png = |args: &[&str]| {
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .arg("png")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &run)
+            .output()
+            .expect("phitex png runs");
+        let o = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{args:?}: {o}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path = o.split(" (").next().unwrap_or("").trim().to_owned();
+        assert!(Path::new(&path).is_file(), "{args:?}: {o}");
+        png_size(&path)
+    };
+    let (w, h) = png(&["main.tex", "--page", "1"]);
+    // (a letter page at 150 dpi)
+    assert!(w > 1200 && h > 1600, "{w}x{h}");
+    let (w2, h2) = png(&["--label", "fig:a"]);
+    assert!(w2 < w && h2 < h && w2 > 100, "{w2}x{h2}");
+    // (no watch left)
+    let left: Vec<_> = std::fs::read_dir(run.join("phitex"))
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .count()
+        })
+        .into_iter()
+        .collect();
+    assert_eq!(left, [0], "a watch left running");
 }

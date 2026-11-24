@@ -3917,9 +3917,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 // disk, a change no event told)
                                 let t = Instant::now();
                                 let r = s.reread_all_timed();
+                                // (incremental: what changed is built)
+                                why.push(format!(
+                                    "asked: every input read again, {} of {} changed",
+                                    r.changed, r.checked
+                                ));
                                 reread.set(Some((r, t.elapsed())));
                                 diff_reread = true;
-                                why.push("asked in the viewer".to_owned());
                                 again = true;
                             }
                             Applied::Cold => {

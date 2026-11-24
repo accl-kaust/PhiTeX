@@ -161,6 +161,16 @@ pub enum Verb {
     Stop,
     /// The running watches
     List,
+    /// `phitex png`: a page, or what a label labels, drawn from a build of
+    /// the document (a running watch's, else one started for it)
+    #[command(hide = true)]
+    Look {
+        file: Option<String>,
+        page: Option<usize>,
+        label: Option<String>,
+        out: Option<String>,
+        dpi: u32,
+    },
     /// The notes left in the viewer (open ones; --all: every one)
     Notes {
         #[arg(long)]
@@ -716,6 +726,20 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
     let out = |v: &Value| println!("{v}");
     match verb {
         Verb::List => Ok(crate::attach::sessions(ui, as_json)),
+        Verb::Look {
+            file,
+            page,
+            label,
+            out: to,
+            dpi,
+        } => look(
+            file.as_deref(),
+            *page,
+            label.as_deref(),
+            to.as_deref(),
+            *dpi,
+            as_json,
+        ),
         Verb::Start {
             file,
             timeout,
@@ -1209,7 +1233,9 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     }
                     Ok(0)
                 }
-                Verb::List | Verb::Start { .. } | Verb::Notes { .. } => unreachable!(),
+                Verb::List | Verb::Start { .. } | Verb::Notes { .. } | Verb::Look { .. } => {
+                    unreachable!()
+                }
             }
         }
     }
@@ -2131,6 +2157,121 @@ fn start(
 }
 
 /// A watch started detached: its discovery file once it is there.
+/// `phitex png`: page `page` (from 1), or what `label` labels, of the
+/// document `file` (as `session start` finds it) drawn as a PNG at `dpi`,
+/// to `to` or .phitex/png/: from a running watch of it, else one started
+/// now and stopped after. Its path (and size) printed.
+fn look(
+    file: Option<&str>,
+    page: Option<usize>,
+    label: Option<&str>,
+    to: Option<&str>,
+    dpi: u32,
+    as_json: bool,
+) -> Result<i32, Failed> {
+    let named = match file {
+        Some(f) => Some(f.to_owned()),
+        None => main_here()?,
+    };
+    let file = named.as_deref();
+    let (s, started) = if let Ok(v) = find(None, file) {
+        warn_mismatch(&v);
+        (v, false)
+    } else {
+        can_start()?;
+        (
+            launch(
+                file,
+                &["--no-view".to_owned()],
+                Some(Duration::from_secs(600)),
+            )?,
+            true,
+        )
+    };
+    let mut c = Conn::open(&s)?;
+    let done = (|| -> Result<Value, Failed> {
+        if let Some(l) = label {
+            let what = What::of(Some(l), None)?;
+            let f = locate(&mut c, &s, &what, None, Some("10m"))?;
+            return draw(&f, &what, dpi, to, false);
+        }
+        let k = page.unwrap_or(1);
+        let w = c.call(
+            "phitex/session/wait",
+            &json!({"timeout_ms": 600_000}),
+            Some(Duration::from_secs(630)),
+        )?;
+        if w["timed_out"] == true {
+            return Err(Failed(
+                EXIT_TIMEOUT,
+                "timed out: no build of the files as they are now".into(),
+            ));
+        }
+        let pages = w["pages"].as_u64().unwrap_or(0);
+        if k == 0 || k as u64 > pages {
+            return Err(Failed(
+                EXIT_REFUSED,
+                format!(
+                    "--page {k}: the document has {pages} page{}",
+                    if pages == 1 { "" } else { "s" }
+                ),
+            ));
+        }
+        let v = c.call(
+            "phitex/session/pdf",
+            &json!({}),
+            Some(Duration::from_secs(600)),
+        )?;
+        let pdf = PathBuf::from(v["pdf"].as_str().unwrap_or(""));
+        let bytes: std::sync::Arc<[u8]> = std::fs::read(&pdf)
+            .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", pdf.display())))?
+            .into();
+        let mut r = phitex_render::Renderer::new();
+        let (pw, ph, _) = r.marks(&bytes, k - 1).ok_or_else(|| {
+            Failed(
+                EXIT_REFUSED,
+                format!("page {k} of {} not read", pdf.display()),
+            )
+        })?;
+        let f = Found {
+            build: w["build"].as_u64().unwrap_or(0),
+            page: k - 1,
+            rect: [0.0, 0.0, pw, ph],
+            pdf,
+            before: None,
+            number: None,
+            printed: None,
+            approximate: false,
+        };
+        draw(&f, &What::Label(format!("page-{k}")), dpi, to, false)
+    })();
+    if started {
+        // (the watch started for this: ended, its exact PDF written)
+        let _ = c.call("phitex/session/stop", &json!({}), None);
+        drop(c);
+        let t0 = Instant::now();
+        while crate::attach::alive(&s) && t0.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let rec = Path::new(s["root"].as_str().unwrap_or("."))
+            .join(".phitex")
+            .join("session.json");
+        let _ = std::fs::remove_file(rec);
+    }
+    let v = done?;
+    if as_json {
+        println!("{v}");
+    } else {
+        println!(
+            "{} ({}x{} px, {dpi} dpi)",
+            v["png"].as_str().unwrap_or(""),
+            v["width"],
+            v["height"]
+        );
+    }
+    Ok(0)
+}
+
 /// What `session start` needs, looked at before a watch is started, so
 /// that a sandbox that cannot have one is said at once, not after the
 /// first build's wait: the sessions folder written, a socket on 127.0.0.1

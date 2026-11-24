@@ -941,10 +941,23 @@ impl Hub {
         let mut st = lock(&self.st);
         let mut read = HashMap::new();
         for p in &f.paths {
-            if let Some(n) = name_in(&st.root, Path::new(p))
-                && let Some(h) = st.fed.get(&n)
-            {
-                read.insert(n, Some(*h));
+            let Some(n) = name_in(&st.root, Path::new(p)) else {
+                continue;
+            };
+            // (a file the engine was not given: a build that went on from
+            // a saved graph found it as it was, by its key, and read it
+            // not; its text is the disk's, hashed once)
+            let h = if let Some(h) = st.fed.get(&n) {
+                Some(*h)
+            } else {
+                let h = std::fs::read(st.root.join(&n)).ok().map(|b| hash(&b));
+                if let Some(h) = h {
+                    st.fed.insert(n.clone(), h);
+                }
+                h
+            };
+            if let Some(h) = h {
+                read.insert(n, Some(h));
             }
         }
         if let (main, Some(b)) = &f.main {
@@ -4070,6 +4083,57 @@ mod tests {
         let v = w.join().expect("joined").expect("answered");
         assert_eq!(v["build"], 3, "{v}");
         assert_eq!(v["sources"], json!([]), "{v}");
+    }
+
+    /// A build that went on from a saved graph is given no file it found
+    /// unchanged: what it read is still each file's text on disk (`png`
+    /// and `where` look for a label in it; empty, they found none).
+    #[test]
+    fn a_build_from_a_saved_graph_read_the_files_on_disk() {
+        let d = project(&[("main.tex", DOC), ("ch.tex", "Chapter.\n")]);
+        let h = Hub::default();
+        h.start(&d, "main.tex", true, false);
+        h.built(facts(1, &["main.tex", "ch.tex"]));
+        let st = lock(&h.st);
+        let read = &st.builds.back().expect("a build").read;
+        assert_eq!(
+            read.get("ch.tex"),
+            Some(&Some(hash(b"Chapter.\n"))),
+            "{read:?}"
+        );
+    }
+
+    /// `problems` says when its problems are an earlier build's: the
+    /// files changed since it read them (a `wait` timed out meanwhile).
+    #[test]
+    fn problems_say_when_they_are_stale() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = hub_on(&d, &["main.tex"]);
+        let v = h.problems(&json!({}));
+        assert_eq!(v["stale"], false, "{v}");
+        std::fs::write(d.join("main.tex"), DOC.replace("quick", "slow")).expect("saved");
+        let v = h.problems(&json!({}));
+        assert_eq!(v["stale"], true, "{v}");
+        assert_eq!(v["build"], 1, "{v}");
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let v = h.problems(&json!({}));
+        assert_eq!(v["stale"], false, "{v}");
+    }
+
+    /// A clean rebuild is a new session, its builds numbered from 1 again:
+    /// `rebuild` returns with it, not waiting for a number past the old.
+    #[test]
+    fn rebuild_returns_with_a_new_sessions_first_build() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = Arc::new(hub_on(&d, &["main.tex"]));
+        rebuilt(&h, &d, 2, &["main.tex"]);
+        let h2 = h.clone();
+        let w = std::thread::spawn(move || h2.rebuild(&json!({"clean": true})));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!w.is_finished());
+        rebuilt(&h, &d, 1, &["main.tex"]);
+        let v = w.join().expect("joined").expect("answered");
+        assert_eq!(v["build"], 1, "{v}");
     }
 
     /// Every request waiting on the watch is answered once it ends, before
