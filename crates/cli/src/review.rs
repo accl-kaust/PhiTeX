@@ -601,7 +601,7 @@ pub struct BuildFacts {
     pub diags: Option<Vec<Value>>,
     pub pdf: Option<String>,
     /// Why it was built, as the watch says it ("main.tex changed",
-    /// "asked: every input read again, 1 of 41 changed", "cold").
+    /// "asked: 41 inputs checked, 1 read again", "cold").
     pub why: String,
 }
 

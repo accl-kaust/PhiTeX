@@ -9309,7 +9309,7 @@ fn session_study_bugs() {
     assert!(
         r["why"]
             .as_str()
-            .is_some_and(|w| w.contains("every input read again, ")),
+            .is_some_and(|w| w.contains("inputs checked, ")),
         "{r}"
     );
     let t0 = Instant::now();

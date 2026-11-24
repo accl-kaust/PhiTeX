@@ -3485,8 +3485,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         let r = s.reread_all_timed();
                         // (incremental: what changed is built, as an edit)
                         why.push(format!(
-                            "asked: every input read again, {} of {} changed",
-                            r.changed, r.checked
+                            "asked: {} inputs checked, {} read again",
+                            r.checked, r.changed
                         ));
                         reread.set(Some((r, t.elapsed())));
                         diff_reread = true;
@@ -3919,8 +3919,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 let r = s.reread_all_timed();
                                 // (incremental: what changed is built)
                                 why.push(format!(
-                                    "asked: every input read again, {} of {} changed",
-                                    r.changed, r.checked
+                                    "asked: {} inputs checked, {} read again",
+                                    r.checked, r.changed
                                 ));
                                 reread.set(Some((r, t.elapsed())));
                                 diff_reread = true;
