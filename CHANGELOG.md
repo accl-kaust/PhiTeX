@@ -57,6 +57,8 @@ Compare and Blame are now one thing: **± Changes** :)
   manager of the folder in your browser: click any .tex file and it builds
   in a tab of its own, switch documents from the Files panel or with
   Ctrl+P, and keep two side by side.
+- **Ctrl+R in the terminal** starts a clean rebuild from scratch, as
+  Clean rebuild does in the viewer (`h` lists it with the other keys).
 - **Fixed:** on Overleaf, a jump between the PDF and the source now opens
   the file and scrolls to a line that was off screen, in the separate PDF
   tab too; text selected on the pages is plain blue.

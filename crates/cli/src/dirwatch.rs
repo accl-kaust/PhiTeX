@@ -72,6 +72,7 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("a, 0", "the keys below go to every open document again"),
     ("r, Enter", "build again now"),
+    ("Ctrl-R", "clean rebuild: start over from scratch"),
     ("p", "show the last build's errors again"),
     (
         "w",
@@ -1361,6 +1362,7 @@ fn line_of(l: &str) -> (Key, Option<String>) {
     let key = match k {
         "" => Key::Rebuild,
         "quit" => Key::Quit,
+        "clean" => Key::CleanRebuild,
         k if k.chars().count() == 1 => {
             let c = k.chars().next().unwrap_or(' ');
             Key::of(c).unwrap_or(Key::Other(c))
@@ -1630,9 +1632,10 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
                 chosen = None;
                 ui.line(&st.dim("keys go to every open document now"));
             }
-            Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary => {
+            Key::Rebuild | Key::CleanRebuild | Key::Problems | Key::Warnings | Key::Summary => {
                 let line = match k {
                     Key::Rebuild => "r",
+                    Key::CleanRebuild => "clean",
                     Key::Problems => "p",
                     Key::Warnings => "w",
                     _ => "s",
@@ -1722,6 +1725,7 @@ mod tests {
     fn pipe_lines() {
         assert_eq!(line_of("r"), (Key::Rebuild, None));
         assert_eq!(line_of(""), (Key::Rebuild, None));
+        assert_eq!(line_of("clean"), (Key::CleanRebuild, None));
         assert_eq!(
             line_of("r a/main.tex"),
             (Key::Rebuild, Some("a/main.tex".into()))

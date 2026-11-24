@@ -1025,6 +1025,7 @@ fn line_key(l: &str) -> Key {
         (None, _) => Key::Rebuild,
         (Some(c), None) => Key::of(c).unwrap_or(Key::Other(c)),
         _ if l == "quit" => Key::Quit,
+        _ if l == "clean" => Key::CleanRebuild,
         (Some(c), _) => Key::Other(c),
     }
 }
@@ -1124,7 +1125,9 @@ impl Here {
                     None => std::process::exit(status),
                 }
             }
-            Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
+            Key::Rebuild | Key::CleanRebuild | Key::Problems | Key::Warnings | Key::Summary
+                if busy =>
+            {
                 // (said once a build: a held key says nothing more)
                 if !self.told.swap(true, Ordering::Relaxed) {
                     ui.line(
@@ -3390,6 +3393,21 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         again = true;
                         why.push("asked".to_owned());
                     }
+                    Key::CleanRebuild => {
+                        // (as the viewer's Clean rebuild: a new session on
+                        // the target resolved again; if it can't be had
+                        // again, this session builds cold)
+                        match modern::resolve_again(o) {
+                            Ok((t2, dir)) => {
+                                next = Some(((t2, o.clone(), dir), CLEAN));
+                            }
+                            Err(e) => {
+                                ui.error(&e);
+                                why.push("asked: a clean build".to_owned());
+                                again = true;
+                            }
+                        }
+                    }
                     Key::Open => {
                         let good = last.borrow().good.clone();
                         match (&view, &t.viewer, good) {
@@ -4255,6 +4273,7 @@ mod tests {
     #[test]
     fn lines_as_keys() {
         assert_eq!(line_key(""), Key::Rebuild);
+        assert_eq!(line_key("clean"), Key::CleanRebuild);
         assert_eq!(line_key(" q "), Key::Quit);
         assert_eq!(line_key("quit"), Key::Quit);
         assert_eq!(line_key("xyz"), Key::Other('x'));

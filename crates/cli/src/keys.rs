@@ -368,6 +368,8 @@ pub fn usage() -> Option<(std::time::Duration, u64)> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Rebuild,
+    /// Ctrl-R: a clean rebuild, as the viewer's Clean rebuild.
+    CleanRebuild,
     Open,
     Problems,
     Warnings,
@@ -385,6 +387,7 @@ impl Key {
     pub fn of(c: char) -> Option<Key> {
         Some(match c {
             'r' | 'R' | '\n' | '\r' => Key::Rebuild,
+            '\x12' => Key::CleanRebuild,
             'o' | 'O' => Key::Open,
             'p' | 'P' | 'e' => Key::Problems,
             'w' | 'W' => Key::Warnings,
@@ -407,6 +410,7 @@ pub const BAR: &str = "h: keys";
 /// with its key).
 pub const HELP: &[(&str, &str)] = &[
     ("r, Enter", "build again now"),
+    ("Ctrl-R", "clean rebuild: start over from scratch"),
     ("o", "open the viewer (or the --open program on the output)"),
     ("p", "show the last build's errors again"),
     ("w", "warnings, after every build (w again: off)"),
@@ -425,6 +429,7 @@ mod tests {
     fn keys() {
         assert_eq!(Key::of('\n'), Some(Key::Rebuild));
         assert_eq!(Key::of('\x03'), Some(Key::Quit));
+        assert_eq!(Key::of('\x12'), Some(Key::CleanRebuild));
         assert_eq!(Key::of('x'), Some(Key::Other('x')));
         assert_eq!(Key::of('\x1b'), None);
     }
