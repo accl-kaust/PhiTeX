@@ -79,6 +79,23 @@ pub fn version() -> &'static str {
     }
 }
 
+/// This binary as a `phitex session` and the watch it talks to tell
+/// theirs apart (the discovery file's `build`): the version, a source
+/// build said, and the engine's identity, which tells source builds of
+/// one version apart where their engines differ.
+pub fn build_id() -> String {
+    format!(
+        "{}{} (engine {:016x})",
+        version(),
+        if source_build() { ", source build" } else { "" },
+        phitex_tex::engine_id()
+    )
+}
+
+/// The first version whose watch says its [`build_id`]: an older one is
+/// older than it.
+pub const FIRST_WITH_BUILD_ID: &str = "1.0.5";
+
 /// Built from source rather than by release.yml or nightly.yml (they
 /// set `PHITEX_BUILT_BY` to `release` or `nightly`): such a build carries
 /// the version of the manifest it was built from, which names the
