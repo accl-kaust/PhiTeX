@@ -29,6 +29,14 @@ opens as it is. Hidden files and folders (`.git`,
 read. The listing follows the folder as files are added, removed and
 renamed.
 
+It is a lazy file manager: the watch starts at once whatever the folder's
+size (your home folder too). Nothing is read at the start but the
+folder's own listing; a folder is read when a page opens it, and watched
+(alone, not what is below it) only while some page shows it. Nothing is
+walked below a folder except by quick open (Ctrl+P), for that search
+alone. A document's address carries its path (`d/ID/?path=…`), so a tab
+left open from an earlier watch finds its document without a search.
+
 It never goes above the folder you gave. Every path the page names is
 checked: no `..`, no absolute path, no hidden name, and a symbolic link
 is followed only when it stays inside the folder (a link that leads out
@@ -95,7 +103,8 @@ On a pipe, a line is a key, optionally followed by a document's path:
 
 With `--json`, each document's events come on standard output with a
 `"doc"` field naming it (its path from the folder), beside the folder's
-own: `viewer` (the address), `session` (connected, disconnected, ended,
+own: `viewer` (the address), `watching` (how many folders are watched
+now), `session` (connected, disconnected, ended,
 `"ended": "memory"`), `queued` (a build waiting for another's) and `turn` (a build holding the one turn, then letting it go).
 
 `phitex watch --lsp` takes one file, as before. VS Code is not covered.

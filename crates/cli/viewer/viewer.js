@@ -13751,7 +13751,7 @@ var FileList = class {
   }
   hrefOf(e) {
     if (e.kind === "dir") return this.host.dirHref(e.path);
-    if (e.kind === "tex" && e.id) return this.host.docHref(e.id);
+    if (e.kind === "tex" && e.id) return this.host.docHref(e.id, e.path);
     if (e.kind === "pdf" || e.kind === "image") return this.host.rawHref(e.path);
     return null;
   }
@@ -13908,7 +13908,7 @@ var QuickOpen = class {
   }
   open(f, newTab) {
     this.close();
-    const href = this.host.docHref(f.id);
+    const href = this.host.docHref(f.id, f.path);
     if (newTab) window.open(href, "_blank", "noopener");
     else if (f.path !== this.host.current) location.assign(href);
   }
@@ -13949,7 +13949,7 @@ var QuickOpen = class {
         r.className = "qo-row";
         r.id = `qo-r-${k}`;
         r.dataset.k = String(k);
-        r.href = this.host.docHref(f.id);
+        r.href = this.host.docHref(f.id, f.path);
         r.tabIndex = -1;
         r.setAttribute("role", "option");
         r.setAttribute("aria-selected", String(k === this.at));
@@ -16582,12 +16582,13 @@ var folderDoc;
   if (m) folderMode(m[1]);
 }
 function folderMode(id) {
-  const url = new URL(`../../ws?doc=${id}`, location.href);
+  const here = new URLSearchParams(location.search).get("path");
+  const url = new URL(`../../ws?doc=${id}${here ? `&path=${encodeURIComponent(here)}` : ""}`, location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const link = new FolderLink(url);
   const esc = (p) => p.split("/").map(encodeURIComponent).join("/");
   const host2 = {
-    docHref: (d) => new URL(`../${d}/`, location.href).href,
+    docHref: (d, path) => new URL(`../${d}/?path=${encodeURIComponent(path)}`, location.href).href,
     rawHref: (p) => new URL(`../../raw/${esc(p)}`, location.href).href,
     dirHref: (p) => new URL(`../../${p ? `#dir=${encodeURIComponent(p)}` : ""}`, location.href).href,
     compact: true,
@@ -16651,7 +16652,9 @@ function folderMode(id) {
   const note = new URLSearchParams(location.search).get("note");
   if (note) {
     panel.msg(note, false, true);
-    history.replaceState(null, "", location.pathname + location.hash);
+    const q = new URLSearchParams(location.search);
+    q.delete("note");
+    history.replaceState(null, "", `${location.pathname}${q.size ? `?${q}` : ""}${location.hash}`);
   }
   addEventListener("keydown", (e) => {
     if (e.key !== "b" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;

@@ -54,7 +54,7 @@ const link = new FolderLink(wsUrl);
 const esc = (p: string) => p.split("/").map(encodeURIComponent).join("/");
 let quick: QuickOpen;
 const host: FilesHost = {
-  docHref: (id) => new URL(`d/${id}/`, location.href).href,
+  docHref: (id, path) => new URL(`d/${id}/?path=${encodeURIComponent(path)}`, location.href).href,
   rawHref: (p) => new URL(`raw/${esc(p)}`, location.href).href,
   dirHref: (p) => (p ? `#dir=${encodeURIComponent(p)}` : location.pathname + location.search),
   quickOpen: () => quick.toggle(),

@@ -269,6 +269,7 @@ fn home(base: &Path) -> PathBuf {
 /// path, an escape, a link out or a hidden name, through the listing, the
 /// raw files and the documents' addresses alike.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_folder_watch_never_leaves_its_folder() {
     let base = scratch("bounds");
     let root = base.join("docs");
@@ -360,6 +361,21 @@ fn a_folder_watch_never_leaves_its_folder() {
     for id in [outside_id.as_str(), "000000000000", "..", "%2e%2e"] {
         let (s, _, _) = w.get(&format!("d/{id}/"));
         assert!(s.contains("404"), "d/{id}/ opened: {s}");
+    }
+    // (nor by the path its address names, the id that path's)
+    for p in [
+        "../outside/secret.tex",
+        "%2e%2e/outside/secret.tex",
+        "out/secret.tex",
+    ] {
+        let (s, _, _) = w.get(&format!("d/{outside_id}/?path={p}"));
+        assert!(s.contains("404"), "d/{outside_id}/?path={p} opened: {s}");
+        let id = format!(
+            "{:012x}",
+            fnv(p.replace("%2e", ".").as_bytes()) & 0xffff_ffff_ffff
+        );
+        let (s, _, _) = w.get(&format!("d/{id}/?path={p}"));
+        assert!(s.contains("404"), "d/{id}/?path={p} opened: {s}");
     }
     // (quick open lists the folder's documents once each, the link in
     // leading to one already listed)
@@ -460,12 +476,13 @@ fn a_folder_watch_starts_a_session_when_a_document_opens() {
             ("p/main.tex", &doc("\\input{ch/one}")),
             ("p/ch/one.tex", "% !TEX root = ../main.tex\nOne."),
             ("q/main.tex", &doc("Q.")),
+            ("r/main.tex", &doc("R.")),
         ],
     );
     let mut w = Watch::start(&root, &home(&base), &[]);
     let mut ix = w.socket("ws");
     let q = ask(&mut ix, json!({"op": "list", "dir": "q"}));
-    let qid = id_of(&q, "main.tex");
+    assert_eq!(id_of(&q, "main.tex").len(), 12);
     let ch = ask(&mut ix, json!({"op": "list", "dir": "p/ch"}));
     let one = id_of(&ch, "one.tex");
     // (nothing started while only listed)
@@ -484,7 +501,10 @@ fn a_folder_watch_starts_a_session_when_a_document_opens() {
         .find_map(|l| l.strip_prefix("Location: "))
         .expect("a location")
         .to_owned();
-    assert!(loc.starts_with(&format!("../{main_id}/?note=")), "{loc}");
+    assert!(
+        loc.starts_with(&format!("../{main_id}/?path=p/main.tex&note=")),
+        "{loc}"
+    );
     assert!(loc.contains("one.tex"), "{loc}");
     assert!(
         w.next(|v| v["event"] == "session", 2).is_none(),
@@ -520,7 +540,15 @@ fn a_folder_watch_starts_a_session_when_a_document_opens() {
         "q started: {:?}",
         w.seen
     );
-    let _ = qid;
+    // (a tab left open from the last watch: its address names its path,
+    // nothing walked to find it; r, never listed, opened so)
+    let rid = format!("{:012x}", fnv(b"r/main.tex") & 0xffff_ffff_ffff);
+    let (s, _, _) = w.get(&format!("d/{rid}/"));
+    assert!(s.contains("404"), "r found by a walk: {s}");
+    let (s, _, _) = w.get(&format!("d/{rid}/?path=r/main.tex"));
+    assert!(s.contains("200"), "r by its path: {s}");
+    w.seen_or_next(|v| v["event"] == "build" && v["doc"] == "r/main.tex", 300)
+        .expect("r's build");
     // (the viewer's own files served under the document's address)
     let (s, _, js) = w.get(&format!("d/{main_id}/viewer.js"));
     assert!(s.contains("200") && js.len() > 100_000, "{s}");
@@ -648,5 +676,61 @@ fn a_folder_watch_builds_one_document_at_a_time() {
     w.key("r a/main.tex");
     let r = w.next(|v| v["event"] == "build", 300).expect("r's build");
     assert_eq!(r["doc"], "a/main.tex", "{r}");
+    w.quit();
+}
+
+/// A big folder starts at once: only its own listing's folder is watched
+/// (one watch, not one a folder below), each other folder while a page
+/// shows it; a change in a folder no page shows sends nothing.
+#[test]
+fn a_folder_watch_of_many_folders_starts_at_once_and_watches_what_is_shown() {
+    let base = scratch("many");
+    let root = base.join("docs");
+    for a in 0..40 {
+        for b in 0..50 {
+            for c in 0..10 {
+                std::fs::create_dir_all(root.join(format!("n{a}/m{b}/k{c}"))).expect("a folder");
+            }
+        }
+    }
+    write(&root, &[("main.tex", &doc("M."))]);
+    let t0 = Instant::now();
+    let mut w = Watch::start(&root, &home(&base), &[]);
+    let took = t0.elapsed();
+    eprintln!("22,041 folders: the address after {took:?}");
+    assert!(took < Duration::from_secs(5), "{took:?} to start");
+    let watching: Vec<&Value> = w.seen.iter().filter(|v| v["event"] == "watching").collect();
+    assert_eq!(watching.len(), 1, "{:?}", w.seen);
+    assert_eq!(watching[0]["folders"], 1, "{:?}", w.seen);
+    // (a folder opened: watched while it is shown, alone)
+    let mut ix = w.socket("ws");
+    let v = ask(&mut ix, json!({"op": "list", "dir": "n3/m7"}));
+    assert_eq!(names(&v).len(), 10, "{v}");
+    let on = w.next(|v| v["event"] == "watching", 10).expect("watched");
+    assert_eq!(on["folders"], 2, "{on}");
+    // (a change below it, in a folder no page shows: nothing sent, though
+    // that folder's time in this listing moved)
+    std::fs::write(root.join("n3/m7/k4/deep.tex"), "x").expect("a file");
+    ix.get_ref()
+        .set_read_timeout(Some(Duration::from_millis(2000)))
+        .expect("a timeout");
+    match ix.read() {
+        Err(tungstenite::Error::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) => {}
+        other => panic!("sent for a folder no page shows: {other:?}"),
+    }
+    // (a change in it: sent)
+    std::fs::write(root.join("n3/m7/here.tex"), "x").expect("a file");
+    let v = read_until(&mut ix, |v| {
+        v["event"] == "folder" && names(v).contains(&"here.tex".to_owned())
+    });
+    assert_eq!(v["dir"], "n3/m7");
+    // (the page gone: watched no more, the root still)
+    drop(ix);
+    let off = w.next(|v| v["event"] == "watching", 10).expect("unwatched");
+    assert_eq!(off["folders"], 1, "{off}");
     w.quit();
 }
