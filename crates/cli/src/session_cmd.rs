@@ -49,8 +49,16 @@ pub enum Verb {
     /// Wait until a build has read the files as they are now
     ///
     /// Answers at once when the last build did; else waits for the build
-    /// that does, never an older one.
+    /// that does, never an older one. A file open in an editor with other
+    /// text than the disk's is built from the editor's text (it wins while
+    /// the editor has it open; the disk's is built once the editor takes
+    /// it): the answer says which text a build read, file by file, and
+    /// --disk waits for the disk's.
     Wait {
+        /// …for a build of the files as they are on disk, not an editor's
+        /// other text of one (built once the editor takes the disk's)
+        #[arg(long, conflicts_with = "notes")]
+        disk: bool,
         /// …and for its warnings (made when the editing pauses)
         #[arg(long)]
         warnings: bool,
@@ -281,6 +289,35 @@ pub enum Verb {
     },
 }
 
+/// The warning when the watch `v` (its discovery object) runs another
+/// phitex than this one: its `version`, and its `build` where the
+/// versions are the same ([`crate::build_id`]; a nightly's version is its
+/// own, a source build's is not). A watch older than
+/// [`crate::FIRST_WITH_BUILD_ID`] says no build: another binary all the
+/// same. None: the same.
+pub fn mismatch(v: &Value) -> Option<String> {
+    let ours = env!("CARGO_PKG_VERSION");
+    let ours_build = crate::build_id();
+    let older = format!("older than {}", crate::FIRST_WITH_BUILD_ID);
+    let (a, b) = match (v["version"].as_str(), v["build"].as_str()) {
+        (Some(tv), Some(tb)) if tv == ours && tb == ours_build => return None,
+        (Some(tv), _) if tv != ours => (ours.to_owned(), tv.to_owned()),
+        (Some(_), Some(tb)) => (ours_build, tb.to_owned()),
+        (Some(tv), None) => (ours_build, format!("{tv} of an unknown build ({older})")),
+        (None, _) => (ours.to_owned(), format!("unknown ({older})")),
+    };
+    Some(format!(
+        "Warning: phitex version mismatch! (phitex session is {a}, phitex watch is {b})"
+    ))
+}
+
+/// [`mismatch`]'s warning on standard error, if any.
+fn warn_mismatch(v: &Value) {
+    if let Some(w) = mismatch(v) {
+        eprintln!("{w}");
+    }
+}
+
 /// Why a verb could not be done, and the status it exits with.
 struct Failed(i32, String);
 
@@ -445,19 +482,90 @@ fn not_found(here: &Path, folders: &[(PathBuf, String)]) -> String {
         .iter()
         .map(|(d, why)| format!("{} ({why})", d.display()))
         .collect();
+    let seen: Vec<Value> = folders
+        .iter()
+        .flat_map(|(d, _)| crate::attach::files_in(d))
+        .map(|(_, v)| v)
+        .collect();
+    let hidden = crate::attach::hidden_runtime();
+    let unseen: Vec<String> = crate::attach::unseen_watches(&seen)
+        .into_iter()
+        .map(|(pid, cmd)| {
+            format!(
+                "\n  {}",
+                crate::attach::unseen_line(pid, &cmd, hidden.as_deref())
+            )
+        })
+        .collect();
     format!(
-        "no phitex watch runs here (looked in {}): start one with `phitex session start`, \
+        "no phitex watch runs here (looked in {}){}\nstart one with `phitex session start`, \
          or, if one runs in your terminal and this is a sandbox: --session <its viewer's URL> (or PHITEX_SESSION=<URL> once), \
          or make its sessions folder visible here (read-only will do)",
-        looked.join(", ")
+        looked.join(", "),
+        unseen.concat()
     )
 }
 
-/// A connection to a watch's socket, `initialize`d.
+/// A connection to a watch's socket, `initialize`d, and the watch's
+/// discovery object: a request waiting on it ends when the watch does.
 struct Conn {
     r: BufReader<TcpStream>,
     w: TcpStream,
     next: u64,
+    watch: Value,
+}
+
+/// How often a request waiting on the watch looks whether it still runs.
+const LOOK_EVERY: Duration = Duration::from_millis(250);
+
+/// A thread that looks, while a request waits, whether the watch still
+/// runs ([`crate::attach::ended`]); once it does not, the connection is
+/// shut, so the read waiting on it ends. A watch that ends closes its
+/// socket itself; one gone without that (its socket held open, the
+/// connection not torn down in a sandbox's network) is seen here.
+struct Guard {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    t: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Guard {
+    fn new(watch: &Value, s: &TcpStream) -> Guard {
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stop, rx) = std::sync::mpsc::channel::<()>();
+        let t = s.try_clone().ok().map(|s| {
+            let (watch, gone) = (watch.clone(), gone.clone());
+            std::thread::spawn(move || {
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    rx.recv_timeout(LOOK_EVERY)
+                {
+                    if crate::attach::ended(&watch) {
+                        gone.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = s.shutdown(std::net::Shutdown::Both);
+                        return;
+                    }
+                }
+            })
+        });
+        Guard {
+            stop: Some(stop),
+            gone,
+            t,
+        }
+    }
+
+    fn gone(&self) -> bool {
+        self.gone.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(t) = self.t.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 fn send(w: &mut TcpStream, v: &Value) -> std::io::Result<()> {
@@ -478,6 +586,7 @@ impl Conn {
             r: BufReader::new(s),
             w,
             next: 1,
+            watch: v.clone(),
         };
         let root = v["root"].as_str().unwrap_or("");
         c.call(
@@ -505,9 +614,30 @@ impl Conn {
         )
         .map_err(|e| no_session(format!("the watch's socket: {e}")))?;
         let _ = self.r.get_ref().set_read_timeout(within);
+        let t0 = Instant::now();
+        let guard = Guard::new(&self.watch, self.r.get_ref());
         loop {
             let Some(m) = crate::lsp::read(&mut self.r) else {
-                return Err(no_session("the watch ended (its socket closed)"));
+                let pid = &self.watch["pid"];
+                if guard.gone() {
+                    return Err(no_session(format!(
+                        "the watch (pid {pid}) ended while this waited"
+                    )));
+                }
+                if let Some(w) = within
+                    && t0.elapsed() >= w
+                {
+                    return Err(Failed(
+                        EXIT_TIMEOUT,
+                        format!(
+                            "the watch (pid {pid}) did not answer within {}",
+                            crate::ui::ms(w)
+                        ),
+                    ));
+                }
+                return Err(no_session(format!(
+                    "the watch (pid {pid}) ended (its socket closed)"
+                )));
             };
             if m["id"].as_u64() != Some(id) || m.get("method").is_some() {
                 continue;
@@ -566,7 +696,10 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
         ),
         Verb::Notes { open: _, all } => {
             // (no watch: the notes file read as it is)
-            let v = if let Ok(mut c) = find(pid, None).and_then(|s| Conn::open(&s)) {
+            let v = if let Ok(mut c) = find(pid, None)
+                .inspect(warn_mismatch)
+                .and_then(|s| Conn::open(&s))
+            {
                 c.call("phitex/notes/list", &json!({"all": all}), None)?
             } else {
                 let root = std::env::current_dir().unwrap_or_default();
@@ -589,6 +722,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
         }
         _ => {
             let s = find(pid, None)?;
+            warn_mismatch(&s);
             let mut c = Conn::open(&s)?;
             match verb {
                 Verb::Status => {
@@ -604,6 +738,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     Ok(build_code(&v))
                 }
                 Verb::Wait {
+                    disk,
                     warnings,
                     pdf,
                     notes,
@@ -616,7 +751,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     let ms = t.map_or(0, |d| d.as_millis());
                     let v = c.call(
                         "phitex/session/wait",
-                        &json!({"warnings": warnings, "pdf": pdf, "notes": notes, "timeout_ms": ms}),
+                        &json!({"warnings": warnings, "pdf": pdf, "notes": notes, "disk": disk, "timeout_ms": ms}),
                         t.map(|d| d + Duration::from_secs(30)),
                     )?;
                     if as_json {
@@ -633,18 +768,21 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         print_proposals(&v, st);
                     } else {
                         print_status(&v, st, v["waited_ms"].as_f64());
-                        for f in v["held"].as_array().into_iter().flatten() {
-                            println!(
-                                "{}",
-                                st.yellow(&format!(
-                                    "note: {} is open in an editor with other text: your change on disk is built once the editor takes it",
-                                    f.as_str().unwrap_or("")
-                                ))
-                            );
-                        }
                     }
                     if v["timed_out"] == true {
-                        if !as_json && !*notes {
+                        let held: Vec<&str> = v["held"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect();
+                        if !as_json && !*notes && *disk && !held.is_empty() {
+                            ui.error(&format!(
+                                "timed out: {} open in an editor with other text, which the watch builds instead (an open editor's text wins): \
+                                 your change on disk is built once the editor takes it (reloads the file, or is closed)",
+                                held.join(", ")
+                            ));
+                        } else if !as_json && !*notes {
                             ui.error("timed out: no build has read the files as they are now");
                         }
                         return Ok(EXIT_TIMEOUT);
@@ -1432,10 +1570,59 @@ fn print_status(v: &Value, st: Style, waited: Option<f64>) {
             crate::ui::ms(Duration::from_secs_f64(ms / 1e3))
         )));
     }
+    if let Some(n) = v["superseded_by"].as_u64() {
+        parts.push(format!(
+            "its warnings never made (build {n}, of other text, came after)"
+        ));
+    }
+    let used: Vec<(&str, &str)> = v["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| Some((s["file"].as_str()?, s["used"].as_str()?)))
+        .collect();
+    let of_editor: Vec<&str> = used
+        .iter()
+        .filter(|(_, u)| *u == "editor")
+        .map(|(f, _)| *f)
+        .collect();
+    if !of_editor.is_empty() {
+        parts.push(st.yellow(&format!(
+            "built from the editor's text of {}",
+            of_editor.join(", ")
+        )));
+    }
     println!("{}", parts.join(" · "));
-    for p in v["problems"].as_array().into_iter().flatten() {
+    for l in sources_lines(&used) {
+        println!("{}", st.yellow(&l));
+    }
+    let problems = v["problems"].as_array().map_or(&[][..], Vec::as_slice);
+    if !of_editor.is_empty() && !problems.is_empty() {
+        println!("the problems of the editor's text, not of the files on disk:");
+    }
+    for p in problems {
         println!("{}", problem_line(p, st));
     }
+}
+
+/// What a build read of the files an editor holds with other text than
+/// the disk's (`[(file, used)]`, used `editor`, `disk` or `older`): a
+/// line each, and how to build the other.
+fn sources_lines(used: &[(&str, &str)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (f, u) in used {
+        out.push(match *u {
+            "editor" => format!(
+                "{f}: this build read the editor's text, not the file on disk (an open editor's text wins): a change on disk is not in it; \
+                 it is built once the editor takes it (reloads the file, or is closed): `phitex session wait --disk` waits for that build"
+            ),
+            "disk" => format!(
+                "{f}: this build read the file on disk; an editor holds other text, which the watch's next build reads (an open editor's text wins)"
+            ),
+            _ => format!("{f}: this build read an older text, neither the editor's nor the disk's"),
+        });
+    }
+    out
 }
 
 fn edited_text(e: &Value) -> String {
@@ -1764,9 +1951,25 @@ fn start(
         None => Some(Duration::from_secs(600)),
     };
     let t0 = Instant::now();
-    let (v, started) = match find(None, file) {
-        Ok(v) => (v, false),
-        Err(_) => (launch(file, args, t)?, true),
+    let (v, started) = if let Ok(v) = find(None, file) {
+        warn_mismatch(&v);
+        (v, false)
+    } else {
+        // (a watch this one cannot see may be of this document: said,
+        // the agent's own watch started all the same)
+        let seen: Vec<Value> = crate::attach::read_folders()
+            .iter()
+            .flat_map(|(d, _)| crate::attach::files_in(d))
+            .map(|(_, v)| v)
+            .collect();
+        let hidden = crate::attach::hidden_runtime();
+        for (pid, cmd) in crate::attach::unseen_watches(&seen) {
+            eprintln!(
+                "phitex: note: {} (if it is this document's: work with it through --session, and `phitex session stop` ends the one started here)",
+                crate::attach::unseen_line(pid, &cmd, hidden.as_deref())
+            );
+        }
+        (launch(file, args, t)?, true)
     };
     let left = t.map(|d| d.saturating_sub(t0.elapsed()));
     let mut c = Conn::open(&v)?;
@@ -2754,6 +2957,70 @@ mod tests {
     }
 
     use super::*;
+
+    /// A request waiting on a watch whose process is gone ends, though
+    /// its socket stays open (held by another, as a sandbox's network or
+    /// a process that inherited it may): every verb's request, with no
+    /// time limit.
+    #[test]
+    fn a_request_ends_when_its_watch_is_gone_with_its_socket_open() {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+        let port = l.local_addr().expect("it").port();
+        let held = std::thread::spawn(move || l.accept().map(|(s, _)| s));
+        let s = TcpStream::connect(("127.0.0.1", port)).expect("connected");
+        let _server = held.join().expect("joined").expect("accepted");
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("a process");
+        let pid = child.id();
+        child.wait().expect("it ends");
+        let mut c = Conn {
+            r: BufReader::new(s.try_clone().expect("it")),
+            w: s,
+            next: 1,
+            watch: json!({"pid": pid, "lsp": {"host": "127.0.0.1", "port": port}}),
+        };
+        let t0 = Instant::now();
+        let Err(e) = c.call("phitex/session/wait", &json!({}), None) else {
+            panic!("answered");
+        };
+        assert_eq!(e.0, EXIT_NO_SESSION, "{}", e.1);
+        assert!(e.1.contains("ended while this waited"), "{}", e.1);
+        assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_watch_of_another_phitex_is_warned_of() {
+        let ours = env!("CARGO_PKG_VERSION");
+        let same = json!({"version": ours, "build": crate::build_id()});
+        assert_eq!(mismatch(&same), None);
+        assert_eq!(
+            mismatch(&json!({"version": "0.9.1", "build": "x"})),
+            Some(format!(
+                "Warning: phitex version mismatch! (phitex session is {ours}, phitex watch is 0.9.1)"
+            ))
+        );
+        // (a source build of the same version, another engine)
+        let other = json!({"version": ours, "build": format!("{ours} (engine 0)")});
+        assert_eq!(
+            mismatch(&other),
+            Some(format!(
+                "Warning: phitex version mismatch! (phitex session is {}, phitex watch is {ours} (engine 0))",
+                crate::build_id()
+            ))
+        );
+        // (an older watch: no build said)
+        assert_eq!(
+            mismatch(&json!({})),
+            Some(format!(
+                "Warning: phitex version mismatch! (phitex session is {ours}, phitex watch is unknown (older than {}))",
+                crate::FIRST_WITH_BUILD_ID
+            ))
+        );
+        assert!(
+            mismatch(&json!({"version": ours})).is_some_and(|w| w.contains("of an unknown build"))
+        );
+    }
 
     #[test]
     fn times() {

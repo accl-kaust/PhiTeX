@@ -2373,7 +2373,14 @@ fn watch_attach() {
         .output()
         .expect("phitex session list runs");
     let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
-    assert_eq!(listed, json!([info.clone()]), "{listed}");
+    // (the watches of the user's other sessions folders listed too)
+    let ours: Vec<&serde_json::Value> = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter(|v| v["pid"] == info["pid"])
+        .collect();
+    assert_eq!(ours, [&info], "{listed}");
     let connect = || {
         let s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("its socket");
         let r = s.try_clone().expect("the socket");
@@ -8821,4 +8828,261 @@ fn session_blame() {
         "{text}"
     );
     assert!(text.contains("not committed"), "{text}");
+}
+
+/// The discovery file of the one watch in `run` (a runtime folder).
+fn discovery_in(run: &Path) -> serde_json::Value {
+    let d = run.join("phitex");
+    let p = std::fs::read_dir(&d)
+        .expect("the sessions folder")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("a discovery file");
+    serde_json::from_slice(&std::fs::read(p).expect("it")).expect("JSON")
+}
+
+/// A small article whose warning names `w` (an undefined reference).
+fn ref_doc(w: &str) -> String {
+    format!(
+        "\\documentclass{{article}}\n\\begin{{document}}\nHello {w}. \\ref{{{w}}}\n\\end{{document}}\n"
+    )
+}
+
+/// `phitex session` while an editor holds the main file with other text
+/// than the agent's change on disk (the session's report): `wait` answers
+/// at once with the build of the editor's text and says so, file by
+/// file, as `status` and `rebuild` do; `wait --disk` waits for the build
+/// of the disk's, which comes once the editor lets the file go. A `wait`
+/// whose watch is killed under it ends at once, the status 3.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn session_wait_with_an_editor_and_the_watch_killed() {
+    use serde_json::json;
+    let _one = one();
+    let dir = scratch("session-editor-wait");
+    std::fs::write(dir.join("main.tex"), ref_doc("disk")).expect("the document");
+    let s = PngSession::start(&dir, "main.tex", &[]);
+    let info = discovery_in(&s.run);
+    let pid = info["pid"].as_u64().expect("its pid");
+    let port = u16::try_from(info["lsp"]["port"].as_u64().expect("a port")).expect("a port");
+    // (an editor opens the file with its own text)
+    let mut ed = std::net::TcpStream::connect(("127.0.0.1", port)).expect("its socket");
+    let rx = lsp_messages(ed.try_clone().expect("the socket"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut ed,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null, "rootUri": format!("file://{}", dir.display()),
+            "capabilities": {}, "initializationOptions": {"token": info["lsp"]["token"]}}}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    lsp_send(
+        &mut ed,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    lsp_send(
+        &mut ed,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {
+            "uri": format!("file://{}", dir.join("main.tex").display()), "languageId": "latex",
+            "version": 1, "text": ref_doc("editor")}}}),
+    );
+    let editor_built = |v: &serde_json::Value| {
+        v["sources"] == json!([{"file": "main.tex", "used": "editor"}])
+            && v["diagnostics_pending"] == false
+    };
+    let end = Instant::now() + Duration::from_secs(120);
+    let mut v = s.json(&["status"]);
+    while !editor_built(&v) {
+        assert!(Instant::now() < end, "no build of the editor's text: {v}");
+        std::thread::sleep(Duration::from_millis(100));
+        v = s.json(&["status"]);
+    }
+    // (the agent writes the file on disk: the editor's text is built)
+    std::fs::write(dir.join("main.tex"), ref_doc("agent")).expect("the agent's change");
+    let v = s.json(&["wait", "--warnings", "--timeout", "60s"]);
+    assert!(editor_built(&v), "{v}");
+    assert_eq!(v["held"], json!(["main.tex"]), "{v}");
+    assert!(v["waited_ms"].as_f64().unwrap_or(1e9) < 5000.0, "{v}");
+    assert!(v["problems"].to_string().contains("`editor'"), "{v}");
+    let v = s.json(&["rebuild"]);
+    assert_eq!(
+        v["sources"],
+        json!([{"file": "main.tex", "used": "editor"}]),
+        "{v}"
+    );
+    let out = s.phitex(&["session", "wait", "--warnings", "--timeout", "60s"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("this build read the editor's text, not the file on disk")
+            && text.contains("wait --disk")
+            && text.contains("the problems of the editor's text"),
+        "{text}"
+    );
+    let out = s.phitex(&["session", "wait", "--disk", "--timeout", "1s"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("open in an editor with other text"),
+        "{out:?}"
+    );
+    // (`wait --disk`, no time limit: answered once the editor closes)
+    let session = |args: &[&str]| {
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .arg("session")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &s.run)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("phitex session runs")
+    };
+    let mut disk = session(&["wait", "--disk", "--warnings", "--timeout", "0", "--json"]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(disk.try_wait().expect("it").is_none(), "answered early");
+    lsp_send(
+        &mut ed,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": {
+            "uri": format!("file://{}", dir.join("main.tex").display())}}}),
+    );
+    drop(ed);
+    let out = disk.wait_with_output().expect("it ends");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert!(out.status.success(), "{v}");
+    assert!(v["problems"].to_string().contains("`agent'"), "{v}");
+    assert_eq!(v["sources"], json!([]), "{v}");
+    // (the watch killed under a wait with no time limit: it ends at once)
+    let mut w = session(&["wait", "--notes", "--timeout", "0"]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(w.try_wait().expect("it").is_none(), "answered early");
+    let t0 = Instant::now();
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+    loop {
+        if let Some(st) = w.try_wait().expect("it") {
+            assert_eq!(st.code(), Some(3), "{st:?}");
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "`session wait` went on after its watch was killed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `phitex session list` from a caller whose sessions folder is not the
+/// watch's (a sandbox's own runtime folder, or none: the cache's): every
+/// folder a watch may say itself in is read, and a watch whose file is in
+/// none of them is still named, with how to reach it. A watch of another
+/// phitex is warned of, in the user's words.
+#[test]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+fn session_list_from_another_sessions_folder_and_versions() {
+    let _one = one();
+    let dir = scratch("session-list-folders");
+    std::fs::write(dir.join("main.tex"), ref_doc("list")).expect("the document");
+    let s = PngSession::start(&dir, "main.tex", &[]);
+    let info = discovery_in(&s.run);
+    let pid = info["pid"].as_u64().expect("its pid");
+    let other = dir.with_extension("other");
+    let _ = std::fs::remove_dir_all(&other);
+    std::fs::create_dir_all(&other).expect("a folder");
+    let list = |run: &Path, json: bool| {
+        let mut c = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir);
+        c.args(["session", "list"]);
+        if json {
+            c.arg("--json");
+        }
+        c.env("XDG_RUNTIME_DIR", run).output().expect("it runs")
+    };
+    // (its own folder: listed, no warning, the same phitex)
+    let out = list(&s.run, false);
+    let (o, e) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        o.contains(&format!("pid {pid}")),
+        "pid {pid} {:?}\nstdout: {o}\nstderr: {e}",
+        out.status
+    );
+    assert!(
+        !e.lines()
+            .any(|l| l.contains("mismatch") && l.contains(&format!("(pid {pid})"))),
+        "{e}"
+    );
+    // (another folder: named, how to reach it said)
+    let out = list(&other, false);
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        e.contains(&format!("pid {pid}")) && e.contains("--session <its viewer's URL>"),
+        "{e}"
+    );
+    // (a watch with no runtime folder says itself in the cache's: listed
+    // from a caller that has one)
+    let dir2 = scratch("session-list-cache-folder");
+    std::fs::write(dir2.join("main.tex"), ref_doc("cache")).expect("the document");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir2)
+        .args([
+            "session",
+            "start",
+            "main.tex",
+            "--timeout",
+            "10m",
+            "--",
+            "--no-view",
+        ])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .expect("it runs");
+    assert!(out.status.success(), "{out:?}");
+    let listed = list(&other, true);
+    let v: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    let pid2 = v
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|w| w["root"] == dir2.canonicalize().expect("it").display().to_string())
+        .unwrap_or_else(|| panic!("the cache folder's watch not listed: {v}"))["pid"]
+        .clone();
+    let _ = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir2)
+        .args(["session", "--session", &pid2.to_string(), "stop"])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output();
+    // (another phitex's watch: its discovery file as an older one writes it)
+    let old = dir.with_extension("old");
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::create_dir_all(old.join("phitex")).expect("a folder");
+    let ours = env!("CARGO_PKG_VERSION");
+    for (version, said) in [
+        (
+            Some("1.0.0-old"),
+            format!("(phitex session is {ours}, phitex watch is 1.0.0-old)"),
+        ),
+        (
+            None,
+            format!("(phitex session is {ours}, phitex watch is unknown (older than 1.0.5))"),
+        ),
+    ] {
+        let mut v = info.clone();
+        v.as_object_mut().expect("an object").remove("build");
+        match version {
+            Some(x) => v["version"] = x.into(),
+            None => {
+                v.as_object_mut().expect("an object").remove("version");
+            }
+        }
+        std::fs::write(old.join(format!("phitex/{pid}.json")), v.to_string()).expect("it");
+        let want = format!("Warning: phitex version mismatch! {said}");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["session", "status"])
+            .env("XDG_RUNTIME_DIR", &old)
+            .output()
+            .expect("it runs");
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{e}");
+        assert!(e.lines().any(|l| l == want), "{e}");
+        let out = list(&old, false);
+        let e = String::from_utf8_lossy(&out.stderr);
+        assert!(e.contains(&want), "{e}");
+    }
 }
