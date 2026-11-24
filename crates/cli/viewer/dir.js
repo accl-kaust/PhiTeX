@@ -1356,7 +1356,10 @@ header:active { cursor: grabbing; }
 .pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
 .win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
-/* (the last pages, a build that shipped none or the engine lost: shown as they are, crisp and interactive, a strip above saying so; never dimmed) */
+/* (the last pages after a build that shipped none: as they are, crisp and usable, the strip above saying so. The engine lost:
+   dimmed until the user takes it in (Dismiss, Esc, a click on them), then as they are, the strip staying while it lasts) */
+.stage.unacked .slot { opacity: .4; }
+.stage.unacked { cursor: pointer; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
 /* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
@@ -1427,10 +1430,8 @@ header:active { cursor: grabbing; }
 .card .mainrow { align-items: center; color: var(--ph-fg2); }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
 .stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
-.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
-.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
-  background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
-.win.offline-quiet .offpill { display: block; }
+.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 1px solid currentColor; border-radius: var(--ph-pill); background: none; color: inherit; font: inherit; font-weight: 600; padding: 0 10px; }
+.stage:not(.unacked) ~ .strips .gone .x { display: none; }
 
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
