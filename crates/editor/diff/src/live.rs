@@ -13,11 +13,13 @@
 //!   with the text after it when a closer appears there, and the text
 //!   after an edit is read with it while the edit leaves one open.
 //! - *Segments.* The new chunks (paragraphs of tokens, as [`emit`] aligns
-//!   them) are aligned with the old ones once, and the alignment is kept:
-//!   chunks matched, and runs that differ, each with its markup and changes.
-//!   An edit aligns again only the segments it touched and the runs next
-//!   to them, between the matched chunks on either side, and diffs only
-//!   the runs there by tokens.
+//!   them) are aligned with the old ones: chunks matched, and runs that
+//!   differ, each with its markup and changes. An edit aligns the chunks'
+//!   keys again whole, as the whole diff does (a paragraph repeated
+//!   elsewhere matched as the whole document's alignment matches it, never
+//!   as the edit's neighbourhood alone would), and diffs by tokens only
+//!   the runs whose chunks it changed; a run whose old and new chunks are
+//!   both as before keeps its markup.
 //! - *The output* (the marked-up text, the change list) is put together
 //!   from the segments; a change's place in the new files is found from
 //!   the flattened text then, so an edit before it moves it at no cost.
@@ -33,6 +35,7 @@ use crate::{
     split,
 };
 use phitex_source::{SyntaxKind, Tree};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -47,7 +50,7 @@ pub struct Stats {
     pub paras_read: usize,
     /// The new chunks (paragraphs of tokens) diffed by tokens.
     pub chunks_diffed: usize,
-    /// The segments aligned again.
+    /// The runs diffed again by tokens.
     pub segments: usize,
 }
 
@@ -122,6 +125,7 @@ struct Seg {
 /// A run's markup: its text, whether it owes a line end after it, the
 /// last section written in it, and its changes (new ranges from the run's
 /// start, `out` from its text's).
+#[derive(Clone)]
 struct Run {
     out: String,
     nl: bool,
@@ -135,6 +139,7 @@ struct Run {
     adds: Vec<(usize, usize, Option<&'static str>)>,
 }
 
+#[derive(Clone)]
 struct RunChange {
     raw: emit::RawChange,
     new_text: String,
@@ -238,7 +243,7 @@ impl Side {
         side.units = units;
         side.chunks = chunks;
         let (oc, nc) = (side.old.chunks.len(), side.chunks.len());
-        side.segs = side.align(base, (0, oc), (0, nc), stats);
+        side.segs = side.align(base, (0, oc), (0, nc), &mut HashMap::new(), stats);
         side
     }
 
@@ -280,6 +285,19 @@ impl Side {
         let start = p - self.body.start;
         let old_len = old_end - p;
         let text = &new.text[p..new_end];
+        // (the old text of the paragraphs the edit is in: an opener or a
+        // closer it held, gone or renamed, pairs an opener before them
+        // with another closer)
+        let old_region = {
+            let ends = self.tree.para_ends();
+            let i = ends.partition_point(|&e| e <= start);
+            let j = ends
+                .partition_point(|&e| e < start + old_len)
+                .min(ends.len().saturating_sub(1));
+            let a = if i == 0 { 0 } else { ends[i - 1] };
+            let b = ends.get(j).copied().unwrap_or(a).max(a);
+            self.flat.text[self.body.start + a..self.body.start + b].to_owned()
+        };
         let splice = self.tree.edit(start, old_len, text);
         self.body.end = self.body.end - old_len + text.len();
         self.flat = new.clone();
@@ -344,12 +362,17 @@ impl Side {
         let delta = inserted.cast_signed() - removed.cast_signed();
         let mut pb_new = pb.checked_add_signed(delta).unwrap_or(pb);
         loop {
-            // (an opener before them that a closer they now hold ends)
+            // (an opener before them that a closer they now hold ends; or
+            // one of its kind that they hold or held: a `\begin` of its
+            // name added, removed or renamed there pairs it with another
+            // `\end` after them)
             let text = self.paras_text(pa, pb_new);
-            if let Some(u) = (0..ua)
-                .rev()
-                .find(|&u| self.units[u].opens.iter().any(|o| has_closer(&text, o)))
-            {
+            if let Some(u) = (0..ua).rev().find(|&u| {
+                self.units[u]
+                    .opens
+                    .iter()
+                    .any(|o| has_closer(&text, o) || mentions(&text, o) || mentions(&old_region, o))
+            }) {
                 while ua > u {
                     ua -= 1;
                     pa -= self.units[ua].paras;
@@ -388,60 +411,37 @@ impl Side {
         let nchunks = chunks.len();
         self.units.splice(ua..ub, units);
         self.chunks.splice(ca..cb, chunks);
-        // (the segments these chunks were in, and the runs beside them,
-        // aligned again between the matched chunks around them; a match
-        // cut where the edit begins and ends)
+        // (the chunks aligned again whole, as the whole diff aligns them:
+        // aligned only between the matched chunks around the edit, a
+        // paragraph repeated elsewhere was matched otherwise than the whole
+        // document's alignment matches it (its keys unique in the edit's
+        // neighbourhood, not in the document), and the runs it cut were
+        // diffed by tokens otherwise. Aligning the keys is cheap; what costs
+        // is diffing a run by tokens, done again only for a run the edit
+        // changed: one whose old chunks and new chunks are both as before
+        // is kept)
         let removed_chunks = cb - ca;
-        self.split(ca);
-        self.split(cb);
-        let (mut sa, mut na, mut oa) = (0, 0, 0);
-        while sa < self.segs.len() {
-            let s = &self.segs[sa];
-            let end = na + s.new;
-            if end > ca || (end == ca && s.run.is_some()) {
-                break;
+        let shift = nchunks.cast_signed() - removed_chunks.cast_signed();
+        let mut kept: HashMap<(usize, usize, usize, usize), Run> = HashMap::new();
+        let (mut o, mut n) = (0, 0);
+        for seg in std::mem::take(&mut self.segs) {
+            let (o1, n1) = (o + seg.old, n + seg.new);
+            if let Some(run) = seg.run {
+                // (its new chunks wholly before the edit's, or wholly after
+                // them: the same chunks, at their new places)
+                if n1 <= ca {
+                    kept.insert((o, o1, n, n1), run.clone());
+                }
+                if n >= cb {
+                    let at = |x: usize| x.checked_add_signed(shift).unwrap_or(x);
+                    kept.insert((o, o1, at(n), at(n1)), run);
+                }
             }
-            na = end;
-            oa += s.old;
-            sa += 1;
+            (o, n) = (o1, n1);
         }
-        let (mut sb, mut nb, mut ob) = (sa, na, oa);
-        while sb < self.segs.len() && (nb < cb || (nb == cb && self.segs[sb].run.is_some())) {
-            nb += self.segs[sb].new;
-            ob += self.segs[sb].old;
-            sb += 1;
-        }
-        let nb_new = nb - removed_chunks + nchunks;
-        let segs = self.align(base, (oa, ob), (na, nb_new), stats);
-        self.segs.splice(sa..sb, segs);
+        let (oc, nc) = (self.old.chunks.len(), self.chunks.len());
+        self.segs = self.align(base, (0, oc), (0, nc), &mut kept, stats);
         true
-    }
-
-    /// Cut the matched segment new chunk `x` is inside (not at its start)
-    /// in two there.
-    fn split(&mut self, x: usize) {
-        let mut n = 0;
-        for k in 0..self.segs.len() {
-            let s = &self.segs[k];
-            if s.run.is_none() && n < x && x < n + s.new {
-                let rest = n + s.new - x;
-                self.segs[k].old = x - n;
-                self.segs[k].new = x - n;
-                self.segs.insert(
-                    k + 1,
-                    Seg {
-                        old: rest,
-                        new: rest,
-                        run: None,
-                    },
-                );
-                return;
-            }
-            n += s.new;
-            if n > x {
-                return;
-            }
-        }
     }
 
     /// The text of the new body's paragraphs `a..b`.
@@ -549,6 +549,7 @@ impl Side {
         base: &Baseline,
         o: (usize, usize),
         n: (usize, usize),
+        kept: &mut HashMap<(usize, usize, usize, usize), Run>,
         stats: &mut Stats,
     ) -> Vec<Seg> {
         let ok = &self.old.keys[o.0..o.1];
@@ -561,8 +562,12 @@ impl Side {
             .chain(std::iter::once((o.1 - o.0, n.1 - n.0)))
         {
             if i < pi || j < pj {
-                let run = self.run(base, (o.0 + i, o.0 + pi), (n.0 + j, n.0 + pj));
-                stats.chunks_diffed += pj - j;
+                let (oa, ob, na, nb) = (o.0 + i, o.0 + pi, n.0 + j, n.0 + pj);
+                let run = kept.remove(&(oa, ob, na, nb)).unwrap_or_else(|| {
+                    stats.chunks_diffed += nb - na;
+                    stats.segments += 1;
+                    self.run(base, (oa, ob), (na, nb))
+                });
                 segs.push(Seg {
                     old: pi - i,
                     new: pj - j,
@@ -585,7 +590,6 @@ impl Side {
             i = pi + 1;
             j = pj + 1;
         }
-        stats.segments += segs.len();
         segs
     }
 
@@ -803,6 +807,23 @@ fn opener(s: &str) -> Option<Opener> {
 
 /// Whether `text` may hold a closer of `o` (a closer in a comment counts:
 /// it only makes more be read).
+/// Whether `text` holds an opener or a closer of `o`'s kind (an
+/// environment's `\begin` or `\end` of its name).
+fn mentions(text: &str, o: &Opener) -> bool {
+    match o {
+        Opener::Display => text.contains("\\[") || text.contains("\\]"),
+        Opener::Inline => text.contains("\\(") || text.contains("\\)"),
+        Opener::Env(name) => ["\\begin", "\\end"].iter().any(|cs| {
+            text.match_indices(cs).any(|(k, _)| {
+                let rest = text[k + cs.len()..].trim_start();
+                rest.strip_prefix('{')
+                    .and_then(|r| r.split_once('}'))
+                    .is_some_and(|(n, _)| n.trim() == name)
+            })
+        }),
+    }
+}
+
 fn has_closer(text: &str, o: &Opener) -> bool {
     match o {
         Opener::Display => text.contains("\\]"),
@@ -1090,6 +1111,47 @@ mod tests {
             }
         }
         eprintln!("paragraphs read: {live_read} live, {whole_read} whole");
+    }
+
+    /// A blank line put inside a word of a paragraph whose sentence the
+    /// document repeats (`look_figure`'s "asks", at each of its places): the live diff
+    /// as the whole diff, each split alone and one after another. Its
+    /// alignment made only between the matched chunks around the edit, a
+    /// repeated paragraph was matched otherwise than the whole document's
+    /// alignment matches it, and the run diffed by tokens otherwise
+    /// (`random_edits_match_the_whole_diff` found it).
+    #[test]
+    fn a_split_in_repeated_text_matches_the_whole_diff() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/look_figure");
+        let base = base_of(&case);
+        let start = flatten(&Dir(case.join("new")), "main.tex").unwrap().text;
+        let at: Vec<usize> = start
+            .match_indices("array asks")
+            .map(|(i, _)| i + 7)
+            .collect();
+        assert!(at.len() > 1, "the sentence repeated");
+        // (each alone, from the document as it is)
+        for &k in &at {
+            let mut live = Live::new(base_of(&case));
+            live.update(&one(&start));
+            let mut text = start.clone();
+            text.insert_str(k, "\n\n");
+            let got = live.update(&one(&text)).clone();
+            let want = base.diff_flat(&one(&text));
+            assert_eq!(got.tex, want.tex, "a split at {k}");
+            assert_eq!(got.changes, want.changes, "a split at {k}");
+        }
+        // (one after another, the last first: the earlier places stay)
+        let mut live = Live::new(base_of(&case));
+        live.update(&one(&start));
+        let mut text = start.clone();
+        for &k in at.iter().rev() {
+            text.insert_str(k, "\n\n");
+            let got = live.update(&one(&text)).clone();
+            let want = base.diff_flat(&one(&text));
+            assert_eq!(got.tex, want.tex, "splits down to {k}");
+            assert_eq!(got.changes, want.changes, "splits down to {k}");
+        }
     }
 
     /// Word edits all over a long document: the whole diff's output each
