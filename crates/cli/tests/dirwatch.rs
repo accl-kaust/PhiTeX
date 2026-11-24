@@ -195,7 +195,11 @@ impl Watch {
 impl Drop for Watch {
     fn drop(&mut self) {
         if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
+            // (SIGTERM to `timeout`, which gives it to the watch: it ends
+            // as `q` does; a SIGKILL would end `timeout` alone)
+            let _ = Command::new("kill")
+                .arg(self.child.id().to_string())
+                .status();
             let _ = self.child.wait();
         }
     }

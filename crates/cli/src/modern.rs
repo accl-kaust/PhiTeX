@@ -2331,11 +2331,6 @@ mod tests {
         }
     }
 
-    /// Each option where it means something: a build's after `build` or
-    /// `watch` (before or after the file), the watch's after `watch`
-    /// alone; one where it means nothing is refused, not ignored. -v,
-    /// -q, -y, --json and --color anywhere.
-    #[test]
     /// `--auto-stop`: a time, or `-1` for never (not taken for a flag).
     #[test]
     fn auto_stop_values() {
@@ -2358,6 +2353,10 @@ mod tests {
         assert_eq!(o.idle, Duration::from_millis(500));
     }
 
+    /// Each option where it means something: a build's after `build` or
+    /// `watch` (before or after the file), the watch's after `watch`
+    /// alone; one where it means nothing is refused, not ignored. -v,
+    /// -q, -y, --json and --color anywhere.
     #[test]
     fn options_where_they_mean_something() {
         for line in [

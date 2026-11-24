@@ -1720,7 +1720,7 @@ fn rows(st: &State, now: SystemTime) -> Vec<(String, String, usize, Option<bool>
 /// folder's line, then a line a document opened this run with its state,
 /// the highlighted one marked (`cursor`: 0 the folder's line, every open
 /// document, `k` the k-th document).
-fn tree(
+fn tree_lines(
     shown_dir: &str,
     docs: &[(String, String, usize, Option<bool>)],
     cursor: usize,
@@ -1756,7 +1756,7 @@ fn tree(
 
 /// The status lines drawn (in place, below what is printed).
 fn statuses(sh: &Shared, cursor: usize, shown_dir: &str) {
-    let lines = tree(shown_dir, &rows(&lock(&sh.st), SystemTime::now()), cursor);
+    let lines = tree_lines(shown_dir, &rows(&lock(&sh.st), SystemTime::now()), cursor);
     sh.ui.statuses(&lines);
 }
 
@@ -2091,7 +2091,7 @@ mod tests {
             ),
             ("d.tex".to_owned(), "stopped".to_owned(), 0, None),
         ];
-        let t = tree(".", &rows, 2);
+        let t = tree_lines(".", &rows, 2);
         let lines: Vec<&str> = t.iter().map(|l| l.0.as_str()).collect();
         assert_eq!(
             lines,
@@ -2106,12 +2106,12 @@ mod tests {
         assert_eq!(t[2].1, Some(false));
         assert_eq!(t[4].1, None);
         assert!(
-            tree(".", &rows, 0)[0]
+            tree_lines(".", &rows, 0)[0]
                 .0
                 .starts_with("▸. · 3 open · keys act on all")
         );
         assert_eq!(
-            tree(".", &[], 0)[0].0,
+            tree_lines(".", &[], 0)[0].0,
             ". · no document open yet: pick one in the browser"
         );
     }

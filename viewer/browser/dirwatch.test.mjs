@@ -206,3 +206,66 @@ test("a folder's file manager; documents in tabs of their own, switched in place
   await ix.until(`/phitex watch has stopped/.test($(".fm-note")?.textContent ?? "")`, "the index told the watch stopped");
   await shot(ix, "index-stopped");
 });
+
+test("the Running strip: what runs, its state and tabs, Stop and Stop all; a dot in the Files column", async () => {
+  const dir = project({
+    "thesis/main.tex": doc("Thesis", "Thesis."),
+    "talk/slides.tex": doc("Talk", "Talk."),
+    "notes/a.tex": doc("Notes", "Notes."),
+  });
+  const w = new Watch(dir, { file: ".", home, args: ["-j", "2", "--auto-stop", "10m"] });
+  const url = await w.url();
+  const ix = await browser.tab(url);
+  await ix.until(`$$(".fm-row").length === 3`, "the folder");
+  assert.equal(await ix.q(`$(".fm-run").hidden`), true, "no strip while nothing runs");
+  // (two documents opened in tabs of their own, by their links)
+  const open = async (path) => {
+    const dirName = path.split("/")[0];
+    await ix.click(`.fm-crumb.root`).catch(() => {});
+    await ix.until(`$$(".fm-row").some((r) => r.dataset.path === ${JSON.stringify(dirName)})`, dirName);
+    await ix.click(`.fm-row[data-path="${dirName}"]`);
+    await ix.until(`$(".fm-row[data-path='${path}']")`, path);
+    return browser.tab(await ix.q(`$(".fm-row[data-path='${path}']").href`));
+  };
+  const t1 = await open("thesis/main.tex");
+  await t1.until(`+$("#pgn")?.textContent > 0`, "the thesis's page", 240000);
+  const t2 = await open("talk/slides.tex");
+  await t2.until(`+$("#pgn")?.textContent > 0`, "the talk's page", 240000);
+  // (both in the strip, built, a tab each; each row's link the document's)
+  await ix.until(`$$(".fm-run-row").length === 2 && $$(".fm-run-row .fm-badge").every((b) => b.textContent.startsWith("Built"))`, "the strip");
+  assert.deepEqual(await ix.q(`$$(".fm-run-row").map((r) => [r.dataset.path, r.querySelector(".fm-run-tabs").textContent])`), [
+    ["talk/slides.tex", "1 tab"],
+    ["thesis/main.tex", "1 tab"],
+  ]);
+  assert.match(await ix.q(`$(".fm-run-row .fm-run-name").href`), /\/d\/[0-9a-f]{12}\/\?path=talk/);
+  // (the talk's tab closed: no viewer, it stops in 10 min)
+  await fetch(`http://127.0.0.1:${browser.port}/json/close/${t2.id}`);
+  await ix.until(`/No viewer · stops in 10 min/.test($(".fm-run-row[data-path='talk/slides.tex'] .fm-badge")?.textContent ?? "")`, "the talk without a viewer");
+  await ix.until(`$(".fm-run-row[data-path='talk/slides.tex'] .fm-run-tabs").textContent === "no tab"`, "no tab");
+  // (the Files column: a dot a running document, in its state's colour)
+  if (await t1.q(`!!$("#tip") && !$("#tip").hidden`)) await t1.click("#tip button[data-t='skip']");
+  await t1.click(`.fcol .fm-crumb.root`);
+  await t1.until(`$$(".fcol .fm-row").some((r) => r.dataset.path === "talk")`, "the column's root");
+  await t1.click(`.fcol .fm-row[data-path="talk"]`);
+  await t1.until(`$(".fcol .fm-row[data-path='talk/slides.tex'] .fm-badge.tone-idle")`, "the talk's dot, idle");
+  await shot(t1, "running-files-dot");
+  await shot(t1, "running-files-dot-dark", { scheme: "dark" });
+  await shot(ix, "running-strip");
+  await shot(ix, "running-strip-dark", { scheme: "dark" });
+  await shot(ix, "running-strip-narrow", { width: 390, height: 760 });
+  // (Stop on the talk's row: gone from the strip, its dot says stopped)
+  await ix.click(`.fm-run-row[data-path="talk/slides.tex"] .fm-stop`);
+  await ix.until(`$$(".fm-run-row").length === 1 && $(".fm-run-row").dataset.path === "thesis/main.tex"`, "the talk stopped");
+  await t1.until(`!$(".fcol .fm-row[data-path='talk/slides.tex'] .fm-badge.tone-idle")`, "the talk's dot, stopped");
+  // (Stop all: the strip gone)
+  await ix.click(`.fm-stopall`);
+  await ix.until(`$(".fm-run").hidden`, "nothing running");
+  await shot(ix, "running-none");
+  // (the thesis opened again: it runs again, in the strip)
+  await t1.go(await t1.q(`location.href`));
+  await t1.until(`+$("#pgn")?.textContent > 0`, "the thesis again", 240000);
+  await ix.until(`$$(".fm-run-row").length === 1`, "the thesis running again");
+  for (const t of [ix, t1]) assert.deepEqual(t.errors, [], `errors in a tab: ${t.errors}`);
+  w.key("quit");
+  await w.exited;
+});
