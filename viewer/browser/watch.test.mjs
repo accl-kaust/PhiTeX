@@ -46,7 +46,7 @@ test("Clean rebuild builds again from nothing; Rebuild reads the files again (it
   await waitBuild(w, 1);
   await t.click("#go");
   await waitBuild(w, 2);
-  assert.match(w.out, /2\s+asked in the viewer/);
+  assert.match(w.out, /2\s+asked: \d+ inputs checked, \d+ read again/);
   await t.click("#b-rec");
   await t.click("#r-clean");
   await waitBuild(w, 3);
@@ -149,9 +149,10 @@ test("LaTeX's errors have their line and a mark on the page; a missing package s
 test("a .bib edited while watching is read again (item 17)", async () => {
   const main = doc("Hi \\cite{x}.\n\n\\bibliographystyle{plain}\n\\bibliography{refs}");
   const { w, t } = await open({ "main.tex": main, "refs.bib": "" });
-  await t.until(`/didn't find a database entry/.test($("#diags").innerText)`, "the warning");
+  // (the citation's warning says the key is not in refs.bib; BibTeX's own of it is the same problem, said once)
+  await t.until(`/x is not in refs\\.bib/.test($("#diags").innerText)`, "the warning");
   w.write("refs.bib", "@book{x,title={T},author={A B},year=2000,publisher={P}}\n");
-  await t.until(`!/didn't find a database entry/.test($("#diags").innerText)`, "the entry found");
+  await t.until(`!/is not in refs\\.bib/.test($("#diags").innerText)`, "the entry found");
   await w.stop();
 });
 
