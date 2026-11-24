@@ -901,6 +901,7 @@ fn a_folder_watch_lists_whats_running_and_stops_it() {
 /// A document no tab shows stops by itself after `--auto-stop`; a tab
 /// opened again before then cancels it; `--auto-stop -1` never stops it.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_folder_watch_stops_a_document_nobody_looks_at() {
     let base = scratch("autostop");
     let root = base.join("docs");
@@ -1005,12 +1006,10 @@ fn a_folder_watch_stops_a_document_nobody_looks_at() {
         5,
     );
     assert!(gone.is_none(), "--auto-stop -1 stopped it: {gone:?}");
-    let v = ask(&mut ix, json!({"op": "list", "dir": ""}));
-    assert_eq!(
-        running(&v),
-        [("a/main.tex".to_owned(), "ok".to_owned(), 0)],
-        "{v}"
-    );
+    // (the strip as it is now: the messages before it read first)
+    let v = read_until(&mut ix, |v| {
+        v["event"] == "folder" && running(v) == [("a/main.tex".to_owned(), "ok".to_owned(), 0)]
+    });
     assert!(v["running"][0]["stops_at"].is_null(), "{v}");
     w.quit();
 }

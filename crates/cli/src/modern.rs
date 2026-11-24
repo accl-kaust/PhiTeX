@@ -603,6 +603,7 @@ pub struct Options {
     pub memory: Option<u64>,
     /// watch DIR: how long a document no tab shows keeps running
     /// (`--auto-stop`: none given; `Some(None)`: never).
+    #[allow(clippy::option_option)]
     pub auto_stop: Option<Option<Duration>>,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,

@@ -96,7 +96,7 @@ pub const HELP: &[(&str, &str)] = &[
 /// A wait as people say it: 5 min, 30 s.
 fn span(d: Duration) -> String {
     let s = d.as_secs();
-    if s >= 60 && s % 60 == 0 {
+    if s >= 60 && s.is_multiple_of(60) {
         format!("{} min", s / 60)
     } else if s >= 1 {
         format!("{s} s")
@@ -107,7 +107,7 @@ fn span(d: Duration) -> String {
 
 /// How long a document no tab shows keeps running by default
 /// (`--auto-stop`).
-pub const AUTO_STOP: Duration = Duration::from_secs(5 * 60);
+pub const AUTO_STOP: Duration = Duration::from_mins(5);
 
 /// At most this many files are listed for quick open (a home folder
 /// watched by mistake is not walked for ever).
