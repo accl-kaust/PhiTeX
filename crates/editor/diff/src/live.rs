@@ -137,6 +137,9 @@ struct Run {
     /// The added tokens' places in the markup (`Em::adds`, from the
     /// run's text's start).
     adds: Vec<(usize, usize, Option<&'static str>)>,
+    /// The labels its markup looked for in the new document, and whether
+    /// it had them (`Em::asked`): kept only while the answers hold.
+    asked: Vec<(String, bool)>,
 }
 
 #[derive(Clone)]
@@ -308,6 +311,22 @@ impl Side {
         if let Some(last) = self.tree.paras().last()
             && open_at_end(&last.green)
         {
+            return false;
+        }
+        // (and its last paragraph read with what follows the body: a
+        // verbatim run that begins where the body ends (a `[` closed by the
+        // body's last `]`) reads `\end{document}` as its own, though in the
+        // body alone it is empty)
+        let last_start = self
+            .tree
+            .para_ends()
+            .len()
+            .checked_sub(2)
+            .map_or(0, |i| self.tree.para_ends()[i]);
+        if !ends_body(
+            &self.flat.text[self.body.start + last_start..],
+            self.body.end - self.body.start - last_start,
+        ) {
             return false;
         }
         if !body.ends_with('\n') && start + text.len() >= body.rfind('\n').map_or(0, |k| k + 1) {
@@ -563,11 +582,18 @@ impl Side {
         {
             if i < pi || j < pj {
                 let (oa, ob, na, nb) = (o.0 + i, o.0 + pi, n.0 + j, n.0 + pj);
-                let run = kept.remove(&(oa, ob, na, nb)).unwrap_or_else(|| {
-                    stats.chunks_diffed += nb - na;
-                    stats.segments += 1;
-                    self.run(base, (oa, ob), (na, nb))
-                });
+                let run = kept
+                    .remove(&(oa, ob, na, nb))
+                    .filter(|r| {
+                        r.asked.iter().all(|(k, had)| {
+                            self.flat.text.contains(&format!("\\label{{{k}}}")) == *had
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        stats.chunks_diffed += nb - na;
+                        stats.segments += 1;
+                        self.run(base, (oa, ob), (na, nb))
+                    });
                 segs.push(Seg {
                     old: pi - i,
                     new: pj - j,
@@ -610,7 +636,11 @@ impl Side {
         let mut em = Em::new(&base.flat.text, &text, &self.sigs, self.amsmath);
         em.show_del = base.opts.shows_deleted();
         em.fig = base.opts.style.map(|s| s.fig).unwrap_or_default();
+        // (labels looked for in the whole new document, as the whole diff
+        // looks for them)
+        em.doc = Some(&self.flat.text);
         em.run(&old.toks[ta..tb], &toks, old_end, text.len());
+        let asked = em.asked.take();
         let nl = em.nl;
         let section = em.section.clone();
         let changes = em
@@ -628,6 +658,7 @@ impl Side {
             changes,
             spans: em.spans,
             adds: em.adds,
+            asked,
         }
     }
 
@@ -779,6 +810,29 @@ fn shift(t: &mut Tok, f: impl Fn(usize) -> usize + Copy) {
 
 /// Whether paragraph `g` holds a group its text does not close, or ends
 /// in a verbatim run (which may be one its text does not end).
+/// Whether `\end{document}` is read at `at` of `text` (from a paragraph's
+/// start to the text's end), at its top level.
+fn ends_body(text: &str, at: usize) -> bool {
+    let g = phitex_source::lex(text);
+    let mut off = 0;
+    let kids = g.children();
+    for (i, c) in kids.iter().enumerate() {
+        if off == at {
+            return c.kind() == SyntaxKind::Cs
+                && &text[off..off + c.len()] == "\\end"
+                && kids[i + 1..]
+                    .iter()
+                    .find(|k| k.kind() != SyntaxKind::Space)
+                    .is_some_and(|k| k.kind() == SyntaxKind::Group);
+        }
+        if off > at {
+            return false;
+        }
+        off += c.len();
+    }
+    false
+}
+
 fn open_at_end(g: &phitex_source::Green) -> bool {
     g.children()
         .last()
@@ -800,13 +854,29 @@ fn opener(s: &str) -> Option<Opener> {
         "\\(" => return Some(Opener::Inline),
         _ => {}
     }
-    let rest = s.strip_prefix("\\begin")?.trim_start();
-    let name = rest.strip_prefix('{')?.strip_suffix('}')?;
+    let name = group_text(s.strip_prefix("\\begin")?)?;
     Some(Opener::Env(name.trim().to_owned()))
 }
 
 /// Whether `text` may hold a closer of `o` (a closer in a comment counts:
 /// it only makes more be read).
+/// The text inside the brace group `s` begins with (past spaces), its
+/// braces balanced: an environment's name as the tokens read it (a name
+/// holding a group, `\begin{\end{x}y}`, is the whole group's text).
+fn group_text(s: &str) -> Option<&str> {
+    let r = s.trim_start().strip_prefix('{')?;
+    let mut depth = 0usize;
+    for (k, ch) in r.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' if depth == 0 => return Some(&r[..k]),
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Whether `text` holds an opener or a closer of `o`'s kind (an
 /// environment's `\begin` or `\end` of its name).
 fn mentions(text: &str, o: &Opener) -> bool {
@@ -814,12 +884,8 @@ fn mentions(text: &str, o: &Opener) -> bool {
         Opener::Display => text.contains("\\[") || text.contains("\\]"),
         Opener::Inline => text.contains("\\(") || text.contains("\\)"),
         Opener::Env(name) => ["\\begin", "\\end"].iter().any(|cs| {
-            text.match_indices(cs).any(|(k, _)| {
-                let rest = text[k + cs.len()..].trim_start();
-                rest.strip_prefix('{')
-                    .and_then(|r| r.split_once('}'))
-                    .is_some_and(|(n, _)| n.trim() == name)
-            })
+            text.match_indices(cs)
+                .any(|(k, _)| group_text(&text[k + cs.len()..]).is_some_and(|n| n.trim() == name))
         }),
     }
 }
@@ -828,12 +894,9 @@ fn has_closer(text: &str, o: &Opener) -> bool {
     match o {
         Opener::Display => text.contains("\\]"),
         Opener::Inline => text.contains("\\)"),
-        Opener::Env(name) => text.match_indices("\\end").any(|(k, _)| {
-            let rest = text[k + 4..].trim_start();
-            rest.strip_prefix('{')
-                .and_then(|r| r.split_once('}'))
-                .is_some_and(|(n, _)| n.trim() == name)
-        }),
+        Opener::Env(name) => text
+            .match_indices("\\end")
+            .any(|(k, _)| group_text(&text[k + 4..]).is_some_and(|n| n.trim() == name)),
     }
 }
 
