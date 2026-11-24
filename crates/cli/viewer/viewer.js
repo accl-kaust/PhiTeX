@@ -2852,7 +2852,10 @@ header:active { cursor: grabbing; }
 .pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
 .win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
-/* (the last pages, a build that shipped none or the engine lost: shown as they are, crisp and interactive, a strip above saying so; never dimmed) */
+/* (the last pages after a build that shipped none: as they are, crisp and usable, the strip above saying so. The engine lost:
+   dimmed until the user takes it in (Dismiss, Esc, a click on them), then as they are, the strip staying while it lasts) */
+.stage.unacked .slot { opacity: .4; }
+.stage.unacked { cursor: pointer; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
 /* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
@@ -2923,10 +2926,8 @@ header:active { cursor: grabbing; }
 .card .mainrow { align-items: center; color: var(--ph-fg2); }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
 .stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
-.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
-.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
-  background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
-.win.offline-quiet .offpill { display: block; }
+.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 1px solid currentColor; border-radius: var(--ph-pill); background: none; color: inherit; font: inherit; font-weight: 600; padding: 0 10px; }
+.stage:not(.unacked) ~ .strips .gone .x { display: none; }
 
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
@@ -10141,7 +10142,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Keep viewing these pages, undimmed (Esc, or a click on them)">Dismiss</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -10156,7 +10157,6 @@ var Panel = class {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button type="button" class="btn" id="reportcopy">Copy</button><button type="button" class="btn" id="reportmail">Email</button><button type="button" class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
 </div>`;
@@ -10264,7 +10264,17 @@ var Panel = class {
       else if (!this.escapeProblems()) this.unmark();
     });
     this.$("#gonex").onclick = () => this.dismissOffline();
-    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
+    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("unacked") && this.dismissOffline());
+    this.$("#stage").addEventListener(
+      "click",
+      (e) => {
+        if (!this.$("#stage").classList.contains("unacked")) return;
+        e.stopPropagation();
+        e.preventDefault();
+        this.dismissOffline();
+      },
+      { capture: true }
+    );
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.shiftKey && e.code === "KeyP") {
         e.preventDefault();
@@ -11337,32 +11347,33 @@ var Panel = class {
   }
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
-   * exited, the socket closed, the core trapped) or back: while it is lost
-   * the last pages stay as they are, crisp and usable (a ready page is never
-   * dimmed), under a banner saying so and why.
+   * exited, the socket closed, the core trapped) or back. Lost: the last
+   * pages dimmed under a strip saying so and why, until the user takes it
+   * in (Dismiss, Esc, or a click on the pages, which does nothing else);
+   * then crisp and usable, the strip still there while the outage lasts,
+   * and not dimmed again for it. Back before that: undimmed by itself, the
+   * strip gone. (A watch restarted for a new version looks the same here
+   * as one that stopped: the tab learns which only once it joins again.)
    */
   connection(up, why) {
     const was = this.offline;
     this.offline = !up;
     this.renderStatus();
+    const stage = this.$("#stage");
     if (up) {
-      this.$("#stage").classList.remove("offline");
-      this.win.classList.remove("offline-quiet");
+      stage.classList.remove("offline", "unacked");
       return;
     }
     const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
     this.placeStrips();
     this.$("#gonewhy").textContent = text;
-    this.$("#offpill").title = text;
-    if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
+    stage.classList.add("offline");
+    if (!was) stage.classList.add("unacked");
   }
-  /** The disconnection's banner dismissed (✕ or Esc): the banner gone, a small pill saying so. */
+  /** The lost connection taken in (Dismiss, Esc, a click on the dimmed pages): the pages undimmed and usable, the strip kept. */
   dismissOffline() {
     if (!this.offline) return;
-    this.$("#stage").classList.remove("offline");
-    this.win.classList.add("offline-quiet");
-    const v = this.$("#viewer");
-    this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
+    this.$("#stage").classList.remove("unacked");
   }
   offline = false;
   /** The strips over the pages (engine lost, stale, approximate) clear of the pages' scrollbar, whatever its width. */

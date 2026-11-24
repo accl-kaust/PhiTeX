@@ -678,7 +678,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Keep viewing these pages, undimmed (Esc, or a click on them)">Dismiss</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -693,7 +693,6 @@ export class Panel {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button type="button" class="btn" id="reportcopy">Copy</button><button type="button" class="btn" id="reportmail">Email</button><button type="button" class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
 </div>`;
@@ -810,7 +809,18 @@ export class Panel {
       else if (!this.escapeProblems()) this.unmark();
     });
     this.$("#gonex").onclick = () => this.dismissOffline();
-    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
+    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("unacked") && this.dismissOffline());
+    // (a click on the dimmed pages takes the lost connection in, and does nothing else: no jump, no selection)
+    this.$("#stage").addEventListener(
+      "click",
+      (e) => {
+        if (!this.$("#stage").classList.contains("unacked")) return;
+        e.stopPropagation();
+        e.preventDefault();
+        this.dismissOffline();
+      },
+      { capture: true },
+    );
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.shiftKey && e.code === "KeyP") {
         e.preventDefault();
@@ -2074,35 +2084,35 @@ export class Panel {
 
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
-   * exited, the socket closed, the core trapped) or back: while it is lost
-   * the last pages stay as they are, crisp and usable (a ready page is never
-   * dimmed), under a banner saying so and why.
+   * exited, the socket closed, the core trapped) or back. Lost: the last
+   * pages dimmed under a strip saying so and why, until the user takes it
+   * in (Dismiss, Esc, or a click on the pages, which does nothing else);
+   * then crisp and usable, the strip still there while the outage lasts,
+   * and not dimmed again for it. Back before that: undimmed by itself, the
+   * strip gone. (A watch restarted for a new version looks the same here
+   * as one that stopped: the tab learns which only once it joins again.)
    */
   connection(up: boolean, why?: string): void {
     const was = this.offline;
     this.offline = !up;
     this.renderStatus();
+    const stage = this.$("#stage");
     if (up) {
-      this.$("#stage").classList.remove("offline");
-      this.win.classList.remove("offline-quiet");
+      stage.classList.remove("offline", "unacked");
       return;
     }
     const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
     this.placeStrips();
     this.$("#gonewhy").textContent = text;
-    this.$("#offpill").title = text;
-    // (dismissed once: it stays dismissed until the connection comes back)
-    if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
+    stage.classList.add("offline");
+    // (a new outage dims; told again during the same one, as it stays taken in)
+    if (!was) stage.classList.add("unacked");
   }
 
-  /** The disconnection's banner dismissed (✕ or Esc): the banner gone, a small pill saying so. */
+  /** The lost connection taken in (Dismiss, Esc, a click on the dimmed pages): the pages undimmed and usable, the strip kept. */
   private dismissOffline(): void {
     if (!this.offline) return;
-    this.$("#stage").classList.remove("offline");
-    this.win.classList.add("offline-quiet");
-    // (clear of the pages' scrollbar, whatever its width)
-    const v = this.$("#viewer");
-    this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
+    this.$("#stage").classList.remove("unacked");
   }
 
   private offline = false;
