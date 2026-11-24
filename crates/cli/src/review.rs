@@ -245,61 +245,21 @@ impl Default for Store {
     }
 }
 
-/// The project's `.phitex/` made if missing; when it is made in a git
-/// work tree, `.phitex/` is added to that repository's `.git/info/exclude`
-/// (local to this clone, never a committed `.gitignore`) so git leaves it
-/// out. The sentence to say so once, when it was added.
+/// The project's `.phitex/` made if missing, with a `.gitignore` of `*`
+/// in it, so git leaves it out (made again if missing). Nothing to say:
+/// none (kept, for its callers, as when it said its git exclude).
 pub fn make_dir(root: &Path) -> Result<Option<String>, String> {
     let d = root.join(".phitex");
-    if d.is_dir() {
-        return Ok(None);
-    }
     std::fs::create_dir_all(&d).map_err(|e| format!("{}: {e}", d.display()))?;
-    Ok(exclude(root))
-}
-
-/// `.phitex/` in the `info/exclude` of the git repository `root` is in;
-/// the sentence saying so, when it was added now.
-fn exclude(root: &Path) -> Option<String> {
-    let o = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "info/exclude",
-        ])
-        .current_dir(root)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let path = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
-    let now = std::fs::read_to_string(&path).unwrap_or_default();
-    if now
-        .lines()
-        .any(|l| matches!(l.trim(), ".phitex/" | ".phitex" | "/.phitex/" | "/.phitex"))
-    {
-        return None;
+    let ignore = d.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(
+            &ignore,
+            "# PhiTeX's own files: notes, session log, PNGs, cache\n*\n",
+        )
+        .map_err(|e| format!("{}: {e}", ignore.display()))?;
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).ok()?;
-    }
-    let sep = if now.is_empty() || now.ends_with('\n') {
-        ""
-    } else {
-        "\n"
-    };
-    let line = "# PhiTeX's notes, review baseline and session log (phitex session)\n.phitex/\n";
-    std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{sep}{line}").as_bytes()))
-        .ok()?;
-    Some(format!(
-        "made .phitex/ (notes, review baseline, session log) and added it to {}, so git leaves it out (this clone only)",
-        path.display()
-    ))
+    Ok(None)
 }
 
 impl Store {
@@ -4778,7 +4738,7 @@ mod tests {
     }
 
     #[test]
-    fn the_folder_made_in_a_git_clone_is_excluded_there_once() {
+    fn the_folder_is_left_out_of_git_by_its_own_gitignore() {
         let d = project(&[]);
         let run = |a: &[&str]| {
             std::process::Command::new("git")
@@ -4788,27 +4748,24 @@ mod tests {
                 .expect("git runs")
         };
         run(&["init", "-q"]);
-        let said = make_dir(&d).expect("made");
-        assert!(
-            said.as_deref().is_some_and(|s| s.contains("info/exclude")),
-            "{said:?}"
-        );
-        let ex = std::fs::read_to_string(d.join(".git/info/exclude")).expect("the exclude file");
-        assert_eq!(ex.matches(".phitex/").count(), 1, "{ex}");
-        std::fs::remove_dir_all(d.join(".phitex")).expect("removed");
-        assert_eq!(make_dir(&d).expect("made again"), None);
-        let ex = std::fs::read_to_string(d.join(".git/info/exclude")).expect("the exclude file");
-        assert_eq!(ex.matches(".phitex/").count(), 1, "{ex}");
+        assert_eq!(make_dir(&d).expect("made"), None);
+        std::fs::write(d.join(".phitex/notes.json"), "{}").expect("a file in it");
         std::fs::write(d.join("a.tex"), "x").expect("a file");
         let st = String::from_utf8_lossy(
             &run(&["status", "--porcelain", "--untracked-files=all"]).stdout,
         )
         .into_owned();
-        assert!(!st.contains(".phitex"), "{st}");
-        // (outside git: made, nothing said)
-        let plain = project(&[]);
-        assert_eq!(make_dir(&plain).expect("made"), None);
-        assert!(plain.join(".phitex").is_dir());
+        assert!(!st.contains(".phitex") && st.contains("a.tex"), "{st}");
+        // (made again where it went missing)
+        std::fs::remove_file(d.join(".phitex/.gitignore")).expect("removed");
+        make_dir(&d).expect("made");
+        assert!(d.join(".phitex/.gitignore").is_file());
+        assert!(
+            !d.join(".git/info/exclude").is_file()
+                || !std::fs::read_to_string(d.join(".git/info/exclude"))
+                    .unwrap_or_default()
+                    .contains(".phitex")
+        );
     }
 
     #[test]

@@ -150,9 +150,9 @@ test("a .bib edited while watching is read again (item 17)", async () => {
   const main = doc("Hi \\cite{x}.\n\n\\bibliographystyle{plain}\n\\bibliography{refs}");
   const { w, t } = await open({ "main.tex": main, "refs.bib": "" });
   // (the citation's warning says the key is not in refs.bib; BibTeX's own of it is the same problem, said once)
-  await t.until(`/x is not in refs\\.bib/.test($("#diags").innerText)`, "the warning");
+  await t.until(`/x is cited but not in refs\\.bib/.test($("#diags").innerText)`, "the warning");
   w.write("refs.bib", "@book{x,title={T},author={A B},year=2000,publisher={P}}\n");
-  await t.until(`!/is not in refs\\.bib/.test($("#diags").innerText)`, "the entry found");
+  await t.until(`!/is cited but not in refs\\.bib/.test($("#diags").innerText)`, "the entry found");
   await w.stop();
 });
 

@@ -802,6 +802,13 @@ let folderDoc: string | undefined;
 {
   const m = /\/d\/([0-9a-f]{12})\/$/.exec(location.pathname);
   if (m) folderMode(m[1]);
+  // (the watch's own keys in the keys' help, `?`: a folder's document has its Files and quick open)
+  panel.addKeys([
+    ...(m
+      ? ([["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"]] as [string, string][])
+      : ([["Ctrl+P", "print the PDF"]] as [string, string][])),
+    ["`", "the terminal"],
+  ]);
 }
 function folderMode(id: string): void {
   const here = new URLSearchParams(location.search).get("path");

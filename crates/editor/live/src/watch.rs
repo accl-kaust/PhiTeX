@@ -430,9 +430,14 @@ fn citations(s: &Session, v: &mut Vec<Value>) {
             continue;
         }
         let why = if dbs.is_empty() {
-            "no bibliography database is named (\\bibliography, \\addbibresource)".to_owned()
+            format!(
+                "{key} is cited but no bibliography database is named (\\bibliography, \\addbibresource)"
+            )
         } else {
-            format!("{key} is not in {}", dbs.join(", "))
+            format!(
+                "{key} is cited but not in {}: add the entry or remove the citation",
+                dbs.join(", ")
+            )
         };
         let first = m
             .lines()
