@@ -64,6 +64,11 @@ enum Event {
     /// event told: the target resolved again (its engine is chosen by the
     /// text), the files read again.
     ReadEarly,
+    /// A folder watch's session (`dirwatch.rs`): its viewer's last tab
+    /// closed (true: no build on a change, the changes kept) or one open
+    /// again (false: what changed meanwhile built). Lines `pause` and
+    /// `resume` on standard input.
+    Pause(bool),
 }
 
 /// What the watch keeps from one session to the next (the editor's
@@ -955,6 +960,63 @@ fn diff_build(ui: &Ui, v: &View, c: &mut crate::compare::Compare, what: String) 
     built.is_some()
 }
 
+/// The variable naming the file whose lock a folder watch's sessions
+/// hold while each builds (`dirwatch.rs`).
+pub const TURNS: &str = "PHITEX_WATCH_TURNS";
+
+/// A folder watch's sessions build one at a time, each with every thread
+/// the user gave the watch: the lock on the file [`TURNS`] names, held
+/// while the build runs (dropped: let go), waited for meanwhile and said
+/// so (`queued` to the folder watch, the viewer's status). Two sessions
+/// building at once would each run the user's threads, twice the cores
+/// asked for. None: not a folder watch's session.
+fn turn(ui: &Ui, view: Option<&View>) -> Option<Turn> {
+    let p = std::env::var_os(TURNS)?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(p)
+        .ok()?;
+    match f.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            ui.event(&json!({"event": "queued", "on": true}));
+            if let Some(v) = view {
+                v.event(&json!({"event": "progress", "phase": "queued", "pass": 0, "pages": 0}));
+            }
+            let held = f.lock();
+            ui.event(&json!({"event": "queued", "on": false}));
+            if let Some(v) = view {
+                v.event(
+                    &json!({"event": "progress", "phase": "typesetting", "pass": 0, "pages": 0}),
+                );
+            }
+            held.ok()?;
+        }
+        Err(std::fs::TryLockError::Error(_)) => return None,
+    }
+    ui.event(&json!({"event": "turn", "on": true}));
+    Some(Turn {
+        _f: f,
+        ui: ui.clone(),
+    })
+}
+
+/// A folder watch's session's turn to build ([`turn`]): the lock held
+/// until it is dropped, its end told (`turn`, off).
+struct Turn {
+    _f: std::fs::File,
+    ui: Ui,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        self.ui.event(&json!({"event": "turn", "on": false}));
+    }
+}
+
 /// What a line on standard input (a pipe) asks.
 fn line_key(l: &str) -> Key {
     let l = l.trim();
@@ -1123,6 +1185,19 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
     } else {
         for l in std::io::stdin().lock().lines() {
             let Ok(l) = l else { break };
+            // (a folder watch's session: told when its viewer's tabs leave
+            // and come back)
+            let pause = match l.trim() {
+                "pause" if here.ui.relay => Some(true),
+                "resume" if here.ui.relay => Some(false),
+                _ => None,
+            };
+            if let Some(p) = pause {
+                if tx.send((Instant::now(), Event::Pause(p))).is_err() {
+                    return;
+                }
+                continue;
+            }
             let k = line_key(&l);
             if !here.answer(k) && tx.send((Instant::now(), Event::Key(k))).is_err() {
                 return;
@@ -1131,8 +1206,11 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
         // (standard input not a terminal, at its end: no more keys, not
         // a quit. `phitex watch &`, nohup, a service or a Makefile has
         // it at its end from the start; such a watch runs until a
-        // signal, as latexmk -pvc does)
-        return;
+        // signal, as latexmk -pvc does. A folder watch's session's end
+        // is its folder watch's: it ends with it)
+        if !here.ui.relay {
+            return;
+        }
     }
     // (a terminal's end: it hung up)
     let _ = tx.send((Instant::now(), Event::Key(Key::Quit)));
@@ -1729,16 +1807,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         .unwrap_or_else(PoisonError::into_inner)
                         .send((Instant::now(), Event::Clients(n)));
                 }));
-                ui.line(&format!(
-                    "{}  {}  {}",
-                    st.dim("viewer"),
-                    st.cyan(v.url()),
-                    st.dim(if on_stdio {
-                        "(phitex.openViewer opens it)"
-                    } else {
-                        "(o opens it)"
-                    })
-                ));
+                // (a folder watch's session: the folder watch's address is
+                // the one to open, not this one)
+                if !ui.relay {
+                    ui.line(&format!(
+                        "{}  {}  {}",
+                        st.dim("viewer"),
+                        st.cyan(v.url()),
+                        st.dim(if on_stdio {
+                            "(phitex.openViewer opens it)"
+                        } else {
+                            "(o opens it)"
+                        })
+                    ));
+                }
                 if let Some(l) = &lsp {
                     l.viewer(v.url());
                     // (a double-click's place shown by the editor itself)
@@ -2236,7 +2318,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // one build to the next; the events taken meanwhile on a helper)
         let ran = std::thread::scope(|sc| {
             let pump = sc.spawn(|| while !meanwhile() {});
+            // (a folder watch's sessions build one at a time)
+            let turn = turn(ui, view.as_ref());
             let r = crate::ui::catch(|| s.build());
+            drop(turn);
             let _ = built
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -3007,6 +3092,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         false
     };
     rebuild(&mut s, "cold", None, &mut cold_meanwhile);
+    // (a folder watch's session: paused while no tab shows it, what
+    // changed meanwhile kept for when one does, `Event::Pause`)
+    let mut paused = false;
+    let mut deferred: Vec<String> = Vec::new();
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     // (`phitex session compare`'s diff: the agent's own, beside the
@@ -3496,6 +3585,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 // (a build's end is taken by the loop that waits on it)
                 Event::Built => {}
+                Event::Pause(p) => {
+                    paused = p;
+                    ui.event(&json!({"event": if p { "paused" } else { "resumed" }}));
+                }
                 Event::ReadEarly => {
                     let why_now = "the main file changed as the watch started";
                     match modern::resolve_again(o) {
@@ -3764,6 +3857,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if main_changed && !edits.buffers.contains_key(&main_rel) {
             edits.set(&mut s, &main_rel);
             phitex_tex::timeline::lap("watch: the main file read and set");
+        }
+        if paused && again {
+            deferred.append(&mut why);
+            again = false;
+        } else if !paused && !deferred.is_empty() {
+            // (shown again: what changed meanwhile built now, an edit's build)
+            let mut d = std::mem::take(&mut deferred);
+            d.append(&mut why);
+            why = d;
+            again = true;
         }
         let asked = why.iter().any(|w| w.starts_with("asked"));
         if again && !asked && s.up_to_date() {

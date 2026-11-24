@@ -40,15 +40,15 @@ pub use phitex_live::view::{Ask, Built, Viewer, ranges};
 use crate::ws;
 
 /// The viewer's page and its script (`scripts/viewer-bundle.sh`).
-const INDEX: &[u8] = include_bytes!("../viewer/index.html");
-const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
+pub(crate) const INDEX: &[u8] = include_bytes!("../viewer/index.html");
+pub(crate) const SCRIPT: &[u8] = include_bytes!("../viewer/viewer.js");
 
 /// The served viewer's identity, a hash of [`SCRIPT`] (FNV-1a, 64 bits,
 /// hex): written into the page (`<meta name="phitex-viewer">`) and told by
 /// `ping`, so a tab whose page came from another phitex (a watch
 /// upgraded and started again at the same address) sees that it differs
 /// and asks to be reloaded before it talks to this watch.
-fn viewer_hash() -> &'static str {
+pub(crate) fn viewer_hash() -> &'static str {
     static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     H.get_or_init(|| {
         let h = SCRIPT.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
@@ -62,7 +62,7 @@ fn viewer_hash() -> &'static str {
 /// op's answer), read by its script before anything is drawn: the first
 /// build's opening is the one chosen, not the default's while the socket
 /// connects. `<` written `<`, so the JSON can't end its script element.
-fn index_with(prefs: Option<&Value>) -> Vec<u8> {
+pub(crate) fn index_with(prefs: Option<&Value>) -> Vec<u8> {
     let page = String::from_utf8_lossy(INDEX);
     // (the viewer this page is for, `viewer_hash`: always, prefs or not)
     let mut tag = format!(
@@ -169,7 +169,7 @@ fn doc_port(main: &std::path::Path) -> u16 {
 /// time, random, readable by the user alone), never derived from the
 /// path: a token a page could guess would let it read the document. A
 /// fresh one where the cache can't keep it.
-fn doc_token(main: &std::path::Path) -> String {
+pub(crate) fn doc_token(main: &std::path::Path) -> String {
     let Ok(c) = crate::cache::Cache::open(None) else {
         return token();
     };
@@ -199,7 +199,7 @@ fn doc_token(main: &std::path::Path) -> String {
 /// A listener on 127.0.0.1: `port` if given (an error if taken), else
 /// document `main`'s ([`doc_port`]) or the first free one above it in
 /// [`PORTS`], else any free one.
-fn listen(port: Option<u16>, main: &std::path::Path) -> std::io::Result<TcpListener> {
+pub(crate) fn listen(port: Option<u16>, main: &std::path::Path) -> std::io::Result<TcpListener> {
     if let Some(p) = port {
         return TcpListener::bind(("127.0.0.1", p));
     }

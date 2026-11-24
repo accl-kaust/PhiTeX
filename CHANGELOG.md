@@ -44,6 +44,10 @@ Compare and Blame are now one thing: **± Changes** :)
   contrast or your own page and text colours, and the marker's colour too.
   Only the screen changes: downloads stay the real PDF, and Dark PDF still
   wins while it is on.
+- **A whole folder, one watch.** `phitex watch .` opens a little file
+  manager of the folder in your browser: click any .tex file and it builds
+  in a tab of its own, switch documents from the Files panel or with
+  Ctrl+P, and keep two side by side.
 - **Fixed:** on Overleaf, a jump between the PDF and the source now opens
   the file and scrolls to a line that was off screen, in the separate PDF
   tab too; text selected on the pages is plain blue.

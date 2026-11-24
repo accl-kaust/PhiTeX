@@ -35,6 +35,7 @@ mod compare;
 mod compat;
 mod config;
 mod dirs;
+mod dirwatch;
 mod dvipdf;
 mod editor;
 mod failure;

@@ -158,10 +158,24 @@ pub fn clip(s: &str, max: usize) -> String {
 struct Tap {
     sink: Option<Box<dyn Fn(Value) + Send>>,
     early: Vec<Value>,
+    /// A folder watch's session ([`RELAY`]): every message also a JSON
+    /// line on standard output, for the folder watch to show.
+    relay: bool,
 }
+
+/// The variable that makes a watch one of a folder watch's sessions
+/// (`dirwatch.rs`): its messages relayed as JSON lines on standard
+/// output ([`Ui::tap`]'s items), nothing on standard error but what is
+/// not the terminal's (an `eprintln!`), its keys lines on standard input.
+pub const RELAY: &str = "PHITEX_WATCH_RELAY";
 
 impl Tap {
     fn tell(&mut self, v: Value) {
+        if self.relay {
+            let mut o = std::io::stdout().lock();
+            let _ = writeln!(o, "{v}");
+            let _ = o.flush();
+        }
         match &self.sink {
             Some(f) => f(v),
             None if self.early.len() < 2000 => self.early.push(v),
@@ -178,8 +192,9 @@ struct Bottom {
     /// The watch's status line as given ([`Ui::status`]): its text, its
     /// mark and the style, laid out at the terminal's width each time it
     /// is drawn (a line laid out for a wider terminal wraps when it
-    /// narrows, and its copies piled up under every line printed).
-    idle: Option<(String, Option<bool>, Style)>,
+    /// narrows, and its copies piled up under every line printed). A
+    /// folder watch has one a session ([`Ui::statuses`]).
+    idle: Vec<(String, Option<bool>, Style)>,
     /// The keys shown at the status line's right end.
     keys: Option<&'static str>,
     /// The lines on the screen now, and each one's width when drawn.
@@ -195,9 +210,14 @@ impl Bottom {
             return self.spin.clone();
         }
         let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
+        // (the keys at the first line's end only)
         self.idle
             .iter()
-            .map(|(t, ok, st)| idle_line(*st, t, *ok, self.keys.unwrap_or(""), w))
+            .enumerate()
+            .map(|(k, (t, ok, st))| {
+                let keys = if k == 0 { self.keys.unwrap_or("") } else { "" };
+                idle_line(*st, t, *ok, keys, w)
+            })
             .collect()
     }
 
@@ -280,6 +300,9 @@ pub struct Ui {
     pub quiet: bool,
     /// `--json`: events on standard output, nothing else.
     pub json: bool,
+    /// A folder watch's session ([`RELAY`]): its messages as JSON
+    /// lines on standard output, none on standard error.
+    pub relay: bool,
     bottom: Arc<Mutex<Bottom>>,
     tap: Arc<Mutex<Tap>>,
     /// The pages of the build the spinner shows ([`Ui::streamed`]).
@@ -770,13 +793,26 @@ fn redraw(e: &mut impl std::io::Write, b: &mut Bottom) {
 
 impl Ui {
     pub fn new(st: Style, verbose: u8, quiet: bool, json: bool) -> Ui {
+        let relay = std::env::var_os(RELAY).is_some_and(|v| v == "1");
         Ui {
-            st,
+            // (a folder watch's session: no terminal of its own)
+            st: if relay {
+                Style {
+                    color: false,
+                    tty: false,
+                }
+            } else {
+                st
+            },
             verbose,
             quiet,
             json,
+            relay,
             bottom: Arc::default(),
-            tap: Arc::default(),
+            tap: Arc::new(Mutex::new(Tap {
+                relay,
+                ..Tap::default()
+            })),
             pages: Arc::default(),
         }
     }
@@ -805,7 +841,7 @@ impl Ui {
 
     /// `s` on standard error, above the bottom line.
     fn print(&self, s: &str) {
-        if self.json {
+        if self.json || self.relay {
             return;
         }
         let mut b = lock(&self.bottom);
@@ -891,12 +927,25 @@ impl Ui {
         let st = self.st;
         if st.tty && !self.json {
             let mut b = lock(&self.bottom);
-            b.idle = text.map(|t| (t.to_owned(), ok, st));
+            b.idle = text.map(|t| (t.to_owned(), ok, st)).into_iter().collect();
             if b.spin.is_empty() {
                 redraw(&mut std::io::stderr().lock(), &mut b);
             }
         }
         lock(&self.tap).tell(json!({"kind": "status", "text": text.unwrap_or(""), "ok": ok}));
+    }
+
+    /// A folder watch's status lines, one a line of its own (each its
+    /// text and mark), below what is printed (a terminal only).
+    pub fn statuses(&self, lines: &[(String, Option<bool>)]) {
+        let st = self.st;
+        if st.tty && !self.json {
+            let mut b = lock(&self.bottom);
+            b.idle = lines.iter().map(|(t, ok)| (t.clone(), *ok, st)).collect();
+            if b.spin.is_empty() {
+                redraw(&mut std::io::stderr().lock(), &mut b);
+            }
+        }
     }
 
     /// The bottom lines erased for good, a build's tree too (the watch
