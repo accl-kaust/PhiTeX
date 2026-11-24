@@ -1201,8 +1201,10 @@ export class Panel {
 
   busy(on: boolean): void {
     this.buildSince = on ? this.buildSince || performance.now() : 0;
-    // (the strip over the last pages: none while a build runs, said once one settles without a page)
-    if (this.lastStatus) this.stale(this.lastStatus);
+    // (the strip over the last pages: none while a build runs, said once one settles without a page:
+    // by the status that follows its end, not by the one from before it, which may be of no page
+    // yet (a diff's first build: its pages shown before its first page, the strip flashed))
+    if (on && this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
 

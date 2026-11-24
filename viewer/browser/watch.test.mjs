@@ -928,13 +928,15 @@ test("Compare: an added run ending in a control space (e.g.\\ ) builds the diff'
   await t.click("#chg-start");
   await t.until(`$$(".phx-commits .row[data-i]").length > 0`, "the commits");
   await t.click(".phx-commits .row[data-i='0']");
+  // (the strip "the last complete render" never up, not for a frame: the diff's pages shown before its first build ends)
+  await t.q(`(() => { globalThis.__stale = 0; new MutationObserver(() => $("#stage").classList.contains("stale") && globalThis.__stale++).observe($("#stage"), { attributes: true, attributeFilter: ["class"] }); return 1; })()`);
   await t.click(".phx-commits .row:not([data-i]):not(.skel)");
   await t.until(`/^\\d+ changes$/.test($(".chg-pop .foot [aria-live]")?.textContent ?? "")`, "the diff's changes", 120000);
   // (the diff's pages made: its PDF, no "last complete render" over the current ones)
   await t.until(`fetch(new URL("diff.pdf", location.href)).then((r) => r.ok)`, "the diff's PDF made", 120000);
   await sleep(1500);
   assert.equal(await t.q(`$("#stage").classList.contains("stale")`), false, "the diff's pages shown, not the last complete render");
-  assert.ok(!/shipped no page/.test(await t.q(`$("#banner")?.textContent ?? ""`)), "no 'shipped no page'");
+  assert.equal(await t.q(`globalThis.__stale`), 0, "no 'last complete render' strip at any time, not even a flash");
   // (Caret only: the deleted words leave a caret; the popover closed (Esc), the diff stays)
   await t.click(`#chg-look [data-look="del"][data-v="caret"]`);
   await t.until(`fetch(new URL("diff.tex", location.href)).then((r) => r.text()).then((x) => /scriptstyle\\\\wedge/.test(x))`, "the caret look", 60000);
@@ -1007,6 +1009,8 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
     }
   };
   // (a right-click on the new word: Accept, Reject, Show in the list, Go to source; Accept as the card's button)
+  // (a feature tip over the pages put away first: a right-click on it is the tip's)
+  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
   const add = await mark("h-add");
   await rightClick(t, add[0], add[1]);
   await t.until(`!!$(".phx-ctx")`, "the menu", 5000);

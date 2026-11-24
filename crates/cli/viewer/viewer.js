@@ -7552,8 +7552,9 @@ var BLAME_CSS = `
 .slot svg.bl-marks { --bl-veil: #fff; }
 .win.paged .slot svg.bl-marks { --bl-veil: var(--ph-sheet, #fff); }
 .win.dark-pdf .slot svg.bl-marks, .win.docked.pdf-dark .slot svg.bl-marks { --bl-veil: #2c2e33; }
-.slot svg.bl .v { fill: var(--bl-veil); fill-opacity: .55; visibility: hidden; }
-.slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { visibility: visible; }
+/* (by its opacity alone, not its visibility: an SVG shape's visibility changed lays it out again, its opacity only paints it) */
+.slot svg.bl .v { fill: var(--bl-veil); fill-opacity: 0; }
+.slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { fill-opacity: .55; }
 .slot svg.bl.hl g:not(.on) .v.o { fill-opacity: .7; }
 .slot svg.bl-paint.hl g:not(.on) { fill-opacity: .35; }
 .slot svg.bl-marks.hl g:not(.on) .b { fill-opacity: .3; }
@@ -7715,6 +7716,29 @@ var Blame = class {
    * sources are read again quietly (only what changed is blamed again); the
    * first time, the sources are blamed from the history: no page needed.
    */
+  warmed = false;
+  /**
+   * The card laid out once, unseen, when the main thread is next idle after
+   * Blame turns on: its first layout finds its fonts and shapes its words
+   * (15 ms on a 16-page paper, 1 ms every time after), work the first
+   * hover's task would otherwise do.
+   */
+  warm() {
+    if (this.warmed) return;
+    this.warmed = true;
+    const go = () => {
+      const c = document.createElement("div");
+      c.className = "blcard";
+      c.setAttribute("aria-hidden", "true");
+      c.style.cssText = "visibility:hidden;left:-10000px;top:0";
+      c.replaceChildren(html`<div class="h"><span class="av">AB</span>A writer</div><div class="meta">now · <code>0123abc</code></div><div class="sub">A subject</div><div class="via">via a branch</div><div class="src">main.tex:1–2</div><div class="acts"><button type="button">Show in editor</button></div>`);
+      this.card.after(c);
+      void c.offsetWidth;
+      c.remove();
+    };
+    if (typeof requestIdleCallback === "function") requestIdleCallback(go);
+    else setTimeout(go, 0);
+  }
   toggle(on = !this.on) {
     if (on === this.on) return;
     this.on = on;
@@ -7736,6 +7760,7 @@ var Blame = class {
       this.pagesSoon();
     });
     this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    this.warm();
     if (this.m && this.worked === this.workKey()) {
       void this.mapPages();
       this.checkTexts(true, true);
@@ -8371,7 +8396,6 @@ var Blame = class {
       this.stageBox = this.p.stage.getBoundingClientRect();
       this.avoidBox = this.p.avoid?.() ?? null;
     }
-    this.pick(a);
     const [W2, H2] = this.cardSize;
     const box = this.stageBox ?? this.p.stage.getBoundingClientRect();
     let x = Math.max(box.left + 6, Math.min(box.right - W2 - 6, px + 14));
@@ -8391,6 +8415,7 @@ var Blame = class {
       this.card.style.left = `${x + this.cardShift[0]}px`;
       this.card.style.top = `${y + this.cardShift[1]}px`;
     }
+    this.pick(a);
   }
   cardSize = [300, 120];
   avoidBox = null;
@@ -10927,7 +10952,7 @@ var Panel = class {
   }
   busy(on) {
     this.buildSince = on ? this.buildSince || performance.now() : 0;
-    if (this.lastStatus) this.stale(this.lastStatus);
+    if (on && this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */

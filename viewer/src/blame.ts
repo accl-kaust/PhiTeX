@@ -924,8 +924,9 @@ export const BLAME_CSS = `
 .slot svg.bl-marks { --bl-veil: #fff; }
 .win.paged .slot svg.bl-marks { --bl-veil: var(--ph-sheet, #fff); }
 .win.dark-pdf .slot svg.bl-marks, .win.docked.pdf-dark .slot svg.bl-marks { --bl-veil: #2c2e33; }
-.slot svg.bl .v { fill: var(--bl-veil); fill-opacity: .55; visibility: hidden; }
-.slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { visibility: visible; }
+/* (by its opacity alone, not its visibility: an SVG shape's visibility changed lays it out again, its opacity only paints it) */
+.slot svg.bl .v { fill: var(--bl-veil); fill-opacity: 0; }
+.slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { fill-opacity: .55; }
 .slot svg.bl.hl g:not(.on) .v.o { fill-opacity: .7; }
 .slot svg.bl-paint.hl g:not(.on) { fill-opacity: .35; }
 .slot svg.bl-marks.hl g:not(.on) .b { fill-opacity: .3; }
@@ -1147,6 +1148,30 @@ export class Blame {
    * sources are read again quietly (only what changed is blamed again); the
    * first time, the sources are blamed from the history: no page needed.
    */
+  private warmed = false;
+  /**
+   * The card laid out once, unseen, when the main thread is next idle after
+   * Blame turns on: its first layout finds its fonts and shapes its words
+   * (15 ms on a 16-page paper, 1 ms every time after), work the first
+   * hover's task would otherwise do.
+   */
+  private warm(): void {
+    if (this.warmed) return;
+    this.warmed = true;
+    const go = () => {
+      const c = document.createElement("div");
+      c.className = "blcard";
+      c.setAttribute("aria-hidden", "true");
+      c.style.cssText = "visibility:hidden;left:-10000px;top:0";
+      c.replaceChildren(html`<div class="h"><span class="av">AB</span>A writer</div><div class="meta">now · <code>0123abc</code></div><div class="sub">A subject</div><div class="via">via a branch</div><div class="src">main.tex:1–2</div><div class="acts"><button type="button">Show in editor</button></div>`);
+      this.card.after(c);
+      void c.offsetWidth;
+      c.remove();
+    };
+    if (typeof requestIdleCallback === "function") requestIdleCallback(go);
+    else setTimeout(go, 0);
+  }
+
   toggle(on = !this.on): void {
     if (on === this.on) return;
     this.on = on;
@@ -1172,6 +1197,7 @@ export class Blame {
       this.pagesSoon();
     });
     this.slots.observe(this.p.stage, { childList: true, subtree: true });
+    this.warm();
     if (this.m && this.worked === this.workKey()) {
       void this.mapPages();
       this.checkTexts(true, true);
@@ -1876,7 +1902,6 @@ export class Blame {
       this.stageBox = this.p.stage.getBoundingClientRect();
       this.avoidBox = this.p.avoid?.() ?? null;
     }
-    this.pick(a);
     // (near the pointer, inside the pages' box; placed, then moved by where it landed: a fixed box is
     // placed in its containing block, which a host's transform or containment makes its pane)
     const [W, H] = this.cardSize;
@@ -1899,6 +1924,9 @@ export class Blame {
       this.card.style.left = `${x + this.cardShift[0]}px`;
       this.card.style.top = `${y + this.cardShift[1]}px`;
     }
+    // (its lines picked out last: the card measured and placed first, so no read of it restyles every rect
+    // the highlight's classes touched in this task; they are restyled once, as the frame is drawn)
+    this.pick(a);
   }
   private cardSize: [number, number] = [300, 120];
   private avoidBox: DOMRect | null = null;

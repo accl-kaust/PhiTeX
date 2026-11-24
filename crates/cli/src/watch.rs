@@ -3940,6 +3940,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 // once, each page as it is typeset; then
                                 // the build's own)
                                 v.diff_begins(c.state(false), c.text().to_owned());
+                                // (its build said to run before its pages
+                                // are shown: the viewers, shown no page of
+                                // it yet, wait for it, not "the last
+                                // complete render" of a build not begun)
+                                if c.due() {
+                                    v.building(true);
+                                }
                                 v.diff_shown(true);
                                 diff_build(ui, v, c, format!("{what}: diff against {rev}"));
                                 diff_told(ui, v, &ours, Some(c));
