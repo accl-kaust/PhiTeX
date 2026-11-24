@@ -54,7 +54,8 @@ says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
 /// anyone) edits a document in.
 const AGENTS: &str = "\
 For agents: phitex session start main.tex; edit; phitex session wait;
-phitex session problems; phitex session png --label <label>; phitex session stop";
+phitex session problems; phitex session png --label <label>; phitex session stop
+In a sandbox that ends each command's processes: phitex build, then phitex png --label <label>";
 
 /// `phitex build --help`'s last lines: the session, for builds again and
 /// again.
@@ -250,26 +251,27 @@ enum Sub {
         #[arg(long, value_name = "PID|URL", global = true)]
         session: Option<String>,
     },
-    /// Draw a page, or a figure, table or equation by its label, as a PNG
+    /// Draw pages, or figures, tables and equations by their labels, as PNGs
     ///
     /// A look at the pages without a watch to keep: the document built
-    /// (a running watch of it used, else one started for this and ended
-    /// after), then page N, or what LABEL labels cropped, written as a PNG
-    /// (.phitex/png/, or -o PATH); its path printed. `phitex session png`
+    /// once (a running watch of it used, else one started for this and
+    /// ended after), then pages N-M and what each LABEL labels cropped,
+    /// written as PNGs (the project's .phitex/png/, or -o PATH); each
+    /// one's path printed. `phitex session png`
     /// does the same in a running session, quicker.
     Png {
         /// The main .tex file (default: phitex.toml's `main`, or the one
         /// with a \documentclass here)
         #[arg(value_name = "FILE")]
         file: Option<String>,
-        /// Page N (from 1)
-        #[arg(long, value_name = "N", conflicts_with = "label")]
-        page: Option<usize>,
+        /// Pages: N, N-M or a list (1-4,6), from 1
+        #[arg(long, value_name = "N")]
+        page: Option<String>,
         /// What \label{LABEL} labels (a figure or table with its caption,
-        /// an equation, a theorem), cropped
+        /// an equation, a theorem), cropped; again for more
         #[arg(long, value_name = "LABEL", required_unless_present = "page")]
-        label: Option<String>,
-        /// Write the PNG to PATH
+        label: Vec<String>,
+        /// Write the PNG to PATH (a folder, for several)
         #[arg(short = 'o', long = "out", value_name = "PATH")]
         out: Option<String>,
         /// Pixels per inch
@@ -1404,17 +1406,35 @@ pub fn report(
                 log.display()
             )));
         }
-        // (the layout's: a page to look at)
-        if warned.iter().any(|p| {
-            p["kind"] == "overfull"
-                || p["message"]
-                    .as_str()
-                    .is_some_and(|m| m.contains("float specifier changed"))
-        }) {
-            ui.line(&st.dim(&format!(
-                "  see the pages: phitex png {} --page N (or --label LABEL) draws one as a PNG",
-                t.file
-            )));
+        // (the layout's: what to look at, by its labels where it has them)
+        let layout: Vec<&Value> = warned
+            .iter()
+            .copied()
+            .filter(|p| {
+                p["kind"] == "overfull"
+                    || p["message"]
+                        .as_str()
+                        .is_some_and(|m| m.contains("float specifier changed"))
+            })
+            .collect();
+        if !layout.is_empty() {
+            let labels = layout_labels(s, &layout);
+            ui.line(&st.dim(&if labels.is_empty() {
+                format!(
+                    "  see the pages: phitex png {} --page N draws one as a PNG",
+                    t.file
+                )
+            } else {
+                format!(
+                    "  check: phitex png {}{}",
+                    t.file,
+                    labels.iter().fold(String::new(), |mut o, l| {
+                        o.push_str(" --label ");
+                        o.push_str(l);
+                        o
+                    })
+                )
+            }));
         }
     }
     if !summary {
@@ -1432,6 +1452,123 @@ pub fn report(
         runs: r.runs.len(),
         engine: (!job.ini).then_some(t.engine.name),
     });
+}
+
+/// The labels of what the layout warnings `layout` are about: for a box
+/// too wide (`file:line`), the innermost environment around that line
+/// with a `\label` (a table, a figure, an equation); for a float moved
+/// (`h` changed to `ht`, its file alone), the floats of that file placed
+/// `[h]`. In their order, each once.
+fn layout_labels(s: &Session, layout: &[&Value]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in layout {
+        let Some(file) = p["file"].as_str() else {
+            continue;
+        };
+        let Some(text) = s
+            .source(file)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+        else {
+            continue;
+        };
+        let envs = environments(&text);
+        let found: Vec<String> = match p["line"].as_u64() {
+            Some(line) => {
+                let at = text
+                    .split_inclusive('\n')
+                    .take(usize::try_from(line).unwrap_or(1).saturating_sub(1))
+                    .map(str::len)
+                    .sum::<usize>();
+                envs.iter()
+                    .filter(|e| e.begin <= at && at < e.end && e.label.is_some())
+                    .min_by_key(|e| e.end - e.begin)
+                    .and_then(|e| e.label.clone())
+                    .into_iter()
+                    .collect()
+            }
+            None => envs
+                .iter()
+                .filter(|e| {
+                    ["figure", "table", "figure*", "table*"].contains(&e.name.as_str())
+                        && text[e.begin..]
+                            .split_once('}')
+                            .is_some_and(|(_, r)| r.starts_with("[h]"))
+                })
+                .filter_map(|e| e.label.clone())
+                .collect(),
+        };
+        for l in found {
+            if !out.contains(&l) {
+                out.push(l);
+            }
+        }
+    }
+    out
+}
+
+/// An environment of a source text ([`environments`]).
+struct Env {
+    name: String,
+    /// Its `\begin`'s first byte and its `\end`'s last byte past.
+    begin: usize,
+    end: usize,
+    /// Its `\label`: the first in it that no environment inside it holds.
+    label: Option<String>,
+}
+
+/// The environments of `text`, comments skipped, each with its label.
+fn environments(text: &str) -> Vec<Env> {
+    let mut out: Vec<Env> = Vec::new();
+    let mut open: Vec<(String, usize)> = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && (i == 0 || b[i - 1] != b'\\') {
+            i = text[i..].find('\n').map_or(b.len(), |k| i + k);
+            continue;
+        }
+        let rest = &text[i..];
+        let name = |r: &str| r.split_once('}').map(|(n, _)| n.to_owned());
+        if let Some(n) = rest.strip_prefix("\\begin{").and_then(name) {
+            open.push((n, i));
+        } else if let Some(n) = rest.strip_prefix("\\end{").and_then(name)
+            && let Some(k) = open.iter().rposition(|(o, _)| *o == n)
+        {
+            let (n, begin) = open.remove(k);
+            open.truncate(k);
+            let end = i + "\\end{".len() + n.len() + 1;
+            out.push(Env {
+                name: n,
+                begin,
+                end,
+                label: None,
+            });
+        }
+        i += rest.chars().next().map_or(1, char::len_utf8);
+    }
+    let labels: Vec<(usize, String)> = text
+        .match_indices("\\label{")
+        .filter_map(|(k, _)| {
+            text[k + 7..]
+                .split_once('}')
+                .map(|(l, _)| (k, l.to_owned()))
+        })
+        .collect();
+    let spans: Vec<(usize, usize)> = out.iter().map(|e| (e.begin, e.end)).collect();
+    for e in &mut out {
+        // (a label inside an inner environment is that one's)
+        e.label = labels
+            .iter()
+            .find(|(k, _)| {
+                e.begin < *k
+                    && *k < e.end
+                    && !spans
+                        .iter()
+                        .any(|&(a, z)| e.begin < a && z < e.end && a < *k && *k < z)
+            })
+            .map(|(_, l)| l.clone());
+    }
+    out
 }
 
 /// How many warnings `build` lists (`-v`: every one).
@@ -2108,6 +2245,36 @@ pub fn main(args: &[String]) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `build`'s check line names the environment a layout warning is in
+    /// by its label: a table's, not its tabular's (which has none); an
+    /// equation's; a float's around a figure inside it that has its own.
+    #[test]
+    fn a_warnings_environment_by_its_label() {
+        let text = "\\begin{table}[h]\n\\centering\n\\begin{tabular}{ll}\na & b \\\\\n\\end{tabular}\n\\caption{T}\\label{tab:t}\n\\end{table}\n% \\begin{figure}\\label{fig:no}\\end{figure}\n\\begin{equation}\\label{eq:e}\nx\n\\end{equation}\n";
+        let envs = environments(text);
+        let label = |n: &str| {
+            envs.iter()
+                .find(|e| e.name == n)
+                .and_then(|e| e.label.clone())
+        };
+        assert_eq!(label("table").as_deref(), Some("tab:t"));
+        assert_eq!(label("tabular"), None);
+        assert_eq!(label("equation").as_deref(), Some("eq:e"));
+        assert!(envs.iter().all(|e| e.name != "figure"), "a comment's");
+        // (the innermost with a label around the tabular's line 4)
+        let at = text
+            .split_inclusive('\n')
+            .take(3)
+            .map(str::len)
+            .sum::<usize>();
+        let around = envs
+            .iter()
+            .filter(|e| e.begin <= at && at < e.end && e.label.is_some())
+            .min_by_key(|e| e.end - e.begin)
+            .and_then(|e| e.label.clone());
+        assert_eq!(around.as_deref(), Some("tab:t"));
+    }
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|&s| s.to_owned()).collect()

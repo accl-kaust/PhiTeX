@@ -9242,13 +9242,21 @@ fn session_study_bugs() {
     let s = PngSession::start(&dir, "", &[]);
     let st = s.json(&["status"]);
     assert_eq!(st["main"], "main.tex", "{st}");
+    // (the watch is this binary, not a phitex found on the PATH)
+    let pid = discovery_in(&s.run)["pid"].as_u64().expect("its pid");
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{pid}/exe")).expect("its binary"),
+        Path::new(env!("CARGO_BIN_EXE_phitex"))
+            .canonicalize()
+            .expect("this one")
+    );
     let p = s.json(&["problems", "--warnings"]);
     let list = p["problems"].as_array().expect("problems").clone();
     let says = |needle: &str| {
         list.iter()
             .any(|x| x["message"].as_str().is_some_and(|m| m.contains(needle)))
     };
-    assert!(says("nokey is not in refs.bib"), "{p}");
+    assert!(says("nokey is cited but not in refs.bib"), "{p}");
     assert!(!says("I didn't find a database entry"), "{p}");
     for x in &list {
         if x["message"]
@@ -9294,7 +9302,9 @@ fn session_study_bugs() {
     );
     assert!(
         said.contains("main.tex:3: LaTeX Warning: Citation `nokey'")
-            && said.contains("is not in refs.bib"),
+            && said.contains(
+                "nokey is cited but not in refs.bib: add the entry or remove the citation"
+            ),
         "{said}"
     );
     // (the label either way)
@@ -9351,6 +9361,50 @@ fn session_start_where_it_cannot_run_and_a_watch_gone() {
     assert_eq!(out.status.code(), Some(4), "{e}");
     assert!(t0.elapsed() < Duration::from_secs(20), "{e}");
     assert!(e.contains("phitex build"), "{e}");
+    // (Codex's sandbox, which ends a command's processes with it: refused
+    // at once, the way round said)
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["session", "start", "main.tex"])
+        .env("CODEX_SANDBOX", "seatbelt")
+        .env("XDG_RUNTIME_DIR", dir.with_extension("run2"))
+        .output()
+        .expect("it runs");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(4), "{e}");
+    assert!(
+        e.contains("phitex build") && e.contains("phitex png --label"),
+        "{e}"
+    );
+    assert!(!e.contains("started"), "{e}");
+    // (started as an agent starts it: the PDF written beside the main
+    // file, no .synctex.gz)
+    let run3 = dir.with_extension("run3");
+    let _ = std::fs::remove_dir_all(&run3);
+    std::fs::create_dir_all(&run3).expect("a folder");
+    let session = |args: &[&str]| {
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .arg("session")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &run3)
+            .output()
+            .expect("it runs")
+    };
+    assert!(
+        session(&["start", "main.tex", "--timeout", "10m"])
+            .status
+            .success()
+    );
+    assert!(
+        session(&["wait", "--pdf", "--timeout", "120s"])
+            .status
+            .success()
+    );
+    assert!(dir.join("main.pdf").is_file());
+    assert!(
+        !dir.join("main.synctex.gz").exists(),
+        "a .synctex.gz in the project"
+    );
+    let _ = session(&["stop"]);
     // (a watch gone under it)
     let s = PngSession::start(&dir, "main.tex", &[]);
     let pid = discovery_in(&s.run)["pid"].as_u64().expect("its pid");
@@ -9422,8 +9476,11 @@ fn a_read_only_cache_falls_back_to_the_projects() {
     assert!(!e.contains("built again every run"), "{e}");
 }
 
-/// `phitex png` with no watch running: the document built by a watch
-/// started for it, page N or a label's part drawn, the watch ended after.
+/// `phitex png` with no watch running: the document built once by a watch
+/// started for it (nothing said of it), several pages and labels drawn in
+/// one call into the project's .phitex/png/, the watch ended after;
+/// nothing left in the project but .phitex/ (git leaves it out: its
+/// .gitignore), no PDF, no .synctex.gz.
 #[test]
 fn phitex_png_without_a_session() {
     let _one = one();
@@ -9431,36 +9488,154 @@ fn phitex_png_without_a_session() {
     let run = dir.with_extension("run");
     let _ = std::fs::remove_dir_all(&run);
     std::fs::create_dir_all(&run).expect("a runtime folder");
-    let png = |args: &[&str]| {
-        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-            .arg("png")
-            .args(args)
-            .env("XDG_RUNTIME_DIR", &run)
-            .output()
-            .expect("phitex png runs");
-        let o = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(
-            out.status.success(),
-            "{args:?}: {o}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let path = o.split(" (").next().unwrap_or("").trim().to_owned();
-        assert!(Path::new(&path).is_file(), "{args:?}: {o}");
-        png_size(&path)
-    };
-    let (w, h) = png(&["main.tex", "--page", "1"]);
-    // (a letter page at 150 dpi)
-    assert!(w > 1200 && h > 1600, "{w}x{h}");
-    let (w2, h2) = png(&["--label", "fig:a"]);
-    assert!(w2 < w && h2 < h && w2 > 100, "{w2}x{h2}");
-    // (no watch left)
-    let left: Vec<_> = std::fs::read_dir(run.join("phitex"))
-        .map(|d| {
-            d.filter_map(Result::ok)
-                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .count()
-        })
-        .into_iter()
+    let before: Vec<_> = std::fs::read_dir(&dir)
+        .expect("it")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
         .collect();
-    assert_eq!(left, [0], "a watch left running");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "png", "main.tex", "--page", "1-2", "--label", "fig:a", "--label", "fig:b",
+        ])
+        .env("XDG_RUNTIME_DIR", &run)
+        .output()
+        .expect("phitex png runs");
+    let (o, e) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert!(out.status.success(), "{o}{e}");
+    assert!(!e.contains("started the watch"), "{e}");
+    let paths: Vec<&str> = o
+        .lines()
+        .map(|l| l.split(" (").next().unwrap_or("").trim())
+        .collect();
+    assert_eq!(paths.len(), 4, "{o}");
+    let png_dir = dir
+        .join(".phitex/png")
+        .canonicalize()
+        .expect("the project's .phitex/png");
+    for p in &paths {
+        let p = Path::new(p)
+            .canonicalize()
+            .unwrap_or_else(|_| panic!("{p}: not written: {o}"));
+        assert!(
+            p.starts_with(&png_dir),
+            "{}: not in {}",
+            p.display(),
+            png_dir.display()
+        );
+    }
+    let (w, h) = png_size(paths[2]);
+    assert!(w > 1200 && h > 1600, "page 1: {w}x{h}");
+    let (w2, h2) = png_size(paths[0]);
+    assert!(w2 < w && h2 < h && w2 > 100, "fig:a: {w2}x{h2}");
+    // (nothing new in the project but .phitex/, which git leaves out)
+    let mut new: Vec<String> = std::fs::read_dir(&dir)
+        .expect("it")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .filter(|n| !before.contains(n))
+        .map(|n| n.to_string_lossy().into_owned())
+        .collect();
+    new.sort();
+    assert_eq!(new, [".phitex"], "left in the project");
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".phitex/.gitignore"))
+            .expect("its .gitignore")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>(),
+        ["*"]
+    );
+    // (no watch left)
+    let left = std::fs::read_dir(run.join("phitex")).map_or(0, |d| {
+        d.filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count()
+    });
+    assert_eq!(left, 0, "a watch left running");
+}
+
+/// `where` (and `png --label`) after a section moved to an `\input` file
+/// of its own, on another page (the Codex study's paper, as its agent
+/// restructured it): the page the .aux puts it on, not the page whose
+/// roadmap sentence names "related work" too (the heading's two words
+/// found alike on both, the first page was taken).
+#[test]
+fn session_where_after_a_section_moves_to_another_file() {
+    let _one = one();
+    let dir = scratch("session-where-moved");
+    let copy = |from: &Path| {
+        for e in walk(from) {
+            let to = dir.join(e.strip_prefix(from).expect("under it"));
+            std::fs::create_dir_all(to.parent().expect("a folder")).expect("its folder");
+            std::fs::copy(&e, &to).expect("copied");
+        }
+    };
+    copy(&fixtures().join("study/before"));
+    let s = PngSession::start(&dir, "main.tex", &[]);
+    let w = s.json(&["where", "sec:related"]);
+    assert_eq!(w["page"], 1, "{w}");
+    copy(&fixtures().join("study/after"));
+    let _ = s.json(&["wait", "--timeout", "60s"]);
+    let w = s.json(&["where", "sec:related"]);
+    assert_eq!(w["page"], 2, "{w}");
+    assert_eq!(w["printed_page"], "2", "{w}");
+    let p = s.json(&["png", "sec:related"]);
+    assert_eq!(p["page"], 2, "{p}");
+}
+
+/// The files under `d`, recursively.
+fn walk(d: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(d)
+        .expect("a folder")
+        .filter_map(Result::ok)
+    {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// `build` after a layout warning names what to look at by its label: a
+/// table too wide in an `\input` file, `check: phitex png main.tex --label
+/// tab:wide`.
+#[test]
+fn build_names_the_labels_to_check() {
+    let _one = one();
+    let dir = scratch("build-check-labels");
+    std::fs::create_dir_all(dir.join("sections")).expect("a folder");
+    std::fs::write(
+        dir.join("main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nText.\n\\input{sections/results}\n\\end{document}\n",
+    )
+    .expect("main.tex");
+    std::fs::write(
+        dir.join("sections/results.tex"),
+        "\\begin{table}[t]\n\\centering\n\\begin{tabular}{llllllll}\nA very wide column & another very wide column & and one more & and more & and more & and more & and more & end\\\\\n\\end{tabular}\n\\caption{Wide.}\\label{tab:wide}\n\\end{table}\nMore text.\n",
+    )
+    .expect("results.tex");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["build", "main.tex"])
+        .output()
+        .expect("phitex build runs");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("sections/results.tex:3: Overfull \\hbox"),
+        "{said}"
+    );
+    assert!(
+        said.contains("check: phitex png main.tex --label tab:wide"),
+        "{said}"
+    );
 }

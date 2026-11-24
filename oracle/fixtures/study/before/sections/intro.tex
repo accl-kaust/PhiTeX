@@ -1,0 +1,18 @@
+\section{Introduction}\label{sec:intro}
+Heat maps of physical quantities are often sparse: most of the domain is cold,
+and the interesting structure sits in a few hot spots. Sampling such a map
+uniformly wastes most probes on empty regions~\cite{candes2006}. This paper
+proposes a greedy adaptive rule (Section~\ref{sec:method}) and evaluates it in
+Section~\ref{sec:results}.
+
+\subsection{Related work}\label{sec:related}
+Compressed sensing~\cite{candes2006,donoho2006} recovers sparse signals from
+few linear measurements. Active learning~\cite{settles2009} chooses samples
+where a model is least certain. Our rule borrows from both: it is greedy like
+active learning, but its guarantee follows the compressed sensing argument of
+Section~\ref{sec:bound}.
+
+\subsection{Contributions}
+We make three contributions: a greedy sampling rule, an error bound for it
+(Theorem~\ref{thm:main}), and an empirical comparison
+(Table~\ref{tab:results} and Figure~\ref{fig:error}).

@@ -59,11 +59,15 @@ Compare and Blame are now one thing: **± Changes** :)
   Ctrl+P, and keep two side by side.
 - **Warnings where they are.** `phitex build` lists each warning as
   `file:line: message`, the first 20 (`-v` all), and `--json` gives them
-  as a `problems` list. A missing citation says which key is not in which
-  .bib file, and a warning about a float names the file the float is in.
-- **A page as a picture.** `phitex png paper.tex --page 3` draws a page as
+  as a `problems` list. A missing citation says where it is cited and that
+  the key is not in your .bib file, and a warning about a float names the
+  file the float is in. When something sticks out of the page or a float
+  moves, `build` ends with the command to look at it, by its label.
+- **Pages as pictures.** `phitex png paper.tex --page 3` draws a page as
   a PNG, and `--label fig:results` crops just that figure, table or
-  equation: a quick look without opening the PDF.
+  equation: a quick look without opening the PDF. Ask for several at once
+  (`--page 1-4`, `--label` again), from one build; they go to the
+  project's `.phitex/png/`, which git leaves out.
 - **Ctrl+R in the terminal** starts a clean rebuild from scratch, as
   Clean rebuild does in the viewer (`h` lists it with the other keys).
 - **Fixed:** on Overleaf, a jump between the PDF and the source now opens
