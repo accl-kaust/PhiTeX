@@ -1067,6 +1067,12 @@ impl<'a> Em<'a> {
             let last = buf[..k].rfind('\\').map_or("", |b| &buf[b + 1..k]);
             if !last.is_empty() && last.bytes().all(|c| c.is_ascii_alphabetic()) {
                 k = buf.len();
+            } else if escapes_next(&buf[..k]) {
+                // (a control space, `e.g.\ `: its space is its name, not
+                // the space after the run; cut off, the `\` took the
+                // markup's closing brace, `\DIFadd{… e.g.\}`, and the run
+                // never ended)
+                k += buf[k..].chars().next().map_or(0, char::len_utf8);
             }
             let s = format!("\\{cmd}{{{}}}{}", &buf[..k], &buf[k..]);
             self.push(&s);
@@ -1743,6 +1749,13 @@ fn math_rows(body: &str) -> Vec<(&str, &str)> {
     }
     rows.push((&body[from..], ""));
     rows
+}
+
+/// Whether `text` ends in an escape still waiting for its character (an
+/// odd run of `\`): the next character, white space too, is a control
+/// symbol's name.
+fn escapes_next(text: &str) -> bool {
+    text.bytes().rev().take_while(|&c| c == b'\\').count() % 2 == 1
 }
 
 /// The file an `\includegraphics` names (its last group), when it is a
