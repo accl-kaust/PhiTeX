@@ -290,7 +290,46 @@ pub fn publish(info: &Value) {
             v[key] = json!(ns);
         }
     }
+    if let Some(u) = LAST
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .and_then(|l| l.get("used"))
+    {
+        v["used"] = u.clone();
+    }
     *LAST.lock().unwrap_or_else(PoisonError::into_inner) = Some(v.clone());
+    write(p, &v);
+}
+
+/// This watch was used now (a request, a build, a client connected): its
+/// discovery file's `used` set, written again at most once a minute
+/// (`session list` says how long each watch has been idle).
+pub fn touch() {
+    static WRITTEN: Mutex<Option<Instant>> = Mutex::new(None);
+    let Some(p) = PUBLISHED.get() else {
+        return;
+    };
+    let mut w = WRITTEN.lock().unwrap_or_else(PoisonError::into_inner);
+    if w.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        return;
+    }
+    let v = {
+        let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(v) = last.as_mut() else {
+            return;
+        };
+        v["used"] = json!(jiff::Timestamp::now().to_string());
+        v.clone()
+    };
+    *w = Some(Instant::now());
+    drop(w);
+    write(p, &v);
+}
+
+/// The discovery file written: 0600, whole or not at all (written beside
+/// it, then renamed).
+fn write(p: &Published, v: &Value) {
     let _w = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     let tmp = p.file.with_extension("json.tmp");
     let _ = std::fs::remove_file(&tmp);
@@ -667,15 +706,23 @@ pub fn unseen_watches(seen: &[Value]) -> Vec<(u64, String)> {
     }
 }
 
-/// What is said of a watch [`unseen_watches`] found: pid `pid`, run as
-/// `cmd`; `hidden`: why the user's runtime folder is hidden here.
-pub fn unseen_line(pid: u64, cmd: &str, hidden: Option<&str>) -> String {
-    format!(
-        "a phitex watch runs that cannot be reached from here: pid {pid}, `{cmd}`: \
-         it said itself in a sessions folder this process does not see{}, its token with it; \
-         reach it with `phitex session --session <its viewer's URL>` (as its terminal or browser shows it)",
-        hidden.map(|h| format!(" (here {h})")).unwrap_or_default()
-    )
+/// What is said of the watches [`unseen_watches`] found (none: none):
+/// a line saying why they are out of reach (`hidden`: why the user's
+/// runtime folder is hidden here) and how to reach one, then one line
+/// each, its pid and command line.
+pub fn unseen_block(unseen: &[(u64, String)], hidden: Option<&str>) -> Option<String> {
+    if unseen.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "phitex watches that run out of reach from here (their sessions folder, and the token in it, not seen here{}): \
+         `phitex session --session <its viewer's URL>` reaches one",
+        hidden.map(|h| format!(": {h}")).unwrap_or_default()
+    );
+    for (pid, cmd) in unseen {
+        out.push_str(&format!("\n  pid {pid}  {cmd}"));
+    }
+    Some(out)
 }
 
 /// Why this process may be in a sandbox (bubblewrap's, a container's,
@@ -700,6 +747,29 @@ pub fn sandbox_sign() -> Option<String> {
         }
     }
     None
+}
+
+/// How long watch `v` has gone unused, said short (`3h 12m`, `40s`): from
+/// its discovery file's `used` (a request, a build, a client's), else its
+/// start; `?` where neither is said.
+fn idle_of(v: &Value) -> String {
+    let at = v["used"]
+        .as_str()
+        .or_else(|| v["started"].as_str())
+        .and_then(|t| t.parse::<jiff::Timestamp>().ok());
+    let Some(at) = at else {
+        return "?".to_owned();
+    };
+    let secs = jiff::Timestamp::now()
+        .as_second()
+        .saturating_sub(at.as_second())
+        .max(0);
+    match secs {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h {}m", s / 3600, s % 3600 / 60),
+        s => format!("{}d {}h", s / 86400, s % 86400 / 3600),
+    }
 }
 
 /// `phitex session list`: the running watches, a line each, or (`--json`)
@@ -728,9 +798,10 @@ pub fn sessions(ui: &crate::ui::Ui, as_json: bool) -> i32 {
         for v in &live {
             let _ = writeln!(
                 o,
-                "{}  {}  pid {}  lsp {}:{}{}",
+                "{}  {}  idle {}  pid {}  lsp {}:{}{}",
                 v["main"].as_str().unwrap_or("(starting)"),
                 v["started"].as_str().unwrap_or(""),
+                idle_of(v),
                 v["pid"],
                 v["lsp"]["host"].as_str().unwrap_or(""),
                 v["lsp"]["port"],
@@ -760,11 +831,8 @@ pub fn sessions(ui: &crate::ui::Ui, as_json: bool) -> i32 {
         .chain(known)
         .collect();
     let hidden = hidden_runtime();
-    for (pid, cmd) in unseen_watches(&all_files) {
-        ui.line(&format!(
-            "warning: {}",
-            unseen_line(pid, &cmd, hidden.as_deref())
-        ));
+    if let Some(b) = unseen_block(&unseen_watches(&all_files), hidden.as_deref()) {
+        ui.line(&b);
     }
     if live.is_empty() {
         let looked: Vec<String> = folders

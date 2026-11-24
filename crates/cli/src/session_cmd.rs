@@ -202,11 +202,19 @@ pub enum Verb {
     /// name the page at once and tell the text around it apart; without
     /// them every page is looked at.
     Png {
-        /// The label (as in \label{LABEL}) of what to draw
+        /// The label (as in \label{LABEL}) of what to draw; `--label
+        /// LABEL` too
+        #[arg(
+            value_name = "LABEL",
+            required_unless_present_any = ["label", "at", "change"],
+            conflicts_with_all = ["label", "at", "change"]
+        )]
+        name: Option<String>,
+        /// The label of what to draw (as LABEL)
         #[arg(
             long,
             value_name = "LABEL",
-            required_unless_present_any = ["at", "change"],
+            hide = true,
             conflicts_with_all = ["at", "change"]
         )]
         label: Option<String>,
@@ -270,12 +278,15 @@ pub enum Verb {
     ///
     /// As `png` finds it.
     Where {
-        /// The label (as in \label{LABEL})
+        /// The label (as in \label{LABEL}); `--label LABEL` too
         #[arg(
             value_name = "LABEL",
-            required_unless_present = "at",
-            conflicts_with = "at"
+            required_unless_present_any = ["label", "at"],
+            conflicts_with_all = ["label", "at"]
         )]
+        name: Option<String>,
+        /// The label (as LABEL)
+        #[arg(long, value_name = "LABEL", hide = true, conflicts_with = "at")]
         label: Option<String>,
         /// What line LINE (from 1) of FILE made, instead
         #[arg(long, value_name = "FILE:LINE")]
@@ -461,6 +472,35 @@ fn find_here(pid: Option<u32>, file: Option<&str>) -> Result<Value, Failed> {
 /// from here (another PID namespace, its socket not answering: a sandbox
 /// without the host's network).
 fn not_found(here: &Path, folders: &[(PathBuf, String)]) -> String {
+    // (the watch `session start` started here, ended without `session
+    // stop`: a sandbox ends a command's processes as the command ends)
+    if let Some((rec, v)) = here.ancestors().find_map(|d| {
+        let p = d.join(".phitex").join("session.json");
+        let v: Value = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
+        Some((p, v))
+    }) && crate::attach::ended(&v)
+    {
+        let _ = std::fs::remove_file(&rec);
+        let log = std::fs::read_to_string(rec.with_file_name("session.log")).unwrap_or_default();
+        if let Some(l) = log
+            .lines()
+            .find(|l| l.starts_with("phitex watch: unused for"))
+        {
+            return format!(
+                "the watch `phitex session start` started here (pid {}) ended itself ({}): `phitex session start` starts one again",
+                v["pid"],
+                l.trim_start_matches("phitex watch: ")
+            );
+        }
+        return format!(
+            "the watch `phitex session start` started here (pid {}, at {}) has ended without `phitex session stop`: \
+             it may have been ended with the command that started it (a sandbox that ends a command's processes, as Codex's does), \
+             or have failed (its log: {}). `phitex build` builds without a watch; `phitex session start` starts one again",
+            v["pid"],
+            v["started"].as_str().unwrap_or("?"),
+            rec.with_file_name("session.log").display()
+        );
+    }
     let unreachable = folders
         .iter()
         .flat_map(|(d, _)| crate::attach::files_in(d))
@@ -488,21 +528,16 @@ fn not_found(here: &Path, folders: &[(PathBuf, String)]) -> String {
         .map(|(_, v)| v)
         .collect();
     let hidden = crate::attach::hidden_runtime();
-    let unseen: Vec<String> = crate::attach::unseen_watches(&seen)
-        .into_iter()
-        .map(|(pid, cmd)| {
-            format!(
-                "\n  {}",
-                crate::attach::unseen_line(pid, &cmd, hidden.as_deref())
-            )
-        })
-        .collect();
+    let unseen =
+        crate::attach::unseen_block(&crate::attach::unseen_watches(&seen), hidden.as_deref())
+            .map(|b| format!("\n{b}"))
+            .unwrap_or_default();
     format!(
         "no phitex watch runs here (looked in {}){}\nstart one with `phitex session start`, \
          or, if one runs in your terminal and this is a sandbox: --session <its viewer's URL> (or PHITEX_SESSION=<URL> once), \
          or make its sessions folder visible here (read-only will do)",
         looked.join(", "),
-        unseen.concat()
+        unseen
     )
 }
 
@@ -783,7 +818,23 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                                 held.join(", ")
                             ));
                         } else if !as_json && !*notes {
-                            ui.error("timed out: no build has read the files as they are now");
+                            let unread: Vec<&str> = v["unread"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect();
+                            if unread.is_empty() {
+                                ui.error("timed out: no build has read the files as they are now");
+                            } else {
+                                ui.error(&format!(
+                                    "timed out: no build has read {} as {} now: the watch is busy, or saw no change of {} \
+                                     (`phitex session rebuild` reads every input again)",
+                                    unread.join(", "),
+                                    if unread.len() == 1 { "it is" } else { "they are" },
+                                    if unread.len() == 1 { "it" } else { "them" }
+                                ));
+                            }
                         }
                         return Ok(EXIT_TIMEOUT);
                     }
@@ -809,6 +860,15 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     } else {
                         let root = PathBuf::from(s["root"].as_str().unwrap_or("."));
                         let list = v["problems"].as_array().cloned().unwrap_or_default();
+                        if v["stale"] == true {
+                            println!(
+                                "{}",
+                                st.yellow(&format!(
+                                    "build {}'s problems: the files changed since it read them (`phitex session wait` waits for a build of them)",
+                                    v["build"]
+                                ))
+                            );
+                        }
                         if list.is_empty() {
                             println!("no problems (build {})", v["build"]);
                         } else if *summary {
@@ -832,6 +892,10 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         out(&v);
                     } else {
                         print_status(&v, st, None);
+                        // (incremental, or from nothing: said)
+                        if let Some(w) = v["why"].as_str().filter(|w| !w.is_empty()) {
+                            println!("{}", st.dim(&format!("built: {w}")));
+                        }
                     }
                     Ok(build_code(&v))
                 }
@@ -889,6 +953,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     Ok(0)
                 }
                 Verb::Png {
+                    name,
                     label,
                     at,
                     compare: Some(rev),
@@ -904,7 +969,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                         &mut c,
                         &root,
                         rev,
-                        label.as_deref(),
+                        label.as_deref().or(name.as_deref()),
                         at.as_deref(),
                         *change,
                         context.as_deref(),
@@ -924,6 +989,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     Ok(0)
                 }
                 Verb::Png {
+                    name,
                     label,
                     at,
                     compare: None,
@@ -934,7 +1000,7 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     diff,
                     timeout,
                 } => {
-                    let what = What::of(label.as_deref(), at.as_deref())?;
+                    let what = What::of(label.as_deref().or(name.as_deref()), at.as_deref())?;
                     let f = locate(&mut c, &s, &what, context.as_deref(), timeout.as_deref())?;
                     let v = draw(&f, &what, *dpi, to.as_deref(), *diff)?;
                     if as_json {
@@ -988,12 +1054,13 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     ))
                 }
                 Verb::Where {
+                    name,
                     label,
                     at,
                     context,
                     timeout,
                 } => {
-                    let what = What::of(label.as_deref(), at.as_deref())?;
+                    let what = What::of(label.as_deref().or(name.as_deref()), at.as_deref())?;
                     let f = locate(&mut c, &s, &what, context.as_deref(), timeout.as_deref())?;
                     if as_json {
                         out(&found_json(&f, &what));
@@ -1017,6 +1084,16 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                             ));
                         }
                         std::thread::sleep(Duration::from_millis(10));
+                    }
+                    let rec = Path::new(s["root"].as_str().unwrap_or("."))
+                        .join(".phitex")
+                        .join("session.json");
+                    if std::fs::read(&rec)
+                        .ok()
+                        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                        .is_some_and(|r| r["pid"].as_u64() == Some(pid))
+                    {
+                        let _ = std::fs::remove_file(&rec);
                     }
                     if as_json {
                         out(&json!({"stopped": pid}));
@@ -1938,6 +2015,30 @@ fn print_changes(v: &Value, st: Style) {
 }
 
 /// `start`: the watch for FILE found or started, then its first build.
+/// The main file `session start` builds when none is named and no
+/// phitex.toml here names one (none: it does): the one `.tex` file here
+/// with a `\documentclass`, `main.tex` among several.
+fn main_here() -> Result<Option<String>, Failed> {
+    let here = std::env::current_dir().map_err(|e| Failed(EXIT_REFUSED, e.to_string()))?;
+    if crate::config::find(&here)
+        .ok()
+        .flatten()
+        .is_some_and(|(_, c)| c.main.is_some())
+    {
+        return Ok(None);
+    }
+    crate::lsp::find_main(&here).map(Some).ok_or_else(|| {
+        Failed(
+            EXIT_REFUSED,
+            format!(
+                "no main file here: no phitex.toml names one, and {} has no single .tex file with a \\documentclass (nor a main.tex among several): \
+                 name it, `phitex session start FILE`",
+                here.display()
+            ),
+        )
+    })
+}
+
 fn start(
     file: Option<&str>,
     timeout: Option<&str>,
@@ -1951,6 +2052,11 @@ fn start(
         None => Some(Duration::from_secs(600)),
     };
     let t0 = Instant::now();
+    let named = match file {
+        Some(f) => Some(f.to_owned()),
+        None => main_here()?,
+    };
+    let file = named.as_deref();
     let (v, started) = if let Ok(v) = find(None, file) {
         warn_mismatch(&v);
         (v, false)
@@ -1963,10 +2069,21 @@ fn start(
             .map(|(_, v)| v)
             .collect();
         let hidden = crate::attach::hidden_runtime();
-        for (pid, cmd) in crate::attach::unseen_watches(&seen) {
+        // (one whose command line names this main file's name)
+        let name = file
+            .and_then(|f| Path::new(f).file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        for (pid, cmd) in crate::attach::unseen_watches(&seen)
+            .into_iter()
+            .filter(|(_, cmd)| name.as_ref().is_some_and(|n| cmd.contains(n.as_str())))
+        {
             eprintln!(
-                "phitex: note: {} (if it is this document's: work with it through --session, and `phitex session stop` ends the one started here)",
-                crate::attach::unseen_line(pid, &cmd, hidden.as_deref())
+                "phitex: note: a watch of a {} runs out of reach from here (pid {pid}, `{cmd}`){}: if it is this document's, `phitex session --session <its viewer's URL>` works with it",
+                name.as_deref().unwrap_or("main file"),
+                hidden
+                    .as_deref()
+                    .map(|h| format!("; {h}"))
+                    .unwrap_or_default()
             );
         }
         (launch(file, args, t)?, true)
@@ -2014,6 +2131,52 @@ fn start(
 }
 
 /// A watch started detached: its discovery file once it is there.
+/// What `session start` needs, looked at before a watch is started, so
+/// that a sandbox that cannot have one is said at once, not after the
+/// first build's wait: the sessions folder written, a socket on 127.0.0.1
+/// opened and reached. The sessions folder.
+fn can_start() -> Result<PathBuf, Failed> {
+    let instead = "`phitex build` builds without a watch (it needs neither)";
+    let sessions = crate::attach::dir().map_err(|e| {
+        Failed(
+            EXIT_REFUSED,
+            format!("phitex session cannot run here: the sessions folder cannot be made: {e} (a sandbox?); {instead}"),
+        )
+    })?;
+    let probe = sessions.join(format!(".probe-{}", std::process::id()));
+    let wrote = std::fs::write(&probe, b"");
+    let _ = std::fs::remove_file(&probe);
+    if let Err(e) = wrote {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!(
+                "phitex session cannot run here: {} cannot be written ({e}): a sandbox that keeps it read-only? {instead}",
+                sessions.display()
+            ),
+        ));
+    }
+    let reached = std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| {
+        let a = l.local_addr()?;
+        TcpStream::connect_timeout(&a, Duration::from_secs(2)).map(|_| drop(l))
+    });
+    if let Err(e) = reached {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!(
+                "phitex session cannot run here: no socket on 127.0.0.1 ({e}): a sandbox without network? {instead}"
+            ),
+        ));
+    }
+    if std::env::var_os("CODEX_SANDBOX").is_some()
+        || std::env::var_os("CODEX_SANDBOX_NETWORK_DISABLED").is_some()
+    {
+        eprintln!(
+            "phitex: note: this is Codex's sandbox: a watch started here may end when this command does; if the next `phitex session` finds none, {instead}"
+        );
+    }
+    Ok(sessions)
+}
+
 fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Value, Failed> {
     let here = std::env::current_dir().map_err(|e| Failed(EXIT_REFUSED, e.to_string()))?;
     let dir = here.join(".phitex");
@@ -2026,8 +2189,7 @@ fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Va
     let err = log
         .try_clone()
         .map_err(|e| Failed(EXIT_REFUSED, e.to_string()))?;
-    let sessions =
-        crate::attach::dir().map_err(|e| no_session(format!("the sessions folder: {e}")))?;
+    let sessions = can_start()?;
     // (the folder watched before the watch starts: its file seen when made)
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |e| {
@@ -2057,7 +2219,8 @@ fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Va
     cmd.stdin(std::process::Stdio::null())
         .stdout(log)
         .stderr(err)
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .env("PHITEX_SESSION_START", "1");
     // (its own process group: the agent's Ctrl+C does not end it)
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
@@ -2065,6 +2228,16 @@ fn launch(file: Option<&str>, args: &[String], t: Option<Duration>) -> Result<Va
         .spawn()
         .map_err(|e| Failed(EXIT_REFUSED, format!("phitex watch: {e}")))?;
     let pid = child.id();
+    // (the watch this folder's `session start` started: its end without
+    // `session stop` is said by the next verb, [`not_found`])
+    let _ = std::fs::write(
+        dir.join("session.json"),
+        json!({"pid": pid, "started": jiff::Timestamp::now().to_string()}).to_string(),
+    );
+    eprintln!(
+        "phitex: started the watch (pid {pid}); waiting for its first build (its log: {})",
+        log_path.display()
+    );
     let mine = sessions.join(format!("{pid}.json"));
     let t0 = Instant::now();
     loop {

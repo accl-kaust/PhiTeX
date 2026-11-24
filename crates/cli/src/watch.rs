@@ -38,6 +38,10 @@ use phitex_live::watch::{Applied, Edits, diagnostics, splice_utf16, tex_text};
 enum Event {
     /// Files of the project changed on disk.
     Files(Vec<PathBuf>),
+    /// The system lost file events (its queue overflowed, an error of
+    /// its watcher): which files changed is not known, every input is
+    /// read again (the keys of those that did not change say so, as `r`'s).
+    Lost(String),
     /// A key (on a pipe: a line) on standard input.
     Key(Key),
     /// The viewer asked for something.
@@ -304,7 +308,24 @@ fn watcher(
         if log {
             eprintln!("phitex watch: file event {ev:?}");
         }
-        let Ok(ev) = ev else { return };
+        let ev = match ev {
+            Ok(ev) if !ev.need_rescan() => ev,
+            // (events lost: told, every input read again)
+            Ok(_) => {
+                let _ = tx.send((
+                    Instant::now(),
+                    Event::Lost("the system's file events overflowed".into()),
+                ));
+                return;
+            }
+            Err(e) => {
+                let _ = tx.send((
+                    Instant::now(),
+                    Event::Lost(format!("the file watcher failed: {e}")),
+                ));
+                return;
+            }
+        };
         // (a rename's pair: its two halves come as `From` and `To` too)
         if matches!(
             ev.kind,
@@ -870,7 +891,7 @@ fn change_waits(
         held.push_back(e);
     }
     held.iter()
-        .any(|e| matches!(e.1, Event::Files(_) | Event::Edited(_)))
+        .any(|e| matches!(e.1, Event::Files(_) | Event::Edited(_) | Event::Lost(_)))
 }
 
 /// The next event, the receiver borrowed uniquely: a closure that calls
@@ -1295,6 +1316,62 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
 
 /// The quit line: `✓ 9 builds · fastest edit 9.2 ms · median 412 ms ·
 /// clean build 15.38 s`.
+/// How long a watch with no terminal goes unused before it ends itself
+/// ([`idle_end`]): 4 hours (`PHITEX_WATCH_IDLE_SECS`: seconds, for tests).
+fn idle_bound() -> Duration {
+    std::env::var("PHITEX_WATCH_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map_or(Duration::from_hours(4), Duration::from_secs)
+}
+
+/// A `detached` watch (no terminal at its keys, no editor on its standard
+/// input: one `phitex session start` or a script started) that no one has
+/// used for [`idle_bound`] (no request on its socket, no build, no browser
+/// or editor connected) ends as `session stop` ends it, the exact PDF
+/// written: an agent's watch left running is not kept for days. A watch in
+/// a terminal is the user's to end.
+fn idle_end(
+    detached: bool,
+    browsers: Option<Box<dyn Fn() -> usize + Send>>,
+    lsp: Option<Arc<Lsp>>,
+    tx: &mpsc::Sender<(Instant, Event)>,
+    ui: &Ui,
+) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !detached {
+        return;
+    }
+    let (quit, ui) = (tx.clone(), ui.clone());
+    ONCE.call_once(move || {
+        let bound = idle_bound();
+        let look = (bound / 8).clamp(Duration::from_millis(100), Duration::from_secs(60));
+        let _ = std::thread::Builder::new()
+            .name("phitex-idle".into())
+            .spawn(move || {
+                let hub = crate::review::hub();
+                loop {
+                    std::thread::sleep(look);
+                    let clients = browsers.as_ref().map_or(0, |b| b())
+                        + lsp.as_ref().map_or(0, |l| l.attached());
+                    if clients > 0 {
+                        hub.used();
+                        continue;
+                    }
+                    if hub.idle() >= bound {
+                        ui.line(&format!(
+                            "phitex watch: unused for {}: ending (phitex session start starts one again)",
+                            crate::ui::ms(bound)
+                        ));
+                        let _ = quit.send((Instant::now(), Event::Key(Key::Quit)));
+                        return;
+                    }
+                }
+            });
+    });
+}
+
 fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     if l.builds == 0 {
         return None;
@@ -1992,6 +2069,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             v.on_review(Box::new(move |op, req| h.viewer(op, req)));
         }
     }
+    // (a watch with no terminal and no one using it ends itself)
+    idle_end(
+        !std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && lsp.as_ref().is_none_or(|l| !l.editor()),
+        view.as_ref()
+            .map(|v| Box::new(v.clients_handle()) as Box<dyn Fn() -> usize + Send>),
+        lsp.clone(),
+        &tx,
+        ui,
+    );
     // (the viewer's reads, answered off this loop)
     let reads = view.as_ref().map(|v| ReadsWorker::start(v.viewer()));
     // (what the viewer and the editor asked, taken together)
@@ -2576,6 +2663,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             let (errors, diags) = (r.out.errors.clone(), b.diagnostics.clone());
             let main = (main_rel.clone(), s.source(&main_rel));
             let pdf = written.as_ref().map(|p| p.display().to_string());
+            let why_built = why.to_owned();
             let _ = hub_tx.send(Box::new(move || {
                 let found: HashSet<String> = w
                     .paths
@@ -2612,6 +2700,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     // (pending: its errors at once, the last warnings with them)
                     diags,
                     pdf,
+                    why: why_built,
                 }
             }));
             status.set("");
@@ -3356,7 +3445,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         }
         let came = events
             .iter()
-            .filter(|e| matches!(e.1, Event::Files(_) | Event::Asked | Event::Edited(_)))
+            .filter(|e| {
+                matches!(
+                    e.1,
+                    Event::Files(_) | Event::Asked | Event::Edited(_) | Event::Lost(_)
+                )
+            })
             .map(|e| e.0)
             .max()
             .unwrap_or_else(Instant::now);
@@ -3389,10 +3483,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // not move are not read)
                         let t = Instant::now();
                         let r = s.reread_all_timed();
+                        // (incremental: what changed is built, as an edit)
+                        why.push(format!(
+                            "asked: every input read again, {} of {} changed",
+                            r.changed, r.checked
+                        ));
                         reread.set(Some((r, t.elapsed())));
                         diff_reread = true;
                         again = true;
-                        why.push("asked".to_owned());
                     }
                     Key::CleanRebuild => {
                         // (as the viewer's Clean rebuild: a new session on
@@ -3604,6 +3702,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 // (a build's end is taken by the loop that waits on it)
                 Event::Built => {}
+                Event::Lost(what) => {
+                    // (as `r`: every input read again, those changed built)
+                    let t = Instant::now();
+                    let r = s.reread_all_timed();
+                    reread.set(Some((r, t.elapsed())));
+                    diff_reread = true;
+                    again = true;
+                    why.push(format!("{what}: every input read again"));
+                }
                 Event::Pause(p) => {
                     paused = p;
                     ui.event(&json!({"event": if p { "paused" } else { "resumed" }}));

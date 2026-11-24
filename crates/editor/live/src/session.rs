@@ -2749,6 +2749,59 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// The bibliography databases the build names, as files: the `.aux`'s
+    /// `\\bibdata{a,b}` (BibTeX's: `a.bib`, `b.bib`), else the `.bcf`'s
+    /// datasources (biblatex's).
+    #[must_use]
+    pub fn bib_databases(&self) -> Vec<String> {
+        let written = |ext: &str| {
+            let name = format!("{}.{ext}", self.job.jobname);
+            self.build
+                .as_ref()
+                .and_then(|b| {
+                    b.files_shared()
+                        .iter()
+                        .find(|(n, _)| *n == name)
+                        .map(|(_, t)| t.clone())
+                })
+                .or_else(|| {
+                    self.sink
+                        .get(&name)
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                })
+                .unwrap_or_default()
+        };
+        let mut out: Vec<String> = Vec::new();
+        for l in written("aux").lines() {
+            if let Some(list) = l.strip_prefix("\\bibdata{").and_then(|r| r.split_once('}')) {
+                for d in list.0.split(',').map(str::trim).filter(|d| !d.is_empty()) {
+                    let f = if d.ends_with(".bib") {
+                        d.to_owned()
+                    } else {
+                        format!("{d}.bib")
+                    };
+                    if !out.contains(&f) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        if out.is_empty() {
+            for part in written("bcf").split("<bcf:datasource").skip(1) {
+                if let Some(f) = part
+                    .split_once('>')
+                    .and_then(|(_, r)| r.split_once('<'))
+                    .map(|(f, _)| f.trim().to_owned())
+                    && !f.is_empty()
+                    && !out.contains(&f)
+                {
+                    out.push(f);
+                }
+            }
+        }
+        out
+    }
+
     /// Each citation key's label and number as the build's `.aux` gives
     /// them (`\\bibcite`; the `cites` op's): the .aux the build wrote, at
     /// its fixed point, whether or not the outputs are written; else as

@@ -124,7 +124,8 @@ pub fn printable(b: &[u8]) -> String {
 }
 
 /// The file names `line` opens with `(` and closes with `)`, as TeX
-/// prints them, applied to `stack`.
+/// prints them, applied to `stack` (a message's own parenthesis an empty
+/// entry: [`open_file`] passes over it).
 fn track_files(line: &str, stack: &mut Vec<String>) {
     let b = line.as_bytes();
     let mut i = 0;
@@ -143,6 +144,9 @@ fn track_files(line: &str, stack: &mut Vec<String>) {
                     i += 1 + end;
                     continue;
                 }
+                // (a parenthesis of a message, `(hyperref)`: its `)` is
+                // its own, not the file's that is open)
+                stack.push(String::new());
             }
             b')' => {
                 stack.pop();
@@ -151,6 +155,45 @@ fn track_files(line: &str, stack: &mut Vec<String>) {
         }
         i += 1;
     }
+}
+
+/// The warnings the transcript `log` has (`LaTeX Warning: …`, a
+/// package's or a class's), in order, each one's first line with the file
+/// TeX was reading as it was written (the log's open files), as TeX names
+/// it. A warning written with no line (`\@latex@warning@no@line`, an
+/// output routine's: "`h' float specifier changed to `ht'") is placed by
+/// it in that file: the engine, which reads no file in an output routine,
+/// places it at the main file's start.
+pub fn warning_files(log: &str) -> Vec<(String, String)> {
+    let mut stack: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for l in log.lines() {
+        let warning = l.starts_with("LaTeX Warning: ")
+            || ((l.starts_with("Package ") || l.starts_with("Class ")) && l.contains(" Warning: "));
+        if warning {
+            if let Some(f) = open_file(&stack) {
+                out.push((l.trim_end().to_owned(), f.to_owned()));
+            }
+            continue;
+        }
+        track_files(l, &mut stack);
+    }
+    out
+}
+
+/// Whether `message` (a warning's) names its own line (`on input line
+/// N`, `at lines N--M`): one the engine placed by it.
+pub fn names_its_line(message: &str) -> bool {
+    message.contains("input line") || message.contains(" at line")
+}
+
+/// The innermost file open in `stack` ([`track_files`]'s).
+fn open_file(stack: &[String]) -> Option<&str> {
+    stack
+        .iter()
+        .rev()
+        .find(|f| !f.is_empty())
+        .map(String::as_str)
 }
 
 /// `l.N read`: the line number and what TeX had read of the line.
@@ -247,7 +290,7 @@ pub fn parse(log: &str, main: &str) -> Vec<Problem> {
         };
         let mut p = Problem {
             message: msg.trim_end_matches('.').to_owned(),
-            file: Some(stack.last().cloned().unwrap_or_else(|| main.to_owned())),
+            file: Some(open_file(&stack).unwrap_or(main).to_owned()),
             ..Problem::default()
         };
         i += 1;
@@ -344,6 +387,40 @@ pub fn bare(e: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A warning written with no line is in the file the log has open
+    /// as it is written; a message's own parentheses, `(hyperref)`, close
+    /// no file.
+    #[test]
+    fn warnings_in_the_files_open_as_written() {
+        let log = "(./main.tex (/tex/hyperref.sty\n\
+(hyperref)                Option `x' set\n\
+) (./sections/results.tex [1\n\n]\n\
+Overfull \\hbox (245.38898pt too wide) in paragraph at lines 8--17\n\
+(pdftex.def)             Requested size: 551pt.\n\n\
+LaTeX Warning: `h' float specifier changed to `ht'.\n\n\
+) (./sections/conclusion.tex\n\
+LaTeX Warning: Citation `k' on page 2 undefined on input line 4.\n\
+)\n\
+LaTeX Warning: There were undefined references.\n)\n";
+        assert_eq!(
+            warning_files(log),
+            [
+                (
+                    "LaTeX Warning: `h' float specifier changed to `ht'.".to_owned(),
+                    "./sections/results.tex".to_owned()
+                ),
+                (
+                    "LaTeX Warning: Citation `k' on page 2 undefined on input line 4.".to_owned(),
+                    "./sections/conclusion.tex".to_owned()
+                ),
+                (
+                    "LaTeX Warning: There were undefined references.".to_owned(),
+                    "./main.tex".to_owned()
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn tokens() {

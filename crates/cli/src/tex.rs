@@ -197,13 +197,54 @@ impl Files {
 
 /// The cache directory: `PHITEX_CACHE_DIR`, else `$XDG_CACHE_HOME/phitex`,
 /// else `~/.cache/phitex` (Windows: `%LOCALAPPDATA%\phitex\cache`,
-/// [`crate::dirs`]), else the temporary directory's.
+/// [`crate::dirs`]), else the temporary directory's. Where that one
+/// cannot be written (a sandbox that keeps the home read-only), the
+/// project's: `.phitex/cache` in the folder phitex runs in, so that its
+/// format and records last from run to run ([`local_cache`]).
 pub fn cache_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     if let Some(d) = std::env::var_os("PHITEX_CACHE_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
     }
-    crate::dirs::phitex(crate::dirs::Kind::Cache)
-        .unwrap_or_else(|| std::env::temp_dir().join("phitex-cache"))
+    DIR.get_or_init(|| {
+        let d = crate::dirs::phitex(crate::dirs::Kind::Cache)
+            .unwrap_or_else(|| std::env::temp_dir().join("phitex-cache"));
+        if writable(&d) {
+            return d;
+        }
+        std::env::current_dir()
+            .ok()
+            .and_then(|here| local_cache(&here))
+            .unwrap_or(d)
+    })
+    .clone()
+}
+
+/// Whether files can be made in folder `d` (made if missing).
+fn writable(d: &Path) -> bool {
+    let probe = d.join(format!(".probe-{}", std::process::id()));
+    let ok = std::fs::create_dir_all(d)
+        .and_then(|()| std::fs::write(&probe, b""))
+        .is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// The project's own cache in `here`, `.phitex/cache` (`.phitex/` kept
+/// out of git, [`crate::review::make_dir`]), if it can be written.
+fn local_cache(here: &Path) -> Option<PathBuf> {
+    let d = here.join(".phitex").join("cache");
+    if !writable(&d) {
+        return None;
+    }
+    let _ = crate::review::make_dir(here);
+    Some(d)
+}
+
+/// Whether the cache is the project's ([`cache_dir`]'s last resort).
+pub fn cache_is_local() -> bool {
+    std::env::var_os("PHITEX_CACHE_DIR").is_none_or(|d| d.is_empty())
+        && cache_dir().ends_with(Path::new(".phitex").join("cache"))
 }
 
 /// TeX Live for one program name: the finder a build is given.

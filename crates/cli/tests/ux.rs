@@ -859,3 +859,30 @@ fn compat_terminal_is_pdflatexs() {
         assert_eq!(ours.status.code(), theirs.status.code(), "{name}");
     }
 }
+
+/// `phitex` and `phitex --help` open with the loop an agent edits in
+/// (three agents that knew only `phitex` never found `session`), the
+/// command list says what `session` gives, and `build --help` points to it
+/// for builds again and again.
+#[test]
+fn help_shows_the_agents_loop() {
+    let dir = scratch("help-agents");
+    for args in [&[][..], &["--help"][..]] {
+        let out = run(&dir, args);
+        let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        let top: Vec<&str> = all.lines().take(4).collect();
+        assert!(
+            top.iter().any(|l| l.starts_with(
+                "For agents: phitex session start main.tex; edit; phitex session wait;"
+            )),
+            "{args:?}: {all}"
+        );
+        assert!(
+            all.lines()
+                .any(|l| l.contains("session") && l.contains("file:line")),
+            "{args:?}: {all}"
+        );
+    }
+    let build = text(&run(&dir, &["build", "--help"]).stdout);
+    assert!(build.contains("phitex session start"), "{build}");
+}
