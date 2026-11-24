@@ -36,6 +36,7 @@ import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 import { BLAME_CSS, Blame, type BlameHost } from "./blame.ts";
 import { CHANGES_BUTTON_CSS, Changes, type ChangesHost, type ChangesPrefs } from "./changes.ts";
 import type { PageSel } from "./sync.ts";
+import { machineLine } from "./machine.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -3846,6 +3847,13 @@ export class Panel {
    */
   private async debugInfo(): Promise<string> {
     const out: string[] = [...((await this.ev.onDebugInfo?.().catch(() => [])) ?? [])];
+    // (the last build's problems, as the bar's count and its list have them)
+    if (this.lastStatus) {
+      const ds = this.lastStatus.diagnostics ?? [];
+      const n = (sev: string) => ds.filter((d) => d.severity === sev).length;
+      const say = (k: number, w: string) => `${k} ${w}${k === 1 ? "" : "s"}`;
+      out.push(`problems: ${say(n("error"), "error")}, ${say(n("warning"), "warning")}${n("info") ? `, ${say(n("info"), "note")}` : ""}`);
+    }
     const l = this.latest();
     if (l) out.push(`${l.label}: ${dur(l.ms)}`);
     if (this.lat?.summary) out.push(this.lat.summary);
@@ -3858,8 +3866,7 @@ export class Panel {
     if (t.first !== undefined) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
     if (f) out.push(`last page drawn: ${frameText(f)}`);
-    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
-    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    out.push(await machineLine());
     return out.join("\n") + "\n";
   }
 

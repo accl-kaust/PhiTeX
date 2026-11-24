@@ -9838,6 +9838,31 @@ var Changes = class {
   }
 };
 
+// viewer/src/machine.ts
+var HINTS2 = ["platformVersion", "architecture", "bitness", "model", "fullVersionList"];
+function systemOf(platform, version) {
+  const v = version.replace(/(\.0)+$/, "");
+  const major = Number(version.split(".")[0]);
+  if (platform === "Windows" && version) return `${major >= 13 ? "Windows 11" : major >= 1 ? "Windows 10" : "Windows 7, 8 or 8.1"} (${version})`;
+  return v ? `${platform} ${v}` : platform;
+}
+function archOf(architecture, bitness) {
+  if (!architecture) return "";
+  if (architecture === "x86") return bitness === "64" ? "x86-64" : `x86${bitness ? ` (${bitness}-bit)` : ""}`;
+  return `${architecture}${bitness === "64" ? "64" : bitness ? ` (${bitness}-bit)` : ""}`;
+}
+function machineText(cores, userAgent, hints) {
+  const n = `${cores ?? "?"} cores`;
+  if (!hints?.platform) return `machine: ${n}; the browser's reported user agent, which may not name this machine's system or chip: ${userAgent}`;
+  const browser = (hints.fullVersionList ?? []).filter((b) => !/not.?a.?brand/i.test(b.brand)).map((b) => `${b.brand} ${b.version}`).join(", ");
+  const parts = [n, systemOf(hints.platform, hints.platformVersion ?? ""), archOf(hints.architecture ?? "", hints.bitness ?? ""), hints.model ?? ""].filter(Boolean);
+  return `machine: ${parts.join(", ")}${browser ? `; ${browser}` : ""} (the browser's client hints)`;
+}
+async function machineLine(nav = navigator) {
+  const hints = await nav.userAgentData?.getHighEntropyValues?.(HINTS2).catch(() => void 0);
+  return machineText(nav.hardwareConcurrency, nav.userAgent, hints);
+}
+
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
@@ -12867,6 +12892,12 @@ var Panel = class {
    */
   async debugInfo() {
     const out = [...await this.ev.onDebugInfo?.().catch(() => []) ?? []];
+    if (this.lastStatus) {
+      const ds = this.lastStatus.diagnostics ?? [];
+      const n = (sev) => ds.filter((d2) => d2.severity === sev).length;
+      const say = (k, w2) => `${k} ${w2}${k === 1 ? "" : "s"}`;
+      out.push(`problems: ${say(n("error"), "error")}, ${say(n("warning"), "warning")}${n("info") ? `, ${say(n("info"), "note")}` : ""}`);
+    }
     const l = this.latest();
     if (l) out.push(`${l.label}: ${dur(l.ms)}`);
     if (this.lat?.summary) out.push(this.lat.summary);
@@ -12879,8 +12910,7 @@ var Panel = class {
     if (t.first !== void 0) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
     if (f) out.push(`last page drawn: ${frameText(f)}`);
-    const nav = navigator;
-    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    out.push(await machineLine());
     return out.join("\n") + "\n";
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
