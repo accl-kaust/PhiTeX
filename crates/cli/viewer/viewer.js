@@ -11930,6 +11930,11 @@ var Panel = class {
       if (this.prefs.zoom === "fit") this.redraw();
     };
   }
+  /** Keys of the host's own, listed after the viewer's in the keys' help (`?`). */
+  addKeys(rows) {
+    const t = this.$("#keyhelp table");
+    if (t) t.append(...rows.map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`));
+  }
   /** A button of the host's in the bar, before find (the CLI's own). */
   headerButton(label, title, onclick) {
     const b = document.createElement("button");
@@ -16997,6 +17002,10 @@ var folderDoc;
 {
   const m = /\/d\/([0-9a-f]{12})\/$/.exec(location.pathname);
   if (m) folderMode(m[1]);
+  panel.addKeys([
+    ...m ? [["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"]] : [["Ctrl+P", "print the PDF"]],
+    ["`", "the terminal"]
+  ]);
 }
 function folderMode(id) {
   const here = new URLSearchParams(location.search).get("path");

@@ -2338,6 +2338,12 @@ export class Panel {
     };
   }
 
+  /** Keys of the host's own, listed after the viewer's in the keys' help (`?`). */
+  addKeys(rows: [string, string][]): void {
+    const t = this.$("#keyhelp table");
+    if (t) t.append(...rows.map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`));
+  }
+
   /** A button of the host's in the bar, before find (the CLI's own). */
   headerButton(label: string, title: string, onclick: (b: HTMLButtonElement) => void): HTMLButtonElement {
     const b = document.createElement("button");
