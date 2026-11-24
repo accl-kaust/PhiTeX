@@ -31,7 +31,7 @@ Compare and Blame are now one thing: **± Changes** :)
   deletions or just a caret, changed figures side by side, overlaid or new
   only.
 - **Blame down to the word.** Every line is coloured while Blame is on:
-  a soft wash behind the words (the default), the words themselves, or a
+  a soft highlight behind the words (the default), the words themselves, or a
   bar in the margin, by author or by age. Hover a line for its card, and
   everything its author (or its commit) wrote lights up; click a person or
   a commit in the list to keep it that way. It works from the sources and

@@ -507,7 +507,12 @@ export class Changes {
     // (a "folded" kept by the build that had a fold: gone, never read; the next save drops it, this one at once)
     if ("folded" in k) queueMicrotask(() => this.save());
     this.kinds = new Set(k.kinds?.length ? k.kinds : KINDS);
-    if (this.blame && k.blame) this.blame.look = { ...BLAME_LOOK, ...k.blame, skip: [...(k.blame.skip ?? [])] };
+    if (this.blame && k.blame) {
+      // (a style kept as "wash", Highlight's first name: read as Highlight, and kept so from now on)
+      const was = (k.blame as { style?: string }).style === "wash";
+      this.blame.look = { ...BLAME_LOOK, ...k.blame, ...(was ? { style: "highlight" as const } : {}), skip: [...(k.blame.skip ?? [])] };
+      if (was) queueMicrotask(() => this.save());
+    }
     this.applyColors();
     if (this.open) this.render();
   }
@@ -1171,7 +1176,7 @@ export class Changes {
     return html`<div class="look" id="chg-look" role="group" aria-label="Blame's look">
       <div class="opt2"><span class="lab2">Colour by</span>${this.segOf("color", L.color, [["author", "Author", "A colour per person"], ["age", "Age", "Newer lines stronger"]])}</div>
       ${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}
-      <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "wash", [["wash", "Wash", "A soft tint behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
+      <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "highlight", [["highlight", "Highlight", "A soft highlight behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
       <div class="opt2"><span class="lab2">${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Hatched", "Grey stripes"], ["hide", "Hide", "Not marked"]])}</div>
       <button type="button" class="lnk all" id="chg-all" title="All of Blame's settings: detail, spacing, moved text, changed since, the bar's side and width, the colours">All settings…</button></div>`;
   }
@@ -1239,7 +1244,7 @@ export class Changes {
         { id: "bl-color", label: "Blame: colour lines by", kind: "choice", options: [["author", "Author"], ["age", "Age"]], value: B.color, set: (v) => this.setBlameLook({ color: v as BlameLook["color"] }) },
         { id: "bl-ws", label: "Blame: spacing-only edits", kind: "choice", options: [["ignore", "Ignore"], ["count", "Count"]], value: B.ws, set: (v) => this.setBlameLook({ ws: v as BlameLook["ws"] }) },
         { id: "bl-moved", label: "Blame: moved text", kind: "choice", options: [["keep", "Keep its writer"], ["mover", "Credit the mover"]], value: B.moved, set: (v) => this.setBlameLook({ moved: v as BlameLook["moved"] }) },
-        { id: "bl-style", label: "Blame: style", help: "Every line coloured while Blame is on: a soft wash behind its words, the words themselves, or a bar in the margin", kind: "choice", options: [["wash", "Wash"], ["text", "Text"], ["bar", "Bar"]], value: B.style ?? "wash", set: (v) => this.setBlameLook({ style: v as BlameLook["style"] }) },
+        { id: "bl-style", label: "Blame: style", help: "Every line coloured while Blame is on: a soft highlight behind its words, the words themselves, or a bar in the margin", kind: "choice", options: [["highlight", "Highlight"], ["text", "Text"], ["bar", "Bar"]], value: B.style ?? "highlight", set: (v) => this.setBlameLook({ style: v as BlameLook["style"] }) },
         { id: "bl-wip", label: b.words.commit === "version" ? "Blame: not saved yet" : "Blame: not committed", kind: "choice", options: [["show", "Hatched"], ["hide", "Hide"]], value: B.wip, set: (v) => this.setBlameLook({ wip: v as BlameLook["wip"] }) },
         { id: "bl-since", label: "Blame: changed since", help: "Lines older than this set back, uncoloured", kind: "select", options: [["off", "Off"], ...b.summary().since.map((x) => [x.v, x.label] as [string, string]), ...(B.since !== "off" && !b.summary().since.some((x) => x.v === B.since) ? [[B.since, B.since.split(":").slice(1).join(":")] as [string, string]] : [])], value: B.since, set: (v) => this.setBlameLook({ since: String(v) }) },
         { id: "bl-bars", label: "Blame: bars", help: "With the Bar style", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v as BlameLook["bars"] }) },

@@ -1,7 +1,7 @@
 // Blame on the page: who last changed what the pages show, drawn over them
 // (an overlay only: no build, no new TeX run, the PDF as it is). Every
 // printed line coloured while Blame is on, by its writer or its age, in
-// the style chosen: a soft wash behind its words (the default), the words
+// the style chosen: a soft highlight behind its words (the default), the words
 // themselves coloured, or a bar in the margin. A line hovered gets its card
 // after a dwell (the commit's subject, hash, author, age and source lines,
 // with What this commit changed, Show in editor and Copy hash) and its
@@ -10,7 +10,7 @@
 // Text not committed yet is hatched grey (or left out).
 //
 // Drawn once a page, when its blame comes: two SVGs over the page, one
-// blended with it (the wash: multiply, or screen on dark pages; the words'
+// blended with it (the highlight: multiply, or screen on dark pages; the words'
 // colour: lighten, or darken), one plain (the veil that sets lines back,
 // the bars, the placeholders), their rects grouped by commit. A highlight
 // toggles classes on the groups (style only, no rect made or moved); no box
@@ -864,8 +864,8 @@ export interface BlameLook extends Omit<BlameOpts, "progress" | "signal"> {
   wip: "show" | "hide";
   /** Lines older than this dimmed: "off", or "SECONDS:label" (a tag's time, a date). */
   since: string;
-  /** How the lines are coloured: a wash behind the words, the words themselves, or a bar in the margin. */
-  style: "wash" | "text" | "bar";
+  /** How the lines are coloured: a highlight behind the words, the words themselves, or a bar in the margin. */
+  style: "highlight" | "text" | "bar";
   /** Bar's margin. */
   bars: "left" | "right";
   /** Bar's width, in the page's points (Thin 2, Medium 4, Wide 7). */
@@ -874,7 +874,7 @@ export interface BlameLook extends Omit<BlameOpts, "progress" | "signal"> {
   ages: "violet" | "warm" | "grey";
 }
 
-export const BLAME_LOOK: BlameLook = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", style: "wash", bars: "left", width: 4, people: "okabe", ages: "violet" };
+export const BLAME_LOOK: BlameLook = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", style: "highlight", bars: "left", width: 4, people: "okabe", ages: "violet" };
 
 /** The age ramps, newest first, light pages' and dark pages' (Under a day, a week, a month, six months; older: none). */
 export const AGE_RAMPS: Record<BlameLook["ages"], { name: string; light: string[]; dark: string[] }> = {
@@ -899,8 +899,8 @@ export function lookOf(m: Model, c: number, look: Pick<BlameLook, "color" | "age
   return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
 }
 
-/** A line's wash: its colour at its weight (Age: newer stronger), a little stronger on a dark page, whose screen blend is lighter. */
-export function washOf(l: { color: string; tint: number }, dark: boolean): string {
+/** A line's highlight: its colour at its weight (Age: newer stronger), a little stronger on a dark page, whose screen blend is lighter. */
+export function highlightOf(l: { color: string; tint: number }, dark: boolean): string {
   const a = Math.min(1, (l.tint / 0.16) * (dark ? 0.34 : 0.3));
   const hex = /^#([0-9a-f]{6})$/i.exec(l.color);
   if (hex) return `#${hex[1]}${Math.round(a * 255).toString(16).padStart(2, "0")}`;
@@ -914,7 +914,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 export const BLAME_CSS = `
 .slot svg.bl { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-/* (the wash behind the words: multiply on a light page, its ink stays ink; screen on a dark one) */
+/* (the highlight behind the words: multiply on a light page, its ink stays ink; screen on a dark one) */
 .slot svg.bl-paint { mix-blend-mode: multiply; }
 /* (the words' own colour: lighten on a light page, the ink takes the colour and the paper stays; darken on a dark one) */
 .slot svg.bl-paint.s-text { mix-blend-mode: lighten; }
@@ -929,7 +929,7 @@ export const BLAME_CSS = `
 .slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { fill-opacity: .55; }
 .slot svg.bl.hl g:not(.on) .v.o { fill-opacity: .7; }
 .slot svg.bl-paint.hl g:not(.on) { fill-opacity: .35; }
-.slot svg.bl-marks.hl g:not(.on) .b { fill-opacity: .3; }
+.slot svg.bl-marks.hl g:not(.on) .b { stroke-opacity: .3; }
 .blcard { position: fixed; z-index: 30; width: min(300px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 10px; box-shadow: 0 10px 30px rgb(15 25 40 / 18%); padding: 10px 12px; font-size: 13px; line-height: 1.45; }
 .blcard[hidden] { display: none; }
 .blcard .h { display: flex; gap: 8px; align-items: center; font-weight: 600; }
@@ -1643,7 +1643,7 @@ export class Blame {
 
   /**
    * Page `k`'s colours, drawn once (its blame come, a look changed): the
-   * wash or the words' colour in one SVG blended with the page, the veil,
+   * highlight or the words' colour in one SVG blended with the page, the veil,
    * bars and placeholders in another, each run's rects in its commit's
    * group. The highlight in force put on at once.
    */
@@ -1656,17 +1656,22 @@ export class Blame {
     if (!this.on || (!this.m && !this.waits.get(k)?.length) || !segs) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
-    const style = this.look.style === "text" || this.look.style === "bar" ? this.look.style : "wash";
+    const style = this.look.style === "text" || this.look.style === "bar" ? this.look.style : "highlight";
     const f = (v: number) => (Math.round(v * 100) / 100).toString();
     const rect = (x: number, y: number, rw: number, rh: number, rest: string) => `<rect x="${f(x)}" y="${f(y)}" width="${f(Math.max(0, rw))}" height="${f(Math.max(0, rh))}" ${rest}/>`;
+    // (a bar: a line its width in screen pixels whatever the zoom (non-scaling-stroke), the old bar's 4 px
+    // made thicker; a rect's width was the page's points, under 4 px on a page shown small)
+    const bar = (cx: number, y0: number, y1: number, rest: string) => `<line x1="${f(cx)}" x2="${f(cx)}" y1="${f(y0)}" y2="${f(Math.max(y0, y1))}" stroke-width="${f(bpx)}" vector-effect="non-scaling-stroke" ${rest}/>`;
     const paint = new Map<number, string[]>(), marks = new Map<number, string[]>();
     const put = (to: Map<number, string[]>, c: number, r: string) => (to.get(c) ?? to.set(c, []).get(c)!).push(r);
     const right = this.index.get(k)?.right ?? new Map<number, number>();
     const bw = Math.max(1, this.look.width);
+    // (its width on the screen: the old bar's (the look's width, 4 px) half again)
+    const bpx = bw * 1.5;
     const hatch = `url(#blh-${k})`;
     let hatched = false;
     for (const s of segs) {
-      // (the line's box, a little over its glyphs: the lines' washes nearly meet, never overlap)
+      // (the line's box, a little over its glyphs: the lines' highlights nearly meet, never overlap)
       const y0 = s.y0 - 0.5, y1 = s.y1 + 0.5;
       if (style === "bar") {
         put(marks, s.c, rect(s.x0 - 1, y0, s.x1 - s.x0 + 2, y1 - y0, `class="${this.old(s.c) ? "v o" : "v"}"`));
@@ -1674,7 +1679,7 @@ export class Blame {
         if (!lk) continue;
         hatched ||= !!lk.hatch;
         const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 4 : s.bx + 4 - bw;
-        put(marks, s.c, rect(x, s.y0 + 0.5, bw, s.y1 - s.y0 - 1, `class="b" fill="${lk.hatch ? hatch : lk.color}"`));
+        put(marks, s.c, bar(x + bw / 2, s.y0 + 0.5, s.y1 - 0.5, `class="b" stroke="${lk.hatch ? hatch : lk.color}"`));
         continue;
       }
       const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c] as [number, number, number]] : s.runs;
@@ -1684,13 +1689,13 @@ export class Blame {
         const lk = old ? null : this.shade(c);
         if (!lk) continue;
         hatched ||= !!lk.hatch;
-        put(paint, c, rect(a - 1, y0, b - a + 2, y1 - y0, `fill="${lk.hatch ? hatch : style === "text" ? lk.color : washOf(lk, dark)}"`));
+        put(paint, c, rect(a - 1, y0, b - a + 2, y1 - y0, `fill="${lk.hatch ? hatch : style === "text" ? lk.color : highlightOf(lk, dark)}"`));
       }
     }
     // (the files still being worked out: a quiet grey bar on their lines)
-    for (const l of this.waits.get(k) ?? []) put(marks, -2, rect(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 4 - bw, l.y0 + 0.5, bw, l.y1 - l.y0 - 1, `class="w" fill="${UNCOMMITTED}" fill-opacity=".45"`));
-    // (not committed: grey stripes, behind the words (the wash), across them (their colour), or the bar's)
-    const defs = hatched ? `<defs><pattern id="blh-${k}" patternUnits="userSpaceOnUse" width="3" height="3" patternTransform="rotate(45)"><rect width="1.3" height="3" fill="${UNCOMMITTED}"${style === "wash" ? ` fill-opacity="${dark ? 0.5 : 0.6}"` : ""}/></pattern></defs>` : "";
+    for (const l of this.waits.get(k) ?? []) put(marks, -2, bar((this.look.bars === "right" ? l.x + 4 : l.x - 7 + 4 - bw) + bw / 2, l.y0 + 0.5, l.y1 - 0.5, `class="w" stroke="${UNCOMMITTED}" stroke-opacity=".45"`));
+    // (not committed: grey stripes, behind the words (the highlight), across them (their colour), or the bar's)
+    const defs = hatched ? `<defs><pattern id="blh-${k}" patternUnits="userSpaceOnUse" width="3" height="3" patternTransform="rotate(45)"><rect width="1.3" height="3" fill="${UNCOMMITTED}"${style === "highlight" ? ` fill-opacity="${dark ? 0.5 : 0.6}"` : ""}/></pattern></defs>` : "";
     const by = new Map<number, SVGGElement[]>();
     const svg = (cls: string, groups: Map<number, string[]>, withDefs: boolean) => {
       const el = document.createElementNS(SVG_NS, "svg");

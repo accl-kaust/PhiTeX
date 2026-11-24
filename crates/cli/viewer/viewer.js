@@ -7513,7 +7513,7 @@ function agoWords(t, now) {
     }
   return "just now";
 }
-var BLAME_LOOK = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", style: "wash", bars: "left", width: 4, people: "okabe", ages: "violet" };
+var BLAME_LOOK = { color: "author", detail: "word", ws: "ignore", moved: "keep", wip: "show", skip: [], since: "off", style: "highlight", bars: "left", width: 4, people: "okabe", ages: "violet" };
 var AGE_RAMPS = {
   violet: { name: "Violet", light: ["#5B2A86", "#7B4FAE", "#A07CC9", "#C9B5E2"], dark: ["#C7A6F0", "#AE8AD8", "#8E6CB8", "#6B5390"] },
   warm: { name: "Warm", light: ["#b91c1c", "#ea580c", "#f59e0b", "#fde68a"], dark: ["#fca5a5", "#fdba74", "#fcd34d", "#a16207"] },
@@ -7532,7 +7532,7 @@ function lookOf2(m, c, look2, dark, colors) {
   }
   return { color: colors.get(authorKey(x)) ?? OVERFLOW, tint: 0.16 };
 }
-function washOf(l, dark) {
+function highlightOf(l, dark) {
   const a = Math.min(1, l.tint / 0.16 * (dark ? 0.34 : 0.3));
   const hex = /^#([0-9a-f]{6})$/i.exec(l.color);
   if (hex) return `#${hex[1]}${Math.round(a * 255).toString(16).padStart(2, "0")}`;
@@ -7542,7 +7542,7 @@ var sinceTime = (since) => since && since !== "off" ? Number(since.split(":")[0]
 var SVG_NS = "http://www.w3.org/2000/svg";
 var BLAME_CSS = `
 .slot svg.bl { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
-/* (the wash behind the words: multiply on a light page, its ink stays ink; screen on a dark one) */
+/* (the highlight behind the words: multiply on a light page, its ink stays ink; screen on a dark one) */
 .slot svg.bl-paint { mix-blend-mode: multiply; }
 /* (the words' own colour: lighten on a light page, the ink takes the colour and the paper stays; darken on a dark one) */
 .slot svg.bl-paint.s-text { mix-blend-mode: lighten; }
@@ -7557,7 +7557,7 @@ var BLAME_CSS = `
 .slot svg.bl .v.o, .slot svg.bl.hl g:not(.on) .v { fill-opacity: .55; }
 .slot svg.bl.hl g:not(.on) .v.o { fill-opacity: .7; }
 .slot svg.bl-paint.hl g:not(.on) { fill-opacity: .35; }
-.slot svg.bl-marks.hl g:not(.on) .b { fill-opacity: .3; }
+.slot svg.bl-marks.hl g:not(.on) .b { stroke-opacity: .3; }
 .blcard { position: fixed; z-index: 30; width: min(300px, 86vw); background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: 10px; box-shadow: 0 10px 30px rgb(15 25 40 / 18%); padding: 10px 12px; font-size: 13px; line-height: 1.45; }
 .blcard[hidden] { display: none; }
 .blcard .h { display: flex; gap: 8px; align-items: center; font-weight: 600; }
@@ -8159,7 +8159,7 @@ var Blame = class {
   groups = /* @__PURE__ */ new Map();
   /**
    * Page `k`'s colours, drawn once (its blame come, a look changed): the
-   * wash or the words' colour in one SVG blended with the page, the veil,
+   * highlight or the words' colour in one SVG blended with the page, the veil,
    * bars and placeholders in another, each run's rects in its commit's
    * group. The highlight in force put on at once.
    */
@@ -8172,13 +8172,15 @@ var Blame = class {
     if (!this.on || !this.m && !this.waits.get(k)?.length || !segs) return;
     const { w, h } = this.p.pageSize();
     const dark = this.p.dark();
-    const style = this.look.style === "text" || this.look.style === "bar" ? this.look.style : "wash";
+    const style = this.look.style === "text" || this.look.style === "bar" ? this.look.style : "highlight";
     const f = (v) => (Math.round(v * 100) / 100).toString();
     const rect = (x, y, rw, rh, rest) => `<rect x="${f(x)}" y="${f(y)}" width="${f(Math.max(0, rw))}" height="${f(Math.max(0, rh))}" ${rest}/>`;
+    const bar2 = (cx, y0, y1, rest) => `<line x1="${f(cx)}" x2="${f(cx)}" y1="${f(y0)}" y2="${f(Math.max(y0, y1))}" stroke-width="${f(bpx)}" vector-effect="non-scaling-stroke" ${rest}/>`;
     const paint = /* @__PURE__ */ new Map(), marks = /* @__PURE__ */ new Map();
     const put = (to, c, r) => (to.get(c) ?? to.set(c, []).get(c)).push(r);
     const right = this.index.get(k)?.right ?? /* @__PURE__ */ new Map();
     const bw = Math.max(1, this.look.width);
+    const bpx = bw * 1.5;
     const hatch = `url(#blh-${k})`;
     let hatched = false;
     for (const s of segs) {
@@ -8189,7 +8191,7 @@ var Blame = class {
         if (!lk) continue;
         hatched ||= !!lk.hatch;
         const x = this.look.bars === "right" ? (right.get(s.bx) ?? s.x1) + 4 : s.bx + 4 - bw;
-        put(marks, s.c, rect(x, s.y0 + 0.5, bw, s.y1 - s.y0 - 1, `class="b" fill="${lk.hatch ? hatch : lk.color}"`));
+        put(marks, s.c, bar2(x + bw / 2, s.y0 + 0.5, s.y1 - 0.5, `class="b" stroke="${lk.hatch ? hatch : lk.color}"`));
         continue;
       }
       const runs2 = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
@@ -8199,11 +8201,11 @@ var Blame = class {
         const lk = old ? null : this.shade(c);
         if (!lk) continue;
         hatched ||= !!lk.hatch;
-        put(paint, c, rect(a - 1, y0, b - a + 2, y1 - y0, `fill="${lk.hatch ? hatch : style === "text" ? lk.color : washOf(lk, dark)}"`));
+        put(paint, c, rect(a - 1, y0, b - a + 2, y1 - y0, `fill="${lk.hatch ? hatch : style === "text" ? lk.color : highlightOf(lk, dark)}"`));
       }
     }
-    for (const l of this.waits.get(k) ?? []) put(marks, -2, rect(this.look.bars === "right" ? l.x + 4 : l.x - 7 + 4 - bw, l.y0 + 0.5, bw, l.y1 - l.y0 - 1, `class="w" fill="${UNCOMMITTED}" fill-opacity=".45"`));
-    const defs = hatched ? `<defs><pattern id="blh-${k}" patternUnits="userSpaceOnUse" width="3" height="3" patternTransform="rotate(45)"><rect width="1.3" height="3" fill="${UNCOMMITTED}"${style === "wash" ? ` fill-opacity="${dark ? 0.5 : 0.6}"` : ""}/></pattern></defs>` : "";
+    for (const l of this.waits.get(k) ?? []) put(marks, -2, bar2((this.look.bars === "right" ? l.x + 4 : l.x - 7 + 4 - bw) + bw / 2, l.y0 + 0.5, l.y1 - 0.5, `class="w" stroke="${UNCOMMITTED}" stroke-opacity=".45"`));
+    const defs = hatched ? `<defs><pattern id="blh-${k}" patternUnits="userSpaceOnUse" width="3" height="3" patternTransform="rotate(45)"><rect width="1.3" height="3" fill="${UNCOMMITTED}"${style === "highlight" ? ` fill-opacity="${dark ? 0.5 : 0.6}"` : ""}/></pattern></defs>` : "";
     const by = /* @__PURE__ */ new Map();
     const svg2 = (cls, groups, withDefs) => {
       const el = document.createElementNS(SVG_NS, "svg");
@@ -9168,7 +9170,11 @@ var Changes = class {
     this.hide = !!k.hide;
     if ("folded" in k) queueMicrotask(() => this.save());
     this.kinds = new Set(k.kinds?.length ? k.kinds : KINDS3);
-    if (this.blame && k.blame) this.blame.look = { ...BLAME_LOOK, ...k.blame, skip: [...k.blame.skip ?? []] };
+    if (this.blame && k.blame) {
+      const was = k.blame.style === "wash";
+      this.blame.look = { ...BLAME_LOOK, ...k.blame, ...was ? { style: "highlight" } : {}, skip: [...k.blame.skip ?? []] };
+      if (was) queueMicrotask(() => this.save());
+    }
     this.applyColors();
     if (this.open) this.render();
   }
@@ -9758,7 +9764,7 @@ var Changes = class {
     return html`<div class="look" id="chg-look" role="group" aria-label="Blame's look">
       <div class="opt2"><span class="lab2">Colour by</span>${this.segOf("color", L.color, [["author", "Author", "A colour per person"], ["age", "Age", "Newer lines stronger"]])}</div>
       ${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}
-      <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "wash", [["wash", "Wash", "A soft tint behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
+      <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "highlight", [["highlight", "Highlight", "A soft highlight behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
       <div class="opt2"><span class="lab2">${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Hatched", "Grey stripes"], ["hide", "Hide", "Not marked"]])}</div>
       <button type="button" class="lnk all" id="chg-all" title="All of Blame's settings: detail, spacing, moved text, changed since, the bar's side and width, the colours">All settings…</button></div>`;
   }
@@ -9820,7 +9826,7 @@ var Changes = class {
         { id: "bl-color", label: "Blame: colour lines by", kind: "choice", options: [["author", "Author"], ["age", "Age"]], value: B.color, set: (v) => this.setBlameLook({ color: v }) },
         { id: "bl-ws", label: "Blame: spacing-only edits", kind: "choice", options: [["ignore", "Ignore"], ["count", "Count"]], value: B.ws, set: (v) => this.setBlameLook({ ws: v }) },
         { id: "bl-moved", label: "Blame: moved text", kind: "choice", options: [["keep", "Keep its writer"], ["mover", "Credit the mover"]], value: B.moved, set: (v) => this.setBlameLook({ moved: v }) },
-        { id: "bl-style", label: "Blame: style", help: "Every line coloured while Blame is on: a soft wash behind its words, the words themselves, or a bar in the margin", kind: "choice", options: [["wash", "Wash"], ["text", "Text"], ["bar", "Bar"]], value: B.style ?? "wash", set: (v) => this.setBlameLook({ style: v }) },
+        { id: "bl-style", label: "Blame: style", help: "Every line coloured while Blame is on: a soft highlight behind its words, the words themselves, or a bar in the margin", kind: "choice", options: [["highlight", "Highlight"], ["text", "Text"], ["bar", "Bar"]], value: B.style ?? "highlight", set: (v) => this.setBlameLook({ style: v }) },
         { id: "bl-wip", label: b.words.commit === "version" ? "Blame: not saved yet" : "Blame: not committed", kind: "choice", options: [["show", "Hatched"], ["hide", "Hide"]], value: B.wip, set: (v) => this.setBlameLook({ wip: v }) },
         { id: "bl-since", label: "Blame: changed since", help: "Lines older than this set back, uncoloured", kind: "select", options: [["off", "Off"], ...b.summary().since.map((x) => [x.v, x.label]), ...B.since !== "off" && !b.summary().since.some((x) => x.v === B.since) ? [[B.since, B.since.split(":").slice(1).join(":")]] : []], value: B.since, set: (v) => this.setBlameLook({ since: String(v) }) },
         { id: "bl-bars", label: "Blame: bars", help: "With the Bar style", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v }) },

@@ -287,7 +287,7 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await w.stop();
 });
 
-test("Changes, Blame: asked by its half; every line coloured (a wash, by default), each style; its look at the top, ⚙ to it; who wrote this version; a person, a commit or a hover picks out their lines; skip from a commit's row, kept; the merged commit's card; a rebuild blames nothing again", async () => {
+test("Changes, Blame: asked by its half; every line coloured (a highlight, by default), each style; its look at the top, ⚙ to it; who wrote this version; a person, a commit or a hover picks out their lines; skip from a commit's row, kept; the merged commit's card; a rebuild blames nothing again", async () => {
   const { w, t, shot, click } = await opened();
   await click("#b-changes");
   await sleep(500);
@@ -296,14 +296,14 @@ test("Changes, Blame: asked by its half; every line coloured (a wash, by default
   const paint = `$$(".slot svg.bl-paint rect")`;
   await t.until(`${paint}.length >= 8 && $$(".chg-pop .prow").length >= 5`, "the lines coloured and the people", 60000);
   assert.ok(await t.q(`${asked}.includes("blame")`), "Blame asked once its half was clicked");
-  // (Wash by default: one blended SVG a page, its rects grouped by commit; no box of its own per line)
-  assert.deepEqual(await t.q(`[$$(".slot svg.bl-paint.s-wash").length > 0, getComputedStyle($(".slot svg.bl-paint")).mixBlendMode, $$(".slot div.bl").length, $('#chg-look [data-look="style"][data-v="wash"]').getAttribute("aria-pressed")]`), [true, "multiply", 0, "true"], "Wash on by default, blended behind the words");
+  // (Highlight by default: one blended SVG a page, its rects grouped by commit; no box of its own per line)
+  assert.deepEqual(await t.q(`[$$(".slot svg.bl-paint.s-highlight").length > 0, getComputedStyle($(".slot svg.bl-paint")).mixBlendMode, $$(".slot div.bl").length, $('#chg-look [data-look="style"][data-v="highlight"]').getAttribute("aria-pressed")]`), [true, "multiply", 0, "true"], "Highlight on by default, blended behind the words");
   const people = () => t.q(`$$(".chg-pop .prow .nm > span:first-child").map((e) => e.textContent).sort()`);
   assert.deepEqual(await people(), ["Alice", "Bob", "Carol", "Lina", "Mary", "Not committed"]);
   assert.deepEqual(await t.q(`[$("#chg-n").textContent, /The number: 5 people wrote this version/.test($("#b-changes").title)]`), ["5", true], "Blame's badge: the people who wrote this version, as the title says");
   assert.match(await t.q(`$(".chg-pop .sec h3 span").textContent`), /· [\d,]+ words$/, "counted in the sources' words");
   assert.ok(await t.q(`$$('.slot svg.bl-paint rect[fill^="url(#blh-"]').length >= 1`), "the sentence not committed hatched");
-  assert.ok(await t.q(`${paint}.some((r) => r.getBoundingClientRect().height > 30)`), "the figure's picture: a wash of its own (its image's last commit)");
+  assert.ok(await t.q(`${paint}.some((r) => r.getBoundingClientRect().height > 30)`), "the figure's picture: a highlight of its own (its image's last commit)");
   // (the look at the top, open, no fold: Colour by, Style, Not committed; no pinned footer)
   assert.ok(await t.q(`(() => { const l = $("#chg-look"); return $(".chg-pop .body").firstElementChild === l && ["color", "style", "wip"].every((k) => l.querySelector('[data-look="' + k + '"]')) && !$(".chg-pop .lookbox, .chg-pop .lookhead, .chg-pop .skips, .chg-pop details, .chg-pop > .foot"); })()`), "Blame's look at the top, open; no fold, no footer");
   await shot("blame-author-light");
@@ -314,21 +314,22 @@ test("Changes, Blame: asked by its half; every line coloured (a wash, by default
   await t.q(`(() => { $(".chg-pop .body").scrollTop = 1e6; return 1; })()`);
   await click("#chg-gear");
   await t.until(`$(".chg-pop .body").scrollTop === 0 && $("#chg-look").classList.contains("mark")`, "⚙: the look at the top, marked", 5000);
-  // (each style: the words' own colour, blended lighten; a bar in the margin, no blend; back to the wash)
+  // (each style: the words' own colour, blended lighten; a bar in the margin, no blend; back to the highlight)
   await click(`#chg-look [data-look="style"][data-v="text"]`);
   await t.until(`$$(".slot svg.bl-paint.s-text rect").length >= 8 && getComputedStyle($(".slot svg.bl-paint")).mixBlendMode === "lighten"`, "Text: the words coloured", 10000);
   await shot("blame-text-light");
   await click(`#chg-look [data-look="style"][data-v="bar"]`);
-  await t.until(`!$(".slot svg.bl-paint") && $$(".slot svg.bl-marks rect.b").length >= 8`, "Bar: a bar a line", 10000);
-  assert.ok(await t.q(`$$(".slot svg.bl-marks rect.b").every((r) => r.getBoundingClientRect().width >= 4)`), "the bars thicker than the old 4 px");
+  await t.until(`!$(".slot svg.bl-paint") && $$(".slot svg.bl-marks .b").length >= 8`, "Bar: a bar a line", 10000);
+  // (on the screen, whatever the page's zoom: a page shown small, as in a smaller window, keeps them so)
+  assert.ok(await t.q(`$$(".slot svg.bl-marks .b").every((b) => parseFloat(getComputedStyle(b).strokeWidth) > 4 && b.getAttribute("vector-effect") === "non-scaling-stroke")`), "the bars thicker than the old 4 px on the screen");
   await shot("blame-bar-light");
   await click(`#chg-look [data-look="color"][data-v="age"]`);
   await t.until(`!!$("#chg-look .ramp")`, "Age: its ramp", 5000);
   await shot("blame-age-bar-light");
-  await click(`#chg-look [data-look="style"][data-v="wash"]`);
-  await shot("blame-age-wash-light");
+  await click(`#chg-look [data-look="style"][data-v="highlight"]`);
+  await shot("blame-age-highlight-light");
   await click(`#chg-look [data-look="color"][data-v="author"]`);
-  await t.until(`$$(".slot svg.bl-paint.s-wash rect").length >= 8`, "back to the wash", 10000);
+  await t.until(`$$(".slot svg.bl-paint.s-highlight rect").length >= 8`, "back to the highlight", 10000);
   // (not committed hidden, then hatched again)
   await click(`#chg-look [data-look="wip"][data-v="hide"]`);
   await t.until(`!$$('.slot svg.bl-paint rect[fill^="url(#blh-"]').length`, "not committed: not marked", 10000);
@@ -423,8 +424,8 @@ test("Changes, Blame: asked by its half; every line coloured (a wash, by default
   await t.key("Escape", "Escape", 27);
   await t.until(`$$(".slot svg.bl-marks rect.v.o").length > 0`, "since the tag: the lines older than it set back", 10000);
   await shot("blame-since-light");
-  // (the pages' own colours, from Settings: Sepia (a light sheet: the wash multiplied), Dark (a dark one: screened, the
-  // veil the sheet's colour), Dark PDF; each looked at in the wash and the words' colour)
+  // (the pages' own colours, from Settings: Sepia (a light sheet: the highlight multiplied), Dark (a dark one: screened, the
+  // veil the sheet's colour), Dark PDF; each looked at in the highlight and the words' colour)
   const set = async (id, v) => {
     await t.q(`(() => { if ($("#settings").hidden) $("#x-settings").click(); return 1; })()`);
     await t.until(`!$("#settings").hidden`, "Settings", 5000);
@@ -435,7 +436,7 @@ test("Changes, Blame: asked by its half; every line coloured (a wash, by default
   };
   const blend = `getComputedStyle($(".slot svg.bl-paint")).mixBlendMode`;
   await set("page-colours", "sepia");
-  await t.until(`$(".win").classList.contains("paged") && ${blend} === "multiply"`, "Sepia: the wash multiplied", 5000);
+  await t.until(`$(".win").classList.contains("paged") && ${blend} === "multiply"`, "Sepia: the highlight multiplied", 5000);
   await shot("blame-sepia-light");
   await click(`#chg-look [data-look="style"][data-v="text"]`);
   await t.until(`${blend} === "lighten"`, "Sepia: the words coloured", 5000);
@@ -443,13 +444,13 @@ test("Changes, Blame: asked by its half; every line coloured (a wash, by default
   await set("page-colours", "dark");
   await t.until(`$(".win").classList.contains("paged-dark") && ${blend} === "darken"`, "Dark pages: the words' colour darkened in", 5000);
   await shot("blame-darkpages-text-light");
-  await click(`#chg-look [data-look="style"][data-v="wash"]`);
-  await t.until(`${blend} === "screen"`, "Dark pages: the wash screened", 5000);
+  await click(`#chg-look [data-look="style"][data-v="highlight"]`);
+  await t.until(`${blend} === "screen"`, "Dark pages: the highlight screened", 5000);
   await shot("blame-darkpages-light");
   await set("page-colours", "paper");
   await dark(t, true);
   await set("dark-pdf", "on");
-  await t.until(`$(".win").classList.contains("dark-pdf") && ${blend} === "screen"`, "Dark PDF: the wash screened", 5000);
+  await t.until(`$(".win").classList.contains("dark-pdf") && ${blend} === "screen"`, "Dark PDF: the highlight screened", 5000);
   await shot("blame-darkpdf-dark");
   await set("dark-pdf", "off");
   await dark(t, false);

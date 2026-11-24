@@ -1009,9 +1009,18 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
     }
   };
   // (a right-click on the new word: Accept, Reject, Show in the list, Go to source; Accept as the card's button)
-  // (a feature tip over the pages put away first: a right-click on it is the tip's)
-  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
+  // (the mark itself under the point, as a person sees it: a feature tip over it put away (a right-click on the tip is
+  // the tip's), as many as come; anything else over it said)
+  const bare = async ([x, y]) => {
+    let over = "";
+    for (const end = Date.now() + 10000; Date.now() < end; await sleep(100)) {
+      over = await t.q(`(() => { const e = $("#stage").getRootNode().elementFromPoint(${x}, ${y}); if (e?.closest(".slot")) return ""; const tip = e?.closest(".tip"); if (tip) { tip.querySelector("[data-t=skip]")?.click(); return "a tip"; } return e ? e.tagName + "." + (e.className?.baseVal ?? e.className) : "nothing"; })()`);
+      if (!over) return;
+    }
+    assert.fail(`the mark at ${x}, ${y} covered by ${over}`);
+  };
   const add = await mark("h-add");
+  await bare(add);
   await rightClick(t, add[0], add[1]);
   await t.until(`!!$(".phx-ctx")`, "the menu", 5000);
   assert.deepEqual(await t.q(`$$(".phx-ctx button").map((b) => b.textContent)`), ["Accept", "Reject", "Show in the list", "Go to source"]);
@@ -1021,6 +1030,7 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
   assert.match(w.read("main.tex"), /brandnew/, "accepted: the file keeps the agent's word");
   // (a right-click on the deletion's caret: Reject, the file gets the words back)
   const del = await mark("h-del");
+  await bare(del);
   await rightClick(t, del[0], del[1]);
   await t.until(`!!$(".phx-ctx")`, "the menu", 5000);
   await t.click(".phx-ctx button.reject");
