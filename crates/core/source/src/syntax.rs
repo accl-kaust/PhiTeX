@@ -472,17 +472,36 @@ fn skip_blanks(s: &[u8], mut j: usize) -> usize {
     j
 }
 
-/// Past the `]` that closes the `[` at `j`, outside braces (`None`: there
-/// is none, and LaTeX would not read an optional argument either).
+/// Past the `]` that closes the `[` at `j`, outside braces, before a
+/// blank line outside them (`None`: there is none, and LaTeX would not
+/// read an optional argument either; one a blank line cuts is TeX's
+/// "Paragraph ended before … was complete"). Not past a blank line: the
+/// paragraph the `[` is in decides it, whatever text comes after it.
+/// Read on to any `]`, a `]` an edit put paragraphs later made an earlier
+/// paragraph's command a verbatim run reading on to the end, where an
+/// edit's cut, from the edited paragraph on, kept it apart (a live diff's
+/// body ended otherwise than the whole diff's: phitex-diff's random
+/// edits, `look_code`).
 fn bracket_end(s: &[u8], j: usize) -> Option<usize> {
     let mut depth = 0usize;
-    for (k, &c) in s.iter().enumerate().skip(j + 1) {
-        match c {
+    let mut k = j + 1;
+    while k < s.len() {
+        match s[k] {
             b'{' => depth += 1,
             b'}' => depth = depth.saturating_sub(1),
             b']' if depth == 0 => return Some(k + 1),
+            b'\n' if depth == 0 => {
+                let mut e = k + 1;
+                while e < s.len() && matches!(s[e], b' ' | b'\t' | b'\r') {
+                    e += 1;
+                }
+                if s.get(e) == Some(&b'\n') {
+                    return None;
+                }
+            }
             _ => {}
         }
+        k += 1;
     }
     None
 }

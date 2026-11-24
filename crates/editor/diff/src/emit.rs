@@ -96,6 +96,15 @@ pub struct Em<'a> {
     pub show_del: bool,
     /// An image replaced by another: beside it, under it, or not shown.
     pub fig: crate::FigStyle,
+    /// The whole new document, where a label is looked for (a deleted
+    /// label dropped if the new version has it, a reference's label
+    /// renamed): `new` when that is the whole document, the live diff's
+    /// flattened text when `new` is one run of it.
+    pub doc: Option<&'a str>,
+    /// The labels looked for in the new document and whether it had
+    /// them: what the markup of a run depends on beyond its own text (the
+    /// live diff keeps a run only while the answers are the same).
+    pub asked: std::cell::RefCell<Vec<(String, bool)>>,
 }
 
 impl<'a> Em<'a> {
@@ -115,7 +124,19 @@ impl<'a> Em<'a> {
             pending: Vec::new(),
             show_del: true,
             fig: crate::FigStyle::Side,
+            doc: None,
+            asked: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Whether the new document has `\label{key}` (asked, and noted).
+    fn new_has_label(&self, key: &str) -> bool {
+        let has = self
+            .doc
+            .unwrap_or(self.new)
+            .contains(&format!("\\label{{{key}}}"));
+        self.asked.borrow_mut().push((key.to_owned(), has));
+        has
     }
 
     /// The added text at `at` in `new` is at `off` in the buffer.
@@ -1111,7 +1132,7 @@ impl<'a> Em<'a> {
     /// has them where they are now; one only the old version has is kept:
     /// a reference to what was deleted still finds it).
     fn unlabel(&self, text: &str) -> String {
-        unlabel(text, |key| self.new.contains(&format!("\\label{{{key}}}")))
+        unlabel(text, |key| self.new_has_label(key))
     }
 
     /// How many numbered captions the old version's floats of float `t`'s
@@ -1169,7 +1190,7 @@ impl<'a> Em<'a> {
             return false;
         };
         let has = |src: &str, k: &str| src.contains(&format!("\\label{{{k}}}"));
-        has(self.old, a) && !has(self.new, a) && has(self.new, b) && !has(self.old, b)
+        has(self.old, a) && !self.new_has_label(a) && self.new_has_label(b) && !has(self.old, b)
     }
 
     /// Whether deleted text uses a command only the old preamble defines.
