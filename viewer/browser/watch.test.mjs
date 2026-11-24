@@ -686,6 +686,36 @@ test("a double-click starts only the user's editor; a project's phitex.toml runs
   assert.equal((await run(false, true)).ran, true, "the user's editor did not run");
 });
 
+test("a selection dragged across a link opens no window over it; the same link hovered with no button held still opens it (peek, selecting)", async () => {
+  const { w, t } = await open({ "main.tex": doc(`\\section{One}\\label{s}\n\nSee Section~\\ref{s}. ${"Words around it. ".repeat(40)}`, "\\usepackage{hyperref}") });
+  await waitBuild(w, 1);
+  const at = await t.until(`(() => { for (const e of $$(".phx-text text")) { const s = e.textContent, i = s.indexOf("See Section 1"); if (i < 0) continue; const x = e.getExtentOfChar(i + 12), p = new DOMPoint(x.x + x.width / 2, x.y + x.height / 2).matrixTransform(e.getScreenCTM()); return [p.x, p.y]; } return null; })()`, "the reference on the page");
+  const shown = () => t.q(`!!$(".peek:not([hidden])")`);
+  // (no button: hovered, its window as before; then the pointer away, the window gone)
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at[0], y: at[1] });
+  await t.until(`!!$(".peek:not([hidden])")`, "the link's window on a plain hover");
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 300 });
+  await t.until(`!$(".peek:not([hidden])")`, "the window gone with the pointer");
+  // (pressed left of the link, dragged onto it and held there past the window's 350 ms)
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at[0] - 60, y: at[1] });
+  await t.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at[0] - 60, y: at[1], button: "left", buttons: 1, clickCount: 1 });
+  for (let i = 1; i <= 6; i++) await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at[0] - 60 + i * 10, y: at[1], button: "left", buttons: 1 });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(await shown(), false, "a window opened over the selection being dragged");
+  await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at[0], y: at[1], button: "left", buttons: 0, clickCount: 1 });
+  assert.ok((await t.q(`(R?.getSelection?.() ?? getSelection()).toString().length`)) > 0, "the drag selected text");
+  // (pressed on the link itself, a window on its way: the press keeps it away)
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 300 });
+  await t.q(`(R?.getSelection?.() ?? getSelection()).removeAllRanges()`);
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at[0], y: at[1] });
+  await t.send("Input.dispatchMouseEvent", { type: "mousePressed", x: at[0], y: at[1], button: "left", buttons: 1, clickCount: 1 });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(await shown(), false, "a press on the link still opened its window");
+  await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: at[0] + 30, y: at[1], button: "left", buttons: 1 });
+  await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at[0] + 30, y: at[1], button: "left", buttons: 0, clickCount: 1 });
+  await w.stop();
+});
+
 test("a link's window zooms: Ctrl+wheel and a trackpad's pinch at the pointer, two fingers, its magnifiers; pinned, it keeps its place and zoom, dragged to pan (peek zoom)", async () => {
   const fig = "\\begin{figure}[t]\\centering\\fbox{\\parbox{0.8\\linewidth}{\\tiny tiny figure text \\par\\rule{2cm}{1cm}}}\\caption{A figure}\\label{f}\\end{figure}";
   const { w, t } = await open({ "main.tex": doc(`${fig}\n\nSee Figure~\\ref{f}. ${"Words around it. ".repeat(40)}`, "\\usepackage{hyperref}") });

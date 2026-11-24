@@ -648,7 +648,12 @@ var Viewer = class _Viewer {
       const hit = this.linkAt(e);
       if (el) el.classList.toggle("on-link", !!hit);
       this.pointer = [e.clientX, e.clientY];
-      this.hover(hit, el, e);
+      this.hover(e.buttons ? null : hit, el, e);
+    });
+    root.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || !this.peekAt || this.peekEl && !this.peekEl.hidden) return;
+      clearTimeout(this.peekTimer);
+      this.peekAt = null;
     });
     root.addEventListener("mouseleave", () => this.hover(null, null));
     const doc = root.ownerDocument;
