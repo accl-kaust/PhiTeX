@@ -526,6 +526,59 @@ pub struct BuildRec {
     pub pdf: Option<String>,
 }
 
+/// The files build `b` read that an editor holds now with other text
+/// than the disk's, each with the text the build read: `editor` (the
+/// buffer, which wins while the editor has the file open), `disk` (as
+/// `session rebuild` reads them), or `older` (neither: an earlier text).
+fn sources(st: &State, editors: Option<&Editors>, b: &BuildRec) -> Vec<(String, &'static str)> {
+    let Some(e) = editors else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, &'static str)> = b
+        .read
+        .iter()
+        .filter_map(|(n, h)| {
+            let h = (*h)?;
+            let buffer = (e.buffer)(n)?;
+            let disk = std::fs::read(st.root.join(n)).ok()?;
+            if disk == buffer.as_bytes() {
+                return None;
+            }
+            let used = if h == hash(buffer.as_bytes()) {
+                "editor"
+            } else if h == hash(&disk) {
+                "disk"
+            } else {
+                "older"
+            };
+            Some((n.clone(), used))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn sources_json(s: &[(String, &'static str)]) -> Value {
+    s.iter()
+        .map(|(f, used)| json!({"file": f, "used": used}))
+        .collect()
+}
+
+/// A file as it is now ([`Hub::now_hashes`]): its hash on disk, and its
+/// editor's buffer's where that is other text.
+struct Now {
+    disk: Option<u64>,
+    buffer: Option<u64>,
+}
+
+/// A request's answer once the watch ends.
+fn ended() -> Fail {
+    Fail {
+        status: EXIT_NO_SESSION,
+        message: "the watch ended".into(),
+    }
+}
+
 /// What a build gives the hub ([`Hub::built`]).
 pub struct BuildFacts {
     pub n: usize,
@@ -750,6 +803,15 @@ impl Hub {
         st.accept_disk = accept_disk;
         st.started = true;
         st.ended = false;
+    }
+
+    /// The watch ends (`q`, a signal, `session stop`, its editor gone):
+    /// every request waiting on it answered that it ended, at once, not
+    /// after the ending's work (the exact PDF written, the graph saved),
+    /// nor never, where that work waits on a question at the terminal.
+    pub fn end(&self) {
+        lock(&self.st).ended = true;
+        self.cv.notify_all();
     }
 
     /// Edits made on the disk taken as accepted (`review-accept-disk`), as
@@ -1055,14 +1117,22 @@ impl Hub {
     }
 
     fn status_of(st: &State, b: Option<&BuildRec>, warnings: bool) -> Value {
-        let problems: Vec<Value> = st
-            .diags
-            .1
+        // (the diagnostics made are build `diags.0`'s: the last build's
+        // own, or those it left pending until they are made; an older
+        // build's were dropped with it, a later build of other text in)
+        let latest = st.builds.back().map(|l| l.n);
+        let superseded = b.filter(|b| Some(b.n) != latest && st.diags.0 != b.n);
+        let diags: &[Value] = if superseded.is_some() {
+            &[]
+        } else {
+            &st.diags.1
+        };
+        let problems: Vec<Value> = diags
             .iter()
             .filter(|d| d["severity"] == "error" || (warnings && d["severity"] == "warning"))
             .cloned()
             .collect();
-        let count = |sev: &str| st.diags.1.iter().filter(|d| d["severity"] == sev).count();
+        let count = |sev: &str| diags.iter().filter(|d| d["severity"] == sev).count();
         // (the build's own errors where no diagnostic placed them)
         let problems = if problems.is_empty() && b.is_some_and(|b| !b.errors.is_empty()) {
             b.map(|b| {
@@ -1079,7 +1149,8 @@ impl Hub {
             "build": b.map(|b| b.n),
             "ok": b.map(|b| b.ok),
             "errors": b.map_or(0, |b| b.errors.len()),
-            "warnings": count("warning"),
+            "warnings": if superseded.is_some() { Value::Null } else { json!(count("warning")) },
+            "superseded_by": superseded.and(latest),
             "pages": b.map(|b| b.pages),
             "ms": b.map(|b| b.ms),
             "pdf": b.and_then(|b| b.pdf.clone()),
@@ -1087,6 +1158,7 @@ impl Hub {
             "main": st.main,
             "root": st.root.display().to_string(),
             "pid": std::process::id(),
+            "version": crate::build_id(),
             "engine": st.about["engine"],
             "engine_why": st.about["engine_why"],
             "out_dir": st.about["out_dir"],
@@ -1095,14 +1167,19 @@ impl Hub {
             "review": mode_of(st),
             "workspace": (mode_of(st) == "propose").then(|| prop::workspace(&st.root).0.display().to_string()),
             "problems": problems,
-            "diagnostics_pending": b.is_some_and(|b| b.diags_pending),
+            "diagnostics_pending": b.is_some_and(|b| b.diags_pending) && superseded.is_none(),
             "written": b.is_some_and(|b| st.written >= b.n),
         })
     }
 
     fn status(&self, warnings: bool) -> Value {
+        let editors = self.editors();
         let st = lock(&self.st);
-        Hub::status_of(&st, st.builds.back(), warnings)
+        let mut v = Hub::status_of(&st, st.builds.back(), warnings);
+        if let Some(b) = st.builds.back() {
+            v["sources"] = sources_json(&sources(&st, editors.as_deref(), b));
+        }
+        v
     }
 
     fn problems(&self, p: &Value) -> Value {
@@ -1132,24 +1209,34 @@ impl Hub {
         json!({"build": st.diags.0, "problems": list})
     }
 
-    /// The hashes of the files the last build read, as they are now.
-    fn now_hashes(st: &State, editors: Option<&Editors>) -> HashMap<String, Option<u64>> {
+    /// The files the last build read as they are now: each one's hash on
+    /// disk (none: not there) and, where an editor holds it with other
+    /// text, its buffer's.
+    fn now_hashes(st: &State, editors: Option<&Editors>) -> HashMap<String, Now> {
         let Some(last) = st.builds.back() else {
             return HashMap::new();
         };
         last.read
             .keys()
             .map(|n| {
-                let h = editors
+                let disk = std::fs::read(st.root.join(n)).ok();
+                let buffer = editors
                     .and_then(|e| (e.buffer)(n))
-                    .map(|t| hash(t.as_bytes()))
-                    .or_else(|| std::fs::read(st.root.join(n)).ok().map(|b| hash(&b)));
-                (n.clone(), h)
+                    .filter(|b| disk.as_deref() != Some(b.as_bytes()))
+                    .map(|b| hash(b.as_bytes()));
+                let disk = disk.map(|d| hash(&d));
+                (n.clone(), Now { disk, buffer })
             })
             .collect()
     }
 
-    /// `wait` (§9.2).
+    /// `wait` (§9.2): the newest build that read the files as they are
+    /// now. Where an editor holds a file with other text than the disk's,
+    /// a build of either text is one (the editor's wins while it is open:
+    /// the disk's is built once the editor takes it, or was before it
+    /// took other text), and the answer says which it read; `disk`: the
+    /// disk's alone. A build a later one of other text superseded answers
+    /// with what it has: its warnings are never made.
     fn wait(&self, p: &Value) -> Result<Value, Fail> {
         let t0 = Instant::now();
         let timeout = p["timeout_ms"]
@@ -1162,6 +1249,7 @@ impl Hub {
         }
         let warnings = p["warnings"].as_bool().unwrap_or(false);
         let pdf = p["pdf"].as_bool().unwrap_or(false);
+        let disk = p["disk"].as_bool().unwrap_or(false);
         let editors = self.editors();
         let mut st = lock(&self.st);
         if pdf && !st.writing {
@@ -1172,39 +1260,40 @@ impl Hub {
         let want = Hub::now_hashes(&st, editors.as_deref());
         let first = st.builds.is_empty();
         // (the files an editor holds whose buffer is not the disk's)
-        let held: Vec<String> = want
-            .keys()
-            .filter(|n| {
-                editors
-                    .as_ref()
-                    .and_then(|e| (e.buffer)(n))
-                    .is_some_and(|b| {
-                        std::fs::read(st.root.join(n.as_str())).is_ok_and(|d| d != b.as_bytes())
-                    })
-            })
-            .cloned()
+        let mut held: Vec<String> = want
+            .iter()
+            .filter(|(_, w)| w.buffer.is_some())
+            .map(|(n, _)| n.clone())
             .collect();
-        let matches = |b: &BuildRec| want.iter().all(|(n, h)| b.read.get(n) == Some(h));
+        held.sort();
+        let matches = |b: &BuildRec| {
+            want.iter().all(|(n, w)| {
+                let r = b.read.get(n).copied().flatten();
+                r == w.disk || (!disk && r.is_some() && r == w.buffer)
+            })
+        };
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
+            let latest = st.builds.back().map(|b| b.n);
             let found = st
                 .builds
                 .iter()
                 .rev()
-                .find(|b| (first || matches(b)) && !st.builds.is_empty())
+                .find(|b| first || matches(b))
                 .cloned();
             if let Some(b) = found {
-                let diags_ok = !warnings || !b.diags_pending;
-                let pdf_ok = !pdf || st.written >= b.n;
+                // (a build superseded: what it left pending is never made)
+                let last = Some(b.n) == latest;
+                let diags_ok = !warnings || !b.diags_pending || !last;
+                let pdf_ok = !pdf || st.written >= b.n || !last;
                 if diags_ok && pdf_ok {
                     let mut v = Hub::status_of(&st, Some(&b), warnings);
                     v["waited_ms"] = json!(t0.elapsed().as_secs_f64() * 1e3);
                     v["held"] = json!(held);
+                    let used = sources(&st, editors.as_deref(), &b);
+                    v["sources"] = sources_json(&used);
                     return Ok(v);
                 }
             }
@@ -1216,6 +1305,9 @@ impl Hub {
                         let mut v = Hub::status_of(&st, st.builds.back(), warnings);
                         v["timed_out"] = json!(true);
                         v["held"] = json!(held);
+                        if let Some(b) = st.builds.back() {
+                            v["sources"] = sources_json(&sources(&st, editors.as_deref(), b));
+                        }
                         return Ok(v);
                     }
                     self.cv
@@ -1232,10 +1324,7 @@ impl Hub {
         let from = st.seq;
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
             let ids: Vec<String> = st
                 .user_events
@@ -1289,6 +1378,7 @@ impl Hub {
 
     fn rebuild(&self, p: &Value) -> Result<Value, Fail> {
         let n0 = lock(&self.st).builds.back().map_or(0, |b| b.n);
+        let editors = self.editors();
         self.ask_watch(if p["clean"].as_bool().unwrap_or(false) {
             Ask::Cold
         } else {
@@ -1297,13 +1387,12 @@ impl Hub {
         let mut st = lock(&self.st);
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
-            if st.builds.back().is_some_and(|b| b.n > n0) {
-                return Ok(Hub::status_of(&st, st.builds.back(), false));
+            if let Some(b) = st.builds.back().filter(|b| b.n > n0) {
+                let mut v = Hub::status_of(&st, Some(b), false);
+                v["sources"] = sources_json(&sources(&st, editors.as_deref(), b));
+                return Ok(v);
             }
             st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
         }
@@ -1319,10 +1408,6 @@ impl Hub {
         let mut st = lock(&self.st);
         let Some(n) = st.builds.back().map(|b| b.n) else {
             return Err(refused("no build yet: `phitex session wait` first"));
-        };
-        let ended = || Fail {
-            status: EXIT_NO_SESSION,
-            message: "the watch ended".into(),
         };
         if st.writing {
             loop {
@@ -1440,10 +1525,7 @@ impl Hub {
         let mut st = lock(&self.st);
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
             if let Some(r) = st.shots.1.remove(&id) {
                 return r.map_err(refused).map(|mut v| {
@@ -1478,10 +1560,7 @@ impl Hub {
         let mut st = lock(&self.st);
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
             if let Some(r) = st.shots.1.remove(&id) {
                 return r.map_err(refused);
@@ -1516,10 +1595,7 @@ impl Hub {
         let mut st = lock(&self.st);
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
             if let Some(r) = st.shots.1.remove(&id) {
                 return r.map_err(refused);
@@ -1541,10 +1617,7 @@ impl Hub {
         let mut st = lock(&self.st);
         loop {
             if st.ended {
-                return Err(Fail {
-                    status: EXIT_NO_SESSION,
-                    message: "the watch ended".into(),
-                });
+                return Err(ended());
             }
             if st.transcript.0 >= last && last > 0 {
                 return Ok(json!({"build": st.transcript.0, "text": st.transcript.1}));
@@ -3816,6 +3889,152 @@ mod tests {
         std::fs::write(d.join("main.tex"), DOC.replace("lazy", "busy")).expect("saved");
         let v = h.wait(&json!({"timeout_ms": 50})).expect("answered");
         assert_eq!(v["timed_out"], true);
+    }
+
+    /// An editor holding `main.tex` with the text in `buf` (none: closed).
+    fn editor(h: &Hub) -> Arc<Mutex<Option<String>>> {
+        let buf: Arc<Mutex<Option<String>>> = Arc::default();
+        let b = buf.clone();
+        h.on_editors(Editors {
+            buffer: Box::new(move |f| (f == "main.tex").then(|| lock(&b).clone()).flatten()),
+            replace: Box::new(|_, _| false),
+        });
+        buf
+    }
+
+    /// A build `n` of `text` as `main.tex`, its warnings `pending`.
+    fn built_from(h: &Hub, n: usize, text: &str, pending: bool) {
+        lock(&h.st)
+            .fed
+            .insert("main.tex".into(), hash(text.as_bytes()));
+        let mut f = facts(n, &["main.tex"]);
+        f.diags_pending = pending;
+        if pending {
+            f.diags = None;
+        }
+        h.built(f);
+    }
+
+    /// The session's report: an editor held other text than the agent's
+    /// change on disk, `session rebuild` built the disk's, and `wait
+    /// --warnings` never answered: it waited for a build of the editor's
+    /// text, whose warnings, left for when the editing paused, the
+    /// rebuild after it had dropped. A build of either text answers it,
+    /// at once, saying which it read.
+    #[test]
+    fn wait_after_a_rebuild_from_disk_answers_at_once_while_an_editor_holds_other_text() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = Arc::new(hub_on(&d, &["main.tex"]));
+        let buf = editor(&h);
+        let typed = DOC.replace("quick", "QUICK");
+        *lock(&buf) = Some(typed.clone());
+        // (the user types: build 2 of the editor's text, its warnings due
+        // when the editing pauses)
+        built_from(&h, 2, &typed, true);
+        // (the agent writes the disk; `session rebuild` builds it)
+        let agents = DOC.replace("lazy", "busy");
+        std::fs::write(d.join("main.tex"), &agents).expect("saved");
+        built_from(&h, 3, &agents, true);
+        h.diagnostics(
+            3,
+            &[json!({"severity": "warning", "message": "w", "file": "main.tex", "line": 3})],
+        );
+        let v = h
+            .wait(&json!({"warnings": true, "timeout_ms": 3000}))
+            .expect("answered");
+        assert_ne!(v["timed_out"], true, "{v}");
+        assert_eq!(v["build"], 3, "{v}");
+        assert_eq!(v["warnings"], 1, "{v}");
+        assert!(v["waited_ms"].as_f64().unwrap() < 1000.0, "{v}");
+        assert_eq!(
+            v["sources"],
+            json!([{"file": "main.tex", "used": "disk"}]),
+            "{v}"
+        );
+        // (the editor closed: the disk's text alone, build 3 still)
+        *lock(&buf) = None;
+        let v = h
+            .wait(&json!({"warnings": true, "timeout_ms": 3000}))
+            .expect("answered");
+        assert_eq!(v["build"], 3, "{v}");
+        assert_eq!(v["sources"], json!([]), "{v}");
+        // (the editor's text back and built after: build 2 is superseded,
+        // its warnings never made; said, not waited for)
+        *lock(&buf) = Some(typed.clone());
+        std::fs::write(d.join("main.tex"), &typed).expect("saved");
+        built_from(&h, 4, &agents.replace("busy", "idle"), false);
+        let v = h
+            .wait(&json!({"warnings": true, "timeout_ms": 3000}))
+            .expect("answered");
+        assert_eq!(v["build"], 2, "{v}");
+        assert_ne!(v["timed_out"], true, "{v}");
+        assert_eq!(v["superseded_by"], 4, "{v}");
+        assert_eq!(v["warnings"], Value::Null, "{v}");
+    }
+
+    /// The agent's change on disk while an editor holds other text: `wait`
+    /// answers with the build of the editor's text and says it read the
+    /// editor's; `wait --disk` waits for a build of the disk's, which
+    /// comes once the editor takes it.
+    #[test]
+    fn wait_says_which_text_a_build_read_and_disk_waits_for_the_disks() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = Arc::new(hub_on(&d, &["main.tex"]));
+        let buf = editor(&h);
+        let typed = DOC.replace("quick", "QUICK");
+        *lock(&buf) = Some(typed.clone());
+        built_from(&h, 2, &typed, false);
+        let agents = DOC.replace("lazy", "busy");
+        std::fs::write(d.join("main.tex"), &agents).expect("saved");
+        let v = h.wait(&json!({"timeout_ms": 3000})).expect("answered");
+        assert_eq!(v["build"], 2, "{v}");
+        assert_eq!(v["held"], json!(["main.tex"]), "{v}");
+        assert_eq!(
+            v["sources"],
+            json!([{"file": "main.tex", "used": "editor"}]),
+            "{v}"
+        );
+        // (--disk: not the editor's build; timed out while the editor
+        // holds its text, saying which)
+        let v = h
+            .wait(&json!({"disk": true, "timeout_ms": 100}))
+            .expect("answered");
+        assert_eq!(v["timed_out"], true, "{v}");
+        assert_eq!(v["held"], json!(["main.tex"]), "{v}");
+        let h2 = h.clone();
+        let w = std::thread::spawn(move || h2.wait(&json!({"disk": true, "timeout_ms": 20000})));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!w.is_finished(), "answered before the disk's build");
+        // (the editor takes the disk's text: built)
+        *lock(&buf) = Some(agents.clone());
+        built_from(&h, 3, &agents, false);
+        let v = w.join().expect("joined").expect("answered");
+        assert_eq!(v["build"], 3, "{v}");
+        assert_eq!(v["sources"], json!([]), "{v}");
+    }
+
+    /// Every request waiting on the watch is answered once it ends, before
+    /// the ending's work (or a question at the terminal) is done.
+    #[test]
+    fn a_watch_that_ends_answers_every_waiting_request() {
+        let d = project(&[("main.tex", DOC)]);
+        let h = Arc::new(hub_on(&d, &["main.tex"]));
+        std::fs::write(d.join("main.tex"), DOC.replace("quick", "slow")).expect("saved");
+        let (h1, h2, h3) = (h.clone(), h.clone(), h.clone());
+        let waits = [
+            std::thread::spawn(move || h1.wait(&json!({"timeout_ms": 0}))),
+            std::thread::spawn(move || h2.wait(&json!({"notes": true, "timeout_ms": 0}))),
+            std::thread::spawn(move || h3.rebuild(&json!({}))),
+        ];
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(waits.iter().all(|w| !w.is_finished()));
+        let t0 = Instant::now();
+        h.end();
+        for w in waits {
+            let e = w.join().expect("joined").expect_err("ended");
+            assert_eq!(e.status, EXIT_NO_SESSION);
+        }
+        assert!(t0.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

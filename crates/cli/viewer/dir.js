@@ -607,7 +607,7 @@ var FileList = class {
   }
   hrefOf(e) {
     if (e.kind === "dir") return this.host.dirHref(e.path);
-    if (e.kind === "tex" && e.id) return this.host.docHref(e.id);
+    if (e.kind === "tex" && e.id) return this.host.docHref(e.id, e.path);
     if (e.kind === "pdf" || e.kind === "image") return this.host.rawHref(e.path);
     return null;
   }
@@ -764,7 +764,7 @@ var QuickOpen = class {
   }
   open(f, newTab) {
     this.close();
-    const href = this.host.docHref(f.id);
+    const href = this.host.docHref(f.id, f.path);
     if (newTab) window.open(href, "_blank", "noopener");
     else if (f.path !== this.host.current) location.assign(href);
   }
@@ -805,7 +805,7 @@ var QuickOpen = class {
         r.className = "qo-row";
         r.id = `qo-r-${k}`;
         r.dataset.k = String(k);
-        r.href = this.host.docHref(f.id);
+        r.href = this.host.docHref(f.id, f.path);
         r.tabIndex = -1;
         r.setAttribute("role", "option");
         r.setAttribute("aria-selected", String(k === this.at));
@@ -1807,7 +1807,7 @@ var link = new FolderLink(wsUrl);
 var esc = (p) => p.split("/").map(encodeURIComponent).join("/");
 var quick;
 var host = {
-  docHref: (id) => new URL(`d/${id}/`, location.href).href,
+  docHref: (id, path) => new URL(`d/${id}/?path=${encodeURIComponent(path)}`, location.href).href,
   rawHref: (p) => new URL(`raw/${esc(p)}`, location.href).href,
   dirHref: (p) => p ? `#dir=${encodeURIComponent(p)}` : location.pathname + location.search,
   quickOpen: () => quick.toggle(),

@@ -1,8 +1,13 @@
 // Changes' Diff where the core runs in the browser (Overleaf, VS Code's
 // builtin engine, the web demo): two versions' files diffed by PhiTeX's
 // latexdiff (diff.ts, run by the core's host: its `latexdiff` op), the
-// marked-up document typeset by a session of its own on a transport of its
-// own, so the editor's stays warm; one panel shows either (gated sinks).
+// marked-up document typeset by a session of its own, so the editor's stays
+// warm, on the transport the host gives (Overleaf's: another document of the
+// editor's own core, its format and packs there already); one panel shows
+// either (gated sinks). The marked-up document is opened as the editor's
+// main file, the same job: a core that keeps the editor's persisted graph
+// starts the diff's build from the editor's build, an edit of it, as
+// `phitex watch`'s Compare forks the document's session.
 // Against the editor's text, each edit is diffed again, 400 ms after the
 // last, and goes in as an edit of the marked-up document. Where versions
 // come from (Overleaf's history, history.ts; a git revision) and how a file
@@ -31,14 +36,18 @@ export function gate(sink: PreviewSink, on: () => boolean, drop: string[] = []):
   });
 }
 
-/** A compare's files: the marked-up document only (diff.ts made it), nothing live. */
+/** A compare's files: the marked-up document as `main` (diff.ts made it), the project's other files as the editor has them, nothing live. */
 export class DiffHost implements EditorHost {
   private readonly tex: Record<string, string>;
-  constructor(tex: Record<string, string>) {
-    this.tex = tex;
+  private readonly main: string;
+  constructor(tex: Record<string, string>, main: string) {
+    [this.tex, this.main] = [tex, main];
   }
   loadProject() {
     return Promise.resolve(this.tex);
+  }
+  mainFile() {
+    return this.main;
   }
   onOpen() {}
   onChanges() {}
@@ -54,7 +63,7 @@ export interface CompareHost<V> {
   onChanges(cb: () => void): void;
   /** Version `v`'s text files, by path (`say`: what it is doing, "Fetching version 42…", `done` of `total` where it counts). */
   files(v: V, say: (busy: string, done?: number, total?: number) => void): Promise<Record<string, string>>;
-  /** A transport of its own for the marked-up document's session, connected, the project's binary files given. */
+  /** A transport for the marked-up document's session (another document of the editor's core, or a core of its own), connected, the project's binary files given. */
   connect(): Promise<CoreTransport & { close(): void }>;
   /** The marked-up document's sink, painting while `on()` (gate it). */
   sink(on: () => boolean): PreviewSink;
@@ -84,7 +93,8 @@ export class Compare<V> {
   /** Whether the diff's pages are wanted in view (Changes' Diff on): a diff typeset meanwhile shows only if so. */
   private want = false;
   private unopened: (() => void) | null = null;
-  private c: { session: PreviewSession; transport: CoreTransport & { close(): void }; base: Record<string, string>; neu: Record<string, string> | null; d: DiffOut } | undefined;
+  /** The compare's session, its transport, the versions, the diff, and the name the marked-up text has there (the editor's main file's). */
+  private c: { session: PreviewSession; transport: CoreTransport & { close(): void }; base: Record<string, string>; neu: Record<string, string> | null; d: DiffOut; file: string } | undefined;
   private h: CompareHost<V>;
   private counted: ((c: DiffChange[]) => void) | undefined;
   private look: ChangesDiffLook = { colors: "blue", ins: "wavy", del: "strike", fig: "side" };
@@ -107,8 +117,13 @@ export class Compare<V> {
     const d = c && (await this.diffOf(c.base, c.neu).catch(() => null));
     if (!d || this.c !== c) return;
     c.d = d;
-    c.session.sync("diff.tex", d.tex);
+    c.session.sync(c.file, d.tex);
     this.counted?.(d.changes);
+  }
+
+  /** The marked-up text last made (dev: a scenario reads it). */
+  tex(): string | null {
+    return this.c?.d.tex ?? null;
   }
 
   restyle(l: ChangesDiffLook, hide: boolean): void {
@@ -151,7 +166,7 @@ export class Compare<V> {
       this.c.base = old;
       this.c.neu = neu;
       this.c.d = d;
-      this.c.session.sync("diff.tex", d.tex);
+      this.c.session.sync(this.c.file, d.tex);
       this.showing = this.want ? "diff" : "current";
       if (this.want) void this.c.session.resync();
       return d.changes;
@@ -164,8 +179,18 @@ export class Compare<V> {
     const mapped = new Proxy(sink, {
       get: (o, k, r) => (k === "goto" ? (_f: string, from: number, to: number) => this.toSource(from, to) : Reflect.get(o, k, r)),
     });
-    const s = new PreviewSession(new DiffHost({ "diff.tex": d.tex }), t, mapped, this.h.options);
-    this.c = { session: s, transport: t, base: old, neu, d };
+    // (the marked-up text as the editor's main file, the project's other files beside it: the
+    // editor's job, so its persisted graph holds for it; a double-click on its pages, in the
+    // session's remote mode (the host's), taken to the user's file through the diff's map)
+    const file = this.h.session().main ?? "main.tex";
+    const editor = this.h.session().texts();
+    const o = this.h.options;
+    const remote = o.remote && { source: (_f: string, a: number, b: number) => this.toSourceBytes(a, b) };
+    const s = new PreviewSession(new DiffHost({ ...editor, [file]: d.tex }, file), t, mapped, remote ? { ...o, remote } : o);
+    this.c = { session: s, transport: t, base: old, neu, d, file };
+    // (in remote mode a build's end is told, not answered: its status asked then, as the
+    // editor's host does for the editor's, so the last pack fetched is not left loading)
+    if (remote) t.onEvent?.((e) => void (e.event === "settled" && this.c?.session === s && (s as unknown as { core: CoreTransport }).core.request({ op: "status" })));
     this.showing = this.want ? "diff" : "current";
     // (the marked-up document is another one: never the current version's pages as its "last complete render")
     // (typeset out of view: the opening when it first comes into view)
@@ -173,6 +198,11 @@ export class Compare<V> {
     if (this.want) mapped.opening?.();
     say("Typesetting the diff…");
     await s.start();
+    // (remote mode joins, as the editor's does: its files then given, its main set, which opens it)
+    if (remote) {
+      s.refresh({ ...editor, [file]: d.tex });
+      await s.setMain(file);
+    }
     return d.changes;
   }
 
@@ -180,8 +210,15 @@ export class Compare<V> {
   private toSource(from: number, to: number): void {
     const d = this.c?.d;
     if (!d) return;
-    const a = diffSource(d, byteOffset(d.tex, from));
-    const b = diffSource(d, byteOffset(d.tex, Math.max(from, to - 1)));
+    this.toSourceBytes(byteOffset(d.tex, from), byteOffset(d.tex, Math.max(from, to - 1)) + (to > from ? 1 : 0));
+  }
+
+  /** [from, to) of the marked-up text (bytes): the editor at its source in the user's file. */
+  private toSourceBytes(from: number, to: number): void {
+    const d = this.c?.d;
+    if (!d) return;
+    const a = diffSource(d, from);
+    const b = diffSource(d, Math.max(from, to - 1));
     if (!a) return;
     const t = this.h.session().text(a.file);
     if (t === undefined) return;
@@ -198,7 +235,7 @@ export class Compare<V> {
     if (this.showing !== "diff" || !c) return session.follow(file, pos);
     const t = session.text(file);
     const out = t === undefined ? null : diffPlace(c.d, file, byteOffset(t, pos));
-    if (out !== null) c.session.follow("diff.tex", charOffset(c.d.tex, out));
+    if (out !== null) c.session.follow(c.file, charOffset(c.d.tex, out));
   }
 
   show(diff: boolean): void {
@@ -221,7 +258,7 @@ export class Compare<V> {
       this.h.goto(c.new.file, from, to);
       if (this.showing === "current") void session.toPage(c.new.file, from);
     }
-    if (this.showing === "diff") void this.c.session.toPage("diff.tex", charOffset(this.c.d.tex, c.out[0]));
+    if (this.showing === "diff") void this.c.session.toPage(this.c.file, charOffset(this.c.d.tex, c.out[0]));
   }
 
   /** The editor at change `n` (from 1) in its file, against the editor's text (a past version's is nowhere to go). */
@@ -269,7 +306,7 @@ export class Compare<V> {
     const out = new Map<number, DiffMark>();
     const grow = (b: [number, number, number, number] | undefined, x: number, y: number): [number, number, number, number] => (b ? [Math.min(b[0], x), Math.min(b[1], y - 8), Math.max(b[2], x + 5), Math.max(b[3], y + 3)] : [x, y - 8, x + 5, y + 3]);
     for (const g of gs) {
-      if (g.file !== "diff.tex") continue;
+      if (g.file !== c.file) continue;
       // (the changes are in the text's order: the first whose markup ends past the glyph)
       let lo = 0, hi = d.changes.length;
       while (lo < hi) {

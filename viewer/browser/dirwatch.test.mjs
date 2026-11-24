@@ -168,7 +168,7 @@ test("a folder's file manager; documents in tabs of their own, switched in place
   await shot(ix, "index-built-dark", { scheme: "dark" });
   const at = await ix.point(`.fm-row[data-path="beta/main.tex"]`);
   for (const type of ["mousePressed", "mouseReleased"]) await ix.send("Input.dispatchMouseEvent", { type, x: at.x, y: at.y, button: "middle", clickCount: 1 });
-  const tb = await newTab(/\/d\/[0-9a-f]{12}\/$/);
+  const tb = await newTab(/\/d\/[0-9a-f]{12}\/(\?|$)/);
   await tb.until(`+$("#pgn")?.textContent > 0`, "beta's page in its own tab", 240000);
   assert.notEqual(await ta.q(`location.pathname`), await tb.q(`location.pathname`));
   assert.equal(await ta.q(`$(".fcol .fm-row[aria-current=page]")?.dataset.path`), "papers/alpha/main.tex");

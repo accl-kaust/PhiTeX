@@ -127,8 +127,8 @@ export class FolderLink {
 
 /** Where the file manager is shown, and what opening does there. */
 export interface FilesHost {
-  /** A document's address, from this page. */
-  docHref(id: string): string;
+  /** A document's address, from this page (its path in it: a tab left open finds it in the next watch). */
+  docHref(id: string, path: string): string;
   /** A raw file's address (a PDF, a picture), from this page. */
   rawHref(path: string): string;
   /** A folder's address, from this page (the index at that folder). */
@@ -494,7 +494,7 @@ export class FileList {
 
   private hrefOf(e: FileEntry): string | null {
     if (e.kind === "dir") return this.host.dirHref(e.path);
-    if (e.kind === "tex" && e.id) return this.host.docHref(e.id);
+    if (e.kind === "tex" && e.id) return this.host.docHref(e.id, e.path);
     if (e.kind === "pdf" || e.kind === "image") return this.host.rawHref(e.path);
     return null;
   }
@@ -674,7 +674,7 @@ export class QuickOpen {
 
   private open(f: Found, newTab: boolean): void {
     this.close();
-    const href = this.host.docHref(f.id);
+    const href = this.host.docHref(f.id, f.path);
     if (newTab) window.open(href, "_blank", "noopener");
     else if (f.path !== this.host.current) location.assign(href);
   }
@@ -718,7 +718,7 @@ export class QuickOpen {
         r.className = "qo-row";
         r.id = `qo-r-${k}`;
         r.dataset.k = String(k);
-        r.href = this.host.docHref(f.id);
+        r.href = this.host.docHref(f.id, f.path);
         r.tabIndex = -1;
         r.setAttribute("role", "option");
         r.setAttribute("aria-selected", String(k === this.at));

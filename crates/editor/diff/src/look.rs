@@ -28,6 +28,31 @@
 
 use crate::{Color, DelStyle, InsStyle, Markup, Options, Style, Subtype};
 
+/// The files the markup may load beyond the document's own, whatever the
+/// look: the packages of the types and subtypes that need one
+/// (changebar and xcolor's bars, footmisc's footnotes, the subtypes'
+/// zref, atbegshi and etoolbox) and the math fonts a deleted part's
+/// caret (`$\scriptstyle\wedge$`) loads where the document set no math
+/// (LaTeX loads every family at its script sizes). A host that fetches
+/// TeX's files (Shelf) keeps them ahead, so that a first diff downloads
+/// nothing.
+pub const LOADS: &[&str] = &[
+    "changebar.sty",
+    "xcolor.sty",
+    "footmisc.sty",
+    "zref.sty",
+    "atbegshi.sty",
+    "etoolbox.sty",
+    "cmr7.tfm",
+    "cmmi7.tfm",
+    "cmsy7.tfm",
+    "cmr5.tfm",
+    "cmmi5.tfm",
+    "cmsy5.tfm",
+    "cmex10.tfm",
+    "cmsy7.pfb",
+];
+
 /// ulem's underlining, renamed: each definition on one line (every line
 /// of the preamble's extension is tagged `%DIF PREAMBLE`, after a space a
 /// macro's body would keep).

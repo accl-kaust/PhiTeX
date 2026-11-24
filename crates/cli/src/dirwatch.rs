@@ -481,8 +481,6 @@ struct State {
     /// The watch is quitting: no session starts any more (a tab cut
     /// joins again at once, and would start its document's anew).
     quitting: bool,
-    /// Quick open's list, and the folder's version it was made at.
-    found: Option<(u64, Vec<String>)>,
 }
 
 /// What wakes the watch's loop.
@@ -498,9 +496,15 @@ pub struct Shared {
     token: String,
     st: Mutex<State>,
     cv: Condvar,
-    /// The folder's files changed this many times (the listings sent
-    /// again, quick open's list made again).
+    /// The folders shown changed this many times (their listings sent
+    /// again).
     files: AtomicU64,
+    /// The folders a page shows (the index's, a Files column's), each
+    /// watched alone, not its subfolders, while one does: how many pages
+    /// show it. Nothing else is watched: a folder of a hundred thousand
+    /// folders starts at once, and changes nobody looks at cost nothing.
+    shown: Mutex<HashMap<String, usize>>,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// A session's command line, before its file.
     args: Vec<String>,
     turns: PathBuf,
@@ -518,32 +522,80 @@ impl Shared {
     }
 
     /// The path document address `id` stands for: one handed out, else
-    /// found among the folder's `.tex` files (a tab left open from the
-    /// last watch).
-    fn rel_of(&self, id: &str) -> Option<String> {
+    /// `hint` (the address's `?path=`, a tab left open from the last
+    /// watch) when it is that id's. Nothing is walked for it.
+    fn rel_of(&self, id: &str, hint: Option<&str>) -> Option<String> {
         if let Some(r) = lock(&self.st).ids.get(id) {
             return Some(r.clone());
         }
-        let all = self.found();
-        let mut st = lock(&self.st);
-        for r in all {
-            st.ids.insert(doc_id(&r), r);
-        }
-        st.ids.get(id).cloned()
+        let rel = hint
+            .filter(|h| doc_id(h) == id && kind_of(h) == "tex" && inside(&self.root, h).is_ok())?
+            .to_owned();
+        lock(&self.st).ids.insert(id.to_owned(), rel.clone());
+        Some(rel)
     }
 
-    /// Quick open's list: every `.tex` file, made again when the folder
-    /// changed.
+    /// Quick open's list: every `.tex` file, walked when asked (no
+    /// folder is watched for it).
     fn found(&self) -> Vec<String> {
-        let v = self.files.load(Ordering::Acquire);
-        if let Some((at, l)) = &lock(&self.st).found
-            && *at == v
-        {
-            return l.clone();
+        find_tex(&self.root)
+    }
+
+    /// Folder `rel` shown by one more page: watched (alone) from the
+    /// first.
+    fn show(&self, rel: &str) {
+        let mut shown = lock(&self.shown);
+        let n = shown.entry(rel.to_owned()).or_insert(0);
+        *n += 1;
+        if *n == 1 {
+            if let (Some(w), Ok(p)) = (lock(&self.watcher).as_mut(), inside(&self.root, rel)) {
+                let _ = w.watch(&p, RecursiveMode::NonRecursive);
+            }
+            self.ui
+                .event(&json!({"event": "watching", "folders": shown.len()}));
         }
-        let l = find_tex(&self.root);
-        lock(&self.st).found = Some((v, l.clone()));
-        l
+    }
+
+    /// Folder `rel` shown by one page less: no longer watched once none
+    /// shows it.
+    fn hide(&self, rel: &str) {
+        let mut shown = lock(&self.shown);
+        let Some(n) = shown.get_mut(rel) else { return };
+        *n -= 1;
+        if *n == 0 {
+            shown.remove(rel);
+            if let (Some(w), Ok(p)) = (lock(&self.watcher).as_mut(), inside(&self.root, rel)) {
+                let _ = w.unwatch(&p);
+            }
+            self.ui
+                .event(&json!({"event": "watching", "folders": shown.len()}));
+        }
+    }
+}
+
+/// The folder a page shows, watched while it does ([`Shared::show`]).
+struct Showing<'a> {
+    sh: &'a Shared,
+    dir: Option<String>,
+}
+
+impl Showing<'_> {
+    fn set(&mut self, dir: &str) {
+        if self.dir.as_deref() == Some(dir) {
+            return;
+        }
+        self.sh.show(dir);
+        if let Some(old) = self.dir.replace(dir.to_owned()) {
+            self.sh.hide(&old);
+        }
+    }
+}
+
+impl Drop for Showing<'_> {
+    fn drop(&mut self) {
+        if let Some(d) = self.dir.take() {
+            self.sh.hide(&d);
+        }
     }
 }
 
@@ -905,6 +957,15 @@ fn escape(rel: &str) -> String {
     s
 }
 
+/// Parameter `key` of a path's or an address's query, decoded.
+fn query(path: &str, key: &str) -> Option<String> {
+    let q = path.split_once('?')?.1;
+    let q = q.split('#').next().unwrap_or(q);
+    q.split('&')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+        .and_then(|v| unescape(&v.replace('+', " ")))
+}
+
 fn redirect(w: &mut TcpStream, to: &str) {
     let _ = write!(
         w,
@@ -944,12 +1005,9 @@ fn serve(sh: &Arc<Shared>, conn: TcpStream) {
             let _ = ws::respond(&mut w, "200 OK", "text/plain", b"phitex watch DIR\n");
         }
         "ws" if req.is_upgrade() => {
-            // (`?doc=ID`: a document's viewer asking, its Files panel)
-            let doc = req
-                .path
-                .split_once('?')
-                .and_then(|(_, q)| q.split('&').find_map(|kv| kv.strip_prefix("doc=")))
-                .and_then(|id| sh.rel_of(id));
+            // (`?doc=ID&path=…`: a document's viewer asking, its Files panel)
+            let doc = query(&req.path, "doc")
+                .and_then(|id| sh.rel_of(&id, query(&req.path, "path").as_deref()));
             if let Ok(sock) = ws::upgrade(r.into_inner(), &req) {
                 index_socket(sh, sock, doc);
             }
@@ -1019,8 +1077,12 @@ fn document(
     r: BufReader<TcpStream>,
     mut w: TcpStream,
 ) {
+    // (its path from the address, else from the page's, that asks: a tab
+    // left open from the last watch names its document so)
+    let hint =
+        query(&req.path, "path").or_else(|| req.header("referer").and_then(|r| query(r, "path")));
     let Some(rel) = sh
-        .rel_of(id)
+        .rel_of(id, hint.as_deref())
         .filter(|rel| kind_of(rel) == "tex" && inside(&sh.root, rel).is_ok_and(|p| p.is_file()))
     else {
         let _ = ws::respond(
@@ -1040,11 +1102,11 @@ fn document(
             let (open, why) = root_of(&sh.root, &rel);
             if open != rel {
                 let to = doc_id(&open);
-                lock(&sh.st).ids.insert(to.clone(), open);
-                let q = why
-                    .map(|w| format!("?note={}", escape(&w)))
+                lock(&sh.st).ids.insert(to.clone(), open.clone());
+                let note = why
+                    .map(|w| format!("&note={}", escape(&w)))
                     .unwrap_or_default();
-                return redirect(&mut w, &format!("../{to}/{q}"));
+                return redirect(&mut w, &format!("../{to}/?path={}{note}", escape(&open)));
             }
             if let Err(e) = connect(sh, &rel, true) {
                 sh.ui.error(&e);
@@ -1246,6 +1308,7 @@ fn root_name(p: &Path) -> String {
 /// document of the viewer asking, which it starts in.
 fn index_socket(sh: &Arc<Shared>, mut sock: WebSocket<TcpStream>, doc: Option<String>) {
     let mut dir: Option<String> = None;
+    let mut watching = Showing { sh, dir: None };
     let hello = json!({
         "event": "hello",
         "root": root_name(&sh.root.path),
@@ -1268,6 +1331,7 @@ fn index_socket(sh: &Arc<Shared>, mut sock: WebSocket<TcpStream>, doc: Option<St
                         match folder(sh, want) {
                             Ok(v) => {
                                 dir = Some(want.to_owned());
+                                watching.set(want);
                                 sent = v.to_string();
                                 at = (sh.files.load(Ordering::Acquire), lock(&sh.st).version);
                                 Some(sent.clone())
@@ -1319,6 +1383,7 @@ fn index_socket(sh: &Arc<Shared>, mut sock: WebSocket<TcpStream>, doc: Option<St
                 up = parent(&up).to_owned();
             }
             dir = Some(up.clone());
+            watching.set(&up);
             at = (u64::MAX, u64::MAX);
             let Ok(v) = folder(sh, &up) else { continue };
             v.to_string()
@@ -1507,6 +1572,8 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
         st: Mutex::new(State::default()),
         cv: Condvar::new(),
         files: AtomicU64::new(0),
+        shown: Mutex::new(HashMap::new()),
+        watcher: Mutex::new(None),
         args: session_args(args, &shown_dir),
         turns: turns.clone(),
         tx: Mutex::new(tx.clone()),
@@ -1529,9 +1596,11 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
             })
             .unwrap_or_else(|e| fail(&format!("the viewer: {e}")));
     }
-    let _watcher = {
+    // (the folders shown watched, each alone: the root from the start,
+    // the others while a page shows them)
+    {
         let s = sh.clone();
-        let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+        let w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
             let Ok(ev) = ev else { return };
             if matches!(ev.kind, notify::EventKind::Access(_)) {
                 return;
@@ -1541,10 +1610,9 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
             }
         })
         .unwrap_or_else(|e| fail(&format!("can't watch {}: {e}", root.display())));
-        w.watch(&root, RecursiveMode::Recursive)
-            .unwrap_or_else(|e| fail(&format!("can't watch {}: {e}", root.display())));
-        w
-    };
+        *lock(&sh.watcher) = Some(w);
+        sh.show("");
+    }
     if !ui.quiet {
         let threads = crate::session::threads(o.threads);
         ui.line(&format!(

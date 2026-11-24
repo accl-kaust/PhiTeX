@@ -348,7 +348,15 @@ export class Viewer {
       const hit = this.linkAt(e);
       if (el) el.classList.toggle("on-link", !!hit);
       this.pointer = [e.clientX, e.clientY];
-      this.hover(hit, el, e);
+      // (a button held: a selection being dragged, or the pages panned: no
+      // window opens over it, and one on its way is not shown)
+      this.hover(e.buttons ? null : hit, el, e);
+    });
+    // (a press starts a selection or a drag: the window on its way stays away)
+    root.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || !this.peekAt || (this.peekEl && !this.peekEl.hidden)) return;
+      clearTimeout(this.peekTimer);
+      this.peekAt = null;
     });
     root.addEventListener("mouseleave", () => this.hover(null, null));
     const doc = root.ownerDocument;
