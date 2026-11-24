@@ -228,6 +228,9 @@ jobs:
           # (#37: Page colours in the panel's Settings: the filter on the pages, kept, Overleaf's
           # dark PDF winning, nothing written again at the toolbar's passes)
           node tools/dev/mock-run.mjs test/scenarios/colours.json
+          # (Collaborators on the PDF: a collaborator's cursor, as Overleaf keeps it, marked on the
+          # pages in their colour with their name, moved when they move, gone when they leave)
+          node tools/dev/mock-run.mjs test/scenarios/collaborators.json
       # (Firefox: its content scripts fetch as the page by content.fetch, whose
       # objects are the page's; a project opened, Compare with a past version and a
       # figure replaced, through that path. Chromium has no content.fetch, so the
