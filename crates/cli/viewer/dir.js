@@ -906,7 +906,7 @@ span.fm-crumb { font-weight: 600; color: var(--ph-fg); }
 .fm-note { padding: 8px 14px; font-size: 13px; border-bottom: 1px solid var(--ph-border); }
 .fm-note.info { background: color-mix(in srgb, var(--ph-info, #1d3e72) 10%, var(--ph-bar)); }
 .fm-note.bad { background: color-mix(in srgb, var(--ph-danger) 14%, var(--ph-bar)); color: var(--ph-fg); }
-.fm-head, .fm-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(130px, 170px) 92px 72px 0px; align-items: center; column-gap: 12px; padding: 0 14px; }
+.fm-head, .fm-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(130px, 220px) 92px 72px 0px; align-items: center; column-gap: 12px; padding: 0 14px; }
 .fm-head { height: 30px; border-bottom: 1px solid var(--ph-border); color: var(--ph-fg2); font-size: 12px; font-weight: 600; }
 .fm-h { all: unset; display: inline-flex; align-items: center; gap: 2px; cursor: default; white-space: nowrap; }
 button.fm-h { cursor: pointer; border-radius: 4px; padding: 2px 4px; margin: 0 -4px; }

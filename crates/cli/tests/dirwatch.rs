@@ -647,8 +647,9 @@ fn a_folder_watch_builds_one_document_at_a_time() {
     assert!(w.get(&format!("d/{}/", id("a/main.tex"))).0.contains("200"));
     assert!(w.get(&format!("d/{}/", id("b/main.tex"))).0.contains("200"));
     for d in ["a/main.tex", "b/main.tex"] {
+        // (whichever built first, the other's build read after it)
         let b = w
-            .next(|v| v["event"] == "build" && v["doc"] == d, 600)
+            .seen_or_next(|v| v["event"] == "build" && v["doc"] == d, 600)
             .unwrap_or_else(|| panic!("{d}'s build"));
         assert_eq!(b["ok"], true, "{b}");
     }
