@@ -6476,6 +6476,115 @@ fn png_article_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// `phitex session png --label` and `where` on displayed equations and a
+/// theorem (the usability study's cases): an equation's part is its whole
+/// display, its left-hand side and number with it, whether its words are
+/// in the text around it or not; an equation in a theorem is the
+/// equation, not the theorem's words; a theorem's part runs to its end,
+/// its last display in it. The words of math are few and scattered (a
+/// subscript's `uniform` was found in the sentence before its display):
+/// the glyph origins place the display's glyphs in its source.
+#[test]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+fn session_png_equations_and_theorems() {
+    let _one = one();
+    let dir = scratch("session-png-equations");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\documentclass{article}\n\\usepackage{amsmath,amsthm}\n\\newtheorem{theorem}{Theorem}\n\
+\\begin{document}\n\\section{Start}\nOpening paragraph with plain words about the estimate below.\n\
+\\begin{equation}\\label{eq:long}\n  \\mathrm{Lhsword}_{k}(x) + \\mathrm{Moreleft}(y)\n  = \\sum_{i=1}^{k} w_i(x)\\, f(x_i)\n\\end{equation}\n\
+Middle paragraph sits between the estimate and the theorem.\n\n\
+\\begin{theorem}[Bound]\\label{thm:main}\nSuppose the opening words of the theorem hold.\n\
+For a target error the greedy rule reaches it with probe count\n\
+\\begin{equation}\\label{eq:first}\n  \\mathrm{Firstdisp}_{\\mathrm{greedy}}(\\varepsilon)\n  = O\\!\\left(s \\log(1/\\varepsilon)\\right),\n\\end{equation}\n\
+whereas uniform sampling has probe count\n\
+\\begin{equation}\\label{eq:second}\n  \\mathrm{Seconddisp}_{\\mathrm{uniform}}(\\varepsilon)\n  = O\\!\\left(\\varepsilon^{-2}\\right).\n\\end{equation}\n\
+\\end{theorem}\n\nClosing paragraph after the theorem ends here.\n\\end{document}\n",
+    )
+    .expect("the document");
+    let s = PngSession::start(&dir, "doc.tex", &[]);
+    let png = |label: &str| s.json(&["png", "--label", label, "--dpi", "100"]);
+    let lines_of = |v: &serde_json::Value| {
+        page_parts(
+            v["pdf"].as_str().expect("the PDF"),
+            usize::try_from(v["page"].as_u64().expect("a page") - 1).expect("a page"),
+        )
+        .0
+    };
+    // (whether box `b` holds the words `t` of the first line with them)
+    let holds = |b: &[f64], lines: &[phitex_render::TextLine], t: &str| {
+        let l = lines
+            .iter()
+            .find(|l| l.text.contains(t))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no line {t:?} in {:?}",
+                    lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+                )
+            });
+        let i = l.text.find(t).expect("the words");
+        let a = l.text[..i].encode_utf16().count();
+        let e = a + t.encode_utf16().count() - 1;
+        holds_text(b, l, l.xs[a], l.rs[e])
+    };
+    // (whether box `b` holds any of the middle of the line with `t`)
+    let touches = |b: &[f64], lines: &[phitex_render::TextLine], t: &str| {
+        lines.iter().filter(|l| l.text.contains(t)).any(|l| {
+            let mid = l.x + l.w / 2.0;
+            holds_text(b, l, mid, mid)
+        })
+    };
+    for (label, number, has, hasnt) in [
+        (
+            "eq:long",
+            "1",
+            &["Lhsword", "Moreleft", "(1)"][..],
+            &["Opening", "Middle"][..],
+        ),
+        (
+            "eq:first",
+            "2",
+            &["Firstdisp", "(2)"][..],
+            &["Suppose", "whereas", "Seconddisp"][..],
+        ),
+        (
+            "eq:second",
+            "3",
+            &["Seconddisp", "(3)"][..],
+            &["whereas", "Firstdisp", "Closing"][..],
+        ),
+        (
+            "thm:main",
+            "1",
+            &[
+                "Theorem",
+                "Suppose",
+                "Firstdisp",
+                "whereas",
+                "Seconddisp",
+                "(3)",
+            ][..],
+            &["Middle", "Closing"][..],
+        ),
+    ] {
+        let v = png(label);
+        eprintln!("{label}: {v}");
+        assert_eq!(v["number"], number, "{label}: {v}");
+        let b = bbox_of(&v);
+        let lines = lines_of(&v);
+        for t in has {
+            assert!(holds(&b, &lines, t), "{label}: {t:?} not in {b:?}: {v}");
+        }
+        for t in hasnt {
+            assert!(!touches(&b, &lines, t), "{label}: {t:?} in {b:?}: {v}");
+        }
+        // (`where` says the same box)
+        let w = s.json(&["where", label]);
+        assert_eq!(w["bbox"], v["bbox"], "{label}: {w}");
+    }
+}
+
 /// `phitex session png --label` on a two-column article: each label's
 /// float whole (its picture or table and its caption, a subfigure's own
 /// picture and caption), and nothing of the text around it; the PNG the

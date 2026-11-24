@@ -2776,6 +2776,53 @@ fn locate(
             break;
         }
     }
+    let in_range_of = |names: &[String], c: &crate::shot::Code| {
+        names.get(c.file as usize).is_some_and(|n| {
+            ranges.iter().any(|(f, a, b)| {
+                crate::shot::same_file(n, f)
+                    && (c.start as usize) < *b
+                    && (c.end as usize).max(c.start as usize + 1) > *a
+            })
+        })
+    };
+    // (the page whose glyph origins place the most glyphs in the
+    // element's source, of those the engine placed it on: the element's
+    // page for certain, where its words are few or a neighbour's too, as
+    // a display's math is)
+    let shot_names: Vec<String> = strs(&v["files"]);
+    let by_origins = v["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let k = usize::try_from(p["page"].as_u64()?).ok()?;
+            let n = page_codes(p)
+                .iter()
+                .filter(|c| c.end > c.start && in_range_of(&shot_names, c))
+                .count();
+            (n > 0).then_some((k, n))
+        })
+        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k)));
+    if let Some((k, _)) = by_origins
+        && best.as_ref().is_none_or(|b| b.page != k)
+        && let Some((w, h, marks)) = r.marks(&bytes, k)
+    {
+        let words = crate::shot::page_words(&marks);
+        let found = crate::shot::find(&tokens, &words)
+            .into_iter()
+            .next()
+            .unwrap_or(crate::shot::Found {
+                pairs: Vec::new(),
+                score: 0.0,
+            });
+        best = Some(Shown {
+            page: k,
+            size: (w, h),
+            marks,
+            words,
+            found,
+        });
+    }
     let Some(shown) = best else {
         return Err(Failed(
             EXIT_REFUSED,
@@ -2793,7 +2840,7 @@ fn locate(
         .flatten()
         .find(|p| p["page"].as_u64() == u64::try_from(k).ok())
         .cloned();
-    let mut names: Vec<String> = strs(&v["files"]);
+    let mut names: Vec<String> = shot_names;
     if pv.is_none() {
         let v2 = shot(c, &[], &[k])?;
         pv = v2["pages"].as_array().and_then(|p| p.first()).cloned();
@@ -2807,15 +2854,7 @@ fn locate(
                 && (top.join(n).is_file() || top.join(format!("{n}.tex")).is_file())
         })
     };
-    let in_range = |c: &crate::shot::Code| {
-        names.get(c.file as usize).is_some_and(|n| {
-            ranges.iter().any(|(f, a, b)| {
-                crate::shot::same_file(n, f)
-                    && (c.start as usize) < *b
-                    && (c.end as usize).max(c.start as usize + 1) > *a
-            })
-        })
-    };
+    let in_range = |c: &crate::shot::Code| in_range_of(&names, c);
     // (each glyph: the element's, found; another element's, its typed
     // text as the origins place it; or neither)
     let texts: std::cell::RefCell<std::collections::HashMap<u32, Option<Vec<u8>>>> =
@@ -2832,14 +2871,34 @@ fn locate(
             .is_some_and(|t| crate::shot::whole_words(t, a, b))
     });
     let code_at = crate::shot::codes_at(&codes);
+    // (a glyph the origins place in the element's source is its own,
+    // math and macros' glyphs too: an equation's left-hand side and
+    // number, a theorem's last display; not one placed at a point, no
+    // bytes its own, as a neighbour's macro text, a subfigure's "(b)", is
+    // put at the end of the text before it; a word of it matched
+    // elsewhere is not, where the origins say that glyph is another
+    // element's text, as a word of an equation's in the theorem's text
+    // around it)
+    let mut mine_bytes: Option<(usize, usize)> = None;
     let mut class: Vec<crate::shot::Class> = shown
         .marks
         .iter()
         .map(|m| match m.kind {
             phitex_render::MarkKind::Glyph { x, y, .. } => match code_at(x, y) {
-                Some(c) if sure[c] && user(codes[c].file) && !in_range(&codes[c]) => {
-                    crate::shot::Class::Sure(c)
+                Some(c) if codes[c].end > codes[c].start && in_range(&codes[c]) => {
+                    let cc = &codes[c];
+                    if names
+                        .get(cc.file as usize)
+                        .is_some_and(|n| crate::shot::same_file(n, &file))
+                    {
+                        let (s0, e0) =
+                            (cc.start as usize, (cc.end as usize).max(cc.start as usize));
+                        mine_bytes =
+                            Some(mine_bytes.map_or((s0, e0), |(x0, y0)| (x0.min(s0), y0.max(e0))));
+                    }
+                    crate::shot::Class::Mine
                 }
+                Some(c) if sure[c] && user(codes[c].file) => crate::shot::Class::Sure(c),
                 _ => crate::shot::Class::Neutral,
             },
             _ => crate::shot::Class::Neutral,
@@ -2847,7 +2906,9 @@ fn locate(
         .collect();
     for &(wi, _) in &shown.found.pairs {
         for &m in &shown.words[wi].marks {
-            class[m] = crate::shot::Class::Mine;
+            if !matches!(class[m], crate::shot::Class::Sure(_)) {
+                class[m] = crate::shot::Class::Mine;
+            }
         }
     }
     let shown_bytes = (
@@ -2856,6 +2917,7 @@ fn locate(
             .pairs
             .iter()
             .map(|p| tokens[p.1].start)
+            .chain(mine_bytes.map(|m| m.0))
             .min()
             .unwrap_or(a),
         shown
@@ -2863,6 +2925,7 @@ fn locate(
             .pairs
             .iter()
             .map(|p| tokens[p.1].end)
+            .chain(mine_bytes.map(|m| m.1))
             .max()
             .unwrap_or(b),
     );
