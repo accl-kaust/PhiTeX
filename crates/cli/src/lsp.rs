@@ -999,6 +999,8 @@ fn info(w: &Watch) -> Value {
         "root": root.display().to_string(),
         "viewer": lock(&w.viewer).clone(),
         "version": env!("CARGO_PKG_VERSION"),
+        // (this binary's, which `phitex session` compares with its own)
+        "build": crate::build_id(),
     })
 }
 

@@ -308,8 +308,10 @@ pub fn publish(info: &Value) {
     }
 }
 
-/// This watch's discovery file removed (it ends).
+/// This watch's discovery file removed (it ends), and every request
+/// waiting on it answered so ([`crate::review::Hub::end`]).
 pub fn forget() {
+    crate::review::hub().end();
     if let Some(p) = PUBLISHED.get() {
         let _ = std::fs::remove_file(&p.file);
     }
@@ -342,6 +344,48 @@ pub fn alive(v: &Value) -> bool {
         Duration::from_millis(300),
     )
     .is_ok()
+}
+
+/// Whether the watch `v` names is known to have ended: its process gone
+/// where this one can look it up (its PID namespace, [`ours_to_see`]),
+/// or its socket refusing a connection where its 127.0.0.1 is this
+/// one's ([`same_net`]: a process of its pid is another's). What cannot be
+/// told is taken as running.
+pub fn gone(v: &Value) -> bool {
+    let Some(pid) = v["pid"].as_u64() else {
+        return false;
+    };
+    #[cfg(unix)]
+    if ours_to_see(v) && !unix_runs(pid) {
+        return true;
+    }
+    #[cfg(windows)]
+    if windows_runs(pid) == Some(false) {
+        return true;
+    }
+    let _ = pid;
+    let port = v["lsp"]["port"]
+        .as_u64()
+        .and_then(|p| u16::try_from(p).ok());
+    match port {
+        Some(port) if same_net(v) => TcpStream::connect_timeout(
+            &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            Duration::from_millis(300),
+        )
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused),
+        _ => false,
+    }
+}
+
+/// [`gone`] as a request waiting on the watch looks at it, often: by its
+/// process alone where this one can look it up (no connection made to
+/// its socket a few times a second), else by its socket.
+pub fn ended(v: &Value) -> bool {
+    #[cfg(unix)]
+    if ours_to_see(v) {
+        return v["pid"].as_u64().is_some_and(|pid| !unix_runs(pid));
+    }
+    gone(v)
 }
 
 /// Unix: whether process `pid` runs: `kill(pid, 0)` sends nothing and
@@ -407,11 +451,12 @@ pub fn live_in(d: &Path) -> Vec<Value> {
     found.retain(|(p, v)| {
         let ours = Some(p.as_path()) == PUBLISHED.get().map(|x| x.file.as_path());
         let keep = ours || alive(v);
-        // (removed only when its watch is known gone: its process looked
-        // up, or its socket refused in the same network; a reader in a
-        // sandbox of its own (PID namespace, no network) cannot tell, and
-        // leaves the file)
-        if !keep && (ours_to_see(v) || same_net(v)) {
+        // (removed only when its watch is known gone ([`gone`]): its
+        // process looked up, or its socket refused in the same network; a
+        // reader in a sandbox of its own (PID namespace, no network)
+        // cannot tell, nor where the process runs and its socket cannot
+        // be reached, and leaves the file)
+        if !keep && gone(v) {
             let _ = std::fs::remove_file(p);
         }
         keep
@@ -516,39 +561,227 @@ fn out_first(d: &Path) -> bool {
     folder().is_ok_and(|f| f == d)
 }
 
-/// `phitex session list`: the running watches, a line each, or (`--json`)
-/// their discovery files as one JSON array on a line.
-pub fn sessions(ui: &crate::ui::Ui, as_json: bool) -> i32 {
-    let d = match dir() {
-        Ok(d) => d,
-        Err(e) => {
-            ui.error(&format!("the sessions folder: {e}"));
-            return crate::EXIT_FAILED;
+/// The running watches in every folder a watch may have said itself in
+/// ([`read_folders`]: this process's sessions folder, the user's runtime
+/// folder, the cache's), oldest first, each once; and the discovery files
+/// of watches that run, or may, but cannot be reached from here (their
+/// 127.0.0.1 not this one's: a sandbox's network, or the host's seen
+/// from one).
+pub fn every_watch(folders: &[(PathBuf, String)]) -> (Vec<Value>, Vec<Value>) {
+    let mut live: Vec<Value> = Vec::new();
+    for (d, _) in folders {
+        for v in live_in(d) {
+            if !live
+                .iter()
+                .any(|w| w["pid"] == v["pid"] && w["lsp"]["port"] == v["lsp"]["port"])
+            {
+                live.push(v);
+            }
         }
-    };
-    let live = live_in(&d);
+    }
+    live.sort_by(|a, b| a["started"].as_str().cmp(&b["started"].as_str()));
+    let mut unreachable: Vec<Value> = Vec::new();
+    for (_, v) in folders.iter().flat_map(|(d, _)| files_in(d)) {
+        let listed = live
+            .iter()
+            .chain(&unreachable)
+            .any(|w| w["pid"] == v["pid"] && w["lsp"]["port"] == v["lsp"]["port"]);
+        if !listed && !gone(&v) {
+            unreachable.push(v);
+        }
+    }
+    (live, unreachable)
+}
+
+/// Why the user's runtime folder, where a watch outside a sandbox says
+/// itself, is hidden from this process, if it is: a folder of a
+/// sandbox's own mounted over it (two mounts at `/run/user/<uid>`, the
+/// later one seen), or none there at all.
+pub fn hidden_runtime() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let uid = own_uid()?;
+        let run = format!("/run/user/{uid}");
+        let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        let over = mounts
+            .lines()
+            .filter(|l| l.split(' ').nth(4) == Some(run.as_str()))
+            .count();
+        if over > 1 {
+            return Some(format!(
+                "a sandbox mounted a folder of its own over the user's runtime folder, {run}"
+            ));
+        }
+        if !Path::new(&run).is_dir()
+            && std::env::var_os("XDG_RUNTIME_DIR").is_none_or(|v| v.is_empty())
+        {
+            return Some(format!("the user's runtime folder, {run}, is not there"));
+        }
+    }
+    None
+}
+
+/// The `phitex watch` processes of this user that run, seen from here
+/// (Linux's /proc: this PID namespace), whose discovery file is in none of
+/// `seen`: each one's pid and command line. Their files are in a sessions
+/// folder hidden from here (a sandbox's), so their tokens are too; they
+/// are named so the user's agent knows they run.
+pub fn unseen_watches(seen: &[Value]) -> Vec<(u64, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let Some(uid) = own_uid() else {
+            return Vec::new();
+        };
+        let me = u64::from(std::process::id());
+        let mut out: Vec<(u64, String)> = std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let pid: u64 = e.file_name().to_str()?.parse().ok()?;
+                if pid == me || seen.iter().any(|v| v["pid"].as_u64() == Some(pid)) {
+                    return None;
+                }
+                if std::fs::metadata(e.path()).ok()?.uid() != uid {
+                    return None;
+                }
+                let cmd = std::fs::read(e.path().join("cmdline")).ok()?;
+                let args: Vec<String> = cmd
+                    .split(|b| *b == 0)
+                    .filter(|a| !a.is_empty())
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect();
+                let exe = Path::new(args.first()?).file_name()?.to_str()?;
+                (exe == "phitex" && args.get(1).map(String::as_str) == Some("watch"))
+                    .then(|| (pid, args.join(" ")))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = seen;
+        Vec::new()
+    }
+}
+
+/// What is said of a watch [`unseen_watches`] found: pid `pid`, run as
+/// `cmd`; `hidden`: why the user's runtime folder is hidden here.
+pub fn unseen_line(pid: u64, cmd: &str, hidden: Option<&str>) -> String {
+    format!(
+        "a phitex watch runs that cannot be reached from here: pid {pid}, `{cmd}`: \
+         it said itself in a sessions folder this process does not see{}, its token with it; \
+         reach it with `phitex session --session <its viewer's URL>` (as its terminal or browser shows it)",
+        hidden.map(|h| format!(" (here {h})")).unwrap_or_default()
+    )
+}
+
+/// Why this process may be in a sandbox (bubblewrap's, a container's,
+/// Flatpak's), as said to the user, or none seen.
+pub fn sandbox_sign() -> Option<String> {
+    if std::env::var_os("PHITEX_SANDBOX").is_some_and(|v| !v.is_empty()) {
+        return Some("PHITEX_SANDBOX is set".to_owned());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(c) = std::fs::read_to_string("/proc/1/comm") {
+            let c = c.trim();
+            if ["bwrap", "bubblewrap", "firejail", "nsjail"].contains(&c) {
+                return Some(format!("its first process is {c}"));
+            }
+        }
+        if Path::new("/.flatpak-info").exists() {
+            return Some("Flatpak's".to_owned());
+        }
+        if std::env::var_os("container").is_some() || Path::new("/.dockerenv").exists() {
+            return Some("a container's".to_owned());
+        }
+    }
+    None
+}
+
+/// `phitex session list`: the running watches, a line each, or (`--json`)
+/// their discovery files as one JSON array on a line; those in every
+/// folder a watch may have said itself in ([`every_watch`]). A watch that
+/// runs another phitex is warned of on standard error. Where none is
+/// found, or some cannot be reached from here, where it looked and why a
+/// watch may be out of its sight (a sandbox), and what reaches one there:
+/// `--session <its viewer's URL>`.
+pub fn sessions(ui: &crate::ui::Ui, as_json: bool) -> i32 {
+    // (this process's own folder made, as a watch started here makes it)
+    if let Err(e) = dir() {
+        ui.error(&format!("the sessions folder: {e}"));
+    }
+    let folders = read_folders();
+    let (live, unreachable) = every_watch(&folders);
+    for v in &live {
+        if let Some(w) = crate::session_cmd::mismatch(v) {
+            eprintln!("{w}  (pid {})", v["pid"]);
+        }
+    }
     let mut o = std::io::stdout().lock();
     if as_json {
-        let _ = writeln!(o, "{}", Value::Array(live));
-        return 0;
+        let _ = writeln!(o, "{}", Value::Array(live.clone()));
+    } else {
+        for v in &live {
+            let _ = writeln!(
+                o,
+                "{}  {}  pid {}  lsp {}:{}{}",
+                v["main"].as_str().unwrap_or("(starting)"),
+                v["started"].as_str().unwrap_or(""),
+                v["pid"],
+                v["lsp"]["host"].as_str().unwrap_or(""),
+                v["lsp"]["port"],
+                v["viewer"]
+                    .as_str()
+                    .map(|u| format!("  viewer {u}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    drop(o);
+    for v in &unreachable {
+        ui.line(&format!(
+            "warning: a phitex watch of {} runs, or may (pid {}, in another sandbox or outside this one), but its socket, 127.0.0.1:{}, cannot be reached from here: \
+             this process has no network to its 127.0.0.1 (bubblewrap: --share-net); \
+             reach it with `phitex session --session <its viewer's URL>`",
+            v["main"].as_str().unwrap_or("(starting)"),
+            v["pid"],
+            v["lsp"]["port"]
+        ));
+    }
+    let known: Vec<Value> = live.iter().chain(&unreachable).cloned().collect();
+    let all_files: Vec<Value> = folders
+        .iter()
+        .flat_map(|(d, _)| files_in(d))
+        .map(|(_, v)| v)
+        .chain(known)
+        .collect();
+    let hidden = hidden_runtime();
+    for (pid, cmd) in unseen_watches(&all_files) {
+        ui.line(&format!(
+            "warning: {}",
+            unseen_line(pid, &cmd, hidden.as_deref())
+        ));
     }
     if live.is_empty() {
-        ui.line("no phitex watch is running");
-    }
-    for v in &live {
-        let _ = writeln!(
-            o,
-            "{}  {}  pid {}  lsp {}:{}{}",
-            v["main"].as_str().unwrap_or("(starting)"),
-            v["started"].as_str().unwrap_or(""),
-            v["pid"],
-            v["lsp"]["host"].as_str().unwrap_or(""),
-            v["lsp"]["port"],
-            v["viewer"]
-                .as_str()
-                .map(|u| format!("  viewer {u}"))
-                .unwrap_or_default()
+        let looked: Vec<String> = folders
+            .iter()
+            .map(|(d, why)| format!("{} ({why})", d.display()))
+            .collect();
+        let sandbox = match hidden.or_else(sandbox_sign) {
+            Some(why) => format!("this looks like a sandbox ({why}): "),
+            None => "if this is a sandbox: ".to_owned(),
+        };
+        let m = format!(
+            "no phitex watch is running that can be seen from here (looked in {}); \
+             {sandbox}a watch outside it is out of its sight where it hides the user's runtime folder or its network, \
+             and is reached with `phitex session --session <its viewer's URL>` (or PHITEX_SESSION=<URL>)",
+            looked.join(", ")
         );
+        ui.line(&m);
     }
     0
 }
