@@ -286,6 +286,8 @@ header:active { cursor: grabbing; }
 /* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
 .slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (the pages' size not known yet (no page drawn): laid out at a guess, not shown, nor what is on them; viewer.ts sized) */
+.unsized > .slot { visibility: hidden; }
 /* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
 .slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
@@ -424,7 +426,7 @@ header:active { cursor: grabbing; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
-.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks { position: absolute; right: 0; top: var(--tipgap, 0px); bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
 .smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
 /* (a target larger than the tick: it is 3 px tall) */
@@ -465,8 +467,8 @@ header:active { cursor: grabbing; }
 
 /* strips over the pages: plain, in the host's colours */
 /* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
-.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; padding-top: var(--tipgap, 0px); }
+.strips { position: absolute; top: var(--tipgap, 0px); left: 0; right: 0; z-index: 2; pointer-events: none; }
 .strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
 .stage.stale ~ .strips .banner, .approx.on { display: block; }

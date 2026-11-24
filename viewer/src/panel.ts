@@ -1107,6 +1107,8 @@ export class Panel {
     const was = this.wasShown;
     this.wasShown = on;
     this.host.style.display = display;
+    // (the tips' room made before the first page is laid out: the pages never move for them)
+    if (on && was === undefined && !this.opened && !this.last) this.tipsReserve();
     if (on && !was) this.redraw();
     // (shown with no page yet: the first step said (the status). The sheet goes up, the opening
     // playing, once a build's own step has been said (the host reading the files, packages
@@ -3569,13 +3571,38 @@ export class Panel {
     this.tips("unseen", true);
   }
 
-  private tips(which: "unseen" | "fresh" | "all", asked = false): void {
-    if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
+  /** The tips `which` offers here: every one, the new ones, or the ones not seen; none where no tip is offered (another host's bar, the panel folded, the unseen ones not by themselves). */
+  private offered(which: "unseen" | "fresh" | "all", asked = false): typeof TIPS {
+    if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return [];
     const seen = [...this.seenIds];
     // (Overleaf's welcome callout says "as you type" already: not twice)
     const offered = TIPS.filter((t) => !(t.id === "changes" && (!this.changes || this.ownChanges)) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
-    this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
+    return which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
+  }
+
+  private tips(which: "unseen" | "fresh" | "all", asked = false): void {
+    if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
+    this.tipList = this.offered(which, asked);
     this.tip(0);
+  }
+
+  /**
+   * The room the tips offered by themselves will take above the pages, made
+   * before the first page is laid out (the panel shown, nothing drawn yet):
+   * the tallest of them, so the pages are where they will stay when the
+   * tips come after the opening, and never move under a reader's pointer.
+   * They move once, up, when the user is done with the tips.
+   */
+  private tipsReserve(): void {
+    const list = this.offered("unseen");
+    if (!list.length) return;
+    const el = this.$("#tip");
+    el.style.visibility = "hidden";
+    let gap = 0;
+    for (let i = 0; i < list.length; i++) gap = Math.max(gap, this.tipGap(this.tipCard(list, i)));
+    el.hidden = true;
+    el.style.visibility = "";
+    this.setTipRoom(gap);
   }
 
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
@@ -3591,6 +3618,46 @@ export class Panel {
     this.ev.onTipsSeen?.([...this.seenIds]);
   }
 
+  /** The control tip `t` points at (one hidden at this width: the menu that holds it). */
+  private tipTarget(t: (typeof TIPS)[number]): HTMLElement {
+    const target = this.$(t.at);
+    return !target || !target.offsetParent ? this.$("#b-more") : target;
+  }
+
+  /** Tip `i` of `list` drawn in its card and placed under its control (shown: `hidden` off; nothing else of the tour). */
+  private tipCard(list: typeof TIPS, i: number): HTMLElement {
+    const el = this.$("#tip");
+    const t = list[i];
+    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${list.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < list.length ? "Next" : "Got it"}</button></div>`);
+    el.hidden = false;
+    const bar = this.$(".bar").getBoundingClientRect(), r = this.tipTarget(t).getBoundingClientRect(), w = el.offsetWidth;
+    const cx = r.left + r.width / 2 - bar.left, left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
+    Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar.top + 9}px` });
+    el.style.setProperty("--ax", `${cx - left}px`);
+    return el;
+  }
+
+  /** How far a tip's card (placed) reaches down over the pages' box, and a margin: 0 where it is beside them. */
+  private tipGap(el: HTMLElement): number {
+    const b = this.$(".stagebox").getBoundingClientRect(), t = el.getBoundingClientRect();
+    return t.left < b.right && t.right > b.left && t.bottom > b.top ? Math.ceil(t.bottom - b.top + 8) : 0;
+  }
+
+  /**
+   * The pages kept clear of the tips: they start `gap` pixels down (0: at
+   * the top again), so a tip never sits over what is on a page (the diff's
+   * and the review's marks, Blame's colours, a link): nothing a click or a
+   * right-click there means is under it.
+   */
+  private tipRoomNow = 0;
+  private setTipRoom(gap: number): void {
+    if (gap === this.tipRoomNow) return;
+    this.tipRoomNow = gap;
+    const box = this.$(".stagebox");
+    if (gap) box.style.setProperty("--tipgap", `${gap}px`);
+    else box.style.removeProperty("--tipgap");
+  }
+
   private tip(i: number): void {
     const el = this.$("#tip");
     this.root.querySelectorAll(".ringed").forEach((e) => e.classList.remove("ringed"));
@@ -3598,11 +3665,9 @@ export class Panel {
     this.tipUsed = undefined;
     this.tipAt = i;
     const t = this.tipList[i];
-    if (!t) return void (el.hidden = true);
+    if (!t) return void ((el.hidden = true), this.setTipRoom(0));
     this.seen([t.id]);
-    let target = this.$(t.at);
-    // (a control hidden at this width: the menu that holds it)
-    if (!target || !target.offsetParent) target = this.$("#b-more");
+    const target = this.tipTarget(t);
     // (its control open already (a click before the tip came): used, so seen; the next one, under none of it)
     if (target.getAttribute("aria-expanded") === "true") return this.tip(i + 1);
     target.classList.add("ringed");
@@ -3610,12 +3675,9 @@ export class Panel {
     // with it; left open, it covered what the control opened, Compare's Next)
     const used = (this.tipUsed = new AbortController());
     target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
-    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
-    el.hidden = false;
-    const bar = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
-    const cx = r.left + r.width / 2 - bar.left, left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
-    Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar.top + 9}px` });
-    el.style.setProperty("--ax", `${cx - left}px`);
+    this.tipCard(this.tipList, i);
+    // (the pages below it: the room made for the tips before the pages came, or this one's own)
+    this.setTipRoom(Math.max(this.tipRoomNow, this.tipGap(el)));
     el.onclick = (e) => {
       e.stopPropagation();
       const a = (e.target as HTMLElement).closest<HTMLElement>("[data-t]")?.dataset.t;

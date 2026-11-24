@@ -71,6 +71,10 @@ Compare and Blame are now one thing: **± Changes** :)
   tab too; text selected on the pages is plain blue.
 - **Fixed:** comparing text that ends a change with a forced space
   (`e.g.\ `) builds the diff's pages.
+- **Fixed:** the first-visit tips sit above the pages, never over
+  something you might click on them.
+- **Fixed:** a page you start selecting right as it appears no longer
+  shifts under the pointer, so the selection begins where you pressed.
 - **Fixed:** SyncTeX and the viewer's follow take you to the right copy
   of text that repeats: clicking equation (2) no longer lands on (1).
 - **Fixed:** `files = texlive` finds TeX Live installed with Nix

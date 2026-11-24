@@ -493,6 +493,15 @@ var LETTER = { w: 612, h: 792 };
 var Viewer = class _Viewer {
   slots = [];
   size = LETTER;
+  /**
+   * Whether the pages' size is known (a page drawn has said it): until then
+   * the pages are laid out at Letter's, a guess, and not shown (`unsized`),
+   * nor anything on them: an A4 document's first page at Letter's size, its
+   * find marks and text where a reader could act on them, then made A4 a
+   * moment later, moved what was under a press made in between (a drag
+   * that began a word late or early, "t Quokka" for "Quokka").
+   */
+  sized = false;
   visible = /* @__PURE__ */ new Set();
   current = 0;
   io;
@@ -2027,6 +2036,8 @@ var Viewer = class _Viewer {
    * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
    */
   layout(hashes, previews) {
+    if (!hashes.length) this.sized = false;
+    this.root.classList.toggle("unsized", !this.sized);
     this.citesKnown.clear();
     this.previews = previews ?? /* @__PURE__ */ new Set();
     while (this.slots.length > hashes.length) {
@@ -2044,6 +2055,7 @@ var Viewer = class _Viewer {
    * drawn when seen.
    */
   shipped(k, hash) {
+    this.root.classList.toggle("unsized", !this.sized);
     this.waits(Object.assign(this.slotAt(k), { hash }));
     this.wantVisible();
   }
@@ -2082,7 +2094,11 @@ var Viewer = class _Viewer {
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
-    if (img.w && img.h) this.size = { w: img.w, h: img.h };
+    if (img.w && img.h) {
+      this.size = { w: img.w, h: img.h };
+      this.sized = true;
+      this.root.classList.remove("unsized");
+    }
     if (resized) for (const el of this.root.querySelectorAll("[data-pt]")) this.lay(el, JSON.parse(el.dataset.pt));
     s.img = img;
     this.waits(s);
@@ -2735,6 +2751,8 @@ header:active { cursor: grabbing; }
 /* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
 .slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (the pages' size not known yet (no page drawn): laid out at a guess, not shown, nor what is on them; viewer.ts sized) */
+.unsized > .slot { visibility: hidden; }
 /* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
 .slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
@@ -2873,7 +2891,7 @@ header:active { cursor: grabbing; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
-.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks { position: absolute; right: 0; top: var(--tipgap, 0px); bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
 .smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
 /* (a target larger than the tick: it is 3 px tall) */
@@ -2914,8 +2932,8 @@ header:active { cursor: grabbing; }
 
 /* strips over the pages: plain, in the host's colours */
 /* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
-.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; padding-top: var(--tipgap, 0px); }
+.strips { position: absolute; top: var(--tipgap, 0px); left: 0; right: 0; z-index: 2; pointer-events: none; }
 .strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
 .stage.stale ~ .strips .banner, .approx.on { display: block; }
@@ -10887,6 +10905,7 @@ var Panel = class {
     const was = this.wasShown;
     this.wasShown = on;
     this.host.style.display = display;
+    if (on && was === void 0 && !this.opened && !this.last) this.tipsReserve();
     if (on && !was) this.redraw();
     if (on && !this.last) {
       this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
@@ -13014,12 +13033,35 @@ var Panel = class {
     }
     this.tips("unseen", true);
   }
-  tips(which, asked = false) {
-    if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
+  /** The tips `which` offers here: every one, the new ones, or the ones not seen; none where no tip is offered (another host's bar, the panel folded, the unseen ones not by themselves). */
+  offered(which, asked = false) {
+    if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return [];
     const seen = [...this.seenIds];
     const offered = TIPS.filter((t) => !(t.id === "changes" && (!this.changes || this.ownChanges)) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
-    this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
+    return which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
+  }
+  tips(which, asked = false) {
+    if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
+    this.tipList = this.offered(which, asked);
     this.tip(0);
+  }
+  /**
+   * The room the tips offered by themselves will take above the pages, made
+   * before the first page is laid out (the panel shown, nothing drawn yet):
+   * the tallest of them, so the pages are where they will stay when the
+   * tips come after the opening, and never move under a reader's pointer.
+   * They move once, up, when the user is done with the tips.
+   */
+  tipsReserve() {
+    const list = this.offered("unseen");
+    if (!list.length) return;
+    const el = this.$("#tip");
+    el.style.visibility = "hidden";
+    let gap = 0;
+    for (let i = 0; i < list.length; i++) gap = Math.max(gap, this.tipGap(this.tipCard(list, i)));
+    el.hidden = true;
+    el.style.visibility = "";
+    this.setTipRoom(gap);
   }
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
   seen(ids) {
@@ -13032,6 +13074,42 @@ var Panel = class {
     }
     this.ev.onTipsSeen?.([...this.seenIds]);
   }
+  /** The control tip `t` points at (one hidden at this width: the menu that holds it). */
+  tipTarget(t) {
+    const target = this.$(t.at);
+    return !target || !target.offsetParent ? this.$("#b-more") : target;
+  }
+  /** Tip `i` of `list` drawn in its card and placed under its control (shown: `hidden` off; nothing else of the tour). */
+  tipCard(list, i) {
+    const el = this.$("#tip");
+    const t = list[i];
+    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${list.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < list.length ? "Next" : "Got it"}</button></div>`);
+    el.hidden = false;
+    const bar2 = this.$(".bar").getBoundingClientRect(), r = this.tipTarget(t).getBoundingClientRect(), w = el.offsetWidth;
+    const cx = r.left + r.width / 2 - bar2.left, left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
+    Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar2.top + 9}px` });
+    el.style.setProperty("--ax", `${cx - left}px`);
+    return el;
+  }
+  /** How far a tip's card (placed) reaches down over the pages' box, and a margin: 0 where it is beside them. */
+  tipGap(el) {
+    const b = this.$(".stagebox").getBoundingClientRect(), t = el.getBoundingClientRect();
+    return t.left < b.right && t.right > b.left && t.bottom > b.top ? Math.ceil(t.bottom - b.top + 8) : 0;
+  }
+  /**
+   * The pages kept clear of the tips: they start `gap` pixels down (0: at
+   * the top again), so a tip never sits over what is on a page (the diff's
+   * and the review's marks, Blame's colours, a link): nothing a click or a
+   * right-click there means is under it.
+   */
+  tipRoomNow = 0;
+  setTipRoom(gap) {
+    if (gap === this.tipRoomNow) return;
+    this.tipRoomNow = gap;
+    const box = this.$(".stagebox");
+    if (gap) box.style.setProperty("--tipgap", `${gap}px`);
+    else box.style.removeProperty("--tipgap");
+  }
   tip(i) {
     const el = this.$("#tip");
     this.root.querySelectorAll(".ringed").forEach((e) => e.classList.remove("ringed"));
@@ -13039,20 +13117,15 @@ var Panel = class {
     this.tipUsed = void 0;
     this.tipAt = i;
     const t = this.tipList[i];
-    if (!t) return void (el.hidden = true);
+    if (!t) return void (el.hidden = true, this.setTipRoom(0));
     this.seen([t.id]);
-    let target = this.$(t.at);
-    if (!target || !target.offsetParent) target = this.$("#b-more");
+    const target = this.tipTarget(t);
     if (target.getAttribute("aria-expanded") === "true") return this.tip(i + 1);
     target.classList.add("ringed");
     const used = this.tipUsed = new AbortController();
     target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
-    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
-    el.hidden = false;
-    const bar2 = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
-    const cx = r.left + r.width / 2 - bar2.left, left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
-    Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar2.top + 9}px` });
-    el.style.setProperty("--ax", `${cx - left}px`);
+    this.tipCard(this.tipList, i);
+    this.setTipRoom(Math.max(this.tipRoomNow, this.tipGap(el)));
     el.onclick = (e) => {
       e.stopPropagation();
       const a = e.target.closest("[data-t]")?.dataset.t;

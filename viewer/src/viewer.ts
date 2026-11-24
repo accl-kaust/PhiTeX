@@ -156,6 +156,15 @@ const LETTER = { w: 612, h: 792 };
 export class Viewer {
   private slots: Slot[] = [];
   private size = LETTER;
+  /**
+   * Whether the pages' size is known (a page drawn has said it): until then
+   * the pages are laid out at Letter's, a guess, and not shown (`unsized`),
+   * nor anything on them: an A4 document's first page at Letter's size, its
+   * find marks and text where a reader could act on them, then made A4 a
+   * moment later, moved what was under a press made in between (a drag
+   * that began a word late or early, "t Quokka" for "Quokka").
+   */
+  private sized = false;
   private visible = new Set<number>();
   private current = 0;
   private io: IntersectionObserver;
@@ -1957,6 +1966,9 @@ export class Viewer {
    * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
    */
   layout(hashes: string[], previews?: ReadonlySet<string>): void {
+    // (no page: another document may come, of another size)
+    if (!hashes.length) this.sized = false;
+    this.root.classList.toggle("unsized", !this.sized);
     // (a new build's: the engine's answers were the last one's)
     this.citesKnown.clear();
     this.previews = previews ?? new Set();
@@ -1977,6 +1989,7 @@ export class Viewer {
    * drawn when seen.
    */
   shipped(k: number, hash: string): void {
+    this.root.classList.toggle("unsized", !this.sized);
     this.waits(Object.assign(this.slotAt(k), { hash }));
     this.wantVisible();
   }
@@ -2018,7 +2031,11 @@ export class Viewer {
     if (!s) return;
     if (hash) this.asked.delete(`${k}:${hash}`);
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
-    if (img.w && img.h) this.size = { w: img.w, h: img.h };
+    if (img.w && img.h) {
+      this.size = { w: img.w, h: img.h };
+      this.sized = true;
+      this.root.classList.remove("unsized");
+    }
     // (the marks placed at the size before, at this one)
     if (resized) for (const el of this.root.querySelectorAll<HTMLElement>("[data-pt]")) this.lay(el, JSON.parse(el.dataset.pt!));
     s.img = img;

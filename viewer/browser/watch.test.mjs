@@ -426,7 +426,8 @@ async function problems(t) {
 /** The rectangle of `word` on the pages, as find marks it (find closed after). */
 async function wordAt(t, word) {
   await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = ${JSON.stringify(word)}; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
-  const r = await t.until(`(() => { const m = $(".mark.fnd"); if (!m) return null; const r = m.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, n: $$(".mark.fnd").length }; })()`, `${word} found`);
+  // (its mark as a reader sees it: shown, on a page whose size is known)
+  const r = await t.until(`(() => { const m = $(".mark.fnd"); if (!m || !m.checkVisibility({ visibilityProperty: true })) return null; const r = m.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, n: $$(".mark.fnd").length }; })()`, `${word} found`);
   await t.q(`(() => { const i = $("#findq"); i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); $("#find").hidden = true; return 1; })()`);
   await t.until(`$$(".mark.fnd").length === 0`, "find's marks gone");
   return r;
@@ -1023,7 +1024,6 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
   // (the agent's edits: a word replaced, words deleted)
   w.write("main.tex", text("brandnew", "zeta"));
   await t.until(`$$(".slot .rv.h-add").length > 0 && $$(".slot .rv.h-del").length > 0`, "the changes marked on the pages", 120000);
-  if (await t.q(`!!$(".tip [data-t=skip]") && !$(".tip").hidden`)) await t.click(".tip [data-t=skip]");
   await t.click("#b-review");
   await t.until(`!!$('.rside [data-tab="changes"]')`, "the review's side", 5000);
   await t.click('.rside [data-tab="changes"]');
@@ -1040,15 +1040,13 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
     }
   };
   // (a right-click on the new word: Accept, Reject, Show in the list, Go to source; Accept as the card's button)
-  // (the mark itself under the point, as a person sees it: a feature tip over it put away (a right-click on the tip is
-  // the tip's), as many as come; anything else over it said)
+  // (the mark itself under the point, as a person sees it: nothing over it, a feature tip's card included, which keeps
+  // clear of the pages)
   const bare = async ([x, y]) => {
-    let over = "";
-    for (const end = Date.now() + 10000; Date.now() < end; await sleep(100)) {
-      over = await t.q(`(() => { const e = $("#stage").getRootNode().elementFromPoint(${x}, ${y}); if (e?.closest(".slot")) return ""; const tip = e?.closest(".tip"); if (tip) { tip.querySelector("[data-t=skip]")?.click(); return "a tip"; } return e ? e.tagName + "." + (e.className?.baseVal ?? e.className) : "nothing"; })()`);
-      if (!over) return;
-    }
-    assert.fail(`the mark at ${x}, ${y} covered by ${over}`);
+    const over = await t.q(`(() => { const e = $("#stage").getRootNode().elementFromPoint(${x}, ${y}); return e?.closest(".slot") ? "" : e ? e.tagName + "." + (e.className?.baseVal ?? e.className) : "nothing"; })()`);
+    assert.equal(over, "", `the mark at ${x}, ${y} under the pointer, not covered`);
+    // (a tip up: above the pages, none of it over them)
+    assert.ok(await t.q(`$("#tip").hidden || $("#tip").getBoundingClientRect().bottom <= $("#stage").getBoundingClientRect().top`), "a tip up stays above the pages");
   };
   const add = await mark("h-add");
   await bare(add);
