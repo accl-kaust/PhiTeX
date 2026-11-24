@@ -10,7 +10,7 @@
 // Quality of life: floating (Overleaf's layout not found), drag by the
 // header, resize from the corner, collapse (Alt+Shift+P); position, size
 // and zoom remembered; a build that ships nothing keeps the last good page,
-// dimmed, with why; problems jump to their line.
+// crisp and usable, a strip saying why; problems jump to their line.
 
 import type { CiteAnswer, PageImage, Status } from "./session.ts";
 import { sentence } from "./words.ts";
@@ -38,8 +38,6 @@ import { CHANGES_BUTTON_CSS, Changes, type ChangesHost, type ChangesPrefs } from
 import type { PageSel } from "./sync.ts";
 import { machineLine } from "./machine.ts";
 
-/** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
-const STALE_GRACE_MS = 1000;
 
 /** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
 const MAKING = "Making the format, once per PhiTeX update";
@@ -992,8 +990,6 @@ export class Panel {
     this.speed = undefined;
     this.built = undefined;
     this.at = 0;
-    clearTimeout(this.staleTimer);
-    this.staleSince = 0;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout([]);
     this.again();
@@ -1153,6 +1149,8 @@ export class Panel {
 
   busy(on: boolean): void {
     this.buildSince = on ? this.buildSince || performance.now() : 0;
+    // (the strip over the last pages: none while a build runs, said once one settles without a page)
+    if (this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
 
@@ -2055,35 +2053,20 @@ export class Panel {
     el.onclick = t.err && !t.ms ? () => this.toast(kind, null) : null;
   }
 
-    /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
-  /** When the page first went missing (a build that shipped none); its dimming waits. */
-  private staleSince = 0;
-  private staleTimer: ReturnType<typeof setTimeout> | undefined;
-
   /**
-   * Dim the last good page when a build ships none, but only once that has
-   * lasted STALE_GRACE_MS: typing `\section{B…` is an error at every
-   * keystroke until the `}`, and the page shouldn't flash grey for each.
+   * The last good page kept when a settled build shipped none (or not this
+   * page): shown as it is, crisp, scrollable, selectable, its links live (a
+   * ready page is never dimmed), under a strip saying it is the last
+   * complete render and why. While a build runs, or a rebuild's opening is
+   * up, no strip: the status says what runs, and the build's end says
+   * whether a page came (no timer: typing through `{` says it once the
+   * build settles without one).
    */
   private stale(s: Status): void {
     const stage = this.$("#stage");
-    // (a rebuild's opening is up: its sheet says what happens, not the last render's banner)
-    if (this.reopen) return void (clearTimeout(this.staleTimer), (this.staleSince = 0), stage.classList.remove("stale"));
-    const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last;
-    clearTimeout(this.staleTimer);
-    if (!gone) {
-      this.staleSince = 0;
-      stage.classList.remove("stale");
-      return;
-    }
-    const now = performance.now();
-    this.staleSince ||= now;
-    const left = STALE_GRACE_MS - (now - this.staleSince);
-    if (left > 0) {
-      this.staleTimer = setTimeout(() => this.lastStatus && this.stale(this.lastStatus), left);
-      return;
-    }
-    stage.classList.add("stale");
+    const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last && !this.reopen && !this.buildSince;
+    stage.classList.toggle("stale", gone);
+    if (!gone) return;
     this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
@@ -2092,7 +2075,8 @@ export class Panel {
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
    * exited, the socket closed, the core trapped) or back: while it is lost
-   * the last pages stay, dimmed and inert, under a banner saying so and why.
+   * the last pages stay as they are, crisp and usable (a ready page is never
+   * dimmed), under a banner saying so and why.
    */
   connection(up: boolean, why?: string): void {
     const was = this.offline;
@@ -2111,7 +2095,7 @@ export class Panel {
     if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
   }
 
-  /** The disconnection's banner dismissed (✕ or Esc): the pages interactive again, a small pill saying so. */
+  /** The disconnection's banner dismissed (✕ or Esc): the banner gone, a small pill saying so. */
   private dismissOffline(): void {
     if (!this.offline) return;
     this.$("#stage").classList.remove("offline");
@@ -4102,7 +4086,7 @@ export class Panel {
 
   page(img: PageImage | null, k: number, n: number, hash?: string | null): void {
     if (!img) {
-      // (nothing new to show: the pages shown stay, dimmed; see stale())
+      // (nothing new to show: the pages shown stay as they are; see stale())
       if (!this.last && !this.anim) {
         const empty = this.$("#empty");
         empty.textContent = n ? "This page is empty." : "No page shipped yet.";
