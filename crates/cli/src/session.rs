@@ -92,6 +92,21 @@ impl Session {
             .map(|t| Arc::<str>::from(tex::chars_owned(t)))
             .map_err(|e| format!("{}: {e}", job.path.display()))?;
         let files = crate::shelf::files(job.engine.name, status.meter())?;
+        // (what a Compare's markup may load beyond the document, kept in the
+        // package cache ahead, off the build's way and its progress: a first
+        // diff then downloads nothing; kept already, each a read of the cache)
+        if let Ok(ahead) = crate::shelf::files(
+            job.engine.name,
+            &Arc::new(phitex_live::progress::Meter::default()),
+        ) {
+            let _ = std::thread::Builder::new()
+                .name("diff packs".into())
+                .spawn(move || {
+                    for name in phitex_diff::LOADS {
+                        let _ = ahead.find(name);
+                    }
+                });
+        }
         // (XeTeX's fonts by name: the release's font index, or why not)
         if job.engine.xetex() {
             crate::shelf::font_index(&files)?;
