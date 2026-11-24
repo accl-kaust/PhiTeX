@@ -1005,7 +1005,7 @@ export class PreviewSession {
     // a problem's underline, asked as the tab opened) looked up on them; a
     // build made before the tab sends no origins event to say so)
     if (!had && this.hashes.length) this.sink.origins?.();
-    // (no page shipped: the view keeps what it shows, dimmed; see the sink)
+    // (no page shipped: the view keeps what it shows, as it is; see the sink)
     if (this.hashes.length) this.sink.layout(this.hashes, this.previews);
     // (the collaborators on the new pages)
     this.drawPeers();

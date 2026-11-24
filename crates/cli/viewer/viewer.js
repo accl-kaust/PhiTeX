@@ -2852,8 +2852,7 @@ header:active { cursor: grabbing; }
 .pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
 .win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
-.stage.stale .slot { opacity: .45; filter: grayscale(1); }
-.stage.offline .slot { opacity: .4; pointer-events: none; }
+/* (the last pages, a build that shipped none or the engine lost: shown as they are, crisp and interactive, a strip above saying so; never dimmed) */
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
 /* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
@@ -9838,8 +9837,32 @@ var Changes = class {
   }
 };
 
+// viewer/src/machine.ts
+var HINTS2 = ["platformVersion", "architecture", "bitness", "model", "fullVersionList"];
+function systemOf(platform, version) {
+  const v = version.replace(/(\.0)+$/, "");
+  const major = Number(version.split(".")[0]);
+  if (platform === "Windows" && version) return `${major >= 13 ? "Windows 11" : major >= 1 ? "Windows 10" : "Windows 7, 8 or 8.1"} (${version})`;
+  return v ? `${platform} ${v}` : platform;
+}
+function archOf(architecture, bitness) {
+  if (!architecture) return "";
+  if (architecture === "x86") return bitness === "64" ? "x86-64" : `x86${bitness ? ` (${bitness}-bit)` : ""}`;
+  return `${architecture}${bitness === "64" ? "64" : bitness ? ` (${bitness}-bit)` : ""}`;
+}
+function machineText(cores, userAgent, hints) {
+  const n = `${cores ?? "?"} cores`;
+  if (!hints?.platform) return `machine: ${n}; the browser's reported user agent, which may not name this machine's system or chip: ${userAgent}`;
+  const browser = (hints.fullVersionList ?? []).filter((b) => !/not.?a.?brand/i.test(b.brand)).map((b) => `${b.brand} ${b.version}`).join(", ");
+  const parts = [n, systemOf(hints.platform, hints.platformVersion ?? ""), archOf(hints.architecture ?? "", hints.bitness ?? ""), hints.model ?? ""].filter(Boolean);
+  return `machine: ${parts.join(", ")}${browser ? `; ${browser}` : ""} (the browser's client hints)`;
+}
+async function machineLine(nav = navigator) {
+  const hints = await nav.userAgentData?.getHighEntropyValues?.(HINTS2).catch(() => void 0);
+  return machineText(nav.hardwareConcurrency, nav.userAgent, hints);
+}
+
 // viewer/src/panel.ts
-var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
 var PKG_QUIET = 600;
 var KIND_HELP = {
@@ -10398,8 +10421,6 @@ var Panel = class {
     this.speed = void 0;
     this.built = void 0;
     this.at = 0;
-    clearTimeout(this.staleTimer);
-    this.staleSince = 0;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout([]);
     this.again();
@@ -10531,6 +10552,7 @@ var Panel = class {
   }
   busy(on) {
     this.buildSince = on ? this.buildSince || performance.now() : 0;
+    if (this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
@@ -11295,33 +11317,20 @@ var Panel = class {
     el.title = t.err && !t.ms ? "Click to dismiss" : "";
     el.onclick = t.err && !t.ms ? () => this.toast(kind, null) : null;
   }
-  /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
-  /** When the page first went missing (a build that shipped none); its dimming waits. */
-  staleSince = 0;
-  staleTimer;
   /**
-   * Dim the last good page when a build ships none, but only once that has
-   * lasted STALE_GRACE_MS: typing `\section{B…` is an error at every
-   * keystroke until the `}`, and the page shouldn't flash grey for each.
+   * The last good page kept when a settled build shipped none (or not this
+   * page): shown as it is, crisp, scrollable, selectable, its links live (a
+   * ready page is never dimmed), under a strip saying it is the last
+   * complete render and why. While a build runs, or a rebuild's opening is
+   * up, no strip: the status says what runs, and the build's end says
+   * whether a page came (no timer: typing through `{` says it once the
+   * build settles without one).
    */
   stale(s) {
     const stage = this.$("#stage");
-    if (this.reopen) return void (clearTimeout(this.staleTimer), this.staleSince = 0, stage.classList.remove("stale"));
-    const gone2 = (s.pages === 0 || this.at >= s.pages) && !!this.last;
-    clearTimeout(this.staleTimer);
-    if (!gone2) {
-      this.staleSince = 0;
-      stage.classList.remove("stale");
-      return;
-    }
-    const now = performance.now();
-    this.staleSince ||= now;
-    const left = STALE_GRACE_MS - (now - this.staleSince);
-    if (left > 0) {
-      this.staleTimer = setTimeout(() => this.lastStatus && this.stale(this.lastStatus), left);
-      return;
-    }
-    stage.classList.add("stale");
+    const gone2 = (s.pages === 0 || this.at >= s.pages) && !!this.last && !this.reopen && !this.buildSince;
+    stage.classList.toggle("stale", gone2);
+    if (!gone2) return;
     this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
@@ -11329,7 +11338,8 @@ var Panel = class {
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
    * exited, the socket closed, the core trapped) or back: while it is lost
-   * the last pages stay, dimmed and inert, under a banner saying so and why.
+   * the last pages stay as they are, crisp and usable (a ready page is never
+   * dimmed), under a banner saying so and why.
    */
   connection(up, why) {
     const was = this.offline;
@@ -11346,7 +11356,7 @@ var Panel = class {
     this.$("#offpill").title = text;
     if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
   }
-  /** The disconnection's banner dismissed (✕ or Esc): the pages interactive again, a small pill saying so. */
+  /** The disconnection's banner dismissed (✕ or Esc): the banner gone, a small pill saying so. */
   dismissOffline() {
     if (!this.offline) return;
     this.$("#stage").classList.remove("offline");
@@ -12867,6 +12877,12 @@ var Panel = class {
    */
   async debugInfo() {
     const out = [...await this.ev.onDebugInfo?.().catch(() => []) ?? []];
+    if (this.lastStatus) {
+      const ds = this.lastStatus.diagnostics ?? [];
+      const n = (sev) => ds.filter((d2) => d2.severity === sev).length;
+      const say = (k, w2) => `${k} ${w2}${k === 1 ? "" : "s"}`;
+      out.push(`problems: ${say(n("error"), "error")}, ${say(n("warning"), "warning")}${n("info") ? `, ${say(n("info"), "note")}` : ""}`);
+    }
     const l = this.latest();
     if (l) out.push(`${l.label}: ${dur(l.ms)}`);
     if (this.lat?.summary) out.push(this.lat.summary);
@@ -12879,8 +12895,7 @@ var Panel = class {
     if (t.first !== void 0) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
     if (f) out.push(`last page drawn: ${frameText(f)}`);
-    const nav = navigator;
-    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    out.push(await machineLine());
     return out.join("\n") + "\n";
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
@@ -15643,6 +15658,13 @@ setTimeout(() => void unreached(), 3e3);
 void sock.connect();
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
+/* (the watch's palette and font, light or dark with the system: the bar's and the terminal's own, beside their rules; it
+   lived in the commit picker's sheet, and went with it (0372d5120), leaving both unstyled, the log over the pages) */
+#phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
+  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) {
+  #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
+}
 #phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
   padding: 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--fg2); border-top: 1px solid var(--line);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
@@ -15668,7 +15690,7 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; word-break: break-word; }
 #phx-con .error { color: var(--danger); } #phx-con .warning { color: var(--warning); } #phx-con .note, #phx-con .dim { color: var(--fg2); }
 #phx-con .ok { color: var(--fg); } #phx-con .busy { color: var(--fg2); }
-}`
+`
 }));
 pane.style.bottom = "24px";
 var bar = document.createElement("div");

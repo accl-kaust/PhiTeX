@@ -408,8 +408,7 @@ header:active { cursor: grabbing; }
 .pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
 .win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
-.stage.stale .slot { opacity: .45; filter: grayscale(1); }
-.stage.offline .slot { opacity: .4; pointer-events: none; }
+/* (the last pages, a build that shipped none or the engine lost: shown as they are, crisp and interactive, a strip above saying so; never dimmed) */
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
 /* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
