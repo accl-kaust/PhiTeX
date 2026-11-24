@@ -24,6 +24,7 @@
 //   In `direct` mode the agent's changes waiting are one such card.
 
 import { html } from "./html.ts";
+import { contextMenu } from "./ctxmenu.ts";
 import type { Viewer } from "./viewer.ts";
 import type { PageSel } from "./sync.ts";
 import type { TextLine } from "./text.ts";
@@ -435,10 +436,17 @@ export class Review {
     });
     p.stage.addEventListener("keyup", (e) => e.shiftKey && setTimeout(() => this.offer(), 0));
     p.stage.addEventListener("click", (e) => void this.pageClick(e));
-    p.root.addEventListener("keydown", (e) => {
-      const k = e as KeyboardEvent;
-      if (k.key !== "Escape") return;
-      if (this.compose || this.pop) (this.closePop(), e.stopPropagation());
+    // (a right-click on a change's mark: Accept, Reject, Show in the list, Go to source; on anything else, the browser's)
+    p.stage.addEventListener("contextmenu", (e) => this.markMenu(e));
+    // (Esc: what is open at the pointer first (the kinds offered, a note being written); a note with words in it is
+    // never thrown away by Esc: its box lets go of the focus, the note stays)
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !(this.compose || this.pop)) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const ta = this.compose?.querySelector<HTMLTextAreaElement>("textarea");
+      if (ta?.value.trim()) return void ta.blur();
+      this.closePop();
     }, { capture: true });
     void host.request("review_state").then((r) => {
       if (r.ok && r.json) this.take(r.json as ReviewState);
@@ -1280,6 +1288,35 @@ export class Review {
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
 
+  /** The mark of the pages under a point (the last drawn on top), read when asked (a click, a right-click): no work as the pointer moves. */
+  private markAt(slot: HTMLElement, cx: number, cy: number): HTMLElement | undefined {
+    return [...slot.querySelectorAll<HTMLElement>(".rv:not(.rv-pin):not(.rv-h)")].reverse().find((m) => {
+      const b = m.getBoundingClientRect();
+      return cx >= b.left - 1 && cx <= b.right + 1 && cy >= b.top - 1 && cy <= b.bottom + 1;
+    });
+  }
+
+  /**
+   * A right-click on an agent's change on the pages (its green text, its
+   * red caret): a menu to Accept or Reject it, the same as its card's
+   * buttons (the whole change, its card's unit), Show in the list, Go to
+   * source. Anything else keeps the browser's menu.
+   */
+  private markMenu(e: MouseEvent): void {
+    if (!this.enabled || this.showing) return;
+    const slot = (e.target as HTMLElement).closest<HTMLElement>(".slot");
+    const id = slot && this.markAt(slot, e.clientX, e.clientY)?.dataset.id;
+    const h = id ? this.s.hunks.find((x) => x.id === id) : undefined;
+    if (!h) return;
+    e.preventDefault();
+    contextMenu(this.p.win, e.clientX, e.clientY, [
+      { label: "Accept", cls: "accept", act: () => void this.act("accept", h.id) },
+      { label: "Reject", cls: "reject", act: () => void this.act("reject", h.id) },
+      { label: "Show in the list", sep: true, act: () => ((this.tab = "changes"), this.open(true, "changes"), this.select(h.id, true)) },
+      { label: "Go to source", act: () => this.host.goto(h.file, h.line) },
+    ], `Change at ${h.file} line ${h.line}`);
+  }
+
   /** A click on the pages: a pin or a mark selects its note or hunk; Alt+click notes a spot. */
   private async pageClick(e: MouseEvent): Promise<void> {
     if (!this.enabled) return;
@@ -1307,10 +1344,7 @@ export class Review {
       return this.openCompose(e.clientX, e.clientY, { kind: "note", anchor: { file: at.file, start: at.start, end: at.start, page: k, point: [x, y] } }, "A spot on this page");
     }
     // (a mark under the click: the last drawn on top)
-    const hit = [...slot.querySelectorAll<HTMLElement>(".rv:not(.rv-pin):not(.rv-h)")].reverse().find((m) => {
-      const b = m.getBoundingClientRect();
-      return e.clientX >= b.left - 1 && e.clientX <= b.right + 1 && e.clientY >= b.top - 1 && e.clientY <= b.bottom + 1;
-    });
+    const hit = this.markAt(slot, e.clientX, e.clientY);
     if (hit) this.select(hit.dataset.id!, false, false);
   }
 

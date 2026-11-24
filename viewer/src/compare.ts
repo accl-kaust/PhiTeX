@@ -9,7 +9,7 @@
 // is saved are the host's (CompareHost); the popover is changes.ts's.
 
 import { diffPlace, diffSource, type DiffChange, type DiffMarkup, type DiffOut, type DiffSubtype } from "./diff.ts";
-import { DIFF_COLORS, type ChangesDiffLook, type ChangesRunner } from "./changes.ts";
+import { DIFF_COLORS, type ChangesDiffLook, type ChangesRunner, type DiffMark } from "./changes.ts";
 import { byteOffset, charOffset } from "./edits.ts";
 import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink } from "./session.ts";
 
@@ -223,6 +223,58 @@ export class Compare<V> {
     if (this.showing === "diff") void this.c.session.toPage("diff.tex", charOffset(this.c.d.tex, c.out[0]));
   }
 
+  /** The editor at change `n` (from 1) in its file, against the editor's text (a past version's is nowhere to go). */
+  source(n: number): void {
+    const c = this.c?.d.changes[n - 1];
+    const t = c && !this.c!.neu ? this.h.session().text(c.new.file) : undefined;
+    if (c && t !== undefined) this.h.goto(c.new.file, charOffset(t, c.new.start), charOffset(t, c.new.end));
+  }
+
+  /**
+   * The changes' places on page `k` of the diff's pages: the glyphs of
+   * each change's markup there (by their origins in the marked-up text),
+   * and those of its deleted part (`\DIFdelbegin` to `\DIFdelend`: a
+   * caret, struck words). Asked once a page, the pointer on it.
+   */
+  async marks(k: number): Promise<DiffMark[]> {
+    const c = this.c;
+    if (!c || this.showing !== "diff") return [];
+    const d = c.d;
+    const gs = await c.session.pageGlyphs(k);
+    if (this.c !== c) return [];
+    const bytes = new TextEncoder().encode(d.tex);
+    const dec = new TextDecoder();
+    // (each change's deleted parts, in the marked-up text's bytes)
+    const dels = d.changes.map((x) => {
+      const [a, b] = x.out, part = dec.decode(bytes.subarray(a, b)), out: [number, number][] = [];
+      const at = (i: number) => a + new TextEncoder().encode(part.slice(0, i)).length;
+      for (let i = part.indexOf("\\DIFdelbegin"); i >= 0; i = part.indexOf("\\DIFdelbegin", i + 1)) {
+        const e = part.indexOf("\\DIFdelend", i);
+        out.push([at(i), e < 0 ? b : at(e)]);
+      }
+      return out;
+    });
+    const out = new Map<number, DiffMark>();
+    const grow = (b: [number, number, number, number] | undefined, x: number, y: number): [number, number, number, number] => (b ? [Math.min(b[0], x), Math.min(b[1], y - 8), Math.max(b[2], x + 5), Math.max(b[3], y + 3)] : [x, y - 8, x + 5, y + 3]);
+    for (const g of gs) {
+      if (g.file !== "diff.tex") continue;
+      // (the changes are in the text's order: the first whose markup ends past the glyph)
+      let lo = 0, hi = d.changes.length;
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (d.changes[m].out[1] <= g.start) lo = m + 1;
+        else hi = m;
+      }
+      const x = d.changes[lo];
+      if (!x || x.out[0] > g.start) continue;
+      const m = out.get(lo) ?? { n: lo + 1, k, box: grow(undefined, g.x, g.y) };
+      m.box = grow(m.box, g.x, g.y);
+      if (dels[lo].some(([a, b]) => g.start >= a && g.start < b)) m.del = grow(m.del, g.x, g.y);
+      out.set(lo, m);
+    }
+    return [...out.values()];
+  }
+
   async download(w: "pdf" | "tex"): Promise<void> {
     if (!this.c) return;
     if (w === "tex") return this.h.save(this.c.d.tex, "application/x-tex", `${this.base()}-diff.tex`);
@@ -250,6 +302,8 @@ export class Compare<V> {
       restyle: (l, hide) => this.restyle(l, hide),
       stop: () => this.stop(),
       download: (w) => void this.download(w),
+      marks: (k) => this.marks(k),
+      source: (n) => this.source(n),
     };
   }
 }

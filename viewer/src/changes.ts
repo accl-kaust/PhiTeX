@@ -1,7 +1,10 @@
 // Changes: Compare and Blame as one, a popover anchored to the toolbar's
 // ± Changes button (the panel's, or a host's own: Overleaf's toolbar). A
-// click opens it, a second click, ✕ or Esc closes it; nothing else does (a
-// pointer passing, a click on the pages beside it, where the work goes on).
+// click opens it; a second click, ✕, Esc or a press outside it closes it
+// (a pointer passing does not; nor a press on the pages while Blame waits
+// for one there, a line's card, nor a drag begun inside it). Closing it
+// leaves a diff on the pages, to be read with nothing over them, the
+// button pressed meanwhile: Stop comparing or Current ends that.
 // Opening it starts nothing: a diff is typeset once a pair is chosen, Blame
 // worked out once its half is clicked; the history is read when asked for.
 //
@@ -11,9 +14,11 @@
 //   (commits.ts) in place of the list: quick choices, then the graph.
 // - Blame (blame.ts): no range, the paper as it is now: colour by Author
 //   or Age, who wrote this version (share bars: click picks out a person's
-//   lines), the commits that still own lines (click picks out a commit's).
-// - The look (⚙, or its section under the list): the mode's settings, kept
-//   as the viewer's other ones, also in the panel's Settings, Changes.
+//   lines), the commits that still own lines (click picks out a commit's;
+//   each with its Skip).
+// - The look: the mode's few settings in a block at the top of its list,
+//   always open (⚙ goes to it), its others and all of these in the panel's
+//   Settings, Changes ("All settings…"), kept as the viewer's other ones.
 //
 // Reading the history is never a frozen panel: rows shaped like the real
 // ones while the first page comes, a progress line ("Reading history… 340
@@ -26,6 +31,7 @@ import { Commits, COMMITS_CSS, initials, mergedVia, type Commit } from "./commit
 import { AGE_RAMPS, AUTHOR_COLORS, BLAME_LOOK, OVERLEAF_COLORS, UNCOMMITTED, agoWords, type Blame, type BlameCommit, type BlameLook } from "./blame.ts";
 import type { DiffChange } from "./diff.ts";
 import { html } from "./html.ts";
+import { closeMenu, contextMenu, type MenuItem } from "./ctxmenu.ts";
 
 /** Two versions: `from` a commit (a version), `to` another, null the working tree (the editor's text). */
 export interface Pair {
@@ -82,6 +88,8 @@ export interface ChangeItem {
   who?: { name: string; color?: string; time?: number; short?: string; via?: string | null };
   /** Not committed (typed since the last commit or version). */
   wip?: boolean;
+  /** Its deleted text's words, longer than `old` (the card for deleted text not shown). */
+  was?: string;
 }
 
 export const KINDS: ChangeItem["kind"][] = ["Text", "Section", "Citation", "Table", "Figure", "Equation"];
@@ -109,7 +117,7 @@ export function itemOf(c: DiffChange, k: number): ChangeItem {
   let old = words(c.old_text), neu = words(c.new_text);
   if (kind === "Figure" && (img(c.old_text) || img(c.new_text))) (old = img(c.old_text) ?? old), (neu = img(c.new_text) ? `${img(c.new_text)}${img(c.old_text) ? " replaced" : ""}` : neu);
   if (kind === "Section") (old = old || ""), (neu = neu || "");
-  return { k, kind, sec: c.section ?? c.new.file ?? c.old.file, old: c.kind === "add" ? "" : old, neu: c.kind === "del" ? "" : neu, file: c.new.file, at: c.new.start, end: c.new.end, oldAt: c.old.start, oldEnd: c.old.end };
+  return { k, kind, sec: c.section ?? c.new.file ?? c.old.file, old: c.kind === "add" ? "" : old, neu: c.kind === "del" ? "" : neu, file: c.new.file, at: c.new.start, end: c.new.end, oldAt: c.old.start, oldEnd: c.old.end, was: c.kind === "add" ? "" : words(c.old_text, 70) };
 }
 
 /** What Changes needs of its host: the history, the diff, and where the user was last. */
@@ -136,6 +144,14 @@ export interface ChangesHost {
   lastTag?(): Promise<{ id: string; name: string } | null>;
 }
 
+/** A change's place on the diff's pages: page `k` (from 0), its box and its deleted part's (PDF points from the page's top left: x0, y0, x1, y1), change `n` (from 1). */
+export interface DiffMark {
+  n: number;
+  k: number;
+  box: [number, number, number, number];
+  del?: [number, number, number, number];
+}
+
 /** What the popover drives: a diff typeset on a session of its own, shown or not. */
 export interface ChangesRunner {
   /** Diff `p`: its changes (the runner's own count as edits change them: `count`). */
@@ -148,6 +164,10 @@ export interface ChangesRunner {
   restyle(look: ChangesDiffLook, hide: boolean): void;
   stop(): void;
   download?(what: "pdf" | "tex"): void;
+  /** The changes' places on page `k` of the diff's pages (asked the first time the pointer is on it, kept till the diff changes). */
+  marks?(k: number): DiffMark[] | Promise<DiffMark[]>;
+  /** The editor at change `n` (from 1), in its file. */
+  source?(n: number): void;
 }
 
 /** The panel's part Changes lives in. */
@@ -159,6 +179,11 @@ export interface ChangesPanel {
   prefs(): Partial<ChangesPrefs> | undefined;
   savePrefs(p: ChangesPrefs): void;
   msg(t: string, err?: boolean): void;
+  /** The panel's Settings opened at `at` (Changes' "Diff" or "Blame"), where it has them. */
+  settings?(at: string): void;
+  /** The pages, and their size in points: the diff's marks on them answer the pointer (deleted text's card, the right-click menu). */
+  stage?: HTMLElement;
+  pageSize?(): { w: number; h: number };
 }
 
 export const CHANGES_CSS = `
@@ -225,15 +250,27 @@ ${COMMITS_CSS}
 .chg-pop .seg button:disabled { opacity: .45; cursor: default; }
 .chg-pop .primary { display: block; margin: 12px auto 0; border: 0; background: var(--phc-focus); color: #fff !important; border-radius: 7px; padding: 6px 14px; font-weight: 600; font-size: 12.5px; cursor: pointer; }
 .chg-pop .primary:hover { filter: brightness(1.08); }
-.chg-pop .lookbox { border-top: 1px solid var(--phc-line); display: flex; flex-direction: column; min-height: 0; }
-/* (open: the look keeps its height, up to 55% of the popover, scrolling inside; the list above gives way, down to its own least) */
-.chg-pop .lookbox.open { max-height: calc(min(680px, var(--chg-h, calc(100vh - 70px))) * .55); flex: 0 0 auto; }
-.chg-pop .lookhead { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; background: transparent; padding: 7px 12px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--phc-muted); cursor: pointer; text-align: left; flex: none; }
-.chg-pop .lookhead:hover { color: var(--phc-fg); background: var(--phc-chip); }
-.chg-pop .chev2 { display: inline-block; transition: transform .15s; font-size: 10px; }
-.chg-pop .lookbox.open .chev2 { transform: rotate(90deg); }
-.chg-pop .lookin { overflow: auto; min-height: 0; }
-.chg-pop .lookin[hidden] { display: none; }
+/* (the look: the mode's few settings, at the top of its list, always open; ⚙ comes here and marks it a moment) */
+.chg-pop .look { padding: 10px 12px; border-bottom: 1px solid var(--phc-line); display: grid; gap: 7px; }
+.chg-pop .look.mark { animation: chg-mark 1.1s ease-out; }
+@keyframes chg-mark { from, 35% { background: var(--phc-sel); box-shadow: inset 3px 0 0 var(--phc-focus); } }
+.chg-pop .look .opt2 { grid-template-columns: 92px minmax(0, 1fr); gap: 6px; }
+.chg-pop .look .lab2 { font-size: 12.5px; color: var(--phc-muted); }
+.chg-pop .look .all { justify-self: end; font-size: 12px; }
+.chg-pop .look .ramp { justify-content: flex-start; margin-left: 98px; }
+@container chgpop (max-width: 330px) { .chg-pop .look .opt2 { grid-template-columns: 1fr; } .chg-pop .look .ramp { margin-left: 0; } }
+.chg-pop .look .swatches { gap: 4px; }
+.chg-pop .look .swb { padding: 3px 6px; }
+/* (a commit's row and its Skip beside it; skipped: muted, struck, said, Skip pressed to take it back) */
+.chg-pop .crw { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; }
+.chg-pop .crw .crow { width: auto; min-width: 0; }
+.chg-pop .crow:disabled { cursor: default; }
+.chg-pop .skipb { border: 1px solid var(--phc-line); background: transparent; color: var(--phc-muted); border-radius: 999px; padding: 1px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.chg-pop .skipb:hover { color: var(--phc-fg); border-color: var(--phc-focus); }
+.chg-pop .skipb[aria-pressed="true"] { background: var(--phc-chip2); color: var(--phc-fg); }
+.chg-pop .crw.skipped .crow { opacity: .6; }
+.chg-pop .crw.skipped .crow .s { text-decoration: line-through; }
+.chg-pop .crw .tag { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--phc-muted); border: 1px solid var(--phc-line); border-radius: 4px; padding: 0 4px; margin-left: 4px; }
 .chg-pop .dls { display: flex; gap: 10px; }
 /* (under From → To while a diff is chosen: Stop comparing, said in words, and the diff's downloads once it is made) */
 .chg-pop .cmpacts { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; font-size: 12.5px; min-height: 22px; }
@@ -331,10 +368,17 @@ ${COMMITS_CSS}
 @media (prefers-reduced-motion: reduce) { .chg-pop, .chg-pop * { transition: none !important; animation: none !important; } }
 `;
 
+/** The card for deleted text the pages do not show (Caret only, Hide deletions): Blame's card's look (.blcard). */
+export const DELETED_CSS = `
+.blcard.delcard .dtx { margin-top: 4px; color: var(--chg-del, #bb1b1b); text-decoration: line-through; text-decoration-thickness: 1px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+`;
+
 /** The ± Changes button's count (in the panel's bar, or a host's toolbar). */
 export const CHANGES_BUTTON_CSS = `
 .chg-badge { font: 600 11px ui-monospace, monospace; background: var(--ph-link, var(--ph-accent)); color: #fff; border-radius: 999px; padding: 0 6px; line-height: 16px; display: inline-block; min-width: 8px; text-align: center; }
 .chg-badge:empty { display: none; }
+/* (a diff left on the pages, the popover closed: the button says so, in the accent, till Stop comparing) */
+.chg-comparing { background: color-mix(in srgb, var(--ph-link, var(--ph-accent, #1f6feb)) 14%, transparent) !important; box-shadow: inset 0 0 0 1.5px var(--ph-link, var(--ph-accent, #1f6feb)) !important; border-radius: 6px; }
 .chg-badge.tick { animation: chg-tick .2s ease-out; }
 @keyframes chg-tick { from { transform: scale(1.35); } }
 @media (prefers-reduced-motion: reduce) { .chg-badge.tick { animation: none; } }
@@ -361,8 +405,6 @@ export class Changes {
   private look: ChangesDiffLook;
   hide: boolean;
   private kinds: Set<string>;
-  /** The look's section (under the list) open. */
-  private lookOpen = false;
   /** The picker shown, opened from which field. */
   private pick: "from" | "to" | null = null;
   private pair: Pair | null = null;
@@ -434,11 +476,24 @@ export class Changes {
       if (e.composedPath().includes(p.win)) return;
       this.key(e);
     });
+    // (a press outside closes it: anywhere on the page, the host's too (the path crosses the shadow roots); not on
+    // its buttons (theirs is the toggle), a dialog of the panel's open over it (Settings), Blame's card, or the
+    // pages while Blame waits for a click there. A press, not a click: a drag begun inside it and let go outside
+    // is no press outside)
+    document.addEventListener("pointerdown", (e) => {
+      if (!this.open) return;
+      const path = e.composedPath();
+      if (path.includes(this.el) || this.anchors.some((a) => path.includes(a))) return;
+      if (path.some((n) => n instanceof Element && (n.matches(".dialog, .blcard, .phx-ctx, .tip") || n.id === "chg"))) return;
+      if (this.mode === "blame" && this.blameAsked && this.blame?.takesPress(path)) return;
+      this.setOpen(false, undefined, false);
+    }, { capture: true });
     // (the pane resized: placed again, within it)
     addEventListener("resize", () => this.open && this.place());
     // (the browser tab shown again: what was "not saved yet" may be saved now)
     document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && this.historyMoved());
     if (typeof ResizeObserver === "function") new ResizeObserver(() => this.open && this.place()).observe(p.win);
+    if (p.stage) this.pagesWired(p.stage);
     this.applyColors();
     this.kept(p.prefs());
   }
@@ -473,10 +528,6 @@ export class Changes {
     this.anchors = [...this.anchors.filter((a) => a.isConnected), btn];
     this.badges = [...this.badges.filter((b) => b.isConnected), ...(badge ? [badge] : [])];
     btn.setAttribute("aria-haspopup", "dialog");
-    btn.setAttribute("aria-expanded", String(this.open));
-    btn.setAttribute("aria-pressed", String(this.open));
-    btn.classList.toggle("on", this.open);
-    btn.classList.toggle("active", this.open);
     if (was) {
       this.anchor = btn;
       if (this.open) this.place();
@@ -494,17 +545,12 @@ export class Changes {
    * known already and starts nothing: a diff runs once a pair is chosen, Blame
    * once its half is clicked. Its marks are on the pages while it is open.
    */
-  setOpen(v: boolean, at?: HTMLElement): void {
+  setOpen(v: boolean, at?: HTMLElement, refocus = true): void {
     if (at) this.anchor = at;
     if (v === this.open) return;
     this.open = v;
     this.el.hidden = !v;
-    for (const a of this.anchors) {
-      a.setAttribute("aria-pressed", String(v));
-      a.setAttribute("aria-expanded", String(v));
-      a.classList.toggle("on", v);
-      a.classList.toggle("active", v);
-    }
+    this.anchorState();
     if (v) {
       this.render();
       this.place();
@@ -517,7 +563,7 @@ export class Changes {
       this.graph?.cancel();
       this.marks();
       // (the keyboard back on the button that opened it)
-      if (this.el.contains(this.el.getRootNode() instanceof ShadowRoot ? (this.el.getRootNode() as ShadowRoot).activeElement : null)) (this.anchor ?? this.anchors[0])?.focus({ preventScroll: true });
+      if (refocus && this.el.contains(this.el.getRootNode() instanceof ShadowRoot ? (this.el.getRootNode() as ShadowRoot).activeElement : null)) (this.anchor ?? this.anchors[0])?.focus({ preventScroll: true });
     }
   }
 
@@ -541,7 +587,9 @@ export class Changes {
 
   /** The marks of the mode shown on the pages while open (only what was asked for: a diff run, Blame clicked), else none. */
   private marks(): void {
-    const diff = this.open && this.mode === "diff" && !!this.ran;
+    // (a diff stays on the pages with the popover closed, to be read with nothing over them: only Stop comparing,
+    // or Current, puts the current version back)
+    const diff = this.mode === "diff" && !!this.ran;
     const blame = this.open && this.mode === "blame" && this.blameAsked;
     // (the pages back to the editor's before Blame marks them; asked only when that changes: opened with
     // no diff, nothing is asked of the host)
@@ -583,6 +631,8 @@ export class Changes {
     if (e.key === "Escape") {
       // (a dialog of the panel's open over it, Settings or Keys: Esc is that dialog's)
       if (this.p.root.querySelector(".dialog:not([hidden])")) return;
+      // (a person or a commit picked out in Blame's lists: let go first)
+      if (this.mode === "blame" && this.blame?.unfocus()) return done();
       if (this.pick && this.graph?.aiming) (this.graph.cancel(), this.refreshHint());
       else if (this.pick) (this.pick = null), this.render(), this.el.querySelector<HTMLElement>("#chg-from")?.focus();
       else this.off();
@@ -709,6 +759,7 @@ export class Changes {
 
   /** The diff's changes as the list's items, their authors filled in as the host knows them. */
   private setItems(changes: DiffChange[]): void {
+    this.marksStale();
     const old = new Map(this.items.map((i) => [`${i.file}:${i.old}:${i.neu}`, i]));
     this.items = changes.map((c, i) => {
       const it = itemOf(c, i + 1);
@@ -839,8 +890,31 @@ export class Changes {
         b.classList.add("tick");
       }
     }
-    for (const a of this.anchors) a.title = `${CHANGES_TITLE}${n > 0 ? `. The number: ${says}` : ""}`;
+    const cmp = this.comparing && this.ran ? `Comparing ${this.name(this.ran.from).b} → ${this.name(this.ran.to).b}, on the pages till Stop comparing. ` : "";
+    for (const a of this.anchors) a.title = `${cmp}${CHANGES_TITLE}${n > 0 ? `. The number: ${says}` : ""}`;
     this.lastCount = n;
+    this.anchorState();
+  }
+
+  /** Whether a diff is on the pages (the popover open or not: closing it leaves the diff to be read). */
+  get comparing(): boolean {
+    return this.mode === "diff" && !!this.ran && this.pages === "diff";
+  }
+
+  /**
+   * The ± Changes buttons' state: expanded while the popover is open;
+   * pressed (on, active) while it is open or a diff is on the pages, so a
+   * comparison left on with the popover closed is plain to see.
+   */
+  private anchorState(): void {
+    const on = this.open || this.comparing;
+    for (const a of this.anchors) {
+      a.setAttribute("aria-expanded", String(this.open));
+      a.setAttribute("aria-pressed", String(on));
+      a.classList.toggle("on", on);
+      a.classList.toggle("active", on);
+      a.classList.toggle("chg-comparing", this.comparing);
+    }
   }
 
   render(): void {
@@ -850,7 +924,7 @@ export class Changes {
     const was = this.el.dataset.view;
     const view = `${this.mode}${this.pick ? "-pick" : ""}`;
     this.el.dataset.view = view;
-    this.el.replaceChildren(html`<div class="grip" title="Drag to make it wider or narrower"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.lookBox()}${this.foot()}`);
+    this.el.replaceChildren(html`<div class="grip" title="Drag to make it wider or narrower"></div>${this.head()}<div class="prog" hidden></div><div class="${`body${this.hide ? " hidedel" : ""}`}"></div>${this.foot()}`);
     this.renderProg();
     this.renderBody();
     const body = this.el.querySelector<HTMLElement>(".body")!;
@@ -889,7 +963,7 @@ export class Changes {
 
   private head(): DocumentFragment {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.lookOpen ? "Hide the look settings" : this.mode === "blame" ? "Blame's look: detail, colours, bars" : "Diff's look: colours and marks"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
+    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.mode === "blame" ? "Blame's look: colour by, style, not committed (at the top of the list)" : "Diff's look: colours and marks (at the top of the list)"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
     let below: DocumentFragment;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
@@ -949,7 +1023,7 @@ export class Changes {
       body.append(g.element);
       g.render();
       if (!g.commits.length && g.hasMore && !g.busy) void g.load();
-    } else body.replaceChildren(this.list());
+    } else body.replaceChildren(this.diffLook(), this.list());
     body.scrollTop = keep;
     this.wireBody();
     this.badge();
@@ -1033,86 +1107,81 @@ export class Changes {
     return html`${filters}${rows}`;
   }
 
+  /** Blame's commits as seen (a skipped one's name and subject kept). */
+  private seenCommits = new Map<string, BlameCommit>();
+
   private blameBody(): DocumentFragment {
     const b = this.blame;
     if (!b) return html`<div class="empty">Blame needs the project's history.</div>`;
     const L = b.look;
-    const ramp = AGE_RAMPS[L.ages] ?? AGE_RAMPS.violet;
     const word = b.words.commit;
+    const look = this.blameLook();
     if (!this.blameAsked)
-      return html`<div class="empty"><b>See who wrote each line</b>Bars in the margin, one per printed line, coloured by ${L.color === "age" ? "age" : "author"}; the people and the ${word}s that wrote this version listed here.<button type="button" class="primary" id="chg-blame-go" title="Read the history and mark who wrote each line">Show who wrote what</button></div>`;
+      return html`${look}<div class="empty"><b>See who wrote each line</b>Every line of the pages coloured by ${L.color === "age" ? "its age" : "who wrote it"}; the people and the ${word}s that wrote this version listed here.<button type="button" class="primary" id="chg-blame-go" title="Read the history and colour who wrote each line">Show who wrote what</button></div>`;
     const s = b.summary();
-    const colour = html`<div class="sec"><h3>Colour lines by</h3><div class="seg small" role="group"><button type="button" data-col="author" aria-pressed="${String(L.color === "author")}" title="A colour per person">Author</button><button type="button" data-col="age" aria-pressed="${String(L.color === "age")}" title="Newer lines darker">Age</button></div>${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}</div>`;
-    if (!s.lines && (s.busy || s.waiting)) return html`${colour}<div class="sec"><h3>Who wrote this version</h3>${this.skeleton(3)}</div>`;
-    if (!s.lines && s.error) return colour;
-    if (!s.lines) return html`${colour}<div class="empty"><b>Nothing to blame yet</b>The bars come once the pages are built.</div>`;
-    const people = s.people.map((p) => html`<button type="button" class="${`prow${b.focusP === p.key ? " sel" : ""}`}" data-p="${p.key}" aria-pressed="${String(b.focusP === p.key)}" title="${b.focusP === p.key ? "Show everyone's lines again" : `Pick out ${p.name}'s lines on the pages`}"><span class="av" style="${`background:${p.color}`}">${p.key ? initials(p.name) : "Y"}</span><span class="nm"><span>${p.name}</span><span class="bar6"><i style="${`width:${Math.round((100 * p.n) / s.lines)}%;background:${p.color}`}"></i></span></span><span class="ct">${p.n}</span></button>`);
-    const commits = s.commits.map((c) => {
+    if (!s.lines && (s.busy || s.waiting)) return html`${look}<div class="sec"><h3>Who wrote this version</h3>${this.skeleton(3)}</div>`;
+    if (!s.lines && s.error) return look;
+    if (!s.lines) return html`${look}<div class="empty"><b>Nothing to blame yet</b>The colours come once the pages are built.</div>`;
+    const people = s.people.map((p) => html`<button type="button" class="${`prow${b.focusP === p.key ? " sel" : ""}`}" data-p="${p.key}" aria-pressed="${String(b.focusP === p.key)}" title="${b.focusP === p.key ? "Show everyone's lines again (Esc)" : `Pick out ${p.name}'s lines on the pages`}"><span class="av" style="${`background:${p.color}`}">${p.key ? initials(p.name) : "Y"}</span><span class="nm"><span>${p.name}</span><span class="bar6"><i style="${`width:${Math.round((100 * p.n) / s.lines)}%;background:${p.color}`}"></i></span></span><span class="ct">${p.n}</span></button>`);
+    // (the commits that own lines, and the ones skipped (they own none now), newest first: each with its Skip)
+    const known = b.commitsKnown();
+    for (const c of known) this.seenCommits.set(c.id, c);
+    const hashes = b.words.hashes !== false;
+    type Row = { time: number; row: DocumentFragment };
+    const rows: Row[] = s.commits.map((c) => {
       const x = c.commit;
-      return html`<button type="button" class="${`crow${b.focusC === c.c ? " sel" : ""}`}" data-c="${String(c.c)}" aria-pressed="${String(b.focusC === c.c)}" title="${b.focusC === c.c ? "Show every line again" : `Pick out this ${word}'s lines on the pages`}"><span class="${`sw${x ? "" : " hatch"}`}" style="${`background:${c.color}`}"></span><span style="min-width:0"><div class="s">${x ? x.subject || "(no subject)" : word === "version" ? "Not saved to the history yet" : "Not committed"}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1000)} · <code>${x.short}</code>${c.via ? html` · <span class="refp">${c.via.replace(/^On (\S+),.*/, "$1")}</span>` : ""}` : "You · now"}</small></span><span class="ct">${c.n}</span></button>`;
+      const main = html`<button type="button" class="${`crow${b.focusC === c.c ? " sel" : ""}`}" data-c="${String(c.c)}" aria-pressed="${String(b.focusC === c.c)}" title="${b.focusC === c.c ? "Show every line again (Esc)" : `Pick out this ${word}'s lines on the pages`}"><span class="${`sw${x ? "" : " hatch"}`}" style="${`background:${c.color}`}"></span><span style="min-width:0"><div class="s">${x ? x.subject || "(no subject)" : word === "version" ? "Not saved to the history yet" : "Not committed"}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1000)}${hashes ? html` · <code>${x.short}</code>` : ""}${c.via ? html` · <span class="refp">${c.via.replace(/^On (\S+),.*/, "$1")}</span>` : ""}` : "You · now"}</small></span><span class="ct">${c.n}</span></button>`;
+      const skip = x ? html`<button type="button" class="skipb" data-skip="${x.id}" aria-pressed="false" title="${`Skip this ${word}: its lines go to whoever wrote them before (a reformat, a spell-check)`}">Skip</button>` : html``;
+      return { time: x ? x.time : Infinity, row: html`<div class="crw">${main}${skip}</div>` };
     });
+    for (const id of L.skip) {
+      const x = this.seenCommits.get(id) ?? this.commitOf(id);
+      const what = x ? x.subject || "(no subject)" : `${word === "version" ? "Version" : "Commit"} ${id.slice(0, 7)}`;
+      rows.push({
+        time: x ? x.time : -Infinity,
+        row: html`<div class="crw skipped"><button type="button" class="crow" disabled title="${`Skipped: its lines go to whoever wrote them before`}"><span class="sw" style="background:transparent"></span><span style="min-width:0"><div class="s">${what}</div><small>${x ? html`${x.author || x.email} · ${agoWords(x.time, Date.now() / 1000)}${hashes ? html` · <code>${x.short}</code>` : ""}` : ""}<span class="tag">skipped</span></small></span><span class="ct">–</span></button><button type="button" class="skipb" data-skip="${id}" aria-pressed="true" title="${`Skipped: click to blame this ${word} again`}">Skipped</button></div>`,
+      });
+    }
+    rows.sort((a, b2) => b2.time - a.time);
     // (the count only once every file is in; till then the lists are said to be partial)
     const count = s.waiting ? `so far · ${(s.files - s.waiting).toLocaleString()} of ${s.files.toLocaleString()} files` : `${s.lines.toLocaleString()} ${s.unit}`;
-    return html`${colour}<div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${commits}</div>`;
+    return html`${look}<div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
+  }
+
+  /** A commit by its id, from the history read (a skipped one, kept from before, named). */
+  private commitOf(id: string): BlameCommit | null {
+    const g = this.graph;
+    const i = g ? g.find(id) : -1;
+    if (!g || i < 0) return null;
+    const c = g.commits[i];
+    return { id: c.id, short: c.short, author: c.author, email: c.email ?? "", time: c.time, subject: c.subject } as BlameCommit;
+  }
+
+  /** Blame's look, at the top of its list: Colour by, Style, Not committed; the rest in Settings. */
+  private blameLook(): DocumentFragment {
+    const L = this.blame!.look;
+    const word = this.blame!.words.commit;
+    const ramp = AGE_RAMPS[L.ages] ?? AGE_RAMPS.violet;
+    return html`<div class="look" id="chg-look" role="group" aria-label="Blame's look">
+      <div class="opt2"><span class="lab2">Colour by</span>${this.segOf("color", L.color, [["author", "Author", "A colour per person"], ["age", "Age", "Newer lines stronger"]])}</div>
+      ${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}
+      <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "wash", [["wash", "Wash", "A soft tint behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
+      <div class="opt2"><span class="lab2">${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Hatched", "Grey stripes"], ["hide", "Hide", "Not marked"]])}</div>
+      <button type="button" class="lnk all" id="chg-all" title="All of Blame's settings: detail, spacing, moved text, changed since, the bar's side and width, the colours">All settings…</button></div>`;
+  }
+
+  /** Diff's look, at the top of its list: colours, added and deleted text; the rest in Settings. */
+  private diffLook(): DocumentFragment {
+    const L = this.look;
+    return html`<div class="look" id="chg-look" role="group" aria-label="Diff's look">
+      <div class="opt2"><span class="lab2">Colours</span><div class="swatches">${(Object.entries(DIFF_COLORS) as [ChangesDiffLook["colors"], [string, string, string]][]).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
+      <div class="opt2"><span class="lab2">Added</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
+      <div class="opt2"><span class="lab2">Deleted</span>${this.segOf("del", L.del, [["strike", "Struck", "Struck through"], ["mark", "Marker", "Struck, a highlight behind it"], ["caret", "Caret", "A caret where it was, the text left out"]])}</div>
+      <button type="button" class="lnk all" id="chg-all" title="All of Diff's settings: a changed figure, change bars, hide deletions">All settings…</button></div>`;
   }
 
   private segOf<T extends string | number>(key: string, cur: T, opts: [T, string, string?][]): DocumentFragment {
     return html`<div class="seg small" role="group">${opts.map(([v, l, t]) => html`<button type="button" data-look="${key}" data-v="${String(v)}" aria-pressed="${String(cur === v)}" title="${t ?? null}">${l}</button>`)}</div>`;
-  }
-
-  /** The look's section under the list: the mode's settings, folded or open (⚙ too); the same ones as the panel's Settings, Changes. */
-  private lookBox(): DocumentFragment {
-    if (this.pick) return html``;
-    const name = this.mode === "blame" ? "Blame's look" : "Diff's look";
-    return html`<div class="${`lookbox${this.lookOpen ? " open" : ""}`}"><button type="button" class="lookhead" id="chg-lookhead" aria-expanded="${String(this.lookOpen)}" aria-controls="chg-look" title="${this.lookOpen ? `Fold ${name}` : `${name}: how the marks look, kept for next time`}"><span class="chev2" aria-hidden="true">▸</span>${name}</button><div class="lookin" id="chg-look" hidden="${!this.lookOpen}">${this.lookOpen ? (this.mode === "blame" ? this.blameSettings() : this.diffSettings()) : ""}</div></div>`;
-  }
-
-  private diffSettings(): DocumentFragment {
-    const L = this.look;
-    return html`<div class="set">
-      <div class="opt2"><span>Colours</span><div class="swatches">${(Object.entries(DIFF_COLORS) as [ChangesDiffLook["colors"], [string, string, string]][]).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
-      <div class="opt2"><span>Added text</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
-      <div class="opt2"><span>Deleted text</span>${this.segOf("del", L.del, [["strike", "Struck", "Struck through"], ["mark", "Marker", "Struck, a highlight behind it"], ["caret", "Caret only", "A caret where it was, the text left out"]])}</div>
-      <div class="opt2"><span>Changed figure</span>${this.segOf("fig", L.fig, [["side", "Side by side", "The old one beside the new"], ["over", "Overlay", "The old one under the new"], ["new", "New only", "The new one alone"]])}</div>
-      <div class="opt2"><span>Change bars</span>${this.segOf("bars", L.bars ? "on" : "off", [["off", "Off", "No bars in the margin"], ["on", "In the margin", "A bar beside each changed line (latexdiff's classic marks)"]])}</div>
-      <div class="${`preview i-${L.ins} d-${L.del}${L.bars ? " bars" : ""}`}" aria-label="Preview">We show it <span class="dl">cuts the wait</span> <span class="ins">keeps every edit under 50 ms</span>.</div>
-      <button type="button" class="reset" data-reset="diff" title="Diff's look as it came">Reset to defaults</button></div>`;
-  }
-
-  /** Blame's commits as seen (a skipped one's name and subject kept). */
-  private seenCommits = new Map<string, BlameCommit>();
-
-  private blameSettings(): DocumentFragment {
-    const b = this.blame!;
-    const L = b.look;
-    const word = b.words.commit;
-    const hashes = b.words.hashes !== false;
-    const detailNote = L.detail === "line" ? "Each line takes the newest edit in it, as git blame does." : L.detail === "word" ? "Each word keeps who typed it: a word someone changed in another's sentence is theirs." : word === "version" ? "Exact to the character, from Overleaf's history." : "Each character as git's history gives it: words at best.";
-    const known = b.commitsKnown();
-    // (a commit skipped owns no lines any more: named as it was seen before)
-    for (const c of known) this.seenCommits.set(c.id, c);
-    const skips = [...new Set([...L.skip, ...known.map((c) => c.id)])].slice(0, 40).map((id) => {
-      const c = known.find((x) => x.id === id) ?? this.seenCommits.get(id);
-      const what = c ? `${c.short} ${c.subject}${hashes ? "" : ` · ${c.author}`}` : id.slice(0, 10);
-      return html`<label title="${what}: skipped, its lines go to whoever wrote them before"><input type="checkbox" data-skip="${id}" checked="${L.skip.includes(id)}"><span>${c ? html`<code>${c.short}</code> ${c.subject}${hashes ? "" : ` · ${c.author}`}` : id.slice(0, 10)}</span></label>`;
-    });
-    const since = b.summary().since;
-    const sinceSel = html`<select id="chg-since" aria-label="Changed since" title="Lines older than this are dimmed"><option value="off" selected="${L.since === "off"}">Off</option>${since.map((s) => html`<option value="${s.v}" selected="${L.since === s.v}">${s.label}</option>`)}${L.since !== "off" && !since.some((s) => s.v === L.since) ? html`<option value="${L.since}" selected>${L.since.split(":").slice(1).join(":")}</option>` : ""}</select>`;
-    const sw = (key: string, cur: string, opts: [string, string[], string][]) => html`<div class="swatches">${opts.map(([k, cols, name]) => html`<button type="button" class="swb" data-look="${key}" data-v="${k}" aria-pressed="${String(cur === k)}" title="${name}" aria-label="${name}">${cols.slice(0, 4).map((c) => html`<i style="${`background:${c}`}"></i>`)}</button>`)}</div>`;
-    return html`<div class="set">
-      <div class="opt2"><span>Detail</span>${this.segOf("detail", L.detail, [["line", "Line", "Whole lines"], ["word", "Word", "Word by word"], ["char", "Character", "Character by character"]])}</div>
-      <p class="note2">${detailNote}</p>
-      <div class="opt2"><span>Spacing-only edits</span>${this.segOf("ws", L.ws, [["ignore", "Ignore", "A change of spacing alone changes no one's text"], ["count", "Count", "Spacing changes count as edits"]])}</div>
-      <div class="opt2"><span>Moved text</span>${this.segOf("moved", L.moved, [["keep", "Keep its writer", "Text moved stays its writer's"], ["mover", "Credit the mover", "Text moved is the mover's"]])}</div>
-      <div class="opt2"><span>${word === "version" ? "Not saved yet" : "Not committed"}</span>${this.segOf("wip", L.wip, [["show", "Show hatched", "Grey hatched bars"], ["hide", "Hide", "No bars"]])}</div>
-      <div class="opt2 wide"><span>Skip ${word}s</span><div class="skips">${skips.length ? skips : html`<small>None blamed yet</small>`}<small>A skipped ${word}'s lines go to whoever wrote them before (a reformat, a spell-check)</small></div></div>
-      <div class="opt2"><span>Changed since</span>${sinceSel}</div>
-      <div class="opt2"><span>Tint the text</span>${this.segOf("tint", L.tint, [["off", "Off", "No tint"], ["hover", "Under pointer", "The paragraph under the pointer"], ["all", "Everywhere", "Every line tinted"]])}</div>
-      <div class="opt2"><span>Bars</span>${this.segOf("bars", L.bars, [["left", "Left margin", "Bars in the left margin"], ["right", "Right margin", "Bars in the right margin"]])}</div>
-      <div class="opt2"><span>Bar width</span>${this.segOf("width", L.width, [[2, "Thin"], [4, "Medium"], [7, "Wide"]])}</div>
-      <div class="opt2"><span>People</span>${sw("people", L.people, [["okabe", AUTHOR_COLORS, "Okabe–Ito (colour-blind safe)"], ["overleaf", OVERLEAF_COLORS, "Overleaf's collaborator colours"]])}</div>
-      <div class="opt2"><span>Age</span>${sw("ages", L.ages, (Object.entries(AGE_RAMPS) as [string, { name: string; light: string[] }][]).map(([k, v]) => [k, v.light, v.name]))}</div>
-      <button type="button" class="reset" data-reset="blame" title="Blame's look as it came">Reset to defaults</button></div>`;
   }
 
   /** The look changed, from the popover or the panel's Settings: kept, applied. */
@@ -1153,6 +1222,7 @@ export class Changes {
         { id: "chg-fig", label: "Diff: changed figure", kind: "choice", options: [["side", "Side by side"], ["over", "Overlay"], ["new", "New only"]], value: L.fig, set: (v) => this.setDiffLook({ fig: v as ChangesDiffLook["fig"] }) },
         { id: "chg-bars", label: "Diff: change bars", help: "A bar beside each changed line (latexdiff's classic marks)", kind: "toggle", value: !!L.bars, set: (v) => this.setDiffLook({ bars: !!v }) },
         { id: "chg-hide", label: "Diff: hide deletions", help: "Deleted text left out of the list and the pages", kind: "toggle", value: this.hide, set: (v) => this.setHide(!!v) },
+        { id: "chg-reset", label: "Diff: its look as it came", kind: "action", button: "Reset", set: () => this.setDiffLook({ ...DIFF_LOOK }) },
       ] });
     }
     const b = this.blame;
@@ -1163,10 +1233,14 @@ export class Changes {
         { id: "bl-color", label: "Blame: colour lines by", kind: "choice", options: [["author", "Author"], ["age", "Age"]], value: B.color, set: (v) => this.setBlameLook({ color: v as BlameLook["color"] }) },
         { id: "bl-ws", label: "Blame: spacing-only edits", kind: "choice", options: [["ignore", "Ignore"], ["count", "Count"]], value: B.ws, set: (v) => this.setBlameLook({ ws: v as BlameLook["ws"] }) },
         { id: "bl-moved", label: "Blame: moved text", kind: "choice", options: [["keep", "Keep its writer"], ["mover", "Credit the mover"]], value: B.moved, set: (v) => this.setBlameLook({ moved: v as BlameLook["moved"] }) },
-        { id: "bl-tint", label: "Blame: tint the text", kind: "choice", options: [["off", "Off"], ["hover", "Under pointer"], ["all", "Everywhere"]], value: B.tint, set: (v) => this.setBlameLook({ tint: v as BlameLook["tint"] }) },
-        { id: "bl-bars", label: "Blame: bars", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v as BlameLook["bars"] }) },
-        { id: "bl-width", label: "Blame: bar width", kind: "choice", options: [["2", "Thin"], ["4", "Medium"], ["7", "Wide"]], value: String(B.width), set: (v) => this.setBlameLook({ width: Number(v) }) },
+        { id: "bl-style", label: "Blame: style", help: "Every line coloured while Blame is on: a soft wash behind its words, the words themselves, or a bar in the margin", kind: "choice", options: [["wash", "Wash"], ["text", "Text"], ["bar", "Bar"]], value: B.style ?? "wash", set: (v) => this.setBlameLook({ style: v as BlameLook["style"] }) },
+        { id: "bl-wip", label: b.words.commit === "version" ? "Blame: not saved yet" : "Blame: not committed", kind: "choice", options: [["show", "Hatched"], ["hide", "Hide"]], value: B.wip, set: (v) => this.setBlameLook({ wip: v as BlameLook["wip"] }) },
+        { id: "bl-since", label: "Blame: changed since", help: "Lines older than this set back, uncoloured", kind: "select", options: [["off", "Off"], ...b.summary().since.map((x) => [x.v, x.label] as [string, string]), ...(B.since !== "off" && !b.summary().since.some((x) => x.v === B.since) ? [[B.since, B.since.split(":").slice(1).join(":")] as [string, string]] : [])], value: B.since, set: (v) => this.setBlameLook({ since: String(v) }) },
+        { id: "bl-bars", label: "Blame: bars", help: "With the Bar style", kind: "choice", options: [["left", "Left margin"], ["right", "Right margin"]], value: B.bars, set: (v) => this.setBlameLook({ bars: v as BlameLook["bars"] }) },
+        { id: "bl-width", label: "Blame: bar width", help: "With the Bar style", kind: "choice", options: [["2", "Thin"], ["4", "Medium"], ["7", "Wide"]], value: String(B.width), set: (v) => this.setBlameLook({ width: Number(v) }) },
         { id: "bl-people", label: "Blame: people's colours", kind: "choice", options: [["okabe", "Okabe–Ito"], ["overleaf", "Overleaf's"]], value: B.people, set: (v) => this.setBlameLook({ people: v as BlameLook["people"] }) },
+        { id: "bl-ages", label: "Blame: age colours", kind: "choice", options: (Object.entries(AGE_RAMPS) as [string, { name: string }][]).map(([k, v]) => [k, v.name] as [string, string]), value: B.ages, set: (v) => this.setBlameLook({ ages: v as BlameLook["ages"] }) },
+        { id: "bl-reset", label: "Blame: its look as it came", help: "Skipped commits kept", kind: "action", button: "Reset", set: () => this.setBlameLook({ ...BLAME_LOOK, skip: b.look.skip }) },
       ] });
     }
     return groups;
@@ -1175,14 +1249,17 @@ export class Changes {
   private wire(): void {
     const $ = <T extends HTMLElement>(s: string) => this.el.querySelector<T>(s);
     $("#chg-x")!.onclick = () => this.off();
-    const look = () => {
-      this.lookOpen = !this.lookOpen;
-      this.render();
-      if (this.lookOpen) this.el.querySelector(".lookbox")?.scrollIntoView({ block: "nearest" });
+    // (⚙: to the look at the top of the list, marked a moment (its animation, once); from the picker, the list back first)
+    $("#chg-gear")!.onclick = () => {
+      if (this.pick) (this.pick = null), this.graph?.cancel(), this.render();
+      const body = this.el.querySelector<HTMLElement>(".body"), look = this.el.querySelector<HTMLElement>("#chg-look");
+      if (!body || !look) return;
+      body.scrollTo({ top: 0, behavior: reduced() ? "auto" : "smooth" });
+      look.classList.remove("mark");
+      void look.offsetWidth;
+      look.classList.add("mark");
+      look.querySelector<HTMLElement>("[aria-pressed=true]")?.focus({ preventScroll: true });
     };
-    $("#chg-gear")!.onclick = look;
-    const lh = $("#chg-lookhead");
-    if (lh) lh.onclick = look;
     for (const b of this.el.querySelectorAll<HTMLButtonElement>(".ph [data-m]"))
       b.onclick = () => {
         const m = b.dataset.m as "diff" | "blame";
@@ -1217,7 +1294,6 @@ export class Changes {
     const prev = $<HTMLButtonElement>("#chg-prev"), next = $<HTMLButtonElement>("#chg-next");
     if (prev) prev.onclick = () => this.step(-1);
     if (next) next.onclick = () => this.step(1);
-    this.wireLook();
     // (dragged wider or narrower from its left edge)
     const grip = $<HTMLElement>(".grip");
     if (grip)
@@ -1250,35 +1326,34 @@ export class Changes {
     this.error = "";
     this.pages = "diff";
     this.host.diff?.stop();
+    this.marksStale();
     this.graph?.mark(null, null);
     this.marks();
     this.render();
   }
 
-  /** The look's controls (the section under the list). */
-  private wireLook(): void {
-    const box = this.el.querySelector<HTMLElement>(".lookin");
-    if (!box) return;
+  /** The look's controls (the block at the top of the list) and the commits' Skip. */
+  private wireLook(body: HTMLElement): void {
     const b = this.blame;
-    for (const x of box.querySelectorAll<HTMLButtonElement>("[data-look]"))
+    for (const x of body.querySelectorAll<HTMLButtonElement>("#chg-look [data-look]"))
       x.onclick = () => {
         const k = x.dataset.look!, v = x.dataset.v!;
-        if (this.mode === "blame") this.setBlameLook({ [k]: k === "width" ? Number(v) : v } as Partial<BlameLook>);
-        else this.setDiffLook(k === "bars" ? { bars: v === "on" } : ({ [k]: v } as Partial<ChangesDiffLook>));
+        if (this.mode === "blame") this.setBlameLook({ [k]: v } as Partial<BlameLook>);
+        else this.setDiffLook({ [k]: v } as Partial<ChangesDiffLook>);
       };
-    for (const x of box.querySelectorAll<HTMLInputElement>("[data-skip]"))
-      x.onchange = () => {
-        if (!b) return;
-        const skip = new Set(b.look.skip);
-        x.checked ? skip.add(x.dataset.skip!) : skip.delete(x.dataset.skip!);
-        this.setBlameLook({ skip: [...skip] });
-      };
-    const since = box.querySelector<HTMLSelectElement>("#chg-since");
-    if (since) since.onchange = () => this.setBlameLook({ since: since.value });
-    for (const x of box.querySelectorAll<HTMLButtonElement>("[data-reset]"))
+    const all = body.querySelector<HTMLButtonElement>("#chg-all");
+    if (all) {
+      all.hidden = !this.p.settings;
+      all.onclick = () => this.p.settings?.(this.mode === "blame" ? "Blame" : "Diff");
+    }
+    // (a commit skipped, or taken back: blamed again without it, kept)
+    for (const x of body.querySelectorAll<HTMLButtonElement>(".skipb[data-skip]"))
       x.onclick = () => {
-        if (x.dataset.reset === "blame") this.setBlameLook({ ...BLAME_LOOK, skip: [] });
-        else this.setDiffLook({ ...DIFF_LOOK });
+        if (!b) return;
+        const id = x.dataset.skip!, skip = new Set(b.look.skip);
+        if (skip.has(id)) skip.delete(id);
+        else skip.add(id);
+        this.setBlameLook({ skip: [...skip] });
       };
   }
 
@@ -1338,7 +1413,7 @@ export class Changes {
         this.render();
       };
     const b = this.blame;
-    for (const x of body.querySelectorAll<HTMLButtonElement>("[data-col]")) x.onclick = () => this.setBlameLook({ color: x.dataset.col as BlameLook["color"] });
+    this.wireLook(body);
     for (const x of body.querySelectorAll<HTMLButtonElement>(".prow")) x.onclick = () => b?.focus("person", x.dataset.p ?? "");
     for (const x of body.querySelectorAll<HTMLButtonElement>(".crow")) x.onclick = () => b?.focus("commit", Number(x.dataset.c));
     // (the picker's hint follows a first end clicked)
@@ -1386,6 +1461,174 @@ export class Changes {
     if (!this.graph?.commits.length) return;
     void this.graph.reload();
   }
+
+  // ---- the diff's marks on its pages: deleted text's card, the right-click menu ----
+
+  /** Each page's marks, asked once a diff (cleared when its changes come again). */
+  private pageMarks = new Map<number, DiffMark[] | "asked">();
+  private delCard: HTMLElement | null = null;
+  /** The mark whose card is up (`pinned`: by a click, till Esc or a press outside). */
+  private delAt: DiffMark | null = null;
+  private delPinned = false;
+  private delDwell: ReturnType<typeof setTimeout> | undefined;
+  private delMove: { t: EventTarget | null; x: number; y: number } | null = null;
+  private delFrame = 0;
+  /** Each page's box, read once after a scroll or a resize (not at every move). */
+  private slotRects = new Map<number, DOMRect>();
+
+  /** Whether deleted text is not shown on the diff's pages (Caret only, Hide deletions): its card offered there. */
+  private get delHidden(): boolean {
+    return this.comparing && (this.look.del === "caret" || this.hide);
+  }
+
+  /** The pages' events for the diff's marks: a move hit-tests the marks known (once a frame, nothing laid out), a right-click opens the menu. */
+  private pagesWired(stage: HTMLElement): void {
+    const stale = () => this.slotRects.clear();
+    stage.addEventListener("scroll", stale, { passive: true, capture: true });
+    addEventListener("resize", stale, { passive: true });
+    stage.addEventListener("pointermove", (e) => {
+      if (!this.delHidden || this.delPinned) return;
+      this.delMove = { t: e.target, x: e.clientX, y: e.clientY };
+      if (this.delFrame) return;
+      this.delFrame = requestAnimationFrame(() => {
+        this.delFrame = 0;
+        const m = this.delMove;
+        if (!m || !this.delHidden || this.delPinned) return;
+        const at = this.markAt(m.t, m.x, m.y, true);
+        if (at === this.delAt) return;
+        this.delOver(at, m.x, m.y);
+      });
+    }, { passive: true });
+    stage.addEventListener("pointerleave", (e) => !this.delPinned && !(e.relatedTarget instanceof Node && this.delCard?.contains(e.relatedTarget)) && this.delOver(null));
+    // (a click on a caret: its card pinned; elsewhere, a pinned card let go)
+    stage.addEventListener("click", (e) => {
+      if (!this.delHidden) return;
+      const at = this.markAt(e.target, e.clientX, e.clientY, true);
+      if (at) (this.delPinned = true), clearTimeout(this.delDwell), this.delShow(at, e.clientX, e.clientY);
+      else if (this.delPinned) (this.delPinned = false), this.delOver(null);
+    });
+    document.addEventListener("pointerdown", (e) => {
+      if (!this.delPinned || !this.delCard || e.composedPath().includes(this.delCard) || e.composedPath().includes(stage)) return;
+      this.delPinned = false;
+      this.delOver(null);
+    }, { capture: true });
+    // (Esc: the card first, the topmost thing open)
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.delCard || this.delCard.hidden) return;
+      this.delPinned = false;
+      this.delOver(null);
+      e.stopPropagation();
+      e.preventDefault();
+    }, { capture: true });
+    stage.addEventListener("contextmenu", (e) => {
+      if (!this.comparing) return;
+      const at = this.markAt(e.target, e.clientX, e.clientY, false);
+      if (!at) return;
+      const it = this.items[at.n - 1];
+      const items: MenuItem[] = [{ label: "Show in the list", act: () => this.showItem(at.n) }];
+      if (this.host.diff?.source && it) items.push({ label: "Go to source", act: () => this.host.diff?.source?.(at.n) });
+      e.preventDefault();
+      this.delOver(null);
+      contextMenu(this.p.win, e.clientX, e.clientY, items, `Change ${at.n}`);
+    });
+  }
+
+  /** The change under a point of the pages: its deleted part (`del`; with Hide deletions, the change's box), else its box. Its page's marks asked the first time (none yet: null). */
+  private markAt(target: EventTarget | null, cx: number, cy: number, del: boolean): DiffMark | null {
+    const slot = (target as HTMLElement | null)?.closest?.<HTMLElement>(".slot");
+    const stage = this.p.stage, size = this.p.pageSize?.();
+    if (!slot || !stage || !size || !this.host.diff?.marks) return null;
+    const k = Number(slot.dataset.k);
+    const ms = this.pageMarks.get(k);
+    if (ms === undefined) {
+      this.pageMarks.set(k, "asked");
+      // (come: the pointer's last place hit-tested again, as if it had moved: it may rest on a caret already)
+      void Promise.resolve(this.host.diff.marks(k)).then((m) => {
+        if (this.pageMarks.get(k) !== "asked") return;
+        this.pageMarks.set(k, m);
+        const p = this.delMove;
+        if (p && this.delHidden && !this.delPinned) this.delOver(this.markAt(p.t, p.x, p.y, true), p.x, p.y);
+      }, () => this.pageMarks.delete(k));
+      return null;
+    }
+    if (ms === "asked") return null;
+    let r = this.slotRects.get(k);
+    if (!r) this.slotRects.set(k, (r = slot.getBoundingClientRect()));
+    const x = ((cx - r.left) / r.width) * size.w, y = ((cy - r.top) / r.height) * size.h;
+    const pad = 2;
+    for (const m of ms) {
+      const it = this.items[m.n - 1];
+      const b = del ? (m.del ?? (this.hide && it?.was ? m.box : undefined)) : m.box;
+      if (!b || (del && !it?.was)) continue;
+      if (x >= b[0] - pad && x <= b[2] + pad && y >= b[1] - pad && y <= b[3] + pad) return m;
+    }
+    return null;
+  }
+
+  /** The mark under the pointer changed: its card after Blame's dwell (one up already follows at once), or none. */
+  private delOver(at: DiffMark | null, x?: number, y?: number): void {
+    this.delAt = at;
+    clearTimeout(this.delDwell);
+    if (!at) {
+      if (this.delCard) this.delCard.hidden = true;
+      return;
+    }
+    if (x === undefined || y === undefined) return;
+    if (this.delCard && !this.delCard.hidden) this.delShow(at, x, y);
+    else this.delDwell = setTimeout(() => this.delAt === at && this.delShow(at, x, y), 180);
+  }
+
+  /** The card for change `at`'s deleted text, near the pointer: drawn once a change. */
+  private delShow(at: DiffMark, px: number, py: number): void {
+    const it = this.items[at.n - 1];
+    if (!it?.was) return;
+    if (!this.delCard) {
+      const c = (this.delCard = document.createElement("div"));
+      c.className = "blcard delcard";
+      c.setAttribute("role", "tooltip");
+      c.hidden = true;
+      this.p.win.append(c);
+      c.addEventListener("pointerleave", (e) => !this.delPinned && !(e.relatedTarget instanceof Node && this.p.stage?.contains(e.relatedTarget)) && this.delOver(null));
+    }
+    const c = this.delCard;
+    if (c.dataset.n !== String(at.n) || c.hidden) {
+      c.dataset.n = String(at.n);
+      const [, d] = DIFF_COLORS[this.look.colors] ?? DIFF_COLORS.blue;
+      c.style.setProperty("--chg-del", d);
+      const long = it.was.split(" ").length >= 70;
+      const p = this.ran;
+      const range = p ? `${this.name(p.from).b} → ${this.name(p.to).b}` : "";
+      c.replaceChildren(html`<div class="h">Deleted</div><div class="dtx">${it.was}${long ? " …" : ""}</div><div class="meta">${`Change ${at.n} of ${this.items.length}`}${range ? ` · ${range}` : ""}</div>`);
+      c.hidden = false;
+    }
+    const W = c.offsetWidth || 300, H = c.offsetHeight || 80;
+    const box = this.p.stage!.getBoundingClientRect();
+    const x = Math.max(box.left + 6, Math.min(box.right - W - 6, px + 14));
+    const y = py + H + 20 > box.bottom ? Math.max(box.top + 6, py - H - 12) : py + 16;
+    c.style.left = `${x}px`;
+    c.style.top = `${y}px`;
+    const got = c.getBoundingClientRect();
+    if (Math.abs(got.left - x) > 0.5 || Math.abs(got.top - y) > 0.5) (c.style.left = `${2 * x - got.left}px`), (c.style.top = `${2 * y - got.top}px`);
+  }
+
+  /** Change `n` shown in the list: the popover open on Diff, the change current, scrolled to. */
+  private showItem(n: number): void {
+    this.mode = "diff";
+    this.pick = null;
+    if (!this.kinds.has(this.items[n - 1]?.kind ?? "")) this.kinds = new Set(KINDS);
+    this.cur = this.shown().findIndex((c) => c.k === n);
+    this.setOpen(true);
+    this.render();
+    this.el.querySelector(".citem.cur")?.scrollIntoView({ block: "center" });
+  }
+
+  /** The diff's changes came again (an edit, a new pair, a look): its marks asked again when the pointer comes. */
+  private marksStale(): void {
+    this.pageMarks.clear();
+    this.delPinned = false;
+    this.delOver(null);
+    closeMenu();
+  }
 }
 
 /** A row of the panel's Settings dialog (panel.ts SettingRow's shape, without importing the panel). */
@@ -1393,8 +1636,10 @@ export interface SettingRowLike {
   id: string;
   label: string;
   help?: string;
-  kind: "toggle" | "choice";
+  kind: "toggle" | "choice" | "select" | "action";
   options?: [string, string][];
   value?: boolean | string;
+  /** An action's button. */
+  button?: string;
   set?(v?: boolean | string): void;
 }
