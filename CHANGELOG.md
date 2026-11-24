@@ -12,11 +12,16 @@ milestones, not versions.
 
 Compare and Blame are now one thing: **± Changes** :)
 
-- **One button, one popover.** Click ± Changes to open it and again (or
-  ✕, or Esc) to close it; it stays open while you work on the pages beside
-  it, and nothing is read until you pick a version or switch to Blame.
-  Diff and Blame sit side by side in it, each with its look right under
-  the list (and in Settings), kept for next time.
+- **One button, one popover.** Click ± Changes to open it; click it
+  again, ✕, Esc or anywhere outside it to close it. Nothing is read until
+  you pick a version or switch to Blame. Diff and Blame sit side by side
+  in it, each with its look at the top of its list (and in Settings), kept
+  for next time.
+- **Read the diff with nothing in the way.** Close the popover and the
+  diff stays on the pages, the ± Changes button lit, until you stop
+  comparing; open it again and you are right where you were. Hover a
+  deletion's caret to read the words that were deleted, and right-click
+  any change to find it in the list or jump to its source.
 - **Diff from anywhere to anywhere.** Pick From and To in a commit graph
   coloured by branch: click one end and then the other, drag a range,
   double-click a commit to see just its changes, or start from your last
@@ -25,14 +30,18 @@ Compare and Blame are now one thing: **± Changes** :)
   safe or print colours, wavy, underlined or highlighted additions, struck
   deletions or just a caret, changed figures side by side, overlaid or new
   only.
-- **Blame down to the word.** See who wrote this version, by person or by
-  commit, and click one to pick out their lines. It works from the sources
-  and the history, so it is ready before the first page is, and new pages
-  get their bars as they arrive. Words are counted as a reader counts
-  them: data tables, drawings and commands don't add to anyone's share. Blame by line, word or
-  character, skip a reformatting commit, keep moved text with its writer,
-  dim everything older than a tag. A merged commit's card says which branch
-  it came from, and "What this commit changed" opens its diff.
+- **Blame down to the word.** Every line is coloured while Blame is on:
+  a soft wash behind the words (the default), the words themselves, or a
+  bar in the margin, by author or by age. Hover a line for its card, and
+  everything its author (or its commit) wrote lights up; click a person or
+  a commit in the list to keep it that way. It works from the sources and
+  the history, so it is ready before the first page is, and new pages get
+  their colours as they arrive. Words are counted as a reader counts them:
+  data tables, drawings and commands don't add to anyone's share. Blame by
+  line, word or character, skip a reformatting commit right from its row,
+  keep moved text with its writer, dim everything older than a tag. A
+  merged commit's card says which branch it came from, and "What this
+  commit changed" opens its diff.
 - **Overleaf, exact.** On Overleaf every character is credited to the
   person and edit session that typed it, read straight from the project's
   history, with no cap on its length. The history fills in as it loads,
@@ -47,6 +56,8 @@ Compare and Blame are now one thing: **± Changes** :)
 - **Fixed:** on Overleaf, a jump between the PDF and the source now opens
   the file and scrolls to a line that was off screen, in the separate PDF
   tab too; text selected on the pages is plain blue.
+- **Fixed:** comparing text that ends a change with a forced space
+  (`e.g.\ `) builds the diff's pages.
 - **Fixed:** SyncTeX and the viewer's follow take you to the right copy
   of text that repeats: clicking equation (2) no longer lands on (1).
 - **Fixed:** `files = texlive` finds TeX Live installed with Nix

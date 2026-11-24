@@ -634,6 +634,13 @@ impl Compare {
                 let Some(a) = self.flat_at(f, p.start[i] as usize) else {
                     continue;
                 };
+                // (a deletion's caret is made by the markup's macros, no
+                // text of its own: its glyph is placed at the next call,
+                // the added part's \DIFadd; a made glyph there is the
+                // deleted part's)
+                let n = (p.end[i] - p.start[i]) as usize;
+                let caret =
+                    p.is_synth(i) && matches!(d.tex.get(a..a + n), Some("\\DIFadd" | "\\DIFaddFL"));
                 let mut c = changes.partition_point(|c| c.out.end <= a);
                 while c < changes.len() && changes[c].out.start <= a {
                     let g = glyph_box(p, i);
@@ -643,7 +650,9 @@ impl Compare {
                         Some(_) => {}
                     };
                     put(&mut out[c]);
-                    if spans[c].iter().any(|&(s, e)| a >= s && a < e) {
+                    if spans[c].iter().any(|&(s, e)| a >= s && a < e)
+                        || (!spans[c].is_empty() && caret)
+                    {
                         put(&mut del[c]);
                     }
                     c += 1;

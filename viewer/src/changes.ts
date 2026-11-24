@@ -759,7 +759,10 @@ export class Changes {
 
   /** The diff's changes as the list's items, their authors filled in as the host knows them. */
   private setItems(changes: DiffChange[]): void {
-    this.marksStale();
+    // (the card up kept while its change is the same one: the diff's states come again as it is typeset)
+    const shown = this.delAt ? this.items[this.delAt.n - 1]?.was : undefined;
+    // (the pages' marks asked again, the ones known hit-tested till they come: a press between them still lands)
+    this.marksGen++;
     const old = new Map(this.items.map((i) => [`${i.file}:${i.old}:${i.neu}`, i]));
     this.items = changes.map((c, i) => {
       const it = itemOf(c, i + 1);
@@ -768,6 +771,9 @@ export class Changes {
       return it;
     });
     this.cur = Math.min(this.cur, this.shown().length - 1);
+    if (this.delAt && this.items[this.delAt.n - 1]?.was !== shown) this.marksStale();
+    // (the pointer resting on the pages: what is under it now, the new marks asked for)
+    this.delRetest();
     this.render();
     const p = this.ran;
     if (p && this.host.attribute && this.items.length) {
@@ -1464,8 +1470,9 @@ export class Changes {
 
   // ---- the diff's marks on its pages: deleted text's card, the right-click menu ----
 
-  /** Each page's marks, asked once a diff (cleared when its changes come again). */
-  private pageMarks = new Map<number, DiffMark[] | "asked">();
+  /** Each page's marks, asked once a diff and again when its changes come again (`gen`: the changes they answer; `asked`: an answer coming). */
+  private pageMarks = new Map<number, { gen: number; ms: DiffMark[]; asked: boolean }>();
+  private marksGen = 0;
   private delCard: HTMLElement | null = null;
   /** The mark whose card is up (`pinned`: by a click, till Esc or a press outside). */
   private delAt: DiffMark | null = null;
@@ -1473,19 +1480,14 @@ export class Changes {
   private delDwell: ReturnType<typeof setTimeout> | undefined;
   private delMove: { t: EventTarget | null; x: number; y: number } | null = null;
   private delFrame = 0;
-  /** Each page's box, read once after a scroll or a resize (not at every move). */
-  private slotRects = new Map<number, DOMRect>();
 
   /** Whether deleted text is not shown on the diff's pages (Caret only, Hide deletions): its card offered there. */
   private get delHidden(): boolean {
     return this.comparing && (this.look.del === "caret" || this.hide);
   }
 
-  /** The pages' events for the diff's marks: a move hit-tests the marks known (once a frame, nothing laid out), a right-click opens the menu. */
+  /** The pages' events for the diff's marks: a move hit-tests the marks known (once a frame, its page's box read in it: the pages refit, zoom and scroll), a right-click opens the menu. */
   private pagesWired(stage: HTMLElement): void {
-    const stale = () => this.slotRects.clear();
-    stage.addEventListener("scroll", stale, { passive: true, capture: true });
-    addEventListener("resize", stale, { passive: true });
     stage.addEventListener("pointermove", (e) => {
       if (!this.delHidden || this.delPinned) return;
       this.delMove = { t: e.target, x: e.clientX, y: e.clientY };
@@ -1495,16 +1497,23 @@ export class Changes {
         const m = this.delMove;
         if (!m || !this.delHidden || this.delPinned) return;
         const at = this.markAt(m.t, m.x, m.y, true);
-        if (at === this.delAt) return;
+        if (at?.n === this.delAt?.n) return;
         this.delOver(at, m.x, m.y);
       });
     }, { passive: true });
-    stage.addEventListener("pointerleave", (e) => !this.delPinned && !(e.relatedTarget instanceof Node && this.delCard?.contains(e.relatedTarget)) && this.delOver(null));
+    stage.addEventListener("pointerleave", (e) => {
+      this.delMove = null;
+      if (!this.delPinned && !(e.relatedTarget instanceof Node && this.delCard?.contains(e.relatedTarget))) this.delOver(null);
+    });
     // (a click on a caret: its card pinned; elsewhere, a pinned card let go)
+    // (the click at its press's place: a click's own is in whole pixels, a press's as the pointer was, the hover's)
+    let press: [number, number] = [0, 0];
+    stage.addEventListener("pointerdown", (e) => void (press = [e.clientX, e.clientY]), { passive: true });
     stage.addEventListener("click", (e) => {
       if (!this.delHidden) return;
-      const at = this.markAt(e.target, e.clientX, e.clientY, true);
-      if (at) (this.delPinned = true), clearTimeout(this.delDwell), this.delShow(at, e.clientX, e.clientY);
+      const [x, y] = Math.abs(press[0] - e.clientX) < 1 && Math.abs(press[1] - e.clientY) < 1 ? press : [e.clientX, e.clientY];
+      const at = this.markAt(e.target, x, y, true);
+      if (at) (this.delPinned = true), clearTimeout(this.delDwell), this.delShow(at, x, y);
       else if (this.delPinned) (this.delPinned = false), this.delOver(null);
     });
     document.addEventListener("pointerdown", (e) => {
@@ -1535,27 +1544,29 @@ export class Changes {
 
   /** The change under a point of the pages: its deleted part (`del`; with Hide deletions, the change's box), else its box. Its page's marks asked the first time (none yet: null). */
   private markAt(target: EventTarget | null, cx: number, cy: number, del: boolean): DiffMark | null {
+    // (an element the pages have redrawn since: what is there now)
+    if (!(target as Node | null)?.isConnected) target = (this.p.win.getRootNode() as Document | ShadowRoot).elementFromPoint(cx, cy);
     const slot = (target as HTMLElement | null)?.closest?.<HTMLElement>(".slot");
     const stage = this.p.stage, size = this.p.pageSize?.();
     if (!slot || !stage || !size || !this.host.diff?.marks) return null;
     const k = Number(slot.dataset.k);
-    const ms = this.pageMarks.get(k);
-    if (ms === undefined) {
-      this.pageMarks.set(k, "asked");
+    let got = this.pageMarks.get(k);
+    if (!got || (got.gen !== this.marksGen && !got.asked)) {
+      const gen = this.marksGen;
+      const e = (got = { gen: got?.gen ?? -1, ms: got?.ms ?? [], asked: true });
+      this.pageMarks.set(k, e);
       // (come: the pointer's last place hit-tested again, as if it had moved: it may rest on a caret already)
       void Promise.resolve(this.host.diff.marks(k)).then((m) => {
-        if (this.pageMarks.get(k) !== "asked") return;
-        this.pageMarks.set(k, m);
-        const p = this.delMove;
-        if (p && this.delHidden && !this.delPinned) this.delOver(this.markAt(p.t, p.x, p.y, true), p.x, p.y);
-      }, () => this.pageMarks.delete(k));
-      return null;
+        if (this.pageMarks.get(k) !== e) return;
+        this.pageMarks.set(k, { gen, ms: m, asked: false });
+        this.delRetest();
+      }, () => this.pageMarks.get(k) === e && this.pageMarks.delete(k));
     }
-    if (ms === "asked") return null;
-    let r = this.slotRects.get(k);
-    if (!r) this.slotRects.set(k, (r = slot.getBoundingClientRect()));
+    const ms = got.ms;
+    const r = slot.getBoundingClientRect();
     const x = ((cx - r.left) / r.width) * size.w, y = ((cy - r.top) / r.height) * size.h;
-    const pad = 2;
+    // (a caret is a few points wide: 4 screen pixels round each mark, 2 points at least)
+    const pad = Math.max(2, (4 * size.w) / r.width);
     for (const m of ms) {
       const it = this.items[m.n - 1];
       const b = del ? (m.del ?? (this.hide && it?.was ? m.box : undefined)) : m.box;
@@ -1563,6 +1574,16 @@ export class Changes {
       if (x >= b[0] - pad && x <= b[2] + pad && y >= b[1] - pad && y <= b[3] + pad) return m;
     }
     return null;
+  }
+
+  /** The pointer resting on the pages hit-tested again (the marks changed, not it): the card changed only if another change is under it. */
+  private delRetest(): void {
+    const p = this.delMove;
+    if (!p || !this.delHidden || this.delPinned) return;
+    // (what is under it now: the pages drawn since may have put other elements there, and moved)
+    p.t = null;
+    const at = this.markAt(p.t, p.x, p.y, true);
+    if (at?.n !== this.delAt?.n) this.delOver(at, p.x, p.y);
   }
 
   /** The mark under the pointer changed: its card after Blame's dwell (one up already follows at once), or none. */
@@ -1575,7 +1596,7 @@ export class Changes {
     }
     if (x === undefined || y === undefined) return;
     if (this.delCard && !this.delCard.hidden) this.delShow(at, x, y);
-    else this.delDwell = setTimeout(() => this.delAt === at && this.delShow(at, x, y), 180);
+    else this.delDwell = setTimeout(() => this.delAt?.n === at.n && this.delShow(at, x, y), 180);
   }
 
   /** The card for change `at`'s deleted text, near the pointer: drawn once a change. */
@@ -1622,7 +1643,7 @@ export class Changes {
     this.el.querySelector(".citem.cur")?.scrollIntoView({ block: "center" });
   }
 
-  /** The diff's changes came again (an edit, a new pair, a look): its marks asked again when the pointer comes. */
+  /** The diff gone or its changes other ones: its marks asked again when the pointer comes, the card and the menu put away. */
   private marksStale(): void {
     this.pageMarks.clear();
     this.delPinned = false;

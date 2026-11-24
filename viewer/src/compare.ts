@@ -12,6 +12,7 @@ import { diffPlace, diffSource, type DiffChange, type DiffMarkup, type DiffOut, 
 import { DIFF_COLORS, type ChangesDiffLook, type ChangesRunner, type DiffMark } from "./changes.ts";
 import { byteOffset, charOffset } from "./edits.ts";
 import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink } from "./session.ts";
+import type { Glyph } from "./sync.ts";
 
 
 /**
@@ -248,12 +249,23 @@ export class Compare<V> {
     const dels = d.changes.map((x) => {
       const [a, b] = x.out, part = dec.decode(bytes.subarray(a, b)), out: [number, number][] = [];
       const at = (i: number) => a + new TextEncoder().encode(part.slice(0, i)).length;
+      // (a range that starts inside its deleted part, after its \DIFdelbegin: that part from the range's start)
+      const e0 = part.indexOf("\\DIFdelend"), b0 = part.indexOf("\\DIFdelbegin");
+      if (e0 >= 0 && (b0 < 0 || e0 < b0)) out.push([a, at(e0)]);
       for (let i = part.indexOf("\\DIFdelbegin"); i >= 0; i = part.indexOf("\\DIFdelbegin", i + 1)) {
         const e = part.indexOf("\\DIFdelend", i);
         out.push([at(i), e < 0 ? b : at(e)]);
       }
       return out;
     });
+    // (a deletion's caret is made by the markup's macros, no text of its
+    // own: its glyph is placed at the next call, the added part's
+    // \DIFadd; a made glyph there is the deleted part's)
+    const caret = (g: Glyph) => {
+      if (!g.synth) return false;
+      const t = dec.decode(bytes.subarray(g.start, g.end));
+      return t === "\\DIFadd" || t === "\\DIFaddFL";
+    };
     const out = new Map<number, DiffMark>();
     const grow = (b: [number, number, number, number] | undefined, x: number, y: number): [number, number, number, number] => (b ? [Math.min(b[0], x), Math.min(b[1], y - 8), Math.max(b[2], x + 5), Math.max(b[3], y + 3)] : [x, y - 8, x + 5, y + 3]);
     for (const g of gs) {
@@ -269,7 +281,7 @@ export class Compare<V> {
       if (!x || x.out[0] > g.start) continue;
       const m = out.get(lo) ?? { n: lo + 1, k, box: grow(undefined, g.x, g.y) };
       m.box = grow(m.box, g.x, g.y);
-      if (dels[lo].some(([a, b]) => g.start >= a && g.start < b)) m.del = grow(m.del, g.x, g.y);
+      if (dels[lo].some(([a, b]) => g.start >= a && g.start < b) || (dels[lo].length > 0 && caret(g))) m.del = grow(m.del, g.x, g.y);
       out.set(lo, m);
     }
     return [...out.values()];
