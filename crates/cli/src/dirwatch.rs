@@ -1426,14 +1426,15 @@ fn statuses(sh: &Shared, chosen: Option<&str>, shown_dir: &str) {
     let open = running(&st);
     let shown = st.docs.values().filter(|d| !d.tabs.is_empty()).count();
     let mut lines = vec![(
-        format!(
-            "{shown_dir} · {} open, {shown} shown{}",
-            open.len(),
-            match chosen {
-                Some(c) => format!(" · keys to {c}"),
-                None => String::new(),
+        match (open.len(), chosen) {
+            (0, _) => format!("{shown_dir} · no document open: pick one in the browser"),
+            (n, None) => {
+                format!("{shown_dir} · {n} open, {shown} in a tab · keys to all (1-9: one)")
             }
-        ),
+            (n, Some(c)) => {
+                format!("{shown_dir} · {n} open, {shown} in a tab · keys to {c} (a: all)")
+            }
+        },
         None,
     )];
     for (k, r) in open.iter().enumerate() {
@@ -1456,10 +1457,12 @@ fn statuses(sh: &Shared, chosen: Option<&str>, shown_dir: &str) {
         } else {
             " "
         };
-        let what = if what.is_empty() {
-            "starting".to_owned()
-        } else {
-            what
+        // (its own line names its file first: said once, by its path here)
+        let name = r.rsplit('/').next().unwrap_or(r);
+        let what = match what.strip_prefix(name).and_then(|w| w.strip_prefix(" · ")) {
+            _ if what.is_empty() => "starting".to_owned(),
+            Some(rest) => rest.to_owned(),
+            None => what,
         };
         lines.push((format!("{mark}{} {r} · {what} · {shown}", k + 1), d.ok));
     }
