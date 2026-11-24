@@ -77,6 +77,7 @@ fn after_help() -> String {
         "{h}Examples:{h:#}
   {l}phitex build paper.tex{l:#}              the PDF beside it, pdflatex for LaTeX
   {l}phitex watch -o out paper.tex{l:#}       rebuild on each change, the viewer in the browser
+  {l}phitex watch .{l:#}                       a folder: browse its files in the viewer, open any .tex there
   {l}phitex watch --lsp{l:#}                  the same for an editor's LSP client (its buffers, problems, cursor)
   {l}phitex build --shelf paper.tex{l:#}      TeX's files from Shelf's packs, not TeX Live (v1.shelf.phitex.org)
   {l}phitex build --json paper.tex{l:#}       the build's events as JSON lines
@@ -181,10 +182,20 @@ enum Sub {
     /// Build, then rebuild whenever a file the document reads changes;
     /// keys on a terminal: r rebuild, q quit, h the rest (with --lsp:
     /// an editor's language client on standard input and output).
+    ///
+    /// Given a folder (`phitex watch .`): its address opens a file
+    /// manager of the folder in the browser. A .tex file clicked there
+    /// opens in a tab of its own and builds on every save, as `phitex
+    /// watch FILE` would (its nearest phitex.toml or .latexmkrc applied);
+    /// the viewer's Files panel and Ctrl+P switch documents. Nothing is
+    /// built until a document is opened; builds run one at a time with
+    /// all the threads; a document whose tabs are all closed stays warm
+    /// until --memory is used up. Keys act on every open document, or on
+    /// the one chosen with 1-9 (a: all again).
     Watch {
         /// The main .tex file (default: phitex.toml's `main`; with --lsp,
-        /// the editor's)
-        #[arg(value_name = "FILE")]
+        /// the editor's), or a folder to browse
+        #[arg(value_name = "FILE|DIR")]
         file: Option<String>,
         #[command(flatten)]
         build: BuildArgs,
@@ -456,6 +467,19 @@ struct WatchArgs {
     /// PHITEX_EDITOR, VISUAL, EDITOR)
     #[arg(long, value_name = "CMD", hide_short_help = true)]
     editor: Option<String>,
+    /// watch DIR: the memory the documents opened may keep together
+    /// (e.g. 4GB); past it, those no tab shows end, the least recently
+    /// viewed first (default: a quarter of this machine's memory)
+    #[arg(long, value_name = "SIZE", value_parser = parse_size, hide_short_help = true)]
+    memory: Option<u64>,
+}
+
+/// A size such as `4GB`, `512MiB` or `1000000` (bytes).
+fn parse_size(s: &str) -> Result<u64, String> {
+    s.trim()
+        .parse::<bytesize::ByteSize>()
+        .map(|b| b.as_u64())
+        .map_err(|e| format!("{s}: not a size such as 4GB ({e})"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,6 +533,8 @@ pub struct Options {
     pub port: Option<u16>,
     /// watch: an editor's language server on standard input and output.
     pub lsp: bool,
+    /// watch DIR: the memory its sessions may keep together (`--memory`).
+    pub memory: Option<u64>,
     pub editor: Option<String>,
     pub copy_pdf: Option<config::CopyPdf>,
     pub synctex: Option<bool>,
@@ -652,7 +678,13 @@ impl WatchArgs {
         o.port = w.port;
         o.lsp = w.lsp;
         o.editor = w.editor;
+        o.memory = w.memory;
     }
+}
+
+/// The command line's options (`args` after the program's name).
+pub(crate) fn parse_options(args: &[String]) -> Result<Options, clap::Error> {
+    parse(args)
 }
 
 /// The command line's options (`args` after the program's name).
@@ -1885,7 +1917,8 @@ pub fn main(args: &[String]) -> ! {
     if command == Command::Upgrade {
         std::process::exit(crate::upgrade::upgrade(&ui, o.no_confirm));
     }
-    if !o.lsp && !o.json && !o.quiet {
+    // (a folder watch's session: its folder watch said them)
+    if !o.lsp && !o.json && !o.quiet && !ui.relay {
         crate::news::once(&ui);
         crate::upgrade::begin();
         // (a build's after its result: `build`)
@@ -1921,6 +1954,14 @@ pub fn main(args: &[String]) -> ! {
     } else {
         None
     };
+    // (a folder: a file manager of it in the viewer, each document opened
+    // there a watch of its own)
+    if command == Command::Watch
+        && lsp.is_none()
+        && let Some(d) = o.file.as_deref().map(Path::new).filter(|d| d.is_dir())
+    {
+        crate::dirwatch::main(d, &o, args, &ui);
+    }
     // (a bare `clean`: nothing removed, the cache's status and the
     // commands, the project's main file named where phitex.toml has one)
     if command == Command::Clean && o.file.is_none() {

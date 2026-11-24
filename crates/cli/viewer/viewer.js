@@ -150,8 +150,8 @@ function diagnose(files, main, build2) {
     }
     if (build2.pages === 0) out.push({ severity: "warning", code: "no-pages", message: "no page shipped yet" });
   }
-  const rank = { error: 0, warning: 1, info: 2 };
-  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
+  const rank2 = { error: 0, warning: 1, info: 2 };
+  return out.sort((a, b) => rank2[a.severity] - rank2[b.severity]);
 }
 
 // viewer/src/engines.ts
@@ -345,10 +345,10 @@ function bands(lines3, all = false) {
   for (const [s, n2] of count) if (n2 > most) most = n2, body = s;
   if (!body) return [];
   const em = body;
-  const runs = lines3.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
-  if (!runs.length) return [];
-  const long = runs.filter((l) => l.w > em * 15);
-  const base = long.length ? long : runs;
+  const runs2 = lines3.filter((l) => (all || Math.abs(l.size - body) <= body * 0.12) && l.text.trim());
+  if (!runs2.length) return [];
+  const long = runs2.filter((l) => l.w > em * 15);
+  const base = long.length ? long : runs2;
   const ws = base.map((l) => l.w).sort((a, b) => a - b);
   const measure = ws[ws.length >> 1];
   const across = (l) => l.w > measure * 1.4;
@@ -359,7 +359,7 @@ function bands(lines3, all = false) {
     if (last && s[0] <= last[1]) last[1] = Math.max(last[1], s[1]);
     else cols.push([...s]);
   }
-  const wide = runs.filter(across);
+  const wide = runs2.filter(across);
   if (wide.length) cols.unshift([Math.min(...wide.map((l) => l.x)), Math.max(...wide.map((l) => l.x + l.w))]);
   const colOf = (l) => {
     if (wide.length && across(l)) return 0;
@@ -375,7 +375,7 @@ function bands(lines3, all = false) {
   const out = [];
   let n = 0;
   cols.forEach((col, ci) => {
-    const mine = runs.filter((l) => colOf(l) === ci).sort((a, b) => a.y - b.y || a.x - b.x);
+    const mine = runs2.filter((l) => colOf(l) === ci).sort((a, b) => a.y - b.y || a.x - b.x);
     const rows = [];
     for (const l of mine) {
       const last = rows[rows.length - 1];
@@ -717,17 +717,17 @@ var Viewer = class _Viewer {
    */
   hover(hit, el, e) {
     if (!this.peeks) return;
-    const up = !!this.peekEl && !this.peekEl.hidden;
+    const up2 = !!this.peekEl && !this.peekEl.hidden;
     if (hit && this.peekAt?.link === hit) return void clearTimeout(this.peekHiding);
     clearTimeout(this.peekTimer);
     if (!hit || !el || !e) {
       this.peekAt = null;
-      if (up) this.onTheWay() ? this.peekSoon(150) : this.peekHide();
+      if (up2) this.onTheWay() ? this.peekSoon(150) : this.peekHide();
       return;
     }
     const at = { link: hit, k: Number(el.dataset.k) };
     this.peekAt = at;
-    this.peekTimer = setTimeout(() => this.peekAt === at && this.peekShow(at), up ? 80 : 350);
+    this.peekTimer = setTimeout(() => this.peekAt === at && this.peekShow(at), up2 ? 80 : 350);
   }
   /** The window up for `at`: a web address said, a place in the document shown, its page asked for if not drawn yet. */
   peekShow(at) {
@@ -793,10 +793,10 @@ var Viewer = class _Viewer {
       pv.classList.add("grabbing");
       const [x0, y0, l0, t0] = [e.clientX, e.clientY, pv.scrollLeft, pv.scrollTop];
       const move = (m) => (pv.scrollLeft = l0 - (m.clientX - x0), pv.scrollTop = t0 - (m.clientY - y0));
-      const up = () => (pv.classList.remove("grabbing"), pv.removeEventListener("pointermove", move), pv.removeEventListener("pointerup", up), pv.removeEventListener("pointercancel", up));
+      const up2 = () => (pv.classList.remove("grabbing"), pv.removeEventListener("pointermove", move), pv.removeEventListener("pointerup", up2), pv.removeEventListener("pointercancel", up2));
       pv.addEventListener("pointermove", move);
-      pv.addEventListener("pointerup", up);
-      pv.addEventListener("pointercancel", up);
+      pv.addEventListener("pointerup", up2);
+      pv.addEventListener("pointercancel", up2);
     });
     pv.addEventListener("pointerdown", (e) => {
       if (e.pointerType !== "touch") return;
@@ -882,9 +882,9 @@ var Viewer = class _Viewer {
         el.style.left = `${Math.max(0, Math.min(w, l0 + m.clientX - x0))}px`;
         el.style.top = `${Math.max(0, Math.min(h2, t0 + m.clientY - y0))}px`;
       };
-      const up = () => (bar2.removeEventListener("pointermove", move), bar2.removeEventListener("pointerup", up));
+      const up2 = () => (bar2.removeEventListener("pointermove", move), bar2.removeEventListener("pointerup", up2));
       bar2.addEventListener("pointermove", move);
-      bar2.addEventListener("pointerup", up);
+      bar2.addEventListener("pointerup", up2);
     });
     if (!el.classList.contains("cite") && !el.classList.contains("url")) {
       let t2, w = el.offsetWidth;
@@ -3817,7 +3817,7 @@ function bindKeys(on, t) {
     t.zoomBy(ZOOM_STEP ** (dir * n), !instant);
     if (!instant) glide.press(e.code || e.key, 2, dir, n);
   };
-  const up = (ev) => {
+  const up2 = (ev) => {
     const e = ev;
     glide.release(e.code || e.key);
     if (!e.code) glide.release(e.key === e.key.toLowerCase() ? e.key.toUpperCase() : e.key.toLowerCase());
@@ -3927,12 +3927,12 @@ function bindKeys(on, t) {
     if (done) e.preventDefault();
   };
   on.addEventListener("keydown", handler);
-  on.addEventListener("keyup", up);
+  on.addEventListener("keyup", up2);
   const win = typeof window === "undefined" ? null : window;
   win?.addEventListener("blur", lost);
   return () => {
     on.removeEventListener("keydown", handler);
-    on.removeEventListener("keyup", up);
+    on.removeEventListener("keyup", up2);
     win?.removeEventListener("blur", lost);
     glide.stop();
   };
@@ -4057,7 +4057,7 @@ function byline(svg2, word) {
     return g.lastElementChild;
   });
   const paths = [...lockup.querySelectorAll("path")], A = paths.slice(0, 2), stripes = paths.slice(2, 6), words3 = paths.slice(6);
-  const up = [77.59, -94], n = Math.hypot(up[0], up[1]), D = 150, from2 = [-up[0] / n * D, -up[1] / n * D];
+  const up2 = [77.59, -94], n = Math.hypot(up2[0], up2[1]), D = 150, from2 = [-up2[0] / n * D, -up2[1] / n * D];
   const trails = stripes.map(
     (s) => [0.4, 0.22, 0.1].map((op) => {
       const c = s.cloneNode();
@@ -5762,9 +5762,9 @@ var SheetLine = class {
   constructor(draw, clock = realClock, gap = LINE_GAP) {
     this.calm = new Calm(draw, clock, gap);
   }
-  say(rank, s) {
-    if (rank < this.rank) return false;
-    this.rank = rank;
+  say(rank2, s) {
+    if (rank2 < this.rank) return false;
+    this.rank = rank2;
     this.calm.set(s);
     return true;
   }
@@ -6195,9 +6195,9 @@ var Review = class {
       const x0 = e.clientX, w0 = this.side.getBoundingClientRect().width;
       g.setPointerCapture(e.pointerId);
       const move = (m) => this.side.style.setProperty("--rv-w", `${Math.round(Math.max(260, w0 + x0 - m.clientX))}px`);
-      const up = () => (g.removeEventListener("pointermove", move), g.removeEventListener("pointerup", up), this.p.laidOut());
+      const up2 = () => (g.removeEventListener("pointermove", move), g.removeEventListener("pointerup", up2), this.p.laidOut());
       g.addEventListener("pointermove", move);
-      g.addEventListener("pointerup", up);
+      g.addEventListener("pointerup", up2);
     });
   }
   // ---- the side ----
@@ -6806,10 +6806,10 @@ var Review = class {
       const l = place4.line, [x0, x1] = char(l, place4.off);
       v.place(h, { x: end ? x1 : x0, y: l.y - 8, h: 11 });
     };
-    const up = async (u) => {
+    const up2 = async (u) => {
       if (u.pointerId !== e.pointerId) return;
       removeEventListener("pointermove", move);
-      removeEventListener("pointerup", up);
+      removeEventListener("pointerup", up2);
       if (!place4) return void this.marks();
       const l = place4.line, [x0, x1] = char(l, place4.off), n0 = l.text.length;
       const at = await this.host.source([{ k: place4.k, rects: [], from: [end ? l.xs?.[0] ?? l.x : x0, l.y], to: [end ? x1 : l.rs?.[n0 - 1] ?? l.x + l.w, l.y] }]);
@@ -6818,7 +6818,7 @@ var Review = class {
       else this.marks();
     };
     addEventListener("pointermove", move);
-    addEventListener("pointerup", up);
+    addEventListener("pointerup", up2);
   }
   // ---- the marks on the pages ----
   async marks() {
@@ -6827,13 +6827,13 @@ var Review = class {
     if (this.showing) return void (this.p.scrollMarks?.([]), this.p.viewer.reviewMarks([]));
     const out = [];
     const cls = (n) => n.status === "resolved" ? "n-resolved" : `n-${n.kind}`;
-    const rank = /* @__PURE__ */ new Map();
+    const rank2 = /* @__PURE__ */ new Map();
     for (const n of this.s.notes) {
       if (n.hunk || n.draft || n.detached) continue;
       const spot = !n.anchor.quote && n.anchor.point && n.anchor.page !== void 0;
       const at = await this.host.extent(n.anchor.file, n.anchor.start, spot ? n.anchor.start + 1 : n.anchor.end, n.anchor.page);
       if (turn !== this.drawn) return;
-      if (at[0]?.order !== void 0) rank.set(n.id, [at[0].k, at[0].order]);
+      if (at[0]?.order !== void 0) rank2.set(n.id, [at[0].k, at[0].order]);
       if (spot) {
         const [x, y] = n.anchor.point;
         out.push({ k: n.anchor.page, boxes: [[x - 4, y - 4, 8, 8]], cls: cls(n), id: n.id });
@@ -6850,7 +6850,7 @@ var Review = class {
     }
     const where = /* @__PURE__ */ new Map();
     for (const m of out) if (!where.has(m.id)) where.set(m.id, [m.k, m.boxes[0]?.[1] ?? 0]);
-    const num = this.numbers(rank), pinned = /* @__PURE__ */ new Set();
+    const num = this.numbers(rank2), pinned = /* @__PURE__ */ new Set();
     for (const m of out) {
       const n = this.s.notes.find((x) => x.id === m.id);
       if (!n || n.hunk || pinned.has(n.id)) continue;
@@ -6865,9 +6865,9 @@ var Review = class {
     this.lastOut = out;
     this.handles(out);
     this.outline();
-    const moved = [...rank].some(([id, w]) => this.rank.get(id)?.join() !== w.join()) || rank.size !== this.rank.size;
+    const moved = [...rank2].some(([id, w]) => this.rank.get(id)?.join() !== w.join()) || rank2.size !== this.rank.size;
     this.where = where;
-    this.rank = rank;
+    this.rank = rank2;
     this.scrollbar(where);
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
@@ -7196,9 +7196,9 @@ function bibEntries(text) {
   return out;
 }
 var WORD2 = /[\p{L}\p{N}\p{M}_@\\']/u;
-function wordRuns(text, runs, newer) {
+function wordRuns(text, runs2, newer) {
   const at = new Int32Array(text.length);
-  for (const [a, b, c] of runs) at.fill(c, a, b);
+  for (const [a, b, c] of runs2) at.fill(c, a, b);
   for (let i = 0; i < text.length; ) {
     if (!WORD2.test(text[i])) {
       i++;
@@ -7220,9 +7220,9 @@ function compress(at) {
   }
   return out;
 }
-function linesOf(text, runs, ws, newer) {
+function linesOf(text, runs2, ws, newer) {
   const at = new Int32Array(text.length);
-  for (const [a, b, c] of runs) at.fill(c, a, b);
+  for (const [a, b, c] of runs2) at.fill(c, a, b);
   const out = [];
   let start = 0;
   const end = (i) => {
@@ -7279,10 +7279,10 @@ var Model = class {
       if (g.text !== void 0 && g.runs) {
         g.lines ??= linesOf(g.text, g.runs, this.ws, newer);
         if (this.detail !== "line") {
-          const runs = this.detail === "word" ? wordRuns(g.text, g.runs, newer) : g.runs;
-          g.units = runs;
+          const runs2 = this.detail === "word" ? wordRuns(g.text, g.runs, newer) : g.runs;
+          g.units = runs2;
           const bytes = byteIndex(g.text);
-          g.br = { at: Uint32Array.from(runs, (r) => bytes[r[0]]), c: Int32Array.from(runs, (r) => r[2]) };
+          g.br = { at: Uint32Array.from(runs2, (r) => bytes[r[0]]), c: Int32Array.from(runs2, (r) => r[2]) };
         }
       }
       if (f.text !== void 0) g.starts = lineStarts(f.text);
@@ -7452,7 +7452,7 @@ function mapPage(gs, m, size2) {
   for (const line of printedLines(gs)) {
     if (line.length <= 4 && line.every((g) => g.synth)) continue;
     let c, file = "", l0 = 0, l1 = 0;
-    const runs = [];
+    const runs2 = [];
     line.forEach((g, i) => {
       const at = m.of(g);
       const next = line[i + 1];
@@ -7461,13 +7461,13 @@ function mapPage(gs, m, size2) {
       c = m.newer(c, at.c);
       if (!file) file = at.file, l0 = at.line, l1 = at.last;
       else if (file === at.file) l0 = Math.min(l0, at.line), l1 = Math.max(l1, at.last);
-      const r = runs.at(-1);
+      const r = runs2.at(-1);
       if (r && r[2] === at.c && g.x - r[1] < 6) r[1] = g.x + w;
-      else runs.push([g.x, g.x + w, at.c]);
+      else runs2.push([g.x, g.x + w, at.c]);
     });
     if (c === void 0) continue;
     const x0 = line[0].x, last = line.at(-1);
-    raw.push({ x0, x1: last.x + 5, y0: line[0].y - 8, y1: line[0].y + 3, bx: 0, c, file, l0, l1, runs, para: 0, glyphs: line, srcs: line.filter((g) => g.file).map((g) => ({ file: g.file, start: g.start })) });
+    raw.push({ x0, x1: last.x + 5, y0: line[0].y - 8, y1: line[0].y + 3, bx: 0, c, file, l0, l1, runs: runs2, para: 0, glyphs: line, srcs: line.filter((g) => g.file).map((g) => ({ file: g.file, start: g.start })) });
   }
   const cols = columnStarts(raw.map((s) => s.x0));
   const colOf = (x) => cols.filter((c) => c <= x + 1).at(-1) ?? x;
@@ -8108,12 +8108,12 @@ var Blame = class {
     const base = { busy: this.busy, progress: this.progress, error: this.error, waiting: this.pending.size, files: Math.max(this.fileTotal, this.texts.size), unit, since: this.sinceChoices() };
     if (!m) return { ...base, lines: 0, people: [], commits: [] };
     if (!this.sum || this.sum.unit !== unit) {
-      const counts = m.counts();
+      const counts2 = m.counts();
       const people = /* @__PURE__ */ new Map();
       const commits = /* @__PURE__ */ new Map();
       const dark = this.p.dark();
       let total = 0;
-      for (const [k, n] of counts) {
+      for (const [k, n] of counts2) {
         if (k < 0 && this.look.wip !== "show") continue;
         total += n;
         const c = k >= 0 ? m.commits[k] : null;
@@ -8192,8 +8192,8 @@ var Blame = class {
         put(marks, s.c, rect(x, s.y0 + 0.5, bw, s.y1 - s.y0 - 1, `class="b" fill="${lk.hatch ? hatch : lk.color}"`));
         continue;
       }
-      const runs = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
-      for (const [a, b, c] of runs) {
+      const runs2 = s.fig || !s.runs.length ? [[s.x0, s.x1, s.c]] : s.runs;
+      for (const [a, b, c] of runs2) {
         const old = this.old(c);
         put(marks, c, rect(a - 1, y0, b - a + 2, y1 - y0, `class="${old ? "v o" : "v"}"`));
         const lk = old ? null : this.shade(c);
@@ -8738,9 +8738,9 @@ var Commits = class _Commits {
       this.drag.moved ||= over !== this.drag.from;
       this.paintDrag();
     };
-    const up = () => {
+    const up2 = () => {
       this.el.removeEventListener("pointermove", move);
-      this.el.removeEventListener("pointerup", up);
+      this.el.removeEventListener("pointerup", up2);
       const d = this.drag;
       this.drag = null;
       this.paintDrag();
@@ -8751,7 +8751,7 @@ var Commits = class _Commits {
       this.range(d.from, d.over);
     };
     this.el.addEventListener("pointermove", move);
-    this.el.addEventListener("pointerup", up);
+    this.el.addEventListener("pointerup", up2);
   }
   /**
    * The rows a drag spans, filled as it goes (`drag`), or those a second
@@ -9181,10 +9181,10 @@ var Changes = class {
    * popover, a second closes it; `badge` the count of changes beside it.
    * Pointing at it does nothing but say what it is.
    */
-  attach(btn, badge2) {
+  attach(btn, badge3) {
     const was = this.anchor && !this.anchor.isConnected;
     this.anchors = [...this.anchors.filter((a) => a.isConnected), btn];
-    this.badges = [...this.badges.filter((b) => b.isConnected), ...badge2 ? [badge2] : []];
+    this.badges = [...this.badges.filter((b) => b.isConnected), ...badge3 ? [badge3] : []];
     btn.setAttribute("aria-haspopup", "dialog");
     if (was) {
       this.anchor = btn;
@@ -10947,10 +10947,14 @@ var Panel = class {
   streaming(s) {
     this.streamed = s ? s.pages : void 0;
     this.making = s?.phase === "format";
+    this.queued = s?.phase === "queued";
     if (s && this.firstPending()) this.typesetting = true, this.sayTypesetting();
     this.activity();
   }
+  /** A folder watch's build waits for another document's (`queued`). */
+  queued = false;
   busy(on) {
+    if (!on) this.queued = false;
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     if (on && this.lastStatus) this.stale(this.lastStatus);
     this.activity();
@@ -10983,6 +10987,7 @@ var Panel = class {
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t, m = "", err = false;
     if (this.offline) t = "Disconnected", err = true;
+    else if (this.queued) t = "Waiting for another document's build\u2026";
     else if (this.firstPending() && this.stepNow) t = this.stepNow;
     else if (this.pkgNow) t = "Fetching packages\u2026", m = `${this.pkgNow.fetched.done} fetched`;
     else if (running) {
@@ -11493,7 +11498,7 @@ var Panel = class {
   /** Typesetting's detail, one shape: the page it is on (or the format made first), then the packages fetched for it. */
   sayTypesetting() {
     const f = this.tally.now;
-    const page = this.making ? MAKING : this.streamed !== void 0 ? `Page ${this.streamed + 1}` : "";
+    const page = this.queued ? "Waiting for another document's build" : this.making ? MAKING : this.streamed !== void 0 ? `Page ${this.streamed + 1}` : "";
     this.step(this.words.steps[2], void 0, [page, f.done ? fetchedLine(f, false) : ""].filter(Boolean).join(" \xB7 "));
   }
   /**
@@ -11758,12 +11763,12 @@ var Panel = class {
    * strip gone. (A watch restarted for a new version looks the same here
    * as one that stopped: the tab learns which only once it joins again.)
    */
-  connection(up, why) {
+  connection(up2, why) {
     const was = this.offline;
-    this.offline = !up;
+    this.offline = !up2;
     this.renderStatus();
     const stage = this.$("#stage");
-    if (up) {
+    if (up2) {
       stage.classList.remove("offline", "unacked");
       return;
     }
@@ -11894,6 +11899,25 @@ var Panel = class {
   sideOn(on) {
     this.win.classList.toggle("side-on", on);
     this.$("#b-side").setAttribute("aria-pressed", String(on));
+  }
+  /**
+   * A column of the host's own at the pages' left (a folder watch's Files,
+   * files.ts): its style and element put in the panel, a button for it at
+   * the bar's start. The returned `shown(on)` shows or hides it, the pages
+   * fitted again to the width it leaves.
+   */
+  hostColumn(css, el, button) {
+    const style = document.createElement("style");
+    style.textContent = css;
+    this.root.prepend(style);
+    this.win.classList.add("has-side");
+    this.$(".body").prepend(el);
+    this.$("#b-side").before(button);
+    return (on) => {
+      el.hidden = !on;
+      button.setAttribute("aria-pressed", String(on));
+      if (this.prefs.zoom === "fit") this.redraw();
+    };
   }
   /** A button of the host's in the bar, before find (the CLI's own). */
   headerButton(label, title, onclick) {
@@ -13571,6 +13595,909 @@ function culpritTip(p, click = "click to go there") {
   const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
   return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · ${click}</div></div>`.firstElementChild;
 }
+
+// viewer/src/folders.ts
+function crumbs(root, dir) {
+  const out = [{ name: root || "/", path: "" }];
+  let at = "";
+  for (const part3 of dir.split("/").filter(Boolean)) {
+    at = at ? `${at}/${part3}` : part3;
+    out.push({ name: part3, path: at });
+  }
+  return out;
+}
+function up(dir) {
+  if (!dir) return null;
+  const k = dir.lastIndexOf("/");
+  return k < 0 ? "" : dir.slice(0, k);
+}
+var collator = new Intl.Collator(void 0, { numeric: true, sensitivity: "base" });
+function sortEntries(entries, by, desc = false) {
+  const sign = desc ? -1 : 1;
+  return [...entries].sort((a, b) => {
+    const d = Number(b.kind === "dir") - Number(a.kind === "dir");
+    if (d) return d;
+    if (by === "mtime") {
+      const t = (a.mtime ?? 0) - (b.mtime ?? 0);
+      if (t) return sign * t;
+    }
+    return sign * collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  });
+}
+function filterEntries(entries, q) {
+  const n = q.trim().toLowerCase();
+  return n ? entries.filter((e) => e.name.toLowerCase().includes(n)) : [...entries];
+}
+function stateOf(d) {
+  if (!d) return null;
+  const where = d.tabs > 1 ? `open in ${d.tabs} tabs` : d.tabs === 1 ? "open in a tab" : d.live ? "no tab open: kept ready, it builds when shown again" : "closed: opening it builds it again";
+  const s = (text, tone, more = "") => ({ text, tone, title: [more, where].filter(Boolean).join(" \xB7 ") });
+  switch (d.build) {
+    case "building":
+      return s("Building\u2026", "busy");
+    case "waiting":
+      return s("Waiting\u2026", "busy", "Waiting for another document's build");
+    case "ok":
+      return s(d.pages === 1 ? "Built \xB7 1 page" : `Built \xB7 ${d.pages} pages`, "ok");
+    case "errors":
+      return d.errors <= 1 && d.message ? s("Failed", "bad", d.message) : s(d.errors === 1 ? "1 error" : `${d.errors} errors`, "bad", d.message ?? "");
+    default:
+      return s("Not built", "none", d.live ? "Starting" : "");
+  }
+}
+var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+var two = (n) => String(n).padStart(2, "0");
+function when(mtime, now = Date.now()) {
+  if (mtime === null) return "";
+  const t = new Date(mtime), n = new Date(now);
+  const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((day(n) - day(t)) / 864e5);
+  if (days === 0) return `${two(t.getHours())}:${two(t.getMinutes())}`;
+  if (days === 1) return "Yesterday";
+  if (t.getFullYear() === n.getFullYear()) return `${MONTHS[t.getMonth()]} ${t.getDate()}`;
+  return `${t.getFullYear()}-${two(t.getMonth() + 1)}-${two(t.getDate())}`;
+}
+function whenFull(mtime) {
+  if (mtime === null) return "";
+  const t = new Date(mtime);
+  return `${t.getFullYear()}-${two(t.getMonth() + 1)}-${two(t.getDate())} ${two(t.getHours())}:${two(t.getMinutes())}`;
+}
+function sizeOf(bytes) {
+  if (bytes < 1e3) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1e3, k = 0;
+  while (v >= 1e3 && k < units.length - 1) v /= 1e3, k++;
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[k]}`;
+}
+function counts(entries) {
+  const dirs = entries.filter((e) => e.kind === "dir").length, files = entries.length - dirs;
+  const p = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  return [dirs ? p(dirs, "folder") : "", files ? p(files, "file") : ""].filter(Boolean).join(" \xB7 ") || "Empty";
+}
+function fuzzy(q, path) {
+  const query = q.toLowerCase().replace(/\s+/g, "");
+  if (!query) return { path, score: 0, hits: [] };
+  const p = path.toLowerCase();
+  const nameAt = path.lastIndexOf("/") + 1;
+  const n = query.length, m = p.length;
+  if (n > m) return null;
+  const NEG = -1e9;
+  const best = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(NEG));
+  const take = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(false));
+  for (let j = 0; j <= m; j++) best[n][j] = 0;
+  const startOfWord = (j) => j === 0 || /[/_\-. ]/.test(p[j - 1]) || path[j] !== p[j] && path[j - 1] === p[j - 1];
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      let skip = best[i][j + 1];
+      let here = NEG;
+      if (p[j] === query[i] && best[i + 1][j + 1] > NEG) {
+        let s = 1;
+        if (j >= nameAt) s += 2;
+        if (startOfWord(j)) s += 3;
+        if (i + 1 < n && j + 1 < m && p[j + 1] === query[i + 1]) s += 2;
+        here = s + best[i + 1][j + 1];
+      }
+      if (here >= skip && here > NEG) {
+        best[i][j] = here;
+        take[i][j] = true;
+      } else best[i][j] = skip;
+    }
+  }
+  if (best[0][0] <= NEG) return null;
+  const hits = [];
+  for (let i = 0, j = 0; i < n && j < m; j++) {
+    if (take[i][j]) {
+      hits.push(j);
+      i++;
+    }
+  }
+  const score = best[0][0] * 100 - path.length - (m - nameAt);
+  return { path, score, hits };
+}
+function rank(q, paths, limit = 50) {
+  if (!q.trim()) return [...paths].sort((a, b) => collator.compare(a, b)).slice(0, limit).map((path) => ({ path, score: 0, hits: [] }));
+  const out = [];
+  for (const p of paths) {
+    const m = fuzzy(q, p);
+    if (m) out.push(m);
+  }
+  out.sort((a, b) => b.score - a.score || collator.compare(a.path, b.path));
+  return out.slice(0, limit);
+}
+function runs(s, hits, from2 = 0) {
+  const set = new Set(hits);
+  const out = [];
+  for (let k = 0; k < s.length; k++) {
+    const on = set.has(k + from2);
+    const last = out[out.length - 1];
+    if (last && last[1] === on) last[0] += s[k];
+    else out.push([s[k], on]);
+  }
+  return out;
+}
+
+// viewer/src/files.ts
+var ICONS = {
+  folder: "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z",
+  tex: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
+  other: "M6 2c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6H6zm7 7V3.5L18.5 9H13z",
+  pdf: "M20 2H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8.5 7.5c0 .83-.67 1.5-1.5 1.5H9v2H7.5V7H10c.83 0 1.5.67 1.5 1.5v1zm5 2c0 .83-.67 1.5-1.5 1.5h-2.5V7H15c.83 0 1.5.67 1.5 1.5v3zm4-3H19v1h1.5V11H19v2h-1.5V7h3v1.5zM9 9.5h1v-1H9v1zM4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm10 5.5h1v-3h-1v3z",
+  image: "M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z",
+  open_in_new: "M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z",
+  up: "M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z",
+  search: "M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
+  close: "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  chevron: "M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z",
+  asc: "M7 14l5-5 5 5z",
+  desc: "M7 10l5 5 5-5z",
+  folder_open: "M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"
+};
+function fileIcon(name, size2 = 18) {
+  const ns = "http://www.w3.org/2000/svg";
+  const s = document.createElementNS(ns, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("width", String(size2));
+  s.setAttribute("height", String(size2));
+  s.setAttribute("aria-hidden", "true");
+  s.setAttribute("focusable", "false");
+  const p = document.createElementNS(ns, "path");
+  p.setAttribute("d", ICONS[name] ?? ICONS.other);
+  s.append(p);
+  return s;
+}
+var FolderLink = class {
+  ws;
+  wait = 400;
+  dir = null;
+  finds = [];
+  /** Whether it is joined now; whether it ever was. */
+  up = false;
+  everUp = false;
+  onHello = () => {
+  };
+  onFolder = () => {
+  };
+  onError = () => {
+  };
+  onState = () => {
+  };
+  url;
+  constructor(url) {
+    this.url = url;
+    this.open();
+  }
+  open() {
+    const ws = this.ws = new WebSocket(this.url);
+    ws.onopen = () => {
+      this.up = this.everUp = true;
+      this.wait = 400;
+      this.onState(true);
+      if (this.dir !== null) this.send({ op: "list", dir: this.dir });
+      if (this.finds.length) this.send({ op: "find" });
+    };
+    ws.onmessage = (m) => {
+      let e;
+      try {
+        e = JSON.parse(String(m.data));
+      } catch {
+        return;
+      }
+      if (e.event === "hello") this.onHello(e);
+      else if (e.event === "folder") this.onFolder(e);
+      else if (e.event === "error") this.onError(String(e.message ?? "refused"), String(e.dir ?? ""));
+      else if (e.event === "found") for (const f of this.finds.splice(0)) f(e.files);
+    };
+    ws.onclose = () => {
+      const was = this.up;
+      this.up = false;
+      if (was || !this.everUp) this.onState(false);
+      setTimeout(() => this.open(), this.wait);
+      this.wait = Math.min(this.wait * 2, 3e3);
+    };
+  }
+  send(op) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(op));
+  }
+  /** Folder `dir` (from the root), sent as it is and again as it changes. */
+  list(dir) {
+    this.dir = dir;
+    this.send({ op: "list", dir });
+  }
+  /** Every document of the folder (quick open). */
+  find() {
+    return new Promise((ok) => {
+      this.finds.push(ok);
+      if (this.finds.length === 1) this.send({ op: "find" });
+    });
+  }
+};
+var isMac = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "");
+var MOD = isMac ? "\u2318" : "Ctrl";
+var wantsTab = (e) => e.ctrlKey || e.metaKey || e.shiftKey || "button" in e && e.button === 1;
+function marked(s, hits, from2 = 0) {
+  const f = document.createDocumentFragment();
+  for (const [t, on] of runs(s, hits, from2)) {
+    if (on) {
+      const b = document.createElement("b");
+      b.textContent = t;
+      f.append(b);
+    } else f.append(t);
+  }
+  return f;
+}
+function badge(e) {
+  const s = stateOf(e.doc);
+  if (!s) return null;
+  const b = document.createElement("span");
+  b.className = `fm-badge tone-${s.tone}${e.doc && e.doc.tabs > 0 ? " shown" : ""}${e.doc && !e.doc.live ? " ended" : ""}`;
+  b.title = s.title;
+  b.append(document.createElement("i"), s.text);
+  return b;
+}
+var FileList = class {
+  el;
+  list;
+  filter;
+  crumbsEl;
+  note;
+  empty;
+  foot;
+  upBtn;
+  head;
+  sortBtn;
+  folder = null;
+  shown = [];
+  sel = null;
+  by = "name";
+  desc = false;
+  root = "";
+  /** The folder to select once its parent is shown (going up). */
+  from = null;
+  lost = false;
+  /** The folder asked for, until it comes. */
+  dir = "";
+  /** The folder shown changed (the page keeps it in its address). */
+  onDir = () => {
+  };
+  host;
+  link;
+  constructor(host2, link, start = "") {
+    this.host = host2;
+    this.link = link;
+    const compact = !!host2.compact;
+    this.loadPrefs();
+    this.el = document.createElement("div");
+    this.el.className = `fm${compact ? " compact" : ""}`;
+    this.el.append(html`<div class="fm-bar">
+  <button type="button" class="fm-ib fm-up" title="Up a folder (Backspace)" aria-label="Up a folder">${fileIcon("up", 18)}</button>
+  <nav class="fm-crumbs" aria-label="Folder"></nav>
+  <span class="fm-grow"></span>
+  <label class="fm-filter">${fileIcon("search", 16)}<input type="search" placeholder="Filter" aria-label="Filter this folder" spellcheck="false" autocomplete="off"></label>
+  <button type="button" class="fm-ib fm-sort" title="Sort" aria-label="Sort"></button>
+</div>
+<div class="fm-note" role="status" hidden></div>
+<div class="fm-head" role="presentation">
+  <span class="fm-c-icon"></span>
+  <button type="button" class="fm-h" data-sort="name">Name<span class="fm-dir"></span></button>
+  <span class="fm-h fm-c-state">Status</span>
+  <button type="button" class="fm-h fm-c-time" data-sort="mtime">Modified<span class="fm-dir"></span></button>
+  <span class="fm-h fm-c-size">Size</span>
+</div>
+<div class="fm-list" aria-label="Files"></div>
+<div class="fm-empty" hidden></div>
+<div class="fm-foot"><span class="fm-count"></span><span class="fm-grow"></span><button type="button" class="fm-qo" title="Find a document by its name (${MOD}+P)">${fileIcon("search", 15)}<span>Find a document</span><kbd>${MOD}</kbd><kbd>P</kbd></button></div>`);
+    const $ = (s) => this.el.querySelector(s);
+    this.list = $(".fm-list");
+    this.filter = $(".fm-filter input");
+    this.crumbsEl = $(".fm-crumbs");
+    this.note = $(".fm-note");
+    this.empty = $(".fm-empty");
+    this.foot = $(".fm-count");
+    this.upBtn = $(".fm-up");
+    this.head = $(".fm-head");
+    this.sortBtn = $(".fm-sort");
+    this.upBtn.onclick = () => this.goUp();
+    $(".fm-qo").onclick = () => host2.quickOpen();
+    this.sortBtn.onclick = () => this.sortBy(this.by === "name" ? "mtime" : "name", this.by === "name");
+    this.head.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-sort]");
+      if (b) this.sortBy(b.dataset.sort, b.dataset.sort === this.by ? !this.desc : b.dataset.sort === "mtime");
+    });
+    this.crumbsEl.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-path]");
+      if (b) this.go(b.dataset.path);
+    });
+    this.filter.addEventListener("input", () => this.render());
+    this.filter.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        if (this.filter.value) this.filter.value = "", this.render();
+        else this.focus();
+        e.preventDefault();
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        this.focus();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const r = this.rowEl(this.sel ?? this.shown[0]?.path ?? null);
+        if (r && wantsTab(e) && r instanceof HTMLAnchorElement) window.open(r.href, "_blank", "noopener");
+        else r?.click();
+      }
+    });
+    this.list.addEventListener("focusin", (e) => {
+      const r = e.target.closest(".fm-row");
+      if (r) this.select(r.dataset.path, false);
+    });
+    this.list.addEventListener("keydown", (e) => this.key(e));
+    this.list.addEventListener("click", (e) => this.click(e));
+    link.onFolder = (f) => this.show(f);
+    link.onError = (m, d) => this.refused(m, d);
+    link.onState = (on) => this.connection(on);
+    this.go(start);
+    this.renderSortButton();
+  }
+  loadPrefs() {
+    try {
+      const p = JSON.parse(localStorage.getItem(this.host.prefsKey) ?? "{}");
+      if (p.by === "name" || p.by === "mtime") this.by = p.by;
+      this.desc = !!p.desc;
+    } catch {
+    }
+  }
+  sortBy(by, desc) {
+    this.by = by;
+    this.desc = desc;
+    try {
+      localStorage.setItem(this.host.prefsKey, JSON.stringify({ by, desc }));
+    } catch {
+    }
+    this.renderSortButton();
+    this.render();
+  }
+  renderSortButton() {
+    this.sortBtn.textContent = this.by === "name" ? "A\u2013Z" : "Newest";
+    this.sortBtn.title = this.by === "name" ? "Sorted by name: click to sort by modified" : "Sorted by modified, newest first: click to sort by name";
+    for (const h of this.head.querySelectorAll("[data-sort]")) {
+      const on = h.dataset.sort === this.by;
+      h.classList.toggle("on", on);
+      h.setAttribute("aria-sort", on ? this.desc ? "descending" : "ascending" : "none");
+      h.querySelector(".fm-dir").replaceChildren(on ? fileIcon(this.desc ? "desc" : "asc", 16) : "");
+    }
+  }
+  /** Into folder `dir` (the watch refuses one outside the folder watched). */
+  go(dir) {
+    if (dir !== this.dir) this.filter.value = "";
+    this.dir = dir;
+    this.link.list(dir);
+  }
+  goUp() {
+    const u = up(this.folder?.dir ?? this.dir);
+    if (u === null) return;
+    this.from = this.folder?.dir ?? this.dir;
+    this.go(u);
+  }
+  /** The list focused (the page's keys go to it). */
+  focus() {
+    const p = this.sel ?? this.shown[0]?.path ?? null;
+    if (p) this.select(p);
+    this.rowEl(p)?.focus({ preventScroll: true });
+  }
+  rowEl(path) {
+    if (path === null) return null;
+    return [...this.list.querySelectorAll(".fm-row")].find((r) => r.dataset.path === path) ?? null;
+  }
+  /** Whether a row of the list has the keyboard. */
+  hasFocus() {
+    const a = this.el.getRootNode().activeElement;
+    return !!a && this.list.contains(a);
+  }
+  focusFilter() {
+    this.filter.focus();
+    this.filter.select();
+  }
+  refused(message, dir) {
+    this.say(`${message}.`, "bad");
+    if (dir === this.dir) this.go(this.folder && this.folder.dir !== dir ? this.folder.dir : "");
+  }
+  connection(on) {
+    this.lost = !on;
+    if (on) this.say(null);
+    else this.say(this.link.everUp ? "phitex watch has stopped. Start it again in this folder and this page joins it by itself." : "Joining phitex watch\u2026", this.link.everUp ? "bad" : "info");
+    this.el.classList.toggle("lost", !on && this.link.everUp);
+  }
+  /** A line above the list (null: none). */
+  say(text, tone = "info") {
+    this.note.hidden = !text;
+    this.note.className = `fm-note ${tone}`;
+    this.note.textContent = text ?? "";
+  }
+  show(f) {
+    const moved = !this.folder || this.folder.dir !== f.dir;
+    this.folder = f;
+    this.root = f.root;
+    this.dir = f.dir;
+    if (!this.lost) this.say(null);
+    if (moved) {
+      this.sel = this.from && f.entries.some((e) => e.path === this.from) ? this.from : null;
+      this.from = null;
+      this.list.scrollTop = 0;
+      this.onDir(f.dir);
+    }
+    this.render();
+    if (moved && this.sel) this.reveal();
+  }
+  selected() {
+    return this.shown.find((e) => e.path === this.sel);
+  }
+  /** The folder drawn: crumbs, rows, the empty states, the foot. */
+  render() {
+    const f = this.folder;
+    if (!f) {
+      this.empty.hidden = false;
+      this.empty.replaceChildren(html`<div class="fm-e-title">Loading…</div>`);
+      return;
+    }
+    const c = crumbs(this.root, f.dir);
+    this.crumbsEl.replaceChildren(
+      ...c.flatMap((x, i) => {
+        const last = i === c.length - 1;
+        const b = document.createElement(last ? "span" : "button");
+        if (!last) b.type = "button", b.dataset.path = x.path, b.title = `Go to ${x.path || x.name}`;
+        else b.setAttribute("aria-current", "location");
+        b.className = `fm-crumb${i === 0 ? " root" : ""}`;
+        if (i === 0) b.append(fileIcon(c.length === 1 ? "folder_open" : "folder", 16));
+        b.append(Object.assign(document.createElement("span"), { className: "fm-ct", textContent: x.name }));
+        return i ? [Object.assign(document.createElement("span"), { className: "fm-sep", ariaHidden: "true" }), b] : [b];
+      })
+    );
+    for (const s of this.crumbsEl.querySelectorAll(".fm-sep")) s.replaceChildren(fileIcon("chevron", 14));
+    this.upBtn.disabled = !f.dir;
+    const all = sortEntries(f.entries, this.by, this.desc);
+    const q = this.filter.value;
+    this.shown = filterEntries(all, q);
+    if (this.sel && !this.shown.some((e) => e.path === this.sel)) this.sel = null;
+    const focused = this.hasFocus();
+    const rows = this.shown.map((e) => this.row(e, q));
+    this.list.replaceChildren(...rows);
+    (this.rowEl(this.sel) ?? rows[0])?.setAttribute("tabindex", "0");
+    if (focused) this.rowEl(this.sel)?.focus({ preventScroll: true });
+    const tex = f.entries.filter((e) => e.kind === "tex").length;
+    const dirs = f.entries.filter((e) => e.kind === "dir").length;
+    if (!f.entries.length) this.emptyState("This folder is empty", f.dir ? "Nothing in it yet. Files you add here show up at once." : "Add a .tex file to it and it shows up here at once.");
+    else if (!this.shown.length) this.emptyState(`Nothing here matches \u201C${q.trim()}\u201D`, "", true);
+    else this.empty.hidden = true;
+    const noTex = f.entries.length > 0 && !tex && !dirs && !q;
+    this.el.classList.toggle("no-tex", noTex);
+    let tip = this.list.querySelector(".fm-tip");
+    if (noTex) {
+      tip ??= this.list.insertBefore(document.createElement("div"), this.list.firstChild);
+      tip.className = "fm-tip";
+      tip.setAttribute("role", "presentation");
+      tip.replaceChildren(html`<b>No .tex files here.</b> Only a .tex file opens; the other files are shown as they are.`);
+    }
+    this.foot.textContent = q ? `${this.shown.length} of ${f.entries.length} shown` : counts(f.entries);
+  }
+  emptyState(title, text, clear = false) {
+    this.empty.hidden = false;
+    this.empty.replaceChildren(html`<div class="fm-e-icon">${fileIcon(clear ? "search" : "folder_open", 40)}</div><div class="fm-e-title">${title}</div>${text ? html`<div class="fm-e-text">${text}</div>` : ""}${clear ? html`<button type="button" class="fm-btn">Clear the filter</button>` : ""}`);
+    const b = this.empty.querySelector(".fm-btn");
+    if (b) b.onclick = () => (this.filter.value = "", this.render(), this.filter.focus());
+  }
+  /** An entry's row: a link where it opens (a folder, a document, a PDF, a picture), so the browser's own ways of opening a link hold. */
+  row(e, q) {
+    const href = this.hrefOf(e);
+    const r = document.createElement(href ? "a" : "div");
+    r.className = `fm-row k-${e.kind}`;
+    r.dataset.path = e.path;
+    r.tabIndex = -1;
+    if (r instanceof HTMLAnchorElement && href) r.href = href;
+    r.setAttribute("aria-selected", String(e.path === this.sel));
+    if (e.path === this.host.current) r.setAttribute("aria-current", "page");
+    const name = document.createElement("span");
+    name.className = "fm-name";
+    const at = q ? e.name.toLowerCase().indexOf(q.trim().toLowerCase()) : -1;
+    name.append(at >= 0 ? marked(e.name, Array.from({ length: q.trim().length }, (_, k) => at + k)) : e.name);
+    const kindWord = { dir: "Folder", tex: "Document", pdf: "PDF", image: "Picture", other: "File" }[e.kind];
+    r.title = e.kind === "other" ? `${e.name}: only .tex files open here` : e.path === this.host.current ? `${e.name}: shown in this tab` : `${e.name}: ${e.kind === "dir" ? "open the folder" : "open it"} (${MOD}+click: in a new tab)`;
+    const sub = document.createElement("span");
+    sub.className = "fm-sub";
+    sub.textContent = [e.kind === "dir" ? kindWord : "", when(e.mtime), e.kind === "dir" ? "" : sizeOf(e.size)].filter(Boolean).join(" \xB7 ");
+    const nameBox = html`<span class="fm-c-name">${name}${sub}</span>`;
+    const st = document.createElement("span");
+    st.className = "fm-c-state";
+    const b = badge(e);
+    if (b) st.append(b);
+    const time = document.createElement("span");
+    time.className = "fm-c-time";
+    time.textContent = when(e.mtime);
+    time.title = whenFull(e.mtime);
+    const size2 = document.createElement("span");
+    size2.className = "fm-c-size";
+    size2.textContent = e.kind === "dir" ? "" : sizeOf(e.size);
+    const ic = document.createElement("span");
+    ic.className = "fm-c-icon";
+    ic.append(fileIcon(e.kind === "dir" ? "folder" : e.kind, 20));
+    r.append(ic, nameBox, st, time, size2);
+    if (!href) r.setAttribute("aria-disabled", "true");
+    return r;
+  }
+  hrefOf(e) {
+    if (e.kind === "dir") return this.host.dirHref(e.path);
+    if (e.kind === "tex" && e.id) return this.host.docHref(e.id);
+    if (e.kind === "pdf" || e.kind === "image") return this.host.rawHref(e.path);
+    return null;
+  }
+  rowOf(e) {
+    const r = e.target.closest(".fm-row");
+    return r ? this.shown.find((x) => x.path === r.dataset.path) : void 0;
+  }
+  /** A click on a row: a link's, the browser's own with Ctrl, ⌘, Shift or the middle button (a new tab); a plain one on a folder goes into it here, on the document shown does nothing. */
+  click(e) {
+    const row = this.rowOf(e);
+    if (!row) return;
+    this.select(row.path, false);
+    if (wantsTab(e) || e.button !== 0 || e.altKey) return;
+    if (row.kind === "dir") {
+      e.preventDefault();
+      this.go(row.path);
+    } else if (row.kind === "other" || row.path === this.host.current) e.preventDefault();
+  }
+  select(path, reveal = true) {
+    this.sel = path;
+    for (const r of this.list.querySelectorAll(".fm-row")) {
+      const on = r.dataset.path === path;
+      r.setAttribute("aria-selected", String(on));
+      r.tabIndex = on ? 0 : -1;
+    }
+    if (reveal) this.reveal();
+  }
+  reveal() {
+    this.list.querySelector('.fm-row[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }
+  /** The selection moved `by` rows (from none: the first). */
+  move(by) {
+    if (!this.shown.length) return;
+    const k = this.shown.findIndex((e) => e.path === this.sel);
+    const next = k < 0 ? by < 0 ? this.shown.length - 1 : 0 : Math.max(0, Math.min(this.shown.length - 1, k + by));
+    this.select(this.shown[next].path);
+    this.rowEl(this.shown[next].path)?.focus({ preventScroll: true });
+  }
+  page() {
+    const row = this.list.querySelector(".fm-row");
+    return Math.max(1, Math.floor(this.list.clientHeight / (row?.offsetHeight || 36)) - 1);
+  }
+  key(e) {
+    let done = true;
+    if (e.key === "ArrowDown" && !e.altKey) this.move(1);
+    else if (e.key === "ArrowUp" && e.altKey) this.goUp();
+    else if (e.key === "ArrowUp") this.move(-1);
+    else if (e.key === "Home") this.move(-Infinity);
+    else if (e.key === "End") this.move(Infinity);
+    else if (e.key === "PageDown") this.move(this.page());
+    else if (e.key === "PageUp") this.move(-this.page());
+    else if (e.key === "Backspace" || e.key === "ArrowLeft" && this.host.compact) this.goUp();
+    else if (e.key === "ArrowRight" && this.host.compact && this.sel && this.selected()?.kind === "dir") this.go(this.sel);
+    else if (e.key === "Escape" && this.filter.value) {
+      this.filter.value = "";
+      this.render();
+    } else if (e.key === "/") this.focusFilter();
+    else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey && e.key !== " ") {
+      this.filter.focus();
+      this.filter.value += e.key;
+      this.render();
+    } else done = false;
+    if (done) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
+};
+var QuickOpen = class {
+  back;
+  input;
+  listEl;
+  files = null;
+  shown = [];
+  at = 0;
+  hitsOf = /* @__PURE__ */ new Map();
+  /** Ctrl+P again while open (the viewer prints its PDF). */
+  onAgain;
+  host;
+  link;
+  constructor(mount, host2, link, hint = "") {
+    this.host = host2;
+    this.link = link;
+    this.back = document.createElement("div");
+    this.back.className = "qo-back";
+    this.back.hidden = true;
+    this.back.append(html`<div class="qo" role="dialog" aria-modal="true" aria-label="Open a document by its name">
+  <label class="qo-in">${fileIcon("search", 18)}<input type="text" placeholder="Open a .tex file by name" aria-label="A document's name" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="qo-list"></label>
+  <div class="qo-list" id="qo-list" role="listbox" aria-label="Documents"></div>
+  <div class="qo-foot"><span><kbd>↑</kbd><kbd>↓</kbd> choose</span><span><kbd>Enter</kbd> open</span><span><kbd>${MOD}</kbd><kbd>Enter</kbd> new tab</span><span><kbd>Esc</kbd> close</span>${hint ? html`<span class="qo-hint">${hint}</span>` : ""}</div>
+</div>`);
+    this.input = this.back.querySelector("input");
+    this.listEl = this.back.querySelector(".qo-list");
+    this.back.addEventListener("mousedown", (e) => {
+      if (e.target === this.back) e.preventDefault(), this.close();
+    });
+    this.input.addEventListener("input", () => (this.at = 0, this.render()));
+    this.input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "ArrowDown") e.preventDefault(), this.step(1);
+      else if (e.key === "ArrowUp") e.preventDefault(), this.step(-1);
+      else if (e.key === "PageDown") e.preventDefault(), this.step(8);
+      else if (e.key === "PageUp") e.preventDefault(), this.step(-8);
+      else if (e.key === "Escape") e.preventDefault(), this.close();
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const f = this.shown[this.at];
+        if (f) this.open(f, e.ctrlKey || e.metaKey || e.shiftKey);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "p" && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        if (this.onAgain) this.close(), this.onAgain();
+      }
+    });
+    this.listEl.addEventListener("click", (e) => {
+      const r = e.target.closest(".qo-row");
+      if (!r) return;
+      e.preventDefault();
+      const f = this.shown[Number(r.dataset.k)];
+      if (f) this.open(f, wantsTab(e));
+    });
+    this.listEl.addEventListener("auxclick", (e) => {
+      const r = e.target.closest(".qo-row");
+      if (e.button !== 1 || !r) return;
+      e.preventDefault();
+      const f = this.shown[Number(r.dataset.k)];
+      if (f) this.open(f, true);
+    });
+    this.listEl.addEventListener("mousemove", (e) => {
+      const r = e.target.closest(".qo-row");
+      if (r && Number(r.dataset.k) !== this.at) this.at = Number(r.dataset.k), this.mark();
+    });
+    mount.append(this.back);
+  }
+  get isOpen() {
+    return !this.back.hidden;
+  }
+  open_() {
+    this.back.hidden = false;
+    this.input.value = "";
+    this.at = 0;
+    this.render();
+    this.input.focus();
+    void this.link.find().then((f) => {
+      this.files = f;
+      this.render();
+    });
+  }
+  close() {
+    this.back.hidden = true;
+  }
+  toggle() {
+    if (this.isOpen) this.close();
+    else this.open_();
+  }
+  open(f, newTab) {
+    this.close();
+    const href = this.host.docHref(f.id);
+    if (newTab) window.open(href, "_blank", "noopener");
+    else if (f.path !== this.host.current) location.assign(href);
+  }
+  step(by) {
+    if (!this.shown.length) return;
+    this.at = Math.max(0, Math.min(this.shown.length - 1, this.at + by));
+    this.mark();
+  }
+  mark() {
+    this.listEl.querySelectorAll(".qo-row").forEach((r, i) => r.setAttribute("aria-selected", String(i === this.at)));
+    this.listEl.querySelector('.qo-row[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+    this.input.setAttribute("aria-activedescendant", `qo-r-${this.at}`);
+  }
+  render() {
+    if (!this.files) {
+      this.listEl.replaceChildren(html`<div class="qo-none">Looking for documents…</div>`);
+      return;
+    }
+    const q = this.input.value;
+    const ms = rank(q, this.files.map((f) => f.path), 60);
+    const byPath = new Map(this.files.map((f) => [f.path, f]));
+    this.shown = ms.map((m) => byPath.get(m.path));
+    this.hitsOf = new Map(ms.map((m) => [m.path, m.hits]));
+    if (!this.files.length) {
+      this.listEl.replaceChildren(html`<div class="qo-none"><b>No .tex files in this folder</b>Add one and it shows up here.</div>`);
+      return;
+    }
+    if (!this.shown.length) {
+      this.listEl.replaceChildren(html`<div class="qo-none"><b>No document matches “${q.trim()}”</b>Try fewer letters, or part of its folder's name.</div>`);
+      return;
+    }
+    this.at = Math.min(this.at, this.shown.length - 1);
+    this.listEl.replaceChildren(
+      ...this.shown.map((f, k) => {
+        const hits = this.hitsOf.get(f.path) ?? [];
+        const cut = f.path.lastIndexOf("/") + 1;
+        const r = document.createElement("a");
+        r.className = "qo-row";
+        r.id = `qo-r-${k}`;
+        r.dataset.k = String(k);
+        r.href = this.host.docHref(f.id);
+        r.tabIndex = -1;
+        r.setAttribute("role", "option");
+        r.setAttribute("aria-selected", String(k === this.at));
+        if (f.path === this.host.current) r.setAttribute("aria-current", "page");
+        r.append(fileIcon("tex", 18), html`<span class="qo-name">${marked(f.path.slice(cut), hits, cut)}</span><span class="qo-dir">${cut ? marked(f.path.slice(0, cut - 1), hits, 0) : ""}</span>${f.path === this.host.current ? html`<span class="qo-here">this tab</span>` : ""}`);
+        return r;
+      })
+    );
+    this.input.setAttribute("aria-activedescendant", `qo-r-${this.at}`);
+  }
+};
+var FILES_CSS = `
+.fm { --fm-row: 34px; display: flex; flex-direction: column; min-height: 0; height: 100%; container-type: inline-size; color: var(--ph-fg); font: var(--ph-size, 13px)/1.4 var(--ph-font, system-ui, sans-serif); background: var(--ph-bar); }
+.fm svg { fill: currentColor; flex: none; }
+.fm [hidden], .qo [hidden] { display: none !important; }
+.fm button, .qo button { font: inherit; color: inherit; }
+.fm kbd, .qo kbd { display: inline-block; min-width: 1.6em; padding: 0 4px; margin: 0 1px; border: 1px solid var(--ph-border); border-bottom-width: 2px; border-radius: 4px; font: 600 11px/1.5 var(--ph-font, system-ui, sans-serif); text-align: center; color: var(--ph-fg2); background: var(--ph-stage); }
+.fm-grow { flex: 1; }
+.fm-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--ph-border); min-height: 48px; flex-wrap: wrap; }
+.fm-ib { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 30px; height: 30px; padding: 0 6px; border-radius: var(--ph-radius, 6px); color: var(--ph-fg2); cursor: pointer; font: 600 12px/1 var(--ph-font, system-ui, sans-serif); }
+.fm-ib:hover:not(:disabled) { background: var(--ph-hover); color: var(--ph-fg); }
+.fm-ib:focus-visible { outline: 2px solid var(--ph-accent); outline-offset: 1px; }
+.fm-ib:disabled { opacity: .35; cursor: default; }
+.fm-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 0; min-width: 0; font-size: 14px; }
+.fm-crumb { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: var(--ph-radius, 6px); max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.fm-crumb { color: var(--ph-fg2); cursor: pointer; }
+button.fm-crumb:hover { background: var(--ph-hover); color: var(--ph-fg); }
+button.fm-crumb:focus-visible { outline: 2px solid var(--ph-accent); }
+span.fm-crumb { font-weight: 600; color: var(--ph-fg); }
+.fm-ct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.fm-crumb.root svg { color: var(--fm-folder, #d69a2d); }
+.fm-sep { display: inline-flex; color: var(--ph-fg2); opacity: .6; }
+.fm-filter { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 8px; border: 1px solid var(--ph-border); border-radius: var(--ph-radius, 6px); background: var(--ph-stage); color: var(--ph-fg2); width: 220px; max-width: 100%; }
+.fm-filter:focus-within { border-color: var(--ph-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ph-accent) 22%, transparent); }
+.fm-filter input { all: unset; flex: 1; min-width: 0; width: 100%; color: var(--ph-fg); font: inherit; }
+.fm-filter input::placeholder { color: var(--ph-fg2); opacity: .8; }
+.fm-sort { display: none; }
+.fm-note { padding: 8px 14px; font-size: 13px; border-bottom: 1px solid var(--ph-border); }
+.fm-note.info { background: color-mix(in srgb, var(--ph-info, #1d3e72) 10%, var(--ph-bar)); }
+.fm-note.bad { background: color-mix(in srgb, var(--ph-danger) 14%, var(--ph-bar)); color: var(--ph-fg); }
+.fm-head, .fm-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(130px, 170px) 92px 72px 0px; align-items: center; column-gap: 12px; padding: 0 14px; }
+.fm-head { height: 30px; border-bottom: 1px solid var(--ph-border); color: var(--ph-fg2); font-size: 12px; font-weight: 600; }
+.fm-h { all: unset; display: inline-flex; align-items: center; gap: 2px; cursor: default; white-space: nowrap; }
+button.fm-h { cursor: pointer; border-radius: 4px; padding: 2px 4px; margin: 0 -4px; }
+button.fm-h:hover { color: var(--ph-fg); background: var(--ph-hover); }
+button.fm-h:focus-visible { outline: 2px solid var(--ph-accent); }
+.fm-h.on { color: var(--ph-fg); }
+.fm-h .fm-dir { display: inline-flex; width: 16px; }
+.fm-c-time, .fm-c-size { text-align: right; justify-content: flex-end; }
+.fm-head .fm-c-time { justify-self: end; }
+.fm-head .fm-c-size { justify-self: end; }
+.fm-list { flex: 1; min-height: 0; overflow: auto; outline: none; padding: 4px 0 12px; overscroll-behavior: contain; }
+.fm-row { position: relative; height: var(--fm-row); cursor: default; user-select: none; border-left: 3px solid transparent; padding-left: 11px; color: inherit; text-decoration: none; outline: none; }
+a.fm-row { cursor: pointer; }
+.fm-row:hover { background: var(--ph-hover); }
+.fm-row[aria-selected=true] { background: color-mix(in srgb, var(--ph-accent) 12%, transparent); }
+.fm-row:focus-visible { background: color-mix(in srgb, var(--ph-accent) 20%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ph-accent) 55%, transparent); }
+.fm-row[aria-current=page] { border-left-color: var(--ph-accent); }
+.fm-row[aria-current=page] .fm-name { font-weight: 650; }
+.fm-c-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--ph-fg2); }
+.k-dir .fm-c-icon { color: var(--fm-folder, #d69a2d); }
+.k-tex .fm-c-icon { color: var(--ph-link, var(--ph-accent)); }
+.k-pdf .fm-c-icon { color: var(--fm-pdf, #c8443a); }
+.k-image .fm-c-icon { color: var(--fm-image, #2f8a5b); }
+.k-other .fm-c-icon { opacity: .55; }
+.fm-c-name { display: flex; flex-direction: column; min-width: 0; }
+.fm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm-name b { font-weight: 700; background: color-mix(in srgb, var(--ph-progress, #f58f2d) 28%, transparent); border-radius: 2px; }
+.k-tex .fm-name { font-weight: 550; }
+.k-other .fm-name, .k-other .fm-c-time, .k-other .fm-c-size { color: var(--ph-fg2); opacity: .75; }
+.fm-sub { display: none; color: var(--ph-fg2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fm-c-time, .fm-c-size { color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fm-c-state { display: flex; min-width: 0; }
+.fm-badge { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 9px 2px 7px; border-radius: 999px; font-size: 12px; font-weight: 600; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: color-mix(in srgb, currentColor 11%, transparent); }
+.fm-badge i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.fm-badge.tone-ok { color: var(--fm-ok, #1f8a4c); }
+.fm-badge.tone-bad { color: var(--ph-danger); }
+.fm-badge.tone-busy { color: var(--ph-warning); }
+.fm-badge.tone-busy i { animation: fm-pulse 1s ease-in-out infinite; }
+.fm-badge.tone-none { color: var(--ph-fg2); }
+.fm-badge.ended { opacity: .6; }
+.fm-badge.shown i { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 30%, transparent); }
+@keyframes fm-pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .fm-badge.tone-busy i { animation: none; } }
+.fm-tip { padding: 10px 14px 10px 17px; margin: 0 0 4px; color: var(--ph-fg2); font-size: 12.5px; border-bottom: 1px dashed var(--ph-border); }
+.fm-tip b { color: var(--ph-fg); font-weight: 600; }
+.fm-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 32px 20px 48px; text-align: center; color: var(--ph-fg2); }
+.fm-list:has(+ .fm-empty:not([hidden])) { flex: none; padding: 0; }
+.fm-e-icon { color: var(--ph-border); margin-bottom: 4px; }
+.fm-e-icon svg { fill: color-mix(in srgb, var(--ph-fg2) 45%, transparent); }
+.fm-e-title { color: var(--ph-fg); font-size: 15px; font-weight: 600; }
+.fm-e-text { max-width: 32em; font-size: 13px; }
+.fm-btn { all: unset; margin-top: 10px; padding: 6px 14px; border-radius: var(--ph-radius, 6px); border: 1px solid var(--ph-border); background: var(--ph-stage); cursor: pointer; font-weight: 600; color: var(--ph-fg); }
+.fm-btn:hover { border-color: var(--ph-accent); }
+.fm-btn:focus-visible { outline: 2px solid var(--ph-accent); }
+.fm-foot { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 4px 8px 4px 14px; border-top: 1px solid var(--ph-border); color: var(--ph-fg2); font-size: 12px; }
+.fm-qo { all: unset; display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: var(--ph-radius, 6px); cursor: pointer; color: var(--ph-fg2); font-size: 12px; }
+.fm-qo span { margin: 0 6px 0 2px; }
+.fm-qo:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.fm-qo:focus-visible { outline: 2px solid var(--ph-accent); }
+.fm.lost .fm-list, .fm.lost .fm-head { opacity: .55; }
+/* (narrow: name and state, the time and size under the name) */
+@container (max-width: 620px) {
+  .fm-head { display: none; }
+  .fm-row { grid-template-columns: 26px minmax(0, 1fr) auto; height: auto; min-height: 44px; padding-top: 5px; padding-bottom: 5px; }
+  .fm-row .fm-c-time, .fm-row .fm-c-size { display: none; }
+  .fm-sub { display: block; }
+  .fm-c-state { justify-content: flex-end; }
+  .fm-filter { width: auto; flex: 1 1 140px; }
+  .fm-sort { display: inline-flex; }
+  .fm-bar { gap: 4px; }
+  .fm-qo kbd { display: none; }
+}
+/* (the viewer's Files column) */
+.fm.compact { --fm-row: 30px; }
+.fm.compact .fm-bar { padding: 6px 6px 8px 6px; gap: 4px 2px; min-height: 0; }
+.fm.compact .fm-up { order: 0; min-width: 28px; height: 28px; }
+.fm.compact .fm-crumbs { order: 1; flex: 1 1 calc(100% - 40px); flex-wrap: nowrap; overflow: hidden; font-size: 12.5px; }
+.fm.compact .fm-crumb { flex: 0 1 auto; min-width: 3ch; padding: 3px 4px; max-width: none; }
+.fm.compact span.fm-crumb { flex: 0 0 auto; max-width: 100%; }
+.fm.compact .fm-sep { flex: none; }
+.fm.compact .fm-filter { order: 2; height: 28px; flex: 1 1 0; width: auto; min-width: 0; }
+.fm.compact .fm-sort { order: 3; height: 28px; }
+.fm.compact .fm-grow { display: none; }
+.fm.compact .fm-head { display: none; }
+.fm.compact .fm-row { grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 8px; height: auto; min-height: var(--fm-row); padding: 3px 8px 3px 7px; }
+.fm.compact .fm-row .fm-c-time, .fm.compact .fm-row .fm-c-size { display: none; }
+.fm.compact .fm-sub { display: none; }
+.fm.compact .fm-badge { font-size: 0; gap: 0; padding: 4px; background: none; }
+.fm.compact .fm-badge i { width: 8px; height: 8px; }
+.fm.compact .fm-sort { display: inline-flex; }
+.fm.compact .fm-foot { padding-left: 8px; }
+.fm.compact .fm-tip { padding: 8px 10px; }
+.fm.compact .fm-empty { padding: 24px 12px; }
+
+.qo-back { position: fixed; inset: 0; z-index: 50; display: flex; justify-content: center; align-items: flex-start; padding: min(12vh, 96px) 16px 16px; background: rgb(10 14 20 / 32%); }
+.qo-back[hidden] { display: none; }
+.qo { width: min(620px, 100%); max-height: min(70vh, 560px); display: flex; flex-direction: column; overflow: hidden; border-radius: 10px; background: var(--ph-menu, var(--ph-bar)); color: var(--ph-fg); border: 1px solid var(--ph-border); box-shadow: 0 18px 48px rgb(0 0 0 / 30%); font: var(--ph-size, 13px)/1.4 var(--ph-font, system-ui, sans-serif); }
+.qo svg { fill: currentColor; flex: none; }
+.qo-in { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--ph-border); color: var(--ph-fg2); }
+.qo-in input { all: unset; flex: 1; min-width: 0; color: var(--ph-fg); font-size: 15px; }
+.qo-in input::placeholder { color: var(--ph-fg2); }
+.qo-list { overflow: auto; padding: 6px; }
+.qo-row { display: flex; align-items: baseline; gap: 10px; padding: 7px 10px; border-radius: 6px; color: inherit; text-decoration: none; cursor: pointer; }
+.qo-row svg { align-self: center; color: var(--ph-link, var(--ph-accent)); }
+.qo-row[aria-selected=true] { background: color-mix(in srgb, var(--ph-accent) 16%, transparent); }
+.qo-name { font-weight: 600; white-space: nowrap; }
+.qo-dir { color: var(--ph-fg2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.qo-name b, .qo-dir b { color: var(--ph-accent); font-weight: 750; }
+.qo-here { flex: none; font-size: 11px; color: var(--ph-fg2); border: 1px solid var(--ph-border); border-radius: 999px; padding: 0 7px; }
+.qo-none { display: flex; flex-direction: column; gap: 2px; padding: 22px 12px; text-align: center; color: var(--ph-fg2); }
+.qo-none b { color: var(--ph-fg); font-weight: 600; }
+.qo-foot { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 8px 14px; border-top: 1px solid var(--ph-border); color: var(--ph-fg2); font-size: 12px; }
+.qo-hint { margin-left: auto; }
+@media (max-width: 520px) { .qo-foot span:nth-child(n+3) { display: none; } .qo-back { padding-top: 12px; } }
+`;
 
 // viewer/src/sync.ts
 function glyphs2(json, path) {
@@ -16051,8 +16978,94 @@ addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "p") return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  if (folderQuick) return folderQuick.toggle();
   void printPdf();
 }, { capture: true });
+var folderQuick;
+var folderDoc;
+{
+  const m = /\/d\/([0-9a-f]{12})\/$/.exec(location.pathname);
+  if (m) folderMode(m[1]);
+}
+function folderMode(id) {
+  const url = new URL(`../../ws?doc=${id}`, location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const link = new FolderLink(url);
+  const esc = (p) => p.split("/").map(encodeURIComponent).join("/");
+  const host2 = {
+    docHref: (d) => new URL(`../${d}/`, location.href).href,
+    rawHref: (p) => new URL(`../../raw/${esc(p)}`, location.href).href,
+    dirHref: (p) => new URL(`../../${p ? `#dir=${encodeURIComponent(p)}` : ""}`, location.href).href,
+    compact: true,
+    quickOpen: () => folderQuick?.toggle(),
+    prefsKey: "phitex.files.column"
+  };
+  const col = document.createElement("aside");
+  col.className = "fcol";
+  col.setAttribute("aria-label", "Files");
+  const head = document.createElement("div");
+  head.className = "fcol-head";
+  const title = document.createElement("span");
+  title.textContent = "Files";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "fm-ib";
+  close.title = "Hide the files (b)";
+  close.setAttribute("aria-label", "Hide the files");
+  close.append(fileIcon("close", 16));
+  head.append(title, Object.assign(document.createElement("span"), { className: "fm-grow" }), close);
+  col.append(head);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ib";
+  button.id = "b-files";
+  button.title = "Files (b)";
+  button.setAttribute("aria-label", "Files");
+  button.append(fileIcon("folder", 18));
+  const shown = panel.hostColumn(filesColumnCss() + FILES_CSS, col, button);
+  let on = innerWidth >= 900;
+  try {
+    const kept = localStorage.getItem("phitex.files");
+    if (kept !== null) on = kept === "1";
+  } catch {
+  }
+  const show = (v) => {
+    on = v;
+    shown(v);
+    try {
+      localStorage.setItem("phitex.files", v ? "1" : "0");
+    } catch {
+    }
+  };
+  if (innerWidth < 700) on = false;
+  shown(on);
+  button.onclick = () => show(!on);
+  close.onclick = () => show(false);
+  const root = col.getRootNode();
+  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host2, link, "Ctrl+P again: print the PDF");
+  folderQuick.onAgain = () => void printPdf();
+  let files;
+  link.onHello = (h) => {
+    if (!h.doc) return;
+    host2.current = h.doc.path;
+    folderDoc = h.doc.path;
+    showTitle();
+    if (files) return;
+    files = new FileList(host2, link, h.doc.dir);
+    col.append(files.el);
+  };
+  const note = new URLSearchParams(location.search).get("note");
+  if (note) {
+    panel.msg(note, false, true);
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+  addEventListener("keydown", (e) => {
+    if (e.key !== "b" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+    e.preventDefault();
+    show(!on);
+    if (on) files?.focus();
+  });
+}
 var started = false;
 sock.onOpen = () => {
   panel.msg("connected to phitex watch");
@@ -16137,7 +17150,7 @@ document.body.append(con, bar);
 var log = con.querySelector(".log");
 var dot = bar.querySelector(".dot");
 var barText = bar.querySelector(".text");
-var badge = bar.querySelector(".new");
+var badge2 = bar.querySelector(".new");
 var status = { kind: "status", text: "" };
 var busy = "";
 var unseen = { errors: 0, warnings: 0 };
@@ -16152,12 +17165,13 @@ var favicon = (() => {
   };
 })();
 var showTitle = () => {
-  const file = (status.text ?? "").split(" \xB7 ")[0] || "phitex watch";
+  const said2 = (status.text ?? "").split(" \xB7 ")[0] || "phitex watch";
+  const file = folderDoc && said2 !== "phitex watch" ? folderDoc : said2;
   const connected = !/not connected/.test(status.text ?? "");
   const errs = /(\d+) errors?/.exec(status.text ?? "")?.[1];
   const [what, colour] = !connected ? ["Not connected", "#8a93a3"] : busy ? ["Building\u2026", "#f58f2d"] : status.ok === false ? [errs ? `${errs} error${errs === "1" ? "" : "s"}` : "Failed", "#d1453b"] : status.ok === true ? ["Built", "#2e9d63"] : ["Loading\u2026", "#8a93a3"];
   document.title = connected && file !== "phitex watch" ? `${file} \xB7 ${what}` : `${what} \xB7 phitex watch`;
-  if (/\.(tex|ltx)$/.test(file)) panel.docName(file);
+  if (/\.(tex|ltx)$/.test(said2)) panel.docName(said2);
   favicon(colour);
 };
 var showBar = () => {
@@ -16165,9 +17179,9 @@ var showBar = () => {
   dot.className = "dot" + (busy ? " busy" : status.ok === true ? " ok" : status.ok === false ? " bad" : "");
   barText.textContent = busy ? `${busy}\u2026` : status.text || "phitex watch";
   const n = unseen.errors + unseen.warnings;
-  badge.hidden = n === 0 || !con.hidden;
-  badge.className = "new" + (unseen.errors ? "" : " warn");
-  badge.textContent = unseen.errors ? `${unseen.errors} error${unseen.errors > 1 ? "s" : ""}` : `${n} warning${n > 1 ? "s" : ""}`;
+  badge2.hidden = n === 0 || !con.hidden;
+  badge2.className = "new" + (unseen.errors ? "" : " warn");
+  badge2.textContent = unseen.errors ? `${unseen.errors} error${unseen.errors > 1 ? "s" : ""}` : `${n} warning${n > 1 ? "s" : ""}`;
 };
 var look = (s) => {
   const t = s.text ?? "";
@@ -16349,3 +17363,17 @@ var prefs = async () => {
 var opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();
+function filesColumnCss() {
+  return `
+.fcol { display: flex; flex-direction: column; flex: none; width: 272px; min-height: 0; overflow: hidden; background: var(--ph-bar); border-right: 1px solid var(--ph-border); color: var(--ph-fg); font: var(--ph-size)/1.4 var(--ph-font); --fm-ok: #1f8a4c; --fm-folder: #d08a12; }
+.fcol[hidden] { display: none; }
+.fcol > .fm { flex: 1; }
+.fcol-head { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 4px 0 12px; border-bottom: 1px solid var(--ph-border); font-weight: 650; font-size: 12px; letter-spacing: .4px; text-transform: uppercase; color: var(--ph-fg2); }
+.fcol-head svg { fill: currentColor; }
+.ib#b-files svg { fill: currentColor; }
+.ib#b-files[aria-pressed=true] { color: var(--ph-accent); }
+@media (prefers-color-scheme: dark) { .win.watch:not(.light) .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; } }
+.win.watch.dark .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; }
+@container (max-width: 640px) { .fcol { position: absolute; inset: 0 auto 0 0; z-index: 6; width: min(300px, 86%); box-shadow: 4px 0 18px rgb(0 0 0 / 22%); } }
+`;
+}

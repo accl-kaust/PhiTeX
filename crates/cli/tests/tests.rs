@@ -4,6 +4,7 @@
 
 mod cli;
 mod corpus_repros;
+mod dirwatch;
 mod hints_check;
 mod ladder;
 mod tikzman_repros;

@@ -17,6 +17,8 @@
 // Bundled by scripts/viewer-bundle.sh into viewer.js.
 
 import { Panel } from "../../../viewer/src/panel.ts";
+import { FILES_CSS, FileList, FolderLink, QuickOpen, fileIcon, type FilesHost } from "../../../viewer/src/files.ts";
+import { typing } from "../../../viewer/src/keys.ts";
 import { html } from "../../../viewer/src/html.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
 import { composeLine, search, type Hit, type TextLine } from "../../../viewer/src/text.ts";
@@ -787,8 +789,103 @@ addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "p") return;
   e.preventDefault();
   e.stopImmediatePropagation();
+  // (a folder watch's document: quick open, Ctrl+P again in it prints)
+  if (folderQuick) return folderQuick.toggle();
   void printPdf();
 }, { capture: true });
+
+// ---- A folder watch's document (`phitex watch DIR`): its Files column and quick open ----
+// (served under the folder's address as d/ID/: the folder's file manager is at ../../ws)
+let folderQuick: QuickOpen | undefined;
+/** A folder watch's document: its path from the folder, the tab's title (two main.tex told apart). */
+let folderDoc: string | undefined;
+{
+  const m = /\/d\/([0-9a-f]{12})\/$/.exec(location.pathname);
+  if (m) folderMode(m[1]);
+}
+function folderMode(id: string): void {
+  const url = new URL(`../../ws?doc=${id}`, location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const link = new FolderLink(url);
+  const esc = (p: string) => p.split("/").map(encodeURIComponent).join("/");
+  const host: FilesHost = {
+    docHref: (d) => new URL(`../${d}/`, location.href).href,
+    rawHref: (p) => new URL(`../../raw/${esc(p)}`, location.href).href,
+    dirHref: (p) => new URL(`../../${p ? `#dir=${encodeURIComponent(p)}` : ""}`, location.href).href,
+    compact: true,
+    quickOpen: () => folderQuick?.toggle(),
+    prefsKey: "phitex.files.column",
+  };
+  const col = document.createElement("aside");
+  col.className = "fcol";
+  col.setAttribute("aria-label", "Files");
+  const head = document.createElement("div");
+  head.className = "fcol-head";
+  const title = document.createElement("span");
+  title.textContent = "Files";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "fm-ib";
+  close.title = "Hide the files (b)";
+  close.setAttribute("aria-label", "Hide the files");
+  close.append(fileIcon("close", 16));
+  head.append(title, Object.assign(document.createElement("span"), { className: "fm-grow" }), close);
+  col.append(head);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ib";
+  button.id = "b-files";
+  button.title = "Files (b)";
+  button.setAttribute("aria-label", "Files");
+  button.append(fileIcon("folder", 18));
+  const shown = panel.hostColumn(filesColumnCss() + FILES_CSS, col, button);
+  let on = innerWidth >= 900;
+  try {
+    const kept = localStorage.getItem("phitex.files");
+    if (kept !== null) on = kept === "1";
+  } catch {
+    /* (the default) */
+  }
+  const show = (v: boolean) => {
+    on = v;
+    shown(v);
+    try {
+      localStorage.setItem("phitex.files", v ? "1" : "0");
+    } catch {
+      /* (not kept) */
+    }
+  };
+  // (a narrow window: the column would cover the pages, so it starts hidden)
+  if (innerWidth < 700) on = false;
+  shown(on);
+  button.onclick = () => show(!on);
+  close.onclick = () => show(false);
+  const root = col.getRootNode() as ShadowRoot;
+  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host, link, "Ctrl+P again: print the PDF");
+  folderQuick.onAgain = () => void printPdf();
+  let files: FileList | undefined;
+  link.onHello = (h) => {
+    if (!h.doc) return;
+    host.current = h.doc.path;
+    folderDoc = h.doc.path;
+    showTitle();
+    if (files) return;
+    files = new FileList(host, link, h.doc.dir);
+    col.append(files.el);
+  };
+  // (a part opened that names its root: the root is shown, and why)
+  const note = new URLSearchParams(location.search).get("note");
+  if (note) {
+    panel.msg(note, false, true);
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+  addEventListener("keydown", (e) => {
+    if (e.key !== "b" || e.ctrlKey || e.metaKey || e.altKey || typing(e)) return;
+    e.preventDefault();
+    show(!on);
+    if (on) files?.focus();
+  });
+}
 
 let started = false;
 sock.onOpen = () => {
@@ -912,7 +1009,8 @@ const favicon = (() => {
 
 /** The tab's title and icon: the document and what the watch is doing ("paper.tex · Building…", "· 2 errors", "· Built", "· Not connected"). */
 const showTitle = () => {
-  const file = (status.text ?? "").split(" · ")[0] || "phitex watch";
+  const said = (status.text ?? "").split(" · ")[0] || "phitex watch";
+  const file = folderDoc && said !== "phitex watch" ? folderDoc : said;
   const connected = !/not connected/.test(status.text ?? "");
   const errs = /(\d+) errors?/.exec(status.text ?? "")?.[1];
   const [what, colour] = !connected
@@ -926,7 +1024,7 @@ const showTitle = () => {
           : ["Loading…", "#8a93a3"];
   document.title = connected && file !== "phitex watch" ? `${file} · ${what}` : `${what} · phitex watch`;
   // (the openings that show it: a prompt's, a title bar's)
-  if (/\.(tex|ltx)$/.test(file)) panel.docName(file);
+  if (/\.(tex|ltx)$/.test(said)) panel.docName(said);
   favicon(colour);
 };
 
@@ -1139,3 +1237,19 @@ sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();
 
 
+
+/** The Files column beside the pages (a folder watch's document), in the panel's shadow root. */
+function filesColumnCss(): string {
+  return `
+.fcol { display: flex; flex-direction: column; flex: none; width: 272px; min-height: 0; overflow: hidden; background: var(--ph-bar); border-right: 1px solid var(--ph-border); color: var(--ph-fg); font: var(--ph-size)/1.4 var(--ph-font); --fm-ok: #1f8a4c; --fm-folder: #d08a12; }
+.fcol[hidden] { display: none; }
+.fcol > .fm { flex: 1; }
+.fcol-head { display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 4px 0 12px; border-bottom: 1px solid var(--ph-border); font-weight: 650; font-size: 12px; letter-spacing: .4px; text-transform: uppercase; color: var(--ph-fg2); }
+.fcol-head svg { fill: currentColor; }
+.ib#b-files svg { fill: currentColor; }
+.ib#b-files[aria-pressed=true] { color: var(--ph-accent); }
+@media (prefers-color-scheme: dark) { .win.watch:not(.light) .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; } }
+.win.watch.dark .fcol { --fm-ok: #4cc27f; --fm-folder: #e3a840; --fm-pdf: #f0786d; --fm-image: #5cc48c; }
+@container (max-width: 640px) { .fcol { position: absolute; inset: 0 auto 0 0; z-index: 6; width: min(300px, 86%); box-shadow: 4px 0 18px rgb(0 0 0 / 22%); } }
+`;
+}

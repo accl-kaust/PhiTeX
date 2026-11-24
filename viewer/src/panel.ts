@@ -1195,11 +1195,17 @@ export class Panel {
   streaming(s: { pages: number; phase: string } | null): void {
     this.streamed = s ? s.pages : undefined;
     this.making = s?.phase === "format";
+    // (a folder watch's document waiting for another's build: said, not "Typesetting")
+    this.queued = s?.phase === "queued";
     if (s && this.firstPending()) (this.typesetting = true), this.sayTypesetting();
     this.activity();
   }
 
+  /** A folder watch's build waits for another document's (`queued`). */
+  private queued = false;
+
   busy(on: boolean): void {
+    if (!on) this.queued = false;
     this.buildSince = on ? this.buildSince || performance.now() : 0;
     // (the strip over the last pages: none while a build runs, said once one settles without a page:
     // by the status that follows its end, not by the one from before it, which may be of no page
@@ -1242,6 +1248,7 @@ export class Panel {
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t: string, m = "", err = false;
     if (this.offline) (t = "Disconnected"), (err = true);
+    else if (this.queued) t = "Waiting for another document's build…";
     // (an opening up: its step (loading the compiler, fetching, typesetting), not "Building…")
     else if (this.firstPending() && this.stepNow) t = this.stepNow;
     else if (this.pkgNow) (t = "Fetching packages…"), (m = `${this.pkgNow.fetched.done} fetched`);
@@ -1830,7 +1837,7 @@ export class Panel {
   /** Typesetting's detail, one shape: the page it is on (or the format made first), then the packages fetched for it. */
   private sayTypesetting(): void {
     const f = this.tally.now;
-    const page = this.making ? MAKING : this.streamed !== undefined ? `Page ${this.streamed + 1}` : "";
+    const page = this.queued ? "Waiting for another document's build" : this.making ? MAKING : this.streamed !== undefined ? `Page ${this.streamed + 1}` : "";
     this.step(this.words.steps[2], undefined, [page, f.done ? fetchedLine(f, false) : ""].filter(Boolean).join(" · "));
   }
 
@@ -2309,6 +2316,26 @@ export class Panel {
   private sideOn(on: boolean): void {
     this.win.classList.toggle("side-on", on);
     this.$("#b-side").setAttribute("aria-pressed", String(on));
+  }
+
+  /**
+   * A column of the host's own at the pages' left (a folder watch's Files,
+   * files.ts): its style and element put in the panel, a button for it at
+   * the bar's start. The returned `shown(on)` shows or hides it, the pages
+   * fitted again to the width it leaves.
+   */
+  hostColumn(css: string, el: HTMLElement, button: HTMLButtonElement): (on: boolean) => void {
+    const style = document.createElement("style");
+    style.textContent = css;
+    this.root.prepend(style);
+    this.win.classList.add("has-side");
+    this.$(".body").prepend(el);
+    this.$("#b-side").before(button);
+    return (on) => {
+      el.hidden = !on;
+      button.setAttribute("aria-pressed", String(on));
+      if (this.prefs.zoom === "fit") this.redraw();
+    };
   }
 
   /** A button of the host's in the bar, before find (the CLI's own). */
