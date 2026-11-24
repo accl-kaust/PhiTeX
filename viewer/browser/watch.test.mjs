@@ -57,6 +57,45 @@ test("Clean rebuild builds again from nothing; Rebuild reads the files again (it
   await w.stop();
 });
 
+/**
+ * The first page drawn as a person meets it: its opacity through its
+ * ancestors, any filter, whether it takes the pointer, and whether a click
+ * at its middle lands on it (nothing dimmed, nothing laid over it).
+ */
+const CRISP = `(() => { const s = $("#viewer .slot"); if (!s) return "no page"; let o = 1, f = ""; for (let e = s; e && e.nodeType === 1; e = e.parentElement) { const c = getComputedStyle(e); o *= +c.opacity; if (c.filter !== "none") f = c.filter; if (c.visibility === "hidden") return "hidden"; } const r = s.getBoundingClientRect(); const hit = document.querySelector("phitex-preview").shadowRoot.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 200)); return { o, f, pe: getComputedStyle(s).pointerEvents, hit: !!hit && s.contains(hit) }; })()`;
+const CRISP_IS = { o: 1, f: "", pe: "auto", hit: true };
+
+test("a page that is ready is never dimmed: a build that ships none, the watch gone, a new watch's build from nothing all keep the last pages crisp and usable; a clean rebuild plays the opening (the user: rebuilding the new version dimmed the pages)", async () => {
+  const { dir, w, t } = await open({ "main.tex": doc("Hello, a first page.") });
+  await waitBuild(w, 1);
+  assert.deepEqual(await t.q(CRISP), CRISP_IS, "the first page");
+  // (a build that ships no page: the last pages as they are, a strip saying so)
+  w.write("main.tex", doc(""));
+  await waitBuild(w, 2);
+  await t.until(`$("#stage").classList.contains("stale")`, "the strip: the last complete render");
+  assert.match(await t.q(`$("#banner").textContent`), /^Showing the last complete render/);
+  assert.deepEqual(await t.q(CRISP), CRISP_IS, "the last pages after a build that shipped none");
+  // (the watch gone, as when phitex is updated: the pages as they are, a strip saying the engine is lost)
+  await w.stop();
+  await t.until(`$("#stage").classList.contains("offline")`, "the strip: the engine lost");
+  assert.deepEqual(await t.q(CRISP), CRISP_IS, "the last pages, the watch gone");
+  // (a new watch, its build from nothing: every look at the pages until its own is in finds them crisp)
+  w.write("main.tex", doc("Back again, a new watch."));
+  const w2 = new Watch(dir, { home });
+  const back = `[...$$(".slot")].some((s) => s.textContent.includes("Back again"))`;
+  const seen = [];
+  for (const end = Date.now() + 240000; Date.now() < end && !(await t.q(back)); await sleep(40)) seen.push(JSON.stringify(await t.q(CRISP)));
+  assert.ok(await t.q(back), "the new watch's page");
+  assert.deepEqual([...new Set(seen)], [JSON.stringify(CRISP_IS)], "crisp at every look through the new watch's build");
+  assert.equal(await t.q(`$("#stage").className.split(" ").filter((c) => c === "stale" || c === "offline").join()`), "", "no strip once its page is in");
+  // (a clean rebuild: the opening plays at once, until the new build's first page)
+  assert.equal(await t.q(`($("#b-rec").click(), $("#r-clean").click(), $("#opening").hidden)`), false, "the opening up at the clean rebuild");
+  await waitBuild(w2, 2);
+  await t.until(`$("#opening").hidden`, "the opening gone once the new page is in");
+  assert.deepEqual(await t.q(CRISP), CRISP_IS, "the new page after the clean rebuild");
+  await w2.stop();
+});
+
 test("a build with errors says its time; the badge counts the last build's errors only (items 9, 27)", async () => {
   const good = doc("Hello."), bad = doc("Hello \\nosuch.");
   const { w, t } = await open({ "main.tex": good });
