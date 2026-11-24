@@ -10,7 +10,7 @@
 // Quality of life: floating (Overleaf's layout not found), drag by the
 // header, resize from the corner, collapse (Alt+Shift+P); position, size
 // and zoom remembered; a build that ships nothing keeps the last good page,
-// dimmed, with why; problems jump to their line.
+// crisp and usable, a strip saying why; problems jump to their line.
 
 import type { CiteAnswer, PageImage, Status } from "./session.ts";
 import { sentence } from "./words.ts";
@@ -37,9 +37,8 @@ import { BLAME_CSS, Blame, type BlameHost } from "./blame.ts";
 import { CHANGES_BUTTON_CSS, Changes, DELETED_CSS, type ChangesHost, type ChangesPrefs } from "./changes.ts";
 import { MENU_CSS } from "./ctxmenu.ts";
 import type { PageSel } from "./sync.ts";
+import { machineLine } from "./machine.ts";
 
-/** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
-const STALE_GRACE_MS = 1000;
 
 /** What the status says while the engine makes the format (not cached: once per PhiTeX update). */
 const MAKING = "Making the format, once per PhiTeX update";
@@ -680,7 +679,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Keep viewing these pages, undimmed (Esc, or a click on them)">Dismiss</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -695,7 +694,6 @@ export class Panel {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button type="button" class="btn" id="reportcopy">Copy</button><button type="button" class="btn" id="reportmail">Email</button><button type="button" class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
 </div>`;
@@ -791,10 +789,14 @@ export class Panel {
       }
       const d = (e.target as HTMLElement).closest<HTMLElement>(".diag[data-line]");
       if (d) return ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      // (its place once the latest lookup of the places is done: a card clicked as the build's status came in
+      // said "Not on the pages" and went nowhere, its place still being looked up)
       const card = (e.target as HTMLElement).closest<HTMLElement>(".phx-card[data-key]");
-      const place = card && this.culpritPlaces.get(card.dataset.key!);
-      if (place) this.viewer.mark(place.k, [place.box]);
-      else if (card) this.msg("Not on the pages (no text of it was typeset)", false, true);
+      if (card)
+        void this.placeOf(card.dataset.key!).then((place) => {
+          if (place) this.viewer.mark(place.k, [place.box]);
+          else this.msg("Not on the pages (no text of it was typeset)", false, true);
+        });
     };
     // (a press outside an open menu, the problems, or a dialog closes it: anywhere, the host's page too (the path
     // crosses the shadow roots), never on the menu's own button (its toggle); a press, not a click, so a drag begun
@@ -845,7 +847,18 @@ export class Panel {
     // (the focus nowhere (the page's body: the watch's page is the panel) is the panel's too)
     document.addEventListener("keydown", (e) => !e.composedPath().includes(this.root.host) && esc(e, !document.activeElement || document.activeElement === document.body));
     this.$("#gonex").onclick = () => this.dismissOffline();
-    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
+    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("unacked") && this.dismissOffline());
+    // (a click on the dimmed pages takes the lost connection in, and does nothing else: no jump, no selection)
+    this.$("#stage").addEventListener(
+      "click",
+      (e) => {
+        if (!this.$("#stage").classList.contains("unacked")) return;
+        e.stopPropagation();
+        e.preventDefault();
+        this.dismissOffline();
+      },
+      { capture: true },
+    );
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.shiftKey && e.code === "KeyP") {
         e.preventDefault();
@@ -1029,8 +1042,6 @@ export class Panel {
     this.speed = undefined;
     this.built = undefined;
     this.at = 0;
-    clearTimeout(this.staleTimer);
-    this.staleSince = 0;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout([]);
     this.again();
@@ -1190,6 +1201,8 @@ export class Panel {
 
   busy(on: boolean): void {
     this.buildSince = on ? this.buildSince || performance.now() : 0;
+    // (the strip over the last pages: none while a build runs, said once one settles without a page)
+    if (this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
 
@@ -1402,17 +1415,29 @@ export class Panel {
     if (of === this.culpritsOf) return;
     this.culpritsOf = of;
     const seq = ++this.culpritsSeq;
+    let looked = () => {};
+    this.placesLooked = new Promise((ok) => (looked = ok));
     const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i, rule: w.rule, amount: w.amount })), () => [])));
     // (a newer status came while these were looked up: its own call draws them)
-    if (seq !== this.culpritsSeq) return;
+    if (seq !== this.culpritsSeq) return looked();
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
     // (each problem's place on the pages, for its card's link and the scrollbar)
     this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
+    looked();
     this.problemMarks = want.flatMap((w, i) => (found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message, p: w, box: found[i][0].boxes[0] }] : []));
     this.drawScrollMarks();
   }
 
+  /** The latest lookup of the problems' places, done (a newer one replaces it while it runs). */
+  private placesLooked: Promise<void> = Promise.resolve();
+  /** A problem's place (by its card's key) once the latest lookup is done, whatever replaced it meanwhile. */
+  private async placeOf(key: string): Promise<{ k: number; box: [number, number, number, number] } | null | undefined> {
+    for (let p = this.placesLooked; ; p = this.placesLooked) {
+      await p;
+      if (p === this.placesLooked) return this.culpritPlaces.get(key);
+    }
+  }
   /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
   private culpritPlaces = new Map<string, { k: number; box: [number, number, number, number] } | null>();
   /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
@@ -2092,35 +2117,20 @@ export class Panel {
     el.onclick = t.err && !t.ms ? () => this.toast(kind, null) : null;
   }
 
-    /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
-  /** When the page first went missing (a build that shipped none); its dimming waits. */
-  private staleSince = 0;
-  private staleTimer: ReturnType<typeof setTimeout> | undefined;
-
   /**
-   * Dim the last good page when a build ships none, but only once that has
-   * lasted STALE_GRACE_MS: typing `\section{B…` is an error at every
-   * keystroke until the `}`, and the page shouldn't flash grey for each.
+   * The last good page kept when a settled build shipped none (or not this
+   * page): shown as it is, crisp, scrollable, selectable, its links live (a
+   * ready page is never dimmed), under a strip saying it is the last
+   * complete render and why. While a build runs, or a rebuild's opening is
+   * up, no strip: the status says what runs, and the build's end says
+   * whether a page came (no timer: typing through `{` says it once the
+   * build settles without one).
    */
   private stale(s: Status): void {
     const stage = this.$("#stage");
-    // (a rebuild's opening is up: its sheet says what happens, not the last render's banner)
-    if (this.reopen) return void (clearTimeout(this.staleTimer), (this.staleSince = 0), stage.classList.remove("stale"));
-    const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last;
-    clearTimeout(this.staleTimer);
-    if (!gone) {
-      this.staleSince = 0;
-      stage.classList.remove("stale");
-      return;
-    }
-    const now = performance.now();
-    this.staleSince ||= now;
-    const left = STALE_GRACE_MS - (now - this.staleSince);
-    if (left > 0) {
-      this.staleTimer = setTimeout(() => this.lastStatus && this.stale(this.lastStatus), left);
-      return;
-    }
-    stage.classList.add("stale");
+    const gone = (s.pages === 0 || this.at >= s.pages) && !!this.last && !this.reopen && !this.buildSince;
+    stage.classList.toggle("stale", gone);
+    if (!gone) return;
     this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
@@ -2128,34 +2138,35 @@ export class Panel {
 
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
-   * exited, the socket closed, the core trapped) or back: while it is lost
-   * the last pages stay, dimmed and inert, under a banner saying so and why.
+   * exited, the socket closed, the core trapped) or back. Lost: the last
+   * pages dimmed under a strip saying so and why, until the user takes it
+   * in (Dismiss, Esc, or a click on the pages, which does nothing else);
+   * then crisp and usable, the strip still there while the outage lasts,
+   * and not dimmed again for it. Back before that: undimmed by itself, the
+   * strip gone. (A watch restarted for a new version looks the same here
+   * as one that stopped: the tab learns which only once it joins again.)
    */
   connection(up: boolean, why?: string): void {
     const was = this.offline;
     this.offline = !up;
     this.renderStatus();
+    const stage = this.$("#stage");
     if (up) {
-      this.$("#stage").classList.remove("offline");
-      this.win.classList.remove("offline-quiet");
+      stage.classList.remove("offline", "unacked");
       return;
     }
     const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
     this.placeStrips();
     this.$("#gonewhy").textContent = text;
-    this.$("#offpill").title = text;
-    // (dismissed once: it stays dismissed until the connection comes back)
-    if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
+    stage.classList.add("offline");
+    // (a new outage dims; told again during the same one, as it stays taken in)
+    if (!was) stage.classList.add("unacked");
   }
 
-  /** The disconnection's banner dismissed (✕ or Esc): the pages interactive again, a small pill saying so. */
+  /** The lost connection taken in (Dismiss, Esc, a click on the dimmed pages): the pages undimmed and usable, the strip kept. */
   private dismissOffline(): void {
     if (!this.offline) return;
-    this.$("#stage").classList.remove("offline");
-    this.win.classList.add("offline-quiet");
-    // (clear of the pages' scrollbar, whatever its width)
-    const v = this.$("#viewer");
-    this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
+    this.$("#stage").classList.remove("unacked");
   }
 
   private offline = false;
@@ -3891,6 +3902,13 @@ export class Panel {
    */
   private async debugInfo(): Promise<string> {
     const out: string[] = [...((await this.ev.onDebugInfo?.().catch(() => [])) ?? [])];
+    // (the last build's problems, as the bar's count and its list have them)
+    if (this.lastStatus) {
+      const ds = this.lastStatus.diagnostics ?? [];
+      const n = (sev: string) => ds.filter((d) => d.severity === sev).length;
+      const say = (k: number, w: string) => `${k} ${w}${k === 1 ? "" : "s"}`;
+      out.push(`problems: ${say(n("error"), "error")}, ${say(n("warning"), "warning")}${n("info") ? `, ${say(n("info"), "note")}` : ""}`);
+    }
     const l = this.latest();
     if (l) out.push(`${l.label}: ${dur(l.ms)}`);
     if (this.lat?.summary) out.push(this.lat.summary);
@@ -3903,8 +3921,7 @@ export class Panel {
     if (t.first !== undefined) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
     if (f) out.push(`last page drawn: ${frameText(f)}`);
-    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
-    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    out.push(await machineLine());
     return out.join("\n") + "\n";
   }
 
@@ -4140,7 +4157,7 @@ export class Panel {
 
   page(img: PageImage | null, k: number, n: number, hash?: string | null): void {
     if (!img) {
-      // (nothing new to show: the pages shown stay, dimmed; see stale())
+      // (nothing new to show: the pages shown stay as they are; see stale())
       if (!this.last && !this.anim) {
         const empty = this.$("#empty");
         empty.textContent = n ? "This page is empty." : "No page shipped yet.";

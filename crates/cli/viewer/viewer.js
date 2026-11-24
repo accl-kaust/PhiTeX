@@ -2852,8 +2852,10 @@ header:active { cursor: grabbing; }
 .pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
 .win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
-.stage.stale .slot { opacity: .45; filter: grayscale(1); }
-.stage.offline .slot { opacity: .4; pointer-events: none; }
+/* (the last pages after a build that shipped none: as they are, crisp and usable, the strip above saying so. The engine lost:
+   dimmed until the user takes it in (Dismiss, Esc, a click on them), then as they are, the strip staying while it lasts) */
+.stage.unacked .slot { opacity: .4; }
+.stage.unacked { cursor: pointer; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: var(--ph-mark-fill, rgb(255 214 0 / 45%)); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px var(--ph-mark-line, rgb(232 172 0 / 80%)); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
 /* (the text selected on the pages, one block a line: viewer.ts drawSelection; a selection's blue alone, never the marker's outline) */
@@ -2924,10 +2926,8 @@ header:active { cursor: grabbing; }
 .card .mainrow { align-items: center; color: var(--ph-fg2); }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
 .stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
-.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
-.offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
-  background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
-.win.offline-quiet .offpill { display: block; }
+.gone .x { margin-left: auto; flex: none; cursor: pointer; border: 1px solid currentColor; border-radius: var(--ph-pill); background: none; color: inherit; font: inherit; font-weight: 600; padding: 0 10px; }
+.stage:not(.unacked) ~ .strips .gone .x { display: none; }
 
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
@@ -10176,8 +10176,32 @@ var Changes = class {
   }
 };
 
+// viewer/src/machine.ts
+var HINTS2 = ["platformVersion", "architecture", "bitness", "model", "fullVersionList"];
+function systemOf(platform, version) {
+  const v = version.replace(/(\.0)+$/, "");
+  const major = Number(version.split(".")[0]);
+  if (platform === "Windows" && version) return `${major >= 13 ? "Windows 11" : major >= 1 ? "Windows 10" : "Windows 7, 8 or 8.1"} (${version})`;
+  return v ? `${platform} ${v}` : platform;
+}
+function archOf(architecture, bitness) {
+  if (!architecture) return "";
+  if (architecture === "x86") return bitness === "64" ? "x86-64" : `x86${bitness ? ` (${bitness}-bit)` : ""}`;
+  return `${architecture}${bitness === "64" ? "64" : bitness ? ` (${bitness}-bit)` : ""}`;
+}
+function machineText(cores, userAgent, hints) {
+  const n = `${cores ?? "?"} cores`;
+  if (!hints?.platform) return `machine: ${n}; the browser's reported user agent, which may not name this machine's system or chip: ${userAgent}`;
+  const browser = (hints.fullVersionList ?? []).filter((b) => !/not.?a.?brand/i.test(b.brand)).map((b) => `${b.brand} ${b.version}`).join(", ");
+  const parts = [n, systemOf(hints.platform, hints.platformVersion ?? ""), archOf(hints.architecture ?? "", hints.bitness ?? ""), hints.model ?? ""].filter(Boolean);
+  return `machine: ${parts.join(", ")}${browser ? `; ${browser}` : ""} (the browser's client hints)`;
+}
+async function machineLine(nav = navigator) {
+  const hints = await nav.userAgentData?.getHighEntropyValues?.(HINTS2).catch(() => void 0);
+  return machineText(nav.hardwareConcurrency, nav.userAgent, hints);
+}
+
 // viewer/src/panel.ts
-var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
 var PKG_QUIET = 600;
 var KIND_HELP = {
@@ -10456,7 +10480,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Keep viewing these pages, undimmed (Esc, or a click on them)">Dismiss</button></div><div class="strip approx" id="approx"></div><div class="strip mainask" id="mainask" role="group" aria-label="Main file"></div><div class="strip banner" id="banner"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -10471,7 +10495,6 @@ var Panel = class {
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button type="button" class="btn" id="reportcopy">Copy</button><button type="button" class="btn" id="reportmail">Email</button><button type="button" class="btn" id="reportclose">Close</button></div>
     </div>
-    <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
 </div>`;
@@ -10560,9 +10583,11 @@ var Panel = class {
       const d = e.target.closest(".diag[data-line]");
       if (d) return ev.onGoto(d.dataset.file, Number(d.dataset.line));
       const card = e.target.closest(".phx-card[data-key]");
-      const place4 = card && this.culpritPlaces.get(card.dataset.key);
-      if (place4) this.viewer.mark(place4.k, [place4.box]);
-      else if (card) this.msg("Not on the pages (no text of it was typeset)", false, true);
+      if (card)
+        void this.placeOf(card.dataset.key).then((place4) => {
+          if (place4) this.viewer.mark(place4.k, [place4.box]);
+          else this.msg("Not on the pages (no text of it was typeset)", false, true);
+        });
     };
     document.addEventListener("pointerdown", (e) => {
       const path = e.composedPath();
@@ -10601,7 +10626,17 @@ var Panel = class {
     this.root.addEventListener("keydown", (e) => esc(e, true));
     document.addEventListener("keydown", (e) => !e.composedPath().includes(this.root.host) && esc(e, !document.activeElement || document.activeElement === document.body));
     this.$("#gonex").onclick = () => this.dismissOffline();
-    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
+    addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("unacked") && this.dismissOffline());
+    this.$("#stage").addEventListener(
+      "click",
+      (e) => {
+        if (!this.$("#stage").classList.contains("unacked")) return;
+        e.stopPropagation();
+        e.preventDefault();
+        this.dismissOffline();
+      },
+      { capture: true }
+    );
     window.addEventListener("keydown", (e) => {
       if (e.altKey && e.shiftKey && e.code === "KeyP") {
         e.preventDefault();
@@ -10761,8 +10796,6 @@ var Panel = class {
     this.speed = void 0;
     this.built = void 0;
     this.at = 0;
-    clearTimeout(this.staleTimer);
-    this.staleSince = 0;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout([]);
     this.again();
@@ -10894,6 +10927,7 @@ var Panel = class {
   }
   busy(on) {
     this.buildSince = on ? this.buildSince || performance.now() : 0;
+    if (this.lastStatus) this.stale(this.lastStatus);
     this.activity();
   }
   /** The bar's status, the progress line, and in a host without the bar the corner's note: never silent while the writer waits. */
@@ -11069,13 +11103,26 @@ var Panel = class {
     if (of === this.culpritsOf) return;
     this.culpritsOf = of;
     const seq = ++this.culpritsSeq;
+    let looked = () => {
+    };
+    this.placesLooked = new Promise((ok) => looked = ok);
     const found = await Promise.all(want.map((w, i) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i, rule: w.rule, amount: w.amount })), () => [])));
-    if (seq !== this.culpritsSeq) return;
+    if (seq !== this.culpritsSeq) return looked();
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
     this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
+    looked();
     this.problemMarks = want.flatMap((w, i) => found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message, p: w, box: found[i][0].boxes[0] }] : []);
     this.drawScrollMarks();
+  }
+  /** The latest lookup of the problems' places, done (a newer one replaces it while it runs). */
+  placesLooked = Promise.resolve();
+  /** A problem's place (by its card's key) once the latest lookup is done, whatever replaced it meanwhile. */
+  async placeOf(key) {
+    for (let p = this.placesLooked; ; p = this.placesLooked) {
+      await p;
+      if (p === this.placesLooked) return this.culpritPlaces.get(key);
+    }
   }
   /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
   culpritPlaces = /* @__PURE__ */ new Map();
@@ -11658,64 +11705,53 @@ var Panel = class {
     el.title = t.err && !t.ms ? "Click to dismiss" : "";
     el.onclick = t.err && !t.ms ? () => this.toast(kind, null) : null;
   }
-  /** Keep the last good page when a build ships nothing (or not this page): dimmed, with why. */
-  /** When the page first went missing (a build that shipped none); its dimming waits. */
-  staleSince = 0;
-  staleTimer;
   /**
-   * Dim the last good page when a build ships none, but only once that has
-   * lasted STALE_GRACE_MS: typing `\section{B…` is an error at every
-   * keystroke until the `}`, and the page shouldn't flash grey for each.
+   * The last good page kept when a settled build shipped none (or not this
+   * page): shown as it is, crisp, scrollable, selectable, its links live (a
+   * ready page is never dimmed), under a strip saying it is the last
+   * complete render and why. While a build runs, or a rebuild's opening is
+   * up, no strip: the status says what runs, and the build's end says
+   * whether a page came (no timer: typing through `{` says it once the
+   * build settles without one).
    */
   stale(s) {
     const stage = this.$("#stage");
-    if (this.reopen) return void (clearTimeout(this.staleTimer), this.staleSince = 0, stage.classList.remove("stale"));
-    const gone2 = (s.pages === 0 || this.at >= s.pages) && !!this.last;
-    clearTimeout(this.staleTimer);
-    if (!gone2) {
-      this.staleSince = 0;
-      stage.classList.remove("stale");
-      return;
-    }
-    const now = performance.now();
-    this.staleSince ||= now;
-    const left = STALE_GRACE_MS - (now - this.staleSince);
-    if (left > 0) {
-      this.staleTimer = setTimeout(() => this.lastStatus && this.stale(this.lastStatus), left);
-      return;
-    }
-    stage.classList.add("stale");
+    const gone2 = (s.pages === 0 || this.at >= s.pages) && !!this.last && !this.reopen && !this.buildSince;
+    stage.classList.toggle("stale", gone2);
+    if (!gone2) return;
     this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
   }
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
-   * exited, the socket closed, the core trapped) or back: while it is lost
-   * the last pages stay, dimmed and inert, under a banner saying so and why.
+   * exited, the socket closed, the core trapped) or back. Lost: the last
+   * pages dimmed under a strip saying so and why, until the user takes it
+   * in (Dismiss, Esc, or a click on the pages, which does nothing else);
+   * then crisp and usable, the strip still there while the outage lasts,
+   * and not dimmed again for it. Back before that: undimmed by itself, the
+   * strip gone. (A watch restarted for a new version looks the same here
+   * as one that stopped: the tab learns which only once it joins again.)
    */
   connection(up, why) {
     const was = this.offline;
     this.offline = !up;
     this.renderStatus();
+    const stage = this.$("#stage");
     if (up) {
-      this.$("#stage").classList.remove("offline");
-      this.win.classList.remove("offline-quiet");
+      stage.classList.remove("offline", "unacked");
       return;
     }
     const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
     this.placeStrips();
     this.$("#gonewhy").textContent = text;
-    this.$("#offpill").title = text;
-    if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
+    stage.classList.add("offline");
+    if (!was) stage.classList.add("unacked");
   }
-  /** The disconnection's banner dismissed (✕ or Esc): the pages interactive again, a small pill saying so. */
+  /** The lost connection taken in (Dismiss, Esc, a click on the dimmed pages): the pages undimmed and usable, the strip kept. */
   dismissOffline() {
     if (!this.offline) return;
-    this.$("#stage").classList.remove("offline");
-    this.win.classList.add("offline-quiet");
-    const v = this.$("#viewer");
-    this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
+    this.$("#stage").classList.remove("unacked");
   }
   offline = false;
   /** The strips over the pages (engine lost, stale, approximate) clear of the pages' scrollbar, whatever its width. */
@@ -13234,6 +13270,12 @@ var Panel = class {
    */
   async debugInfo() {
     const out = [...await this.ev.onDebugInfo?.().catch(() => []) ?? []];
+    if (this.lastStatus) {
+      const ds = this.lastStatus.diagnostics ?? [];
+      const n = (sev) => ds.filter((d2) => d2.severity === sev).length;
+      const say = (k, w2) => `${k} ${w2}${k === 1 ? "" : "s"}`;
+      out.push(`problems: ${say(n("error"), "error")}, ${say(n("warning"), "warning")}${n("info") ? `, ${say(n("info"), "note")}` : ""}`);
+    }
     const l = this.latest();
     if (l) out.push(`${l.label}: ${dur(l.ms)}`);
     if (this.lat?.summary) out.push(this.lat.summary);
@@ -13246,8 +13288,7 @@ var Panel = class {
     if (t.first !== void 0) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
     if (f) out.push(`last page drawn: ${frameText(f)}`);
-    const nav = navigator;
-    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    out.push(await machineLine());
     return out.join("\n") + "\n";
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
@@ -16024,6 +16065,13 @@ setTimeout(() => void unreached(), 3e3);
 void sock.connect();
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
+/* (the watch's palette and font, light or dark with the system: the bar's and the terminal's own, beside their rules; it
+   lived in the commit picker's sheet, and went with it (0372d5120), leaving both unstyled, the log over the pages) */
+#phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
+  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) {
+  #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
+}
 #phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
   padding: 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--fg2); border-top: 1px solid var(--line);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
@@ -16049,7 +16097,7 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; word-break: break-word; }
 #phx-con .error { color: var(--danger); } #phx-con .warning { color: var(--warning); } #phx-con .note, #phx-con .dim { color: var(--fg2); }
 #phx-con .ok { color: var(--fg); } #phx-con .busy { color: var(--fg2); }
-}`
+`
 }));
 pane.style.bottom = "24px";
 var bar = document.createElement("div");

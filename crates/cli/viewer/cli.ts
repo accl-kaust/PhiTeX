@@ -845,6 +845,13 @@ type Said = { kind: string; text?: string; ok?: boolean | null; event?: unknown 
 
 document.head.append(Object.assign(document.createElement("style"), {
   textContent: `
+/* (the watch's palette and font, light or dark with the system: the bar's and the terminal's own, beside their rules; it
+   lived in the commit picker's sheet, and went with it (0372d5120), leaving both unstyled, the log over the pages) */
+#phx-bar, #phx-con { --bg: #ffffff; --fg: #1b222c; --fg2: #5d6778; --line: #e3e6ec; --hover: #eef1f6; --danger: #c23a2f; --warning: #a3620a; --accent: #1d3e72;
+  font: 13px/1.4 "Noto Sans", system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) {
+  #phx-bar, #phx-con { --bg: #1b212b; --fg: #e7e9ee; --fg2: #98a1b0; --line: #262d38; --hover: #222935; --danger: #f0786d; --warning: #e5a54b; --accent: #8fb3ec; color-scheme: dark; }
+}
 #phx-bar { position: fixed; left: 0; right: 0; bottom: 0; height: 24px; z-index: 15; display: flex; align-items: center; gap: 10px;
   padding: 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; background: var(--bg); color: var(--fg2); border-top: 1px solid var(--line);
   cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
@@ -870,7 +877,7 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-con .log { flex: 1; overflow: auto; margin: 0; padding: 8px 10px; font: 12px/1.5 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; word-break: break-word; }
 #phx-con .error { color: var(--danger); } #phx-con .warning { color: var(--warning); } #phx-con .note, #phx-con .dim { color: var(--fg2); }
 #phx-con .ok { color: var(--fg); } #phx-con .busy { color: var(--fg2); }
-}`,
+`,
 }));
 // (the pages above the bar)
 pane.style.bottom = "24px";
