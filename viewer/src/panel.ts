@@ -788,10 +788,14 @@ export class Panel {
       }
       const d = (e.target as HTMLElement).closest<HTMLElement>(".diag[data-line]");
       if (d) return ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      // (its place once the latest lookup of the places is done: a card clicked as the build's status came in
+      // said "Not on the pages" and went nowhere, its place still being looked up)
       const card = (e.target as HTMLElement).closest<HTMLElement>(".phx-card[data-key]");
-      const place = card && this.culpritPlaces.get(card.dataset.key!);
-      if (place) this.viewer.mark(place.k, [place.box]);
-      else if (card) this.msg("Not on the pages (no text of it was typeset)", false, true);
+      if (card)
+        void this.placeOf(card.dataset.key!).then((place) => {
+          if (place) this.viewer.mark(place.k, [place.box]);
+          else this.msg("Not on the pages (no text of it was typeset)", false, true);
+        });
     };
     this.$("#stage").addEventListener("pointerdown", () => {
       this.menu(null);
@@ -1373,17 +1377,29 @@ export class Panel {
     if (of === this.culpritsOf) return;
     this.culpritsOf = of;
     const seq = ++this.culpritsSeq;
+    let looked = () => {};
+    this.placesLooked = new Promise((ok) => (looked = ok));
     const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i, rule: w.rule, amount: w.amount })), () => [])));
     // (a newer status came while these were looked up: its own call draws them)
-    if (seq !== this.culpritsSeq) return;
+    if (seq !== this.culpritsSeq) return looked();
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
     // (each problem's place on the pages, for its card's link and the scrollbar)
     this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
+    looked();
     this.problemMarks = want.flatMap((w, i) => (found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message, p: w, box: found[i][0].boxes[0] }] : []));
     this.drawScrollMarks();
   }
 
+  /** The latest lookup of the problems' places, done (a newer one replaces it while it runs). */
+  private placesLooked: Promise<void> = Promise.resolve();
+  /** A problem's place (by its card's key) once the latest lookup is done, whatever replaced it meanwhile. */
+  private async placeOf(key: string): Promise<{ k: number; box: [number, number, number, number] } | null | undefined> {
+    for (let p = this.placesLooked; ; p = this.placesLooked) {
+      await p;
+      if (p === this.placesLooked) return this.culpritPlaces.get(key);
+    }
+  }
   /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
   private culpritPlaces = new Map<string, { k: number; box: [number, number, number, number] } | null>();
   /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
