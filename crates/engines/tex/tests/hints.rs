@@ -311,9 +311,9 @@ fn a_stepped_over_outer_macro_is_still_forbidden() {
 fn a_name_defined_only_inside_a_group_bounds_its_callers() {
     let _g = lock();
     let doc = "\\def\\set{\\def\\lead{\\hrule}}\n\
-               \\def\\mark#1{{\\set\\lead #1}}\n\n\
-               One \\mark{word}.\n\n\
-               Two \\mark{words}.\n\\bye\n";
+               \\def\\mk#1{{\\set\\lead #1}}\n\n\
+               One \\mk{word}.\n\n\
+               Two \\mk{words}.\n\\bye\n";
     let b = build(doc, false);
     assert_eq!(hint_diags(&b), 0, "a hint violated");
     assert_eq!(b.stats.regime_violations, 0);
