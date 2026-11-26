@@ -293,7 +293,14 @@ pub struct Engine {
     /// (`sched::allow_final_rerun`): each evaluation, and each edit taken
     /// during one (`sched::absorb`), a document of its own.
     pub(crate) final_gen: AtomicU64,
+    /// A test's hook into `relocate` ([`Engine::set_move_hook`]).
+    pub(crate) move_hook: std::sync::OnceLock<MoveHook>,
 }
+
+/// A test's hook into a relocation (`commit::relocate`), called with the
+/// point it is at ("lift": about to lift a node of the moved subtree but
+/// the moved node; "done": at its end), the placer and the node.
+pub type MoveHook = Box<dyn Fn(&'static str, NodeId, NodeId) + Send + Sync>;
 
 /// The buckets of [`Engine::field_epochs`].
 const EPOCH_BUCKETS: usize = 4096;
@@ -566,7 +573,15 @@ impl Engine {
             committing: AtomicU64::new(0),
             commit_peak: AtomicU64::new(0),
             last_report: Mx::new(None),
+            move_hook: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Sets the hook a relocation calls at its points ([`MoveHook`]):
+    /// for tests that hold one at a point while another commit goes on.
+    #[doc(hidden)]
+    pub fn set_move_hook(&self, f: MoveHook) {
+        let _ = self.move_hook.set(f);
     }
 
     pub fn values(&self) -> &Values {

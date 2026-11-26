@@ -594,3 +594,114 @@ fn a_taken_sibling_moved_with_its_placer_files_no_brackets() {
     );
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[after_raw, key]`: `Placer`'s placement, its run held at a gate once
+/// the gate is set, until the gate opens.
+struct GatedPlacer {
+    mark: phitex_defuse::OpId,
+    gate: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl Operation for GatedPlacer {
+    fn name(&self) -> &'static str {
+        "gatedplacer"
+    }
+
+    // (as the page loop's: not held for the nodes before it)
+    fn works_at_frontier(&self) -> bool {
+        true
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if let Some(g) = self.gate.lock().unwrap().take() {
+            g.recv_timeout(std::time::Duration::from_secs(20))
+                .expect("the gate opens");
+        }
+        let v = cx.values();
+        let after = NodeId::from_raw(v.as_int(cx.args()[0]).unwrap_or(0).unsigned_abs());
+        cx.follow_after(after, self.mark, vec![cx.args()[1]]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Line: A, B, C, the placer P placing X = Mark after A, a second placer
+/// Q placing Y = Mark after X: Y stands under X. Then, in one edit, P
+/// places X after B and Q places Y after C. P's commit moves X with what
+/// stands under it, Y among them; Q's commit moves Y after C while P's
+/// move is under way, after it listed Y and before it lifts Y (held there
+/// by the engine's move hook). Y stands after C, where Q placed it: taken
+/// along with X, it stood after X with its anchor C, and nothing asked Q
+/// again (deck2 at -j8: a page's finisher past the frame pieces after its
+/// page's, its slides out of order).
+#[test]
+fn a_node_its_placer_moved_while_another_move_listed_it_stays_where_its_placer_put_it() {
+    let e = Engine::new();
+    let def = e.register(Arc::new(Def));
+    let mark = e.register(Arc::new(Mark {
+        runs: AtomicU64::new(0),
+        def: std::sync::Mutex::new(Some(def)),
+    }));
+    let placer = e.register(Arc::new(Placer {
+        runs: AtomicU64::new(0),
+        mark: std::sync::Mutex::new(Some(mark)),
+    }));
+    let gq = Arc::new(GatedPlacer {
+        mark,
+        gate: std::sync::Mutex::new(None),
+    });
+    let gated = e.register(gq.clone());
+    let v = e.values();
+    let u = e.new_unit();
+    let raw = |n: NodeId| v.int(i64::try_from(n.raw()).unwrap());
+    let a = e.push(u, def, vec![v.field("a").0, v.int(1)]);
+    let b = e.push(u, def, vec![v.field("b").0, v.int(2)]);
+    let c = e.push(u, def, vec![v.field("c").0, v.int(3)]);
+    let p = e.push(u, placer, vec![raw(a), v.int(7)]);
+    // (edited with P and Q: a worker taking the node after the first of
+    // another's queue takes Q or P while the other runs, `sched::Ready`)
+    let z = e.push(u, def, vec![v.field("z").0, v.int(1)]);
+    let q = e.push(u, gated, vec![raw(a), v.int(8)]);
+    e.evaluate(2).unwrap();
+    let x = e.placed_by(p)[0];
+    e.replace(q, gated, vec![raw(x), v.int(8)]);
+    let rep = e.evaluate(2).unwrap();
+    let y = e.placed_by(q)[0];
+    assert!(
+        e.before(a, x) && e.before(x, y) && e.before(y, b),
+        "Y under X, after A: {:?} {rep:?}",
+        e.order(u)
+    );
+    // Q's run waits until P's move has listed Y and is about to lift it;
+    // P's move waits there until Q's commit has moved Y
+    let (open_gate, gate) = std::sync::mpsc::channel();
+    *gq.gate.lock().unwrap() = Some(gate);
+    let (moved_tx, moved_rx) = std::sync::mpsc::channel::<()>();
+    let moved_rx = std::sync::Mutex::new(moved_rx);
+    let open_gate = std::sync::Mutex::new(open_gate);
+    let moved_tx = std::sync::Mutex::new(moved_tx);
+    let held = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let held2 = held.clone();
+    e.set_move_hook(Box::new(move |at, by, n| {
+        if at == "lift" && by == p && n == y && !held2.swap(true, Ordering::SeqCst) {
+            open_gate.lock().unwrap().send(()).unwrap();
+            moved_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("Q's commit moved Y");
+        }
+        if at == "done" && by == q && n == y {
+            let _ = moved_tx.lock().unwrap().send(());
+        }
+    }));
+    e.replace(p, placer, vec![raw(b), v.int(7)]);
+    e.replace(z, def, vec![v.field("z").0, v.int(2)]);
+    e.replace(q, gated, vec![raw(c), v.int(8)]);
+    let rep = e.evaluate(4).unwrap();
+    assert!(held.load(Ordering::SeqCst), "P's move listed Y: {rep:?}");
+    assert_eq!(e.placed_by(p), vec![x], "{rep:?}");
+    assert_eq!(e.placed_by(q), vec![y], "{rep:?}");
+    assert!(e.before(b, x) && e.before(x, c), "X after B: {:?}", e.order(u));
+    assert!(e.before(c, y), "Y after C, where Q placed it: {:?} {rep:?}", e.order(u));
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

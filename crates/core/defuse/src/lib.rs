@@ -96,7 +96,7 @@ pub use api::{
     Settled, Step, Stop, SumMonoid, Times, UnitId,
 };
 pub use ctx::{Ctx, View};
-pub use engine::Engine;
+pub use engine::{Engine, MoveHook};
 pub use lock::held as locks_held;
 pub use persist::{Export, ImportError, ImportStats, Imported, ReadCheck};
 pub use persist_probe::PersistProbe;

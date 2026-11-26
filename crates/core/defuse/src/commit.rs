@@ -6093,6 +6093,18 @@ struct Left {
 /// sibling that would stand before it gives its claim back first: its run
 /// takes it again from the new place. False when it stayed (its place
 /// gone with its placer, or the place inside its own subtree).
+///
+/// A node others placed under `k` goes only while it still stands under
+/// `k` when it is lifted, read under its segment's lock: its own placer
+/// may have placed it under another node since the subtree was listed,
+/// storing its new anchor before it moved it, and its place is that
+/// placer's. Taken along, it stood under `k` again with an anchor
+/// elsewhere, and nothing asked its placer again: deck2 at -j8, 1 build
+/// in 4, a frame's continuation moved by its placer took a page's
+/// finisher the page loop had just moved back to the piece its page
+/// ends at, and the finisher stood past that frame's later pieces, its
+/// slides out of order in the PDF
+/// (`relocate::a_node_its_placer_moved_while_another_move_listed_it_stays_where_its_placer_put_it`).
 pub(crate) fn relocate(
     eng: &Engine,
     w: Option<&Worker>,
@@ -6128,6 +6140,9 @@ pub(crate) fn relocate(
     // (and what others placed after it or under it: the nodes after it
     // whose anchor chain reaches it, as they stand in its segment, but
     // for those about to move)
+    // (each goes only while it still stands under it when lifted: its
+    // placer may place it elsewhere meanwhile, `lift`)
+    let mut under_k: FxHashSet<NodeId> = FxHashSet::default();
     if let Some(seg) = eng.seg_for_pos(k.pos_hint()) {
         let inner = seg.inner.read();
         for (_, &x) in inner.nodes.range((Excluded(k.pos_hint()), Unbounded)) {
@@ -6142,6 +6157,7 @@ pub(crate) fn relocate(
             }
             if skip.insert(x) {
                 sub.push(x);
+                under_k.insert(x);
             }
         }
     }
@@ -6181,7 +6197,12 @@ pub(crate) fn relocate(
         // (what it holds, where it stands now: moved past a reader, each
         // is held before that reader or no more, `Node::held_before`)
         let held = held_by(eng, &m);
-        let Some(left) = lift(eng, &m) else {
+        if m.id != k.id
+            && let Some(h) = eng.move_hook.get()
+        {
+            h("lift", placer, m.id);
+        }
+        let Some(left) = lift(eng, &m, under_k.contains(&m.id).then_some(k.id)) else {
             continue;
         };
         hi = hi.max(left.pos);
@@ -6249,6 +6270,9 @@ pub(crate) fn relocate(
         }
         hi = hi.max(npos);
         landed.push(m);
+    }
+    if let Some(h) = eng.move_hook.get() {
+        h("done", placer, k.id);
     }
     if landed.is_empty() {
         return false;
@@ -6386,9 +6410,15 @@ fn old_place(eng: &Engine, left: &Left) -> (Pos, SegId) {
 /// taken (its own go: it runs again), the `next` readers stopped at it
 /// and the range readers bounded by it taken. Its label is 0 until it
 /// lands (`land`): no other placement goes after it meanwhile. Its record
-/// stays.
-fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
+/// stays. With `under`, none when its anchor chain no longer reaches that
+/// node, read under the lock: it is not lifted.
+fn lift(eng: &Engine, m: &Arc<Node>, under: Option<NodeId>) -> Option<Left> {
     let (seg, mut inner) = own_write(eng, m)?;
+    // (one that goes with a node another placed it under: not when its
+    // placer placed it under another since, `relocate`)
+    if under.is_some_and(|k| sib_under(eng, m.id, k).is_none()) {
+        return None;
+    }
     let pos = m.pos_hint();
     let hole = m.is_hole();
     let rec = m.record();
@@ -8717,7 +8747,7 @@ mod tests {
         e.evaluate(1).unwrap();
         assert_eq!(e.output(r).and_then(|y| v.as_int(y)), Some(7));
         let xn = Arc::clone(e.node(x));
-        let left = super::lift(&e, &xn).expect("x lifted");
+        let left = super::lift(&e, &xn, None).expect("x lifted");
         // (its segment's labels moved: relabelled as a landing's relabel
         // does, packed near the segment's start, as a narrow segment's are)
         {
