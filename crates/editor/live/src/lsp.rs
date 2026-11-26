@@ -1029,6 +1029,12 @@ impl Server {
             } else if d["code"] == "format" {
                 p.format.get_or_insert(message);
             }
+            // (a problem with no line, a float's warning whose float
+            // cannot be told: counted, shown in the viewer's list, never
+            // put on a line of the editor's, its first)
+            if d["line"].is_null() && d["severity"] == "warning" {
+                continue;
+            }
             let file = d["file"].as_str().unwrap_or(&main);
             by.entry(self.uri(file))
                 .or_default()

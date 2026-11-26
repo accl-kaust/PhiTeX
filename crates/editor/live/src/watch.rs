@@ -470,37 +470,125 @@ fn unplaced(s: &Session, d: &Value) -> bool {
 /// place ([`unplaced`]) moved to the file TeX was reading as it wrote
 /// them, as the transcript `log` has it ([`crate::problems::warning_files`]),
 /// with no line (TeX gives none): "`h' float specifier changed to `ht'"
-/// in the `\input` file whose float it is, not main.tex:1.
+/// in the `\input` file whose float it is, not main.tex:1; in the main
+/// file, there with no line either, never at its `\documentclass`. A
+/// float's then on its float's line where that can be told
+/// ([`on_their_floats`]).
 fn in_their_files(s: &Session, v: &mut [Value], log: &str) {
     if !v.iter().any(|d| unplaced(s, d)) {
         return;
     }
     let mut seen = crate::problems::warning_files(log);
+    let main = s
+        .job
+        .path
+        .to_string_lossy()
+        .trim_start_matches("./")
+        .to_owned();
     for d in v.iter_mut() {
         let msg = d["message"].as_str().unwrap_or("").to_owned();
         let first = msg.lines().next().unwrap_or("").trim_end().to_owned();
         // (the log's line is the message's first, cut at its width)
-        let Some(k) = seen
+        let file = seen
             .iter()
             .position(|(m, _)| *m == first || (m.len() >= 60 && first.starts_with(m.as_str())))
-        else {
-            continue;
-        };
-        let (_, file) = seen.remove(k);
+            .map(|k| seen.remove(k).1);
         if !unplaced(s, d) {
             continue;
         }
-        let file = file.trim_start_matches("./").to_owned();
-        let main = s.job.path.to_string_lossy();
-        if file == main.trim_start_matches("./") {
-            continue;
-        }
+        let file = file.map_or_else(|| main.clone(), |f| f.trim_start_matches("./").to_owned());
         d["file"] = json!(file);
         d["line"] = Value::Null;
         d["range"] = json!([0, 0]);
         d["col"] = Value::Null;
         d["excerpt"] = Value::Null;
     }
+    on_their_floats(s, v);
+}
+
+/// LaTeX's "`h' float specifier changed to `ht'" (and `!h`'s), written by
+/// the output routine with no line (`\@resethfps`, as it defers a float
+/// placed `[h]` that did not fit where it was): on that float's
+/// `\begin{figure}[h]` where its file has as many floats placed so as
+/// warnings of them, the k-th warning the k-th float (the output routine
+/// meets the floats in their order); else (some fitted: which ones cannot
+/// be told from the text) left with no line.
+fn on_their_floats(s: &Session, v: &mut [Value]) {
+    let spec = |m: &str| -> Option<&'static str> {
+        if m.contains("`!h' float specifier changed to `!ht'") {
+            Some("!h")
+        } else if m.contains("`h' float specifier changed to `ht'") {
+            Some("h")
+        } else {
+            None
+        }
+    };
+    let mut groups: HashMap<(String, &'static str), Vec<usize>> = HashMap::new();
+    for (k, d) in v.iter().enumerate() {
+        if d["severity"] == "warning"
+            && d["line"].is_null()
+            && let (Some(f), Some(sp)) = (
+                d["file"].as_str(),
+                spec(d["message"].as_str().unwrap_or("")),
+            )
+        {
+            groups.entry((f.to_owned(), sp)).or_default().push(k);
+        }
+    }
+    for ((file, sp), ks) in groups {
+        let Some(text) = s
+            .source(&file)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+        else {
+            continue;
+        };
+        let floats = floats_placed(&text, sp);
+        if floats.len() != ks.len() {
+            continue;
+        }
+        for (k, (a, b)) in ks.into_iter().zip(floats) {
+            let ls = text[..a].rfind('\n').map_or(0, |i| i + 1);
+            let le = text[a..].find('\n').map_or(text.len(), |i| a + i);
+            let line_text = text[ls..le].trim_end_matches('\r');
+            let col = text[ls..a].chars().count();
+            let d = &mut v[k];
+            d["line"] = json!(text[..a].matches('\n').count() + 1);
+            d["range"] = json!([a, b]);
+            d["col"] = json!(col + 1);
+            d["excerpt"] =
+                json!({"text": line_text, "start": col, "len": text[a..b].chars().count()});
+        }
+    }
+}
+
+/// The `\begin{ENV}[SPEC]` of `text` whose placement is `spec` alone
+/// (`h`, `!h`), as bytes, in their order; comments read past.
+fn floats_placed(text: &str, spec: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (i, _) in text.match_indices("\\begin{") {
+        let ls = text[..i].rfind('\n').map_or(0, |k| k + 1);
+        if text[ls..i].contains('%') {
+            continue;
+        }
+        let rest = &text[i + "\\begin{".len()..];
+        let Some((name, after)) = rest.split_once('}') else {
+            continue;
+        };
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        let Some(opt) = after.strip_prefix('[') else {
+            continue;
+        };
+        let Some((given, _)) = opt.split_once(']') else {
+            continue;
+        };
+        if given.trim() == spec {
+            let end = i + "\\begin{".len() + name.len() + 1 + 1 + given.len() + 1;
+            out.push((i, end));
+        }
+    }
+    out
 }
 
 /// A build's errors given at once (its diagnostics left for later,
@@ -611,6 +699,24 @@ fn others(r: &Report, log: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The floats a warning of `h` changed to `ht` can be of: those placed
+    /// `[h]` alone (or `[!h]`), their `\begin{...}[h]` as bytes, in
+    /// order; a comment's, `[ht]`'s and `[H]`'s not.
+    #[test]
+    fn floats_placed_h_alone() {
+        let t = "\\documentclass{article}\n\\begin{document}\n\\begin{figure}[h]\nA\n\\end{figure}\n% \\begin{figure}[h]\n\\begin{table}[ht]\nB\n\\end{table}\n\\begin{table}[!h]\n\\end{table}\n\\begin{figure*}[ h ]\n\\end{figure*}\n\\begin{figure}[H]\n\\end{figure}\n";
+        let h: Vec<&str> = floats_placed(t, "h")
+            .iter()
+            .map(|&(a, b)| &t[a..b])
+            .collect();
+        assert_eq!(h, ["\\begin{figure}[h]", "\\begin{figure*}[ h ]"]);
+        let bang: Vec<&str> = floats_placed(t, "!h")
+            .iter()
+            .map(|&(a, b)| &t[a..b])
+            .collect();
+        assert_eq!(bang, ["\\begin{table}[!h]"]);
+    }
 
     #[test]
     fn utf16_splices() {
