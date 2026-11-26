@@ -39,7 +39,10 @@
 //! group or a box of the run's own opened in a macro's expansion is a
 //! cut where it closes while that expansion is still being read, only
 //! groups of its own owning no list stay open, and the state is
-//! nameable as above. The closed group's local bindings are gone; the
+//! nameable as above. A box appended to a vertical list at its close is
+//! no cut: it is an item for the page, and the candidate after it is
+//! where the run may end, under that rule. The closed group's local
+//! bindings are gone; the
 //! continuation carries the input's levels (the `\aftergroup` tokens
 //! the close put back among them), the groups still open and the
 //! conditionals. A read inside the closed group that moves (a loop over

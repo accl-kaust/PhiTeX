@@ -2051,6 +2051,13 @@ impl Run<'_, '_> {
             let Some(b) = b else { return Ok(()) };
             let b = with_shift(v, b, i32::try_from(ctx).unwrap_or(0));
             if md.m.abs() == 1 {
+                // (a box appended to a vertical list is an item for the
+                // page, not a close that changed bindings alone: the run
+                // is cut by the candidate after it, under that rule's
+                // spacing, not at the box's close, `Run::group_cut`. Cut
+                // there, every `\hbox` line a macro set on the page was a
+                // run of its own)
+                self.group_closed = false;
                 self.append_to_vlist(md, b)?;
                 if md.m > 0 && candidate {
                     self.finish_candidate()?;
