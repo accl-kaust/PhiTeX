@@ -45,6 +45,9 @@
     $version = "$env:PHITEX_VERSION"
     $channel = if ($env:PHITEX_CHANNEL) { "$env:PHITEX_CHANNEL" } else { 'stable' }
     $prefix = if ($env:PHITEX_PREFIX) { "$env:PHITEX_PREFIX" } else { Join-Path $env:LOCALAPPDATA 'Programs\phitex' }
+    # (absolute, with no trailing separator: install.json's prefix is the
+    # folder phitex upgrade finds its own binary in, from any directory)
+    $prefix = [System.IO.Path]::GetFullPath($prefix).TrimEnd('\', '/')
 
     # (the machine's, not this PowerShell's: a 32-bit PowerShell on 64-bit
     # Windows says x86 in PROCESSOR_ARCHITECTURE)
