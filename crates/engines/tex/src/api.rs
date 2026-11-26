@@ -4656,7 +4656,13 @@ impl Graph {
                             f.map_or_else(|| "-".to_owned(), |f| crate::val::field_name(v, f));
                         if crate::exec::obs_flag!("PHITEX_RERUN_OPS") {
                             let d: String = describe(&self.eng, *node).chars().take(60).collect();
-                            eprintln!("rerunop: {} [{d}] {k} {name}", node.raw());
+                            let by = match c {
+                                phitex_defuse::Cause::Range { by, .. } => {
+                                    format!(" by {}", by.raw())
+                                }
+                                _ => String::new(),
+                            };
+                            eprintln!("rerunop: {} [{d}] {k} {name}{by}", node.raw());
                         }
                         *by.entry(format!("{k} {name}")).or_default() += 1;
                     }

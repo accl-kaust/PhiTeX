@@ -1044,13 +1044,56 @@ impl<'a> Ctx<'a> {
         suffix: &str,
         then: PathId,
     ) -> Result<(Option<ValueId>, Field), Stop> {
+        self.derived_read(base, None, prefix, j, suffix, then)
+    }
+
+    /// [`Ctx::read_derived`] with the base's value the one reaching node
+    /// `from` (`At::Before`), not me: a name made with another node's
+    /// count (docs/spec-symbol-reads.md B2). The named field is read
+    /// where I read; the base read is filed before `from` and the named
+    /// one at my place, each through the derived path, so a move of
+    /// either asks me again, and a move of the base that names a field
+    /// holding the old answer leaves me standing.
+    pub fn read_derived_from(
+        &mut self,
+        base: Field,
+        from: NodeId,
+        prefix: &str,
+        j: i64,
+        suffix: &str,
+        then: PathId,
+    ) -> Result<(Option<ValueId>, Field), Stop> {
+        self.derived_read(base, Some(from), prefix, j, suffix, then)
+    }
+
+    fn derived_read(
+        &mut self,
+        base: Field,
+        from: Option<NodeId>,
+        prefix: &str,
+        j: i64,
+        suffix: &str,
+        then: PathId,
+    ) -> Result<(Option<ValueId>, Field), Stop> {
         self.check()?;
         let v = self.values();
-        let spec = v.list(vec![base.0, v.str(prefix), v.int(j), v.str(suffix)]);
+        let (at, anchor) = self.here();
+        let node = |n: NodeId| v.int(i64::from_ne_bytes(n.raw().to_ne_bytes()));
+        let mut parts = vec![base.0, v.str(prefix), v.int(j), v.str(suffix)];
+        if let Some(b) = from {
+            parts.extend([node(b), node(at)]);
+        }
+        let spec = v.list(parts);
         // (an overlay, `Ctx::read_before_placer_over`: the base and the
         // named field read as reads are, the name made from the first)
         if self.overlay.is_some() {
-            let b = self.read(base)?;
+            let b = match from {
+                Some(n) => match self.read_at(base, At::Before(n))? {
+                    FieldAt::Def(x, _) => Some(x),
+                    FieldAt::Unset | FieldAt::Gone => None,
+                },
+                None => self.read(base)?,
+            };
             let g = read::derived_name(v, spec, b).ok_or_else(stop)?;
             let x = self.read(g)?;
             return Ok((read::apply_path(self.eng, x, then), g));
@@ -1062,11 +1105,14 @@ impl<'a> Ctx<'a> {
         let p = self.eng.path(&steps);
         self.before_read(base);
         let ep_base = self.ep;
-        let (at, anchor) = self.here();
-        let rb = reaching_at(self.eng, base, at, false).ok_or_else(stop)?;
+        let (b_at, b_anchor) = match from {
+            Some(n) => (n, Anchor::Before(n)),
+            None => (at, anchor),
+        };
+        let rb = reaching_at(self.eng, base, b_at, false).ok_or_else(stop)?;
         self.note_source(rb.by);
         self.wait_for_settling(&rb)?;
-        self.hold_at_frontier(base, at)?;
+        self.hold_at_frontier(base, b_at)?;
         let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
         self.before_read(g);
         let ep_g = self.ep;
@@ -1076,14 +1122,20 @@ impl<'a> Ctx<'a> {
         self.hold_at_frontier(g, at)?;
         let aliased = |x: Option<ValueId>| x.is_some_and(|x| read::alias_of(v, x).is_some());
         if aliased(rb.value) || aliased(rg.value) {
-            let b = self.read(base)?;
+            let b = match from {
+                Some(n) => match self.read_at(base, At::Before(n))? {
+                    FieldAt::Def(x, _) => Some(x),
+                    FieldAt::Unset | FieldAt::Gone => None,
+                },
+                None => self.read(base)?,
+            };
             let g2 = read::derived_name(v, spec, b).ok_or_else(stop)?;
             let x = self.read(g2)?;
             return Ok((read::apply_path(self.eng, x, then), g2));
         }
         let x = read::through_at(self.eng, rg, p, at, false);
         self.ep = ep_base;
-        self.record(ReadKind::Field { f: base, at: anchor }, p, x);
+        self.record(ReadKind::Field { f: base, at: b_anchor }, p, x);
         self.ep = ep_g;
         self.record(ReadKind::Field { f: g, at: anchor }, p, x);
         Ok((x, g))

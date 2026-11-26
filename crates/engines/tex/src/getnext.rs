@@ -224,7 +224,12 @@ impl Run<'_, '_> {
                 let Some(t2) = self.next_tok()? else {
                     return Ok(false);
                 };
-                self.set_cur(t2)?;
+                // (a derived name's symbol stays one: it is not expanded,
+                // docs/spec-symbol-reads.md B3)
+                let d = std::mem::replace(&mut self.d_ok, true);
+                let r = self.set_cur(t2);
+                self.d_ok = d;
+                r?;
                 if self.cur.cmd > cmd::MAX_COMMAND {
                     self.cur.cmd = cmd::RELAX;
                     self.cur.chr = crate::val::NO_EXPAND_FLAG;

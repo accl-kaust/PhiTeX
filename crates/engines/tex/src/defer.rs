@@ -307,14 +307,20 @@ pub(crate) fn value(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
     }
 }
 
-/// `toks` with every symbol replaced by its digits ([`value`]), or
-/// `None` where it holds none.
+/// `toks` with every symbol replaced by its digits ([`value`]) and
+/// every derived name by the control sequence it names
+/// ([`dname_concrete`]: a list printed or compared as TeX has it), or
+/// `None` where it holds neither.
 pub(crate) fn digits_of(r: &mut Run<'_, '_>, toks: &[Tok]) -> crate::run::R<Option<Vec<Tok>>> {
     if !toks.iter().any(|&t| is_sym(t)) {
         return Ok(None);
     }
     let mut out = Vec::with_capacity(toks.len() + 4);
     for &t in toks {
+        if is_dname(t) {
+            out.push(dname_concrete(r, t)?);
+            continue;
+        }
         match digits_str(r, t)? {
             Some(d) => out.extend(d.chars().map(|c| Tok::ch(12, u32::from(c)))),
             None => out.push(t),
@@ -333,6 +339,32 @@ pub(crate) fn reg_sym(ops: &crate::run::Ops, t: Tok) -> Option<Sym> {
 #[inline]
 pub(crate) fn is_sym(t: Tok) -> bool {
     t.is_internal_cs() && t.as_cs().is_some_and(|c| c.name().starts_with(SYM_PREFIX))
+}
+
+/// Whether token lists `a` and `b`, as TeX would have them with every
+/// register symbol's digits in its place, differ whatever those digits
+/// are (`\ifx` of two macros, docs/spec-symbol-reads.md B1): at their
+/// first difference (equal tokens before it, one symbol the same digits
+/// on both sides), two tokens neither of which is a symbol; a register
+/// symbol against a token none of its digits can be (a character
+/// `-0123456789` of category 12); two symbols of one register and piece
+/// with different steps (different numbers); or one list ended against
+/// a token or a register symbol (at least one digit). False where only
+/// the digits can tell (the caller forces them).
+pub(crate) fn lists_differ(ops: &crate::run::Ops, a: &[Tok], b: &[Tok]) -> bool {
+    let digit =
+        |t: Tok| t.cat() == Some(12) && matches!(char::from_u32(t.chr()), Some('0'..='9' | '-'));
+    let i = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    match (a.get(i).copied(), b.get(i).copied()) {
+        (None, None) => false,
+        (Some(x), None) | (None, Some(x)) => !is_sym(x) || sym_of(ops, x).is_some(),
+        (Some(x), Some(y)) => match (sym_of(ops, x), sym_of(ops, y)) {
+            (None, None) => !is_sym(x) && !is_sym(y),
+            (Some(_), None) => !is_sym(y) && !digit(y),
+            (None, Some(_)) => !is_sym(x) && !digit(x),
+            (Some(p), Some(q)) => p.reg == q.reg && p.node == q.node && p.j != q.j,
+        },
+    }
 }
 
 /// A piece needs the digits now: the read the piece makes today
@@ -852,7 +884,7 @@ pub(crate) fn name_chars(
         if r.cur.cmd == cmd::SYM
             && let Some(s) = sym_of(r.ops, r.cur.tok)
         {
-            if keep && kept.is_none() && s.node == r.sym_node() {
+            if keep && kept.is_none() {
                 kept = Some((name.len(), s));
                 continue;
             }
@@ -889,9 +921,11 @@ pub(crate) fn forced_name(
 /// The derived read (`Ctx::read_derived`) of the meaning of the control
 /// sequence named `prefix`, symbol `s`'s digits, `suffix`, through `p`:
 /// its answer, or None where it cannot stand for the look-up (the caller
-/// forces the symbol): another piece's symbol, a run that may not defer,
-/// digits that could run into the name's own, a name of that shape the
-/// run binds itself (the engine's answer is not the run's).
+/// forces the symbol): a run that may not defer, digits that could run
+/// into the name's own, a name of that shape the run binds itself (the
+/// engine's answer is not the run's). Another node's symbol: its base
+/// is the register reaching that node, as [`resolve`] reads it
+/// (`Ctx::read_derived_from`, docs/spec-symbol-reads.md B2).
 pub(crate) fn derived_read(
     r: &mut Run<'_, '_>,
     s: Sym,
@@ -899,8 +933,7 @@ pub(crate) fn derived_read(
     suffix: &str,
     p: phitex_defuse::PathId,
 ) -> crate::run::R<Option<Answer>> {
-    if s.node != r.sym_node()
-        || !r.defer_allowed()
+    if !r.defer_allowed()
         || r.rb.is_some()
         || prefix.ends_with(|c: char| c.is_ascii_digit() || c == '-')
         || suffix.starts_with(|c: char| c.is_ascii_digit())
@@ -912,7 +945,11 @@ pub(crate) fn derived_read(
     let loc = s.loc(r);
     let base = r.loc_field(loc);
     let pre = format!("cs:{prefix}");
-    let (x, g) = r.cx.read_derived(base, &pre, i64::from(s.j), suffix, p)?;
+    let (x, g) = if s.node == r.sym_node() {
+        r.cx.read_derived(base, &pre, i64::from(s.j), suffix, p)?
+    } else {
+        r.cx.read_derived_from(base, s.node, &pre, i64::from(s.j), suffix, p)?
+    };
     if crate::exec::obs_flag!("PHITEX_SYM_TRACE") {
         eprintln!(
             "sym-derived: node {} count {} j {} name {} answer {:?}",

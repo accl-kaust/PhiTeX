@@ -154,3 +154,75 @@ fn the_named_field_changing_runs_the_reader_again() {
         assert_eq!(d.e.output(d.r), Some(ValueId::UNIT), "threads {threads}");
     }
 }
+
+/// `[node]`: the field `p@<n>`, `n` the value of field "n" reaching
+/// `node` (`Ctx::read_derived_from`), not the reader; counts its runs.
+struct DerivedFrom(AtomicU64);
+
+impl Operation for DerivedFrom {
+    fn name(&self) -> &'static str {
+        "derived_from"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let v = cx.values();
+        let at = v.as_int(cx.args()[0]).unwrap_or(0);
+        let at = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(at.to_ne_bytes()));
+        let (x, _) = cx.read_derived_from(v.field("n"), at, "p@", 0, "", PathId::WHOLE)?;
+        Ok(x.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A derived read whose base is read before another node (a name made
+/// with another piece's count, docs/spec-symbol-reads.md B2): n = 5 at
+/// that node, then p@5, p@6 and n = 100 between it and the reader, which
+/// reads `p@<n there>`. A move of n there whose new name holds the old
+/// answer leaves the reader standing, though n reaching the reader never
+/// moved; a change of the named field after that node asks it again; a
+/// move onto a name holding another value runs it again.
+#[test]
+fn a_derived_read_across_nodes_follows_the_base_where_it_is_read() {
+    for threads in [1, 4] {
+        let e = Engine::new();
+        let v = e.values();
+        let def = e.register(Arc::new(Def));
+        let reader = Arc::new(DerivedFrom(AtomicU64::new(0)));
+        let rd = e.register(reader.clone());
+        let u = e.new_unit();
+        let n = e.push(u, def, vec![v.str("n"), v.int(5)]);
+        let at = e.push(u, def, vec![v.str("mark"), v.int(0)]);
+        let d5 = e.push(u, def, vec![v.str("p@5"), v.int(10)]);
+        let d6 = e.push(u, def, vec![v.str("p@6"), v.int(20)]);
+        e.push(u, def, vec![v.str("n"), v.int(100)]);
+        let raw = i64::from_ne_bytes(at.raw().to_ne_bytes());
+        let r = e.push(u, rd, vec![v.int(raw)]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(e.output(r), Some(v.int(10)), "threads {threads}");
+        let first = reader.0.load(Ordering::Relaxed);
+        let runs = || reader.0.load(Ordering::Relaxed) - first;
+        let eval = || {
+            let rep = e.evaluate(threads).unwrap();
+            assert_eq!(e.check_invariants(), Vec::<String>::new(), "{rep:?}");
+            v.as_int(e.output(r).unwrap()).unwrap()
+        };
+        let set = |node, name: &str, x: i64| e.replace(node, def, vec![v.str(name), v.int(x)]);
+        // (n moves to 6 where it is read, p@6 now holding what p@5 held)
+        set(n, "n", 6);
+        set(d6, "p@6", 10);
+        assert_eq!(eval(), 10, "threads {threads}");
+        assert_eq!(runs(), 0, "the reader stands (threads {threads})");
+        // (the field named now changes after the base's node)
+        set(d6, "p@6", 30);
+        assert_eq!(eval(), 30, "threads {threads}");
+        assert_eq!(runs(), 1, "threads {threads}");
+        // (the old name's field: nothing the reader uses)
+        set(d5, "p@5", 40);
+        assert_eq!(eval(), 30, "threads {threads}");
+        assert_eq!(runs(), 1, "threads {threads}");
+        // (n moves back, onto p@5's other value)
+        set(n, "n", 5);
+        assert_eq!(eval(), 40, "threads {threads}");
+        assert_eq!(runs(), 2, "threads {threads}");
+    }
+}

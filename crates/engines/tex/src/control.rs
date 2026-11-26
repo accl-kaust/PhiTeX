@@ -1513,21 +1513,12 @@ impl Run<'_, '_> {
         let n = self.cur.chr;
         let p = self.get_r_token()?;
         if n == 0 {
-            loop {
-                self.get_token();
-                self.ck()?;
-                if self.cur.cmd != cmd::SPACER {
-                    break;
-                }
-            }
-            if self.is_other(b'=') {
-                self.get_token();
-                self.ck()?;
-                if self.cur.cmd == cmd::SPACER {
-                    self.get_token();
-                    self.ck()?;
-                }
-            }
+            // (the token whose meaning is taken may be a derived name's
+            // symbol, kept, [`Run::d_ok`])
+            let d = std::mem::replace(&mut self.d_ok, true);
+            let r = self.let_operand();
+            self.d_ok = d;
+            r?;
         } else {
             self.get_token();
             self.ck()?;
@@ -1537,6 +1528,14 @@ impl Run<'_, '_> {
             let t = self.cur.tok;
             self.back_input(t);
             self.back_input(q);
+        }
+        // (a derived name: the meaning read through its derived read,
+        // docs/spec-symbol-reads.md B3)
+        if n == 0 && self.cur.cmd == cmd::SYM && crate::defer::is_dname(self.cur.tok) {
+            let t = self.cur.tok;
+            let m = crate::defer::dname_meaning(self, t)?;
+            self.define_cs_owned(p, m, global);
+            return Ok(());
         }
         // (a control sequence's decoded meaning: its entry copied)
         if self.interp.is_none()
@@ -1553,6 +1552,27 @@ impl Run<'_, '_> {
         }
         let m = self.cur_mean()?;
         self.define_cs_owned(p, m, global);
+        Ok(())
+    }
+
+    /// `\let`'s operand after its name (§1221): optional spaces, an
+    /// optional `=` and one optional space after it.
+    fn let_operand(&mut self) -> R<()> {
+        loop {
+            self.get_token();
+            self.ck()?;
+            if self.cur.cmd != cmd::SPACER {
+                break;
+            }
+        }
+        if self.is_other(b'=') {
+            self.get_token();
+            self.ck()?;
+            if self.cur.cmd == cmd::SPACER {
+                self.get_token();
+                self.ck()?;
+            }
+        }
         Ok(())
     }
 
@@ -2636,7 +2656,16 @@ impl Run<'_, '_> {
                         self.cx.node().raw(),
                         self.read_point_of(&name)?.map(phitex_defuse::NodeId::raw),
                         self.interp_plain,
-                        r.map_or_else(|| "needs more".to_owned(), |x| crate::val::show_def(v, x))
+                        r.map_or_else(
+                            || "needs more".to_owned(),
+                            |x| {
+                                let names: Vec<String> = list_of(v, x)
+                                    .iter()
+                                    .filter_map(|&d| list_of(v, d).first().map(|&f| str_of(v, f)))
+                                    .collect();
+                                format!("{} reads {}", names.join(","), v.render(self.interp_reads))
+                            }
+                        )
                     );
                 }
                 if let Some(made) = r

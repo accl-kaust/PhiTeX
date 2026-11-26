@@ -1049,3 +1049,118 @@ fn a_first_definition_of_a_stepped_name_asks_the_scan_nothing() {
         );
     }
 }
+
+/// A document of plain TeX for docs/spec-symbol-reads.md B1 to B3: 350
+/// names `pg@<n>` that hold the same macro, then 40 paragraphs, each
+/// stepping count 200 and using its value as `use_` makes it (the
+/// paragraph's number `i` given), `extra` before them all. Where `lit` is
+/// given, the count's values are written out as digits instead (the
+/// value before the paragraphs, `5 + lit`): the text TeX's digits give.
+fn sym_text(extra: &str, lit: Option<i32>, use_: &dyn Fn(usize, &str) -> String) -> String {
+    let mut s = String::from("\\count200=5\n\\countdef\\cn=200\n\\def\\other{q7}\n");
+    for n in 1..=350 {
+        let _ = writeln!(s, "\\expandafter\\def\\csname pg@{n}\\endcsname{{same}}%");
+    }
+    s.push_str(extra);
+    for i in 0..40 {
+        let num = match lit {
+            Some(sh) => (5 + sh + i32::try_from(i).unwrap_or(0) + 1).to_string(),
+            None => "\\the\\cn".to_owned(),
+        };
+        let _ = write!(
+            s,
+            "\\global\\advance\\cn 1 {} Paragraph {i}, long enough to make a line \
+             or two when set in the plain format's ten point roman.\n\n",
+            use_(i, &num)
+        );
+    }
+    s.push_str("\\bye\n");
+    s
+}
+
+/// [`sym_text`] built at one and eight threads, then with the count
+/// stepped once before every paragraph: the PDF a cold build's, the
+/// symbol's form its digits' (`lit`), and the paragraphs asked again on
+/// the count no more than `most` times (each use of a value standing,
+/// its answer the same where every name holds the same macro).
+fn shift_stands(name: &str, most: usize, use_: &dyn Fn(usize, &str) -> String) {
+    let shift = "\\global\\advance\\cn 1\n";
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-{name}-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = sym_text("", None, use_);
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, _) = cold(&format!("{name}-a"), &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        let (lit, _) = cold(&format!("{name}-lit"), &sym_text("", Some(0), use_), 1);
+        assert_eq!(want, lit, "-j{threads}: the digits' text gives the same");
+        let asked = |b: &phitex_tex::Build| {
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200")
+        };
+        let r0 = asked(&b);
+        let moved = sym_text(shift, None, use_);
+        common::rebuild(&mut b, &moved);
+        let (want, _) = cold(&format!("{name}-b"), &moved, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: shifted equals cold");
+        let (lit, _) = cold(&format!("{name}-blit"), &sym_text(shift, Some(1), use_), 1);
+        assert_eq!(
+            want, lit,
+            "-j{threads}: shifted, the digits' text gives the same"
+        );
+        assert!(
+            asked(&b) <= r0 + most,
+            "-j{threads}: paragraphs asked again on the count though no answer moved: {} (from {r0}) {:?}",
+            asked(&b),
+            b.stats.refuted_by_field
+        );
+        common::rebuild(&mut b, &first);
+        let (want, _) = cold(&format!("{name}-a"), &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: reverted equals cold");
+    }
+}
+
+/// docs/spec-symbol-reads.md B1: `\ifx` of a macro holding a stepped
+/// count's symbol with one whose body differs before it (`p<n>` against
+/// `q7`) is false whatever the digits: no read of the count, and a shift
+/// of the count before every paragraph asks none of them again.
+#[test]
+fn an_ifx_told_apart_before_a_symbol_reads_no_count() {
+    shift_stands("ifx-before", 3, &|_, num| {
+        format!("\\edef\\id{{p{num}}}\\ifx\\id\\other same\\else other\\fi{{}}")
+    });
+}
+
+/// docs/spec-symbol-reads.md B2: a name made with another paragraph's
+/// symbol (the count as of the paragraph before, kept in a global macro)
+/// is a derived read whose base is the count reaching that paragraph: a
+/// shift whose new name holds what the old one held asks no paragraph
+/// again.
+#[test]
+fn a_name_made_with_another_pieces_symbol_reads_through_the_name() {
+    shift_stands("cross-name", 3, &|i, num| {
+        let used = if i == 0 {
+            String::new()
+        } else {
+            "[\\csname pg@\\gid\\endcsname]".to_owned()
+        };
+        format!("{used}\\xdef\\gid{{{num}}}")
+    });
+}
+
+/// docs/spec-symbol-reads.md B3: `\noexpand` of a name made with the
+/// paragraph's symbol, kept by an `\edef` (pgf's `\pgfsys@getposition`),
+/// and `\let` to it: its meaning read through the derived read, so a
+/// shift whose new name holds what the old one held asks no paragraph
+/// again.
+#[test]
+fn a_noexpanded_derived_name_let_reads_through_the_name() {
+    shift_stands("let-name", 3, &|_, num| {
+        format!(
+            "\\edef\\m{{\\let\\noexpand\\x=\\expandafter\\noexpand\\csname pg@{num}\\endcsname}}\\m[\\x]"
+        )
+    });
+}

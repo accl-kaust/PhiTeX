@@ -3039,7 +3039,11 @@ pub(crate) fn plan_reads(
                     && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
                     && g != *f
                 {
-                    here_reads.push((g, rec, true));
+                    // (across nodes: at the reader's place, where the
+                    // named field is read, `read::derived_places`)
+                    let (ga, gi) = read::derived_target_place(eng, spec, anchor, inclusive);
+                    let w = Reader::new(node.id, serial, ga, gi, path, r.seen());
+                    here_reads.push((g, w, true));
                 }
                 match at {
                     // (a loop-back read: filed under the field, re-asked when
@@ -3234,11 +3238,8 @@ pub(crate) fn commit_stood(
             && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
             && g != f
         {
-            file_witness(
-                eng,
-                g,
-                &Reader::new(node.id, r.serial, anchor, inclusive, rd.path(), rd.seen()),
-            );
+            let (ga, gi) = read::derived_target_place(eng, spec, anchor, inclusive);
+            file_witness(eng, g, &Reader::new(node.id, r.serial, ga, gi, rd.path(), rd.seen()));
             if !read::holds(eng, node, &rd, &mut memo) {
                 return None;
             }
@@ -4408,9 +4409,13 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         && let Some(spec) = read::derived_spec(eng, r.path())
         && let Some(g) = read::derived_field_at(eng, spec, r.anchor(), r.inclusive())
         && g != f
-        && file_witness(eng, g, r)
+        && let w = {
+            let (ga, gi) = read::derived_target_place(eng, spec, r.anchor(), r.inclusive());
+            Reader::new(r.node(), r.serial, ga, gi, r.path(), r.seen())
+        }
+        && file_witness(eng, g, &w)
     {
-        reader_answer(eng, g, r)
+        reader_answer(eng, g, &w)
     } else {
         now
     };
