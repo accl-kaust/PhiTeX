@@ -710,6 +710,65 @@ fn glyph_origins_plain() {
     assert!(f.is_empty(), "origins after the edits:\n{}", f.join("\n"));
 }
 
+/// Glyph origins of a build loaded from its saved graph
+/// (docs/spec-persisted-graph.md): the pages the load keeps are drawn by
+/// no writer, and their origins, forward search's pages and a page's
+/// click-to-source are a cold build's; after an edit on the loaded build,
+/// the pages it left keep theirs and the whole is the new text's cold
+/// build's.
+#[test]
+fn glyph_origins_after_a_load() {
+    let src = origins_doc();
+    for threads in [1, 8] {
+        let b = origins_build(&src, threads, true);
+        let bytes = b.save();
+        let opts = phitex_tex::Options {
+            epoch: Some(0),
+            threads: Some(threads),
+            origins: true,
+            ..common::options("./orig.tex", "orig", "", &common::fixtures().join("pdf"))
+        };
+        let (mut l, _) =
+            phitex_tex::Build::load(opts, Some(&common::plain()), &bytes).expect("the load");
+        let _ = l.evaluate_unchanged();
+        let want = b.all_page_origins();
+        assert!(
+            want.iter().all(Option::is_some),
+            "-j{threads}: a cold build's pages have origins"
+        );
+        assert_eq!(
+            l.all_page_origins(),
+            want,
+            "-j{threads}: the loaded pages' origins"
+        );
+        // (forward search: a word on the last page, its pages)
+        let at = u32::try_from(src.rfind("waffles").expect("a word")).expect("a place");
+        assert_eq!(
+            l.pages_of_source("orig.tex", at),
+            b.pages_of_source("orig.tex", at),
+            "-j{threads}: forward search after the load"
+        );
+        let f = common::origin_failures(&l, &src, "orig.tex");
+        assert!(
+            f.is_empty(),
+            "-j{threads}: origins after the load:\n{}",
+            f.join("\n")
+        );
+        // (an edit of the loaded build: one page's writer runs again)
+        let at = src
+            .find("Ligatures like office")
+            .expect("the ligature line");
+        let new1 = format!("{}Lagatures{}", &src[..at], &src[at + "Ligatures".len()..]);
+        l.edit(&new1);
+        let cold = origins_build(&new1, threads, true);
+        assert_eq!(
+            l.all_page_origins(),
+            cold.all_page_origins(),
+            "-j{threads}: the loaded build's edit's origins are a cold build's"
+        );
+    }
+}
+
 /// Right-to-left text (TeX--XeT's `\beginR`...`\endR`), which the
 /// page shows in the reverse of its reading order: each glyph's origin is
 /// its own occurrence in the source, a word repeated in the segment and

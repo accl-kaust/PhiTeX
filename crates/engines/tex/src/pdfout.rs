@@ -514,12 +514,18 @@ fn lines_key(pc: &PagePiece, units: &FxHashMap<i64, ValueId>) -> Option<Lines> {
 /// A page's identity in the link (`Linked::shown`): its record `x` in
 /// the line and its sealed lines' units `h` (also the key its glyphs are
 /// kept by, `crate::origins`).
-pub(crate) fn shown_id(x: u64, h: Option<&Lines>) -> u64 {
+pub(crate) fn shown_id(v: &Values, x: ValueId, h: Option<&Lines>) -> u64 {
+    // (by the values' places in the store, not their ids: a graph loaded
+    // into another store of the process (or one of another base) names
+    // the same pages by the same identities, the glyphs it saved with
+    // them found by the link's next writing, `crate::origins::load_kept`;
+    // by the ids, every page an edit after a load left had none)
+    let x = v.stable_raw(x);
     match h {
         Some(h) => phitex_defuse::hash_words(
             x,
             &h.iter()
-                .flat_map(|&(p, u)| [p.cast_unsigned(), u.raw()])
+                .flat_map(|&(p, u)| [p.cast_unsigned(), v.stable_raw(u)])
                 .collect::<Vec<u64>>(),
         ),
         None => x,
@@ -3119,7 +3125,7 @@ impl phitex_defuse::Operation for PdfPage {
             let glyphs = self
                 .origins
                 .load(std::sync::atomic::Ordering::Relaxed)
-                .then(|| shown_id(kx.raw(), Some(&h)));
+                .then(|| shown_id(v, kx, Some(&h)));
             // (and the pieces its lines came from: a source place's page
             // found without matching, `Build::pages_of_source`)
             if let Some(id) = glyphs {
@@ -3166,7 +3172,7 @@ impl phitex_defuse::Operation for PdfPage {
                         }
                         p.page_colors(id, ops, v);
                     }
-                    let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
+                    let shown = v.int(shown_id(v, kx, Some(&h)).cast_signed());
                     let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
                     cx.told_outside();
                     p.stream_page(k, hash, (cx.node().raw(), id), |start, last| {
@@ -6180,7 +6186,7 @@ fn link(
         .iter()
         .zip(&ids)
         .filter(|(r, _)| matches!(r, Rec::Page(_)))
-        .map(|(_, (x, h))| shown_id(*x, h.as_ref()))
+        .map(|(_, (x, h))| shown_id(v, ValueId::from_raw(*x), h.as_ref()))
         .collect();
     // (what the writer starts from: the same for the copy to stand)
     let head: LinkHead = (
@@ -6461,11 +6467,7 @@ fn link(
                 if f.origins && r.is_ok() {
                     let holes = st.hole_codes(rec, &at);
                     if !holes.is_empty() {
-                        crate::origins::keep_holes(
-                            v.instance(),
-                            shown_id(x.raw(), Some(&h)),
-                            holes,
-                        );
+                        crate::origins::keep_holes(v.instance(), shown_id(v, x, Some(&h)), holes);
                     }
                 }
                 r
@@ -6492,7 +6494,7 @@ fn link(
                 // (origins on: the page's glyphs as this writer shows
                 // them, which knows the forms and images it draws that
                 // the writer the page was written apart on did not)
-                let gid = shown_id(x.raw(), Some(&h));
+                let gid = shown_id(v, x, Some(&h));
                 let inst = v.instance();
                 let out = f.origins.then(|| {
                     let (r, out) = crate::origins::Recorder::new();
