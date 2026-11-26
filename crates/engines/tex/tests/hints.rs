@@ -310,7 +310,7 @@ fn a_stepped_over_outer_macro_is_still_forbidden() {
 #[test]
 fn a_name_defined_only_inside_a_group_bounds_its_callers() {
     let _g = lock();
-    let doc = "\\def\\set{\\def\\lead{\\hrule}}\n\
+    let doc = "\\def\\set{\\def\\lead{\\kern1pt}}\n\
                \\def\\mk#1{{\\set\\lead #1}}\n\n\
                One \\mk{word}.\n\n\
                Two \\mk{words}.\n\\bye\n";
