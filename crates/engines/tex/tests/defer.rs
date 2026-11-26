@@ -958,28 +958,13 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
             "{out:?}\n{}",
             log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
         );
-        // (the paragraphs the counter's change asked again in the last
-        // edit, each once however often: at -j8 a paragraph run ahead of
-        // p30, which defines the name before its own, read that name as
-        // the 350 definitions left it and is refuted at its commit once
-        // p30's commit lands, the same paragraph asked twice, and how
-        // often depends on how far ahead it ran)
         let asked = |b: &phitex_tex::Build| {
-            let mut ns: Vec<u64> = b
-                .stats
-                .reruns
-                .iter()
-                .filter(|(_, op, why)| {
-                    (*op == "exec" || *op == "resume") && why.ends_with("count:200")
-                })
-                .map(|(n, ..)| *n)
-                .collect();
-            ns.sort_unstable();
-            ns.dedup();
-            ns
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200")
         };
         // (every name one on, holding what the one before held)
         let near = src("\\global\\advance\\count200 1\n");
+        let r0 = asked(&b);
         common::rebuild(&mut b, &near);
         let (want, out) = cold("dname-near", &near, 1);
         assert_eq!(b.output().0, want, "-j{threads}: one on equals cold");
@@ -989,20 +974,11 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
             oracle("dname-near-lit", "\\global\\advance\\count200 1\n", 1),
             "one on: cold equals the names written out"
         );
-        // (p30 defines a name of that shape: its piece and p30 read the
-        // digits; p31, whose name before its own is the one p30 defines,
-        // asked; p32 asked and stands, no run)
-        let ran = asked(&b);
+        // (p30 defines a name of that shape: its digits read; p31, p32 asked once and stand, no run)
         assert!(
-            ran.len() <= 3,
-            "-j{threads}: no paragraph asked again on the counter when no name's meaning moved: {:?} {:#?}",
-            b.stats.refuted_by_field,
-            b.stats
-                .reruns
-                .iter()
-                .filter(|(_, _, why)| why.contains("count:200"))
-                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
-                .collect::<Vec<_>>()
+            asked(&b) <= r0 + 3,
+            "-j{threads}: no paragraph asked again on the counter when no name's meaning moved: {:?}",
+            b.stats.refuted_by_field
         );
         // (names onto others, undefined ones, the comparison's outcome)
         let far = src("\\global\\advance\\count200 300\n");
