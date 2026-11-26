@@ -490,6 +490,7 @@ impl<'a> Em<'a> {
     /// last section it added.) The markup is one block's as before: a cut
     /// between two files is never inside markup of its own
     /// ([`crate::split`]).
+    #[allow(clippy::too_many_lines)]
     fn block(&mut self, old: &[Tok], new: &[Tok], old_at: usize, new_at: usize, ctx: Ctx) {
         // (comments and labels alone: nothing the pages show changed, so
         // no markup and no change; the new text as it is)
@@ -516,8 +517,7 @@ impl<'a> Em<'a> {
         // (each unit's change: where its markup begins, its places, its
         // section: the one before it, or its own, a sectioning command
         // added; not one it adds further on)
-        let mut parts: Vec<(usize, (usize, usize), (usize, usize), Option<String>, bool)> =
-            Vec::new();
+        let mut parts: Vec<Part> = Vec::new();
         let start = self.out.len();
         let fl = if ctx.fl { "FL" } else { "" };
         // (a deletion the old text set apart from the word before it,
@@ -553,13 +553,13 @@ impl<'a> Em<'a> {
             self.push(&format!("\\DIFdelbegin{fl} "));
             for g in &og {
                 let at = self.out.len();
-                parts.push((
+                parts.push(Part {
                     at,
-                    span(&old[g.clone()], o.1),
-                    (n.0, n.0),
-                    self.section.clone(),
-                    true,
-                ));
+                    old: span(&old[g.clone()], o.1),
+                    new: (n.0, n.0),
+                    section: self.section.clone(),
+                    del: true,
+                });
                 self.mark(&old[g.clone()], Side::Del, ctx);
             }
             self.push(&format!("\\DIFdelend{fl} "));
@@ -585,7 +585,13 @@ impl<'a> Em<'a> {
                     Some(t) if section_of(t, self.new).is_some() => section_of(t, self.new),
                     _ => self.section.clone(),
                 };
-                parts.push((self.out.len(), (o.1, o.1), span(g, n.1), section, false));
+                parts.push(Part {
+                    at: self.out.len(),
+                    old: (o.1, o.1),
+                    new: span(g, n.1),
+                    section,
+                    del: false,
+                });
                 self.mark(g, Side::Add, ctx);
             }
             self.push(&format!("\\DIFaddend{fl} "));
@@ -594,17 +600,19 @@ impl<'a> Em<'a> {
             self.push("\\DIFtabularend ");
         }
         // (the old side's last unit and the new side's first: one change)
-        if let Some(k) = parts.iter().position(|p| !p.4)
+        if let Some(k) = parts.iter().position(|p| !p.del)
             && k > 0
         {
             let added = parts.remove(k);
             let p = &mut parts[k - 1];
-            (p.2, p.3) = (added.2, added.3);
+            (p.new, p.section) = (added.new, added.section);
         }
         if parts.len() <= 1 {
             // (one unit, or none marked (a new image alone, the look's):
             // the block's places whole)
-            let section = parts.pop().map_or_else(|| self.section.clone(), |p| p.3);
+            let section = parts
+                .pop()
+                .map_or_else(|| self.section.clone(), |p| p.section);
             self.changes.push(RawChange {
                 old: o,
                 new: n,
@@ -615,13 +623,13 @@ impl<'a> Em<'a> {
         }
         let end = self.out.len();
         for (i, p) in parts.iter().enumerate() {
-            let from = if i == 0 { start } else { p.0 };
-            let to = parts.get(i + 1).map_or(end, |q| q.0);
+            let from = if i == 0 { start } else { p.at };
+            let to = parts.get(i + 1).map_or(end, |q| q.at);
             self.changes.push(RawChange {
-                old: p.1,
-                new: p.2,
+                old: p.old,
+                new: p.new,
                 out: (from, to),
-                section: p.3.clone(),
+                section: p.section.clone(),
             });
         }
     }
@@ -1654,6 +1662,16 @@ fn section_of(t: &Tok, src: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// A unit's change in a block ([`Em::block`]): where its markup begins, its
+/// places on each side, its section, and whether it is the old side's.
+struct Part {
+    at: usize,
+    old: (usize, usize),
+    new: (usize, usize),
+    section: Option<String>,
+    del: bool,
 }
 
 /// What a token is as a change of its own ([`units`]).
