@@ -1919,6 +1919,11 @@ fn nested_of(d: &Doc, highlighted: bool) -> Vec<String> {
         let n = if highlighted { 6 } else { 2 };
         return d.tree.iter().take(n).cloned().collect();
     }
+    // (another's: its result, its session's own status line as a single
+    // file's watch draws it, "main.tex · build 3 · 12 pages · 80 ms")
+    if !highlighted && !d.status.is_empty() {
+        return vec![d.status.clone()];
+    }
     let n = if highlighted { 6 } else { 1 };
     let skip = d.recent.len().saturating_sub(n);
     d.recent.iter().skip(skip).cloned().collect()
@@ -2417,6 +2422,11 @@ mod tests {
             "{lines:#?}"
         );
         assert_eq!(lines[6], "| = note: at talk.tex:165", "{lines:#?}");
+        // (its session's status line, once it said one)
+        let mut b2 = Doc::new();
+        b2.run = Some(running());
+        b2.status = "talk.tex · build 1 · 1 error".to_owned();
+        assert_eq!(nested_of(&b2, false), ["talk.tex · build 1 · 1 error"]);
         // (b highlighted: its last lines, the error's among them)
         let nested = vec![nested_of(&a, false), nested_of(&b, true)];
         let t = tree_lines(".", &docs, 2, &nested, 40);
