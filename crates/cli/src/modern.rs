@@ -1671,7 +1671,9 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     spin.built(r.pages(), &r.out.pages_changed);
     status.set("writing the outputs");
     phitex_tex::timeline::lap("cli: the build returned");
-    let main = match s.write(&r, true) {
+    // (no page shipped: no PDF file written, the last one kept; pdfTeX's
+    // file of no bytes, hyperref's opened at read time, is no output)
+    let main = match s.write(&r, r.pages() > 0) {
         Ok(w) => w.main,
         Err(e) => {
             spin.done();

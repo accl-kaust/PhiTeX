@@ -1137,8 +1137,11 @@ impl Ui {
             Some(p) => st.bold(&p.display().to_string()),
             None => st.bold(o.file),
         };
+        // (no page: no output, never a ✓, whatever the errors)
         let mark = if o.errors > 0 {
             st.red(st.sym("✗", "failed:"))
+        } else if o.pages == 0 {
+            st.yellow(st.sym("⚠", "no output:"))
         } else {
             st.green(st.sym("✓", "finished:"))
         };
