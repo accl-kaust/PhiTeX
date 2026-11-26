@@ -357,6 +357,44 @@ fn outline_and_text_are_read() {
     assert_eq!(t[0].xs.len(), "Hello outline".encode_utf16().count());
 }
 
+/// A page's text is the same whatever was drawn of it before, at any
+/// zoom: read from a frame's pixels, a place moved in its last bits by the
+/// scale, and the viewer's text (a hundredth of a point) of a heading at
+/// 601.515 pt said .51 or .52 by the zoom the page was first drawn at.
+#[test]
+fn text_is_the_same_whatever_zoom_drew_the_page() {
+    let doc = pdf(&[
+        (238.406, "a line"),
+        (224.857, "the next"),
+        (190.485, "3 Heading"),
+    ]);
+    let want = Renderer::new().text(&doc, 0).expect("the page's text");
+    let bits = |t: &[TextLine]| -> Vec<Vec<u64>> {
+        t.iter()
+            .map(|l| {
+                [l.x, l.y, l.w, l.size]
+                    .into_iter()
+                    .chain(l.xs.iter().copied())
+                    .chain(l.rs.iter().copied())
+                    .map(f64::to_bits)
+                    .collect()
+            })
+            .collect()
+    };
+    for i in 0..300 {
+        #[allow(clippy::cast_precision_loss)]
+        let scale = 0.4 + i as f32 * 0.012_345_7;
+        let mut r = Renderer::new();
+        r.frame(&doc, 0, scale).expect("a frame");
+        let got = r.text(&doc, 0).expect("the page's text");
+        assert_eq!(
+            bits(&got),
+            bits(&want),
+            "drawn at {scale} first: {got:?}, not {want:?}"
+        );
+    }
+}
+
 /// `objs` as a PDF's objects 1, 2, ... (1 the catalog), with its xref.
 fn pdf_of(objs: &[String]) -> Arc<[u8]> {
     let mut out = b"%PDF-1.4\n".to_vec();

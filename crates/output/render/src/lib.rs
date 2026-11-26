@@ -1501,8 +1501,13 @@ impl Renderer {
             &mut self.boxes,
             (&mut doc.contents, &doc.bytes),
         );
+        // (its text for the viewer, at this scale: kept with the frame only.
+        // The page's text ([`Renderer::text`]) is read at one point a
+        // point, whatever was drawn before: from pixels at a scale, a place
+        // came back a few units in the last place off, and one a hair from
+        // a hundredth (a heading at 601.515 pt) said 601.51 or 601.52 by
+        // the zoom the page was drawn at first)
         let text = lines_of(&chars, s);
-        doc.texts.insert(k, text.clone());
         let links = links_of(pdf, pages, page, &mut doc.names);
 
         // (the bands: the drawings cut where they leave a gap, rows, then
