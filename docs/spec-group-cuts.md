@@ -142,6 +142,28 @@ amsldoc 16-21 ms, TikZ 6-7 ms). Clean builds the same but amsldoc at -j8,
 (7.7-7.9 k to 10.7-12.6 k) and the node count varies from build to build
 at -j8 (2180 and 2723 in two), every PDF byte-identical. Open.
 
+amsldoc's clean build, six interleaved runs each (n11, seconds; nodes;
+runs): -j1 1.69-1.80 on dev against 1.76-1.85 (1351 against 1554 nodes;
+2725 against 3071 runs); -j8 1.87-2.14 against 2.36-2.54 (about 1880
+against 2190-2370; 8.1-9.2 k against 11.0-13.2 k); -j16 2.30-2.42 against
+2.71-2.94 (1860-2870 against 2350-3050; 10-14.7 k against 14.6-21.7 k).
+At -j1 amsldoc takes 241 group cuts; at -j8 1400-1870 cut events, most
+at closes a run reaches only on a guessed state (inside `\verbatim@font`,
+`\@donoparitem`, `\endalign`, none at -j1): the rests they make are
+remade or run again as the guesses are corrected. Tried, none within
+noise of dev while keeping the deck's gain: reads inside the closed
+group (non-selective: 233 of 241 closes have them), a cut only where the
+placer has settled (no change), a hold of a placement while its placer
+is to run again (no change), a minimum of commands inside the group
+(amsldoc -j8 runs back to dev's at 400, but the deck's cut moves between
+rounds: its clean build at -j8 3.7 s to 6.1-6.5 s), and
+`Ctx::settled_here` at the close (the deck's clean build at -j1 hung).
+
+Clean builds at many threads, the merged binary, six at once on 16 cores:
+deck2 360 (180 at -j8, 180 at -j16), the lab3 deck 312 (156 and 156), no
+wrong PDF. `DEFUSE_PLACE_LOG=1` prints every placement, kept check and
+relocation (`place-log:` lines) in any build.
+
 ## The relocation race
 
 At eight threads the frame insert gave a wrong PDF in about one edit in
