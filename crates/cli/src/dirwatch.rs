@@ -1731,11 +1731,28 @@ fn listed(st: &State) -> Vec<String> {
     v
 }
 
-/// The folder's documents for the terminal's tree: its `.tex` files with
-/// a `\documentclass` (each one's head read), at most [`FOUND_MAX`].
+/// The folder's documents for the terminal's tree: the `.tex` files with
+/// a `\documentclass` (each one's head read) in the folder and in its
+/// folders one level down, at most [`FOUND_MAX`]: never a walk of a large
+/// tree (a folder watch starts at once, and costs nothing for folders no
+/// one looks at).
 fn documents(root: &Root) -> Vec<String> {
-    find_tex(root)
-        .into_iter()
+    let mut tex = Vec::new();
+    let top = list(root, "").unwrap_or_default();
+    for e in &top {
+        if !e.dir && kind_of(&e.name) == "tex" {
+            tex.push(e.name.clone());
+        }
+    }
+    for d in top.iter().filter(|e| e.dir).take(200) {
+        for e in list(root, &d.name).unwrap_or_default() {
+            if !e.dir && kind_of(&e.name) == "tex" {
+                tex.push(format!("{}/{}", d.name, e.name));
+            }
+        }
+    }
+    tex.sort();
+    tex.into_iter()
         .filter(|r| {
             let Ok(f) = std::fs::File::open(root.path.join(r)) else {
                 return false;
@@ -1871,9 +1888,10 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
             .name("phitex-dir-find".into())
             .spawn(move || {
                 let found = documents(&s.root);
-                let mut st = lock(&s.st);
-                st.found = found;
-                s.changed(&mut st);
+                lock(&s.st).found = found;
+                // (the terminal's tree drawn again; the pages, which list
+                // the folder themselves, told nothing)
+                let _ = lock(&s.tx).send(Ev::Changed);
             });
     }
     {

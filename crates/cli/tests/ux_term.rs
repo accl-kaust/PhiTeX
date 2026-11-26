@@ -2,7 +2,7 @@
 //! 2026-11-25): the help's order, a chapter built for its document, the
 //! main file picked, Ctrl-C and q in a watch, the viewer opened, a folder
 //! watch's tree and its one "nothing written" line, `phitex doctor`, and
-//! an LSP client with no PhiTeX plugin. TeX's files come from Shelf (the
+//! an LSP client with no `PhiTeX` plugin. TeX's files come from Shelf (the
 //! test machines need no TeX Live).
 
 #![allow(clippy::too_many_lines)]
@@ -143,7 +143,7 @@ impl Term {
     }
 }
 
-/// `phitex` and `--help` lead with what PhiTeX is; the agents' loop is
+/// `phitex` and `--help` lead with what `PhiTeX` is; the agents' loop is
 /// the help's last section. `--help-all` gives each option one
 /// description (clap printed the short one, then the long one, back to
 /// back), and --spec offers no value that cannot be used.
@@ -461,8 +461,8 @@ fn uri(p: &Path) -> String {
     format!("file://{}", p.display())
 }
 
-/// An editor's LSP client with no PhiTeX plugin (vim-lsp) is shown the
-/// viewer's address (window/showMessage); PhiTeX's own plugins
+/// An editor's LSP client with no `PhiTeX` plugin (vim-lsp) is shown the
+/// viewer's address (window/showMessage); `PhiTeX`'s own plugins
 /// (`initializationOptions.client`) are not. A problem typed in an
 /// unsaved buffer of a chapter is at its column, not the line's start.
 #[test]
@@ -599,11 +599,11 @@ fn lsp_viewer_address_and_columns() {
 #[test]
 fn session_wait_after_a_copy_in_place() {
     let dir = scratch("wait-cp");
-    let a = TINY.replace("Hi", "Alpha");
-    let b = TINY.replace("Hi", "Beta");
-    std::fs::write(dir.join("a.tex"), &a).expect("text a");
-    std::fs::write(dir.join("b.tex"), &b).expect("text b");
-    std::fs::write(dir.join("doc.tex"), &a).expect("the document");
+    let alpha = TINY.replace("Hi", "Alpha");
+    let beta = TINY.replace("Hi", "Beta");
+    std::fs::write(dir.join("a.tex"), &alpha).expect("text a");
+    std::fs::write(dir.join("b.tex"), &beta).expect("text b");
+    std::fs::write(dir.join("doc.tex"), &alpha).expect("the document");
     let session = |args: &[&str]| {
         let mut all = vec!["session"];
         all.extend_from_slice(args);

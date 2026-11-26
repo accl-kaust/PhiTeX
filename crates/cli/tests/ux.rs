@@ -946,7 +946,7 @@ fn compat_terminal_is_pdflatexs() {
     }
 }
 
-/// `phitex` and `phitex --help` lead with what PhiTeX is, for a person;
+/// `phitex` and `phitex --help` lead with what `PhiTeX` is, for a person;
 /// the loop an agent edits in is a section at their end (three agents
 /// that knew only `phitex` never found `session`: it stays there), the
 /// command list says what `session` gives, and `build --help` points to it

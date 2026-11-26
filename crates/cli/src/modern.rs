@@ -1136,23 +1136,22 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let mut notes = Vec::new();
     let named_file = o.file.clone().or_else(|| cfg.main.clone()).or(from_rc);
     let given = o.file.is_some();
-    let mut file = match named_file {
-        Some(f) => f,
+    let mut file = if let Some(f) = named_file {
+        f
+    } else {
         // (nothing names it: the one .tex file here with a \documentclass,
         // as the editors pick it; several, named by the user)
-        None => {
-            let here = std::env::current_dir().map_err(|e| e.to_string())?;
-            let verb = match o.command {
-                Some(Command::Watch) => "watch",
-                Some(Command::Clean) => "clean",
-                _ => "build",
-            };
-            let f = pick_main(&here, verb)?;
-            notes.push(format!(
-                "no file named: building {f}, the one .tex file here with a \\documentclass"
-            ));
-            f
-        }
+        let here = std::env::current_dir().map_err(|e| e.to_string())?;
+        let verb = match o.command {
+            Some(Command::Watch) => "watch",
+            Some(Command::Clean) => "clean",
+            _ => "build",
+        };
+        let f = pick_main(&here, verb)?;
+        notes.push(format!(
+            "no file named: building {f}, the one .tex file here with a \\documentclass"
+        ));
+        f
     };
     // (the magic comments are in the first lines: the whole file is read
     // only when no engine is named and its text decides)
