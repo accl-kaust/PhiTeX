@@ -35,6 +35,18 @@
 //! only a split of sequential work: the output is the same wherever the
 //! cuts are, and none at all (`cut_min` = `u64::MAX`).
 //!
+//! Group closes ([`Run::group_cut`], docs/spec-group-cuts.md): a group
+//! of the run's own that closes is a cut too, its input going on (a
+//! macro's expansion, its text), where only groups of its own owning no
+//! list stay open and the state is nameable as above; at every such
+//! close, whatever the work before it (`cut_min` never: none). The closed group's local bindings are
+//! gone; the continuation carries the input's levels (the `\aftergroup`
+//! tokens the close put back among them), the groups still open and the
+//! conditionals. A read inside the closed group that moves (a loop over
+//! a list read back from the last run, a box set to measure a footline)
+//! runs the piece up to the close again, and the rest only if what it
+//! carries or reads moved.
+//!
 //! `PHITEX_CUT_CHECK=1`: a continuation, once loaded, is
 //! encoded again and compared with the one it was given; a difference
 //! is printed (`cut check: ... DIFFERENT`): the state did not go across
@@ -44,7 +56,7 @@
 
 use phitex_defuse::ValueId;
 
-use crate::run::Run;
+use crate::run::{R, Run};
 use crate::val::{int_of, list_of};
 
 /// The items (the lists' and the groups' bindings) a continuation may
@@ -97,6 +109,105 @@ impl Run<'_, '_> {
             .text_cuts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         true
+    }
+
+    /// At the end of a command that closed a group of the run's own
+    /// ([`Run::pop_level`]), its input going on (a macro's expansion, its
+    /// text): it ends here, its rest a continuation (true), where the
+    /// state is nameable (see the module's "Group closes").
+    ///
+    /// No bar of commands: where a group closes is the text's structure,
+    /// the same whatever the run read before it. A bar made the cut move
+    /// with the work before it, a loop over a list read back from the
+    /// last run among it: the pieces after it were made anew between a
+    /// clean build's rounds and after an edit (the 112-page beamer deck's
+    /// clean build 1.8 times as long with a bar of 200 commands in the
+    /// closed group or 1000 since the run's start; none, as long as
+    /// before). The hot path: every group close sets a flag; the run
+    /// looks at it once per command.
+    pub(crate) fn group_cut(&mut self) -> R<bool> {
+        let op = self.cx.op();
+        if !self.doc
+            || !(op == self.ops.exec || op == self.ops.resume)
+            || self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed) == u64::MAX
+        {
+            return Ok(false);
+        }
+        if let Some(why) = self.group_cut_refusal()? {
+            if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
+                eprintln!(
+                    "cut: node {} at a group's close after {} commands: none ({why})",
+                    self.cx.node().raw(),
+                    self.cmds
+                );
+            }
+            return Ok(false);
+        }
+        if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
+            eprintln!(
+                "cut: node {} ({}) at a group's close after {} commands, pulled {}: cut, nest {:?}, conds {}, input levels {}",
+                self.cx.node().raw(),
+                self.op_name(),
+                self.cmds,
+                self.pulled,
+                self.nest
+                    .iter()
+                    .map(|l| (l.mode, l.group, l.owns))
+                    .collect::<Vec<_>>(),
+                self.conds.len(),
+                self.input.levels.len()
+            );
+        }
+        self.muts += 1;
+        self.cut = Some(self.cand);
+        self.text_cut = true;
+        self.ops
+            .group_cuts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
+    }
+
+    /// Why the run may not end at the group's close it is at with a
+    /// continuation, if it may not: the cheap checks first, a look at the
+    /// rest of the input and the main list's items last.
+    fn group_cut_refusal(&mut self) -> R<Option<&'static str>> {
+        // (on the main vertical list, inside groups of its own that own
+        // no list: the continuation carries no list, only the groups'
+        // bindings, as at a forced candidate inside them,
+        // `Run::cuttable_here`; a paragraph or a box of its own open goes
+        // on to the close that ends it)
+        if !self.nest.iter().all(|l| !l.owns && l.group != 0) {
+            return Ok(Some("a list of its own"));
+        }
+        if self.cut.is_some() || self.close_cont.is_some() || self.tool_cut.is_some() {
+            return Ok(Some("cut already"));
+        }
+        if !self.ins_pending.is_empty() {
+            return Ok(Some("insertions pending"));
+        }
+        if self.kids.iter().any(|k| {
+            ![
+                self.ops.put,
+                self.ops.toolnode,
+                self.ops.pdfpage,
+                self.ops.xdvpage,
+            ]
+            .contains(&k.0)
+        }) {
+            return Ok(Some("children"));
+        }
+        if let Some(why) = self.open_state_refusal() {
+            return Ok(Some(why));
+        }
+        if self.main_items_since(self.cand_marks.last().map_or(0, |m| m.contribs)) {
+            return Ok(Some("items pending for the page"));
+        }
+        // (a rest of blank input makes no node: the run reads it, as at a
+        // candidate, `Run::finish_candidate_at`)
+        if self.rest_blank()? {
+            return Ok(Some("blank input left"));
+        }
+        Ok(None)
     }
 
     /// Why the run may not end here with a continuation, if it may not.

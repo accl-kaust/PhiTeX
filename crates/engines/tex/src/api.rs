@@ -2112,6 +2112,9 @@ pub struct Stats {
     /// Runs that ended at their text's end with a continuation
     /// (`crate::cut`).
     pub text_cuts: u64,
+    /// Runs that ended at a group's close with a continuation
+    /// (`crate::cut`).
+    pub group_cuts: u64,
     /// Pictures whose body a run read inline though they were found
     /// (`crate::pic`): a child's refusal, a picture after a refused one.
     /// With [`Stats::runs_by_op`]'s `pic` runs, the pictures' runs.
@@ -3652,6 +3655,7 @@ impl Graph {
             stream_objs,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            group_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pic_inline: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
             spec_window: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -4682,6 +4686,10 @@ impl Graph {
             stats.text_cuts += self
                 .ops
                 .text_cuts
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
+            stats.group_cuts += self
+                .ops
+                .group_cuts
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
             stats.pics_inline += self
                 .ops

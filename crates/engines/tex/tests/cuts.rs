@@ -234,3 +234,123 @@ fn forced_mid() -> String {
     s.push_str("\\fi");
     s
 }
+
+/// A document whose `\slide` reads `\count200` only inside a group it
+/// closes before the rest of its work, as beamer's `\beamer@setuplinks`
+/// reads the `.nav` list in `{... \dohead}`: the group's `\loop` runs
+/// `\count200` times and sets a global that does not depend on it; the
+/// rest, inside the outer group and a conditional the macro opened (no
+/// candidate can cut it there), sets three paragraphs with the outer
+/// group's locals, that global and what an `\aftergroup` token the inner
+/// group left does (docs/spec-group-cuts.md).
+fn slide_doc(entries: u32, local: u32, after: &str) -> String {
+    let mut s = format!(
+        "\\count200={entries}\n\\def\\afterthing{{{after}}}\n\\def\\slide{{\\begingroup\\iftrue\n  {{\\count1=0 \\loop\\ifnum\\count1<\\count200 \\advance\\count1 by 1 \\global\\count7=3 \\repeat\\aftergroup\\afterthing}}%\n  \\count5={local} \\def\\x{{local}}%\n"
+    );
+    for j in 0..3 {
+        let _ = write!(
+            s,
+            "  Slide paragraph {j} with the count \\the\\count5, the macro \\x, the global \\the\\count7 and \\the\\count6, long enough to make a line or two when set in the plain format's ten point roman.\\par\n"
+        );
+    }
+    s.push_str("\\fi\\endgroup}\n\n");
+    s.push_str(&doc(12, 6, "\\slide"));
+    s
+}
+
+/// The runs of operation `op` in an evaluation.
+fn runs(r: &phitex_tex::Report, op: &str) -> u64 {
+    r.runs_by_op.iter().filter(|x| x.0 == op).map(|x| x.1).sum()
+}
+
+/// The group's close inside `\slide` is a cut: the piece up to it runs
+/// again for the edited `\count200` it reads there, and the rest, its
+/// continuation the same (the closed group's locals gone, its `\loop`'s
+/// `\iterate` among them), does not run. Without the cut the slide is
+/// one node, run again whole: no rest of its own.
+#[test]
+fn group_cut_a_read_inside_a_closed_group_reruns_only_the_piece_up_to_it() {
+    let src = slide_doc(5, 7, "\\count6=9 ");
+    let more = slide_doc(40, 7, "\\count6=9 ");
+    for threads in [1, 8] {
+        let mut b = build(&format!("gcut-read-{threads}"), &src, threads);
+        assert_eq!(b.output().0, cold("gcut-read", &src), "-j{threads}");
+        assert!(
+            b.stats.group_cuts >= 1,
+            "-j{threads}: the slide is cut at its inner group's close"
+        );
+        assert!(
+            b.nodes_by_op("resume") >= 1,
+            "-j{threads}: the slide's rest is a node of its own"
+        );
+        for (k, text) in [&more, &src].into_iter().enumerate() {
+            let r = common::rebuild(&mut b, text);
+            assert_eq!(
+                b.output().0,
+                cold(&format!("gcut-read-{k}"), text),
+                "-j{threads} edit {k}"
+            );
+            assert!(
+                runs(&r, "exec") >= 1,
+                "-j{threads} edit {k}: the piece reading the count runs again: {r:?}"
+            );
+            assert_eq!(
+                runs(&r, "resume"),
+                0,
+                "-j{threads} edit {k}: the slide's rest does not run: {r:?}"
+            );
+        }
+    }
+}
+
+/// What goes across a group's cut is the state there: the outer group's
+/// locals, the conditional open, the `\aftergroup` token on the input.
+/// Edits of each run what reads them, the output a cold build's; a build
+/// that cuts nowhere makes the same output.
+#[test]
+fn group_cut_carries_the_open_groups_the_conditional_and_the_aftergroup_tokens() {
+    let src = slide_doc(5, 7, "\\count6=9 ");
+    let uncut = {
+        let dir = common::scratch("cuts-gcut-uncut");
+        let opts = Options {
+            threads: Some(1),
+            cut_min: Some(u64::MAX),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(opts, Some(&common::plain()), &src);
+        assert_eq!(b.stats.group_cuts, 0, "a build that cuts nowhere");
+        b.output().0
+    };
+    assert!(
+        common::first_difference(&cold("gcut-state", &src), &uncut).is_none(),
+        "the cut build's output is the uncut one's"
+    );
+    for threads in [1, 8] {
+        let mut b = build(&format!("gcut-state-{threads}"), &src, threads);
+        for (k, text) in [
+            slide_doc(5, 8, "\\count6=9 "),
+            slide_doc(5, 8, "\\count6=4 "),
+            slide_doc(6, 8, "\\count6=4 \\count5=1 "),
+            src.clone(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let r = common::rebuild(&mut b, text);
+            assert_eq!(
+                b.output().0,
+                cold(&format!("gcut-state-{k}"), text),
+                "-j{threads} edit {k}"
+            );
+            // (the rest reads what each edit moved: the local set after
+            // the cut is in its input, the `\aftergroup` macro's meaning
+            // a read of its own)
+            if k < 3 {
+                assert!(
+                    runs(&r, "resume") >= 1,
+                    "-j{threads} edit {k}: the rest runs for what it reads: {r:?}"
+                );
+            }
+        }
+    }
+}

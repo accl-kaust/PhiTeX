@@ -202,6 +202,9 @@ pub(crate) struct Ops {
     /// Runs that ended at their text's end with a continuation
     /// (`crate::cut`; `Stats::text_cuts`).
     pub text_cuts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The runs that ended at a group's close with a continuation
+    /// ([`Run::group_cut`]).
+    pub group_cuts: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Pictures a run read inline where a child was placed or refused
     /// (`crate::pic`; `Stats::pics_inline`).
     pub pic_inline: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -1371,9 +1374,13 @@ pub(crate) struct Run<'c, 'a> {
     /// The page loop's keys for this run ([`crate::pages::LoopKeys`]).
     pub loop_keys: crate::pages::LoopKeys,
     pub cut: Option<u32>,
-    /// The cut is at the run's text's end, at no candidate
-    /// ([`Run::text_cut`]).
+    /// The cut is at no candidate: at the run's text's end
+    /// ([`Run::text_cut`]) or at a group's close ([`Run::group_cut`]).
     pub(crate) text_cut: bool,
+    /// A group of the run's own closed in the command in progress
+    /// ([`Run::pop_level`]): at its end the run may be cut there
+    /// ([`Run::group_cut`]).
+    pub(crate) group_closed: bool,
     /// The candidate a second pass ends at ([`Halt::Recut`]).
     pub stop_at: Option<u32>,
     /// The run's reads made before its last look at the page so far
@@ -1646,6 +1653,7 @@ impl<'c, 'a> Run<'c, 'a> {
             loop_keys: crate::pages::LoopKeys::default(),
             cut: None,
             text_cut: false,
+            group_closed: false,
             stop_at: None,
             page_read_mark: 0,
             recut_reads: 0,
@@ -7511,11 +7519,17 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.input.compact();
                 }
                 self.begin_command();
+                self.group_closed = false;
                 self.command()?;
                 self.mark.active = false;
                 if self.claim_rest || self.closed_scope() {
                     self.csname_force()?;
                     return self.end_at_close();
+                }
+                // (a group of its own closed: the run may end here, its
+                // rest a continuation, `crate::cut`)
+                if self.group_closed && self.group_cut()? {
+                    return Ok(());
                 }
             }
             self.csname_force()?;
