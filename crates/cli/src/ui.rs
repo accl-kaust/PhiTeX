@@ -1154,7 +1154,7 @@ impl Ui {
                     b.spin = lines;
                     redraw(&mut std::io::stderr().lock(), &mut b);
                 }
-                if relay && k % 3 == 0 {
+                if relay && k.is_multiple_of(3) {
                     let w: usize = std::env::var(RELAY_WIDTH)
                         .ok()
                         .and_then(|w| w.parse().ok())

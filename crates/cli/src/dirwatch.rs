@@ -2436,7 +2436,7 @@ mod tests {
         // (a stopped document: its line alone)
         let mut c = Doc::new();
         c.recent.push_back("✓  1  clean build".to_owned());
-        assert!(nested_of(&c, true).is_empty());
+        assert_eq!(nested_of(&c, true), Vec::<String>::new());
         // (the line drawn as it is under its document, no mark)
         let l = crate::ui::idle_line_for_test(&format!("{}x", crate::ui::NESTED), 80);
         assert_eq!(l, "    x");
