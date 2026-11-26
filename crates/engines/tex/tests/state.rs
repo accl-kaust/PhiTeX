@@ -293,3 +293,49 @@ fn the_state_fixtures_are_byte_identical() {
         );
     }
 }
+
+/// A loaded build whose date alone moved (a later process's now, as a
+/// browser's reopened project has) keeps the saved build's date and runs
+/// nothing, as latexmk leaves an up-to-date PDF as it is
+/// (docs/spec-persisted-graph.md §4.2); the next change runs at the new
+/// date, `\day`'s readers re-asked with it.
+#[test]
+fn a_loaded_builds_date_waits_for_a_change() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("state-loaded-date");
+    let _ = std::fs::create_dir_all(&dir);
+    let plain = common::plain();
+    let src = "\\immediate\\write16{[\\the\\year/\\the\\month/\\the\\day \\the\\time]}\n\
+               A paragraph.\n\nAnother.\n\\bye\n";
+    let opts = |t: i64| Options {
+        epoch: Some(t),
+        ..common::options("./dated.tex", "dated", "", &dir)
+    };
+    // (2001-09-09 01:46:40 UTC: minute 106)
+    let b = common::build(opts(1_000_000_000), Some(&plain), src);
+    assert!(b.output().1.contains("[2001/9/9 106]"), "{}", b.output().1);
+    let (pdf, _) = b.output();
+    let bytes = b.save();
+    // (opened again a day later, nothing changed)
+    let (mut l, _) =
+        phitex_tex::Build::load(opts(1_000_086_400), Some(&plain), &bytes).expect("loaded");
+    let re = l.reask_environment();
+    assert!(re.moved.is_empty() && re.date_kept, "{:?}", re.moved);
+    l.edit(src);
+    assert_eq!(
+        l.stats.nodes_run, 0,
+        "a reopen with nothing changed ran nodes"
+    );
+    assert!(l.output().1.contains("[2001/9/9 106]"), "{}", l.output().1);
+    assert!(
+        l.output().0 == pdf,
+        "a reopen with nothing changed made another output"
+    );
+    // (a change: the build runs, at this process's date)
+    l.edit(&src.replace("Another.", "Another one."));
+    assert!(l.stats.nodes_run > 0);
+    assert!(
+        l.output().1.contains("[2001/9/10 106]"),
+        "the change ran at the saved date: {}",
+        l.output().1
+    );
+}
