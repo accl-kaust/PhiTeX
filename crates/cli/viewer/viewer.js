@@ -17282,13 +17282,29 @@ addEventListener("keydown", (e) => {
   if (folderQuick) return folderQuick.toggle();
   void printPdf();
 }, { capture: true });
+{
+  const PRINT_ICON = "M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z";
+  const root = document.querySelector("phitex-preview")?.shadowRoot;
+  const pdf = root?.querySelector("#x-pdf");
+  if (root && pdf && !root.querySelector("#x-print")) {
+    const b = pdf.cloneNode(true);
+    b.id = "x-print";
+    b.querySelector("path")?.setAttribute("d", PRINT_ICON);
+    for (const sp of b.querySelectorAll("span")) if (sp.textContent === "Download PDF") sp.textContent = "Print PDF";
+    b.onclick = () => {
+      root.querySelector("#b-more")?.click();
+      void printPdf();
+    };
+    pdf.after(b);
+  }
+}
 var folderQuick;
 var folderDoc;
 {
   const m = /\/d\/([0-9a-f]{12})\/$/.exec(location.pathname);
   if (m) folderMode(m[1]);
   panel.addKeys([
-    ...m ? [["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] : [["Ctrl+P", "print the PDF"]],
+    ...m ? [["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (print: the \u2026 menu's Print PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] : [["Ctrl+P", "print the PDF"]],
     ["`", "the terminal"]
   ]);
 }
@@ -17348,8 +17364,7 @@ function folderMode(id) {
   button.onclick = () => show(!on);
   close.onclick = () => show(false);
   const root = col.getRootNode();
-  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host2, link, "Ctrl+P again: print the PDF");
-  folderQuick.onAgain = () => void printPdf();
+  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host2, link, "print: the \u2026 menu");
   let files;
   link.onHello = (h) => {
     if (!h.doc) return;
