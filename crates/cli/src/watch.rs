@@ -2253,7 +2253,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         Err(e) => ui.error(&format!("{e}")),
                     }
                 }
-                match s.write(&r, true) {
+                match s.write(&r, r.pages() > 0) {
                     Ok(w) => {
                         for (p, _) in &w.files {
                             ui.line(&st.dim(&format!("wrote {}", p.display())));
@@ -2494,13 +2494,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // knows them as the watch's own)
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
         // (every build writes the output pdfTeX would for its input, errors
-        // or not: the pages shipped; none when nothing was shipped)
+        // or not: the pages shipped; none when nothing was shipped, the
+        // last file kept, never pdfTeX's file of no bytes)
         // (an engine failure, `Report::internal`: nothing written, the
         // last good build's files kept)
         let written = match if r.internal.is_some() || !writing {
             Err(String::new())
         } else {
-            s.write(&r, true)
+            s.write(&r, r.pages() > 0)
         } {
             Ok(w) => {
                 let ours = &mut *mine;
@@ -2827,8 +2828,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if warnings == 1 { "" } else { "s" }
             )));
         }
+        // (no page: no output, never a ✓)
         let mark = if failed {
             st.red(st.sym("✗", "failed:"))
+        } else if r.pages() == 0 {
+            st.yellow(st.sym("⚠", "no output:"))
         } else {
             st.green(st.sym("✓", "ok:"))
         };

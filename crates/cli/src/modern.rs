@@ -1382,6 +1382,21 @@ pub fn report(
     for w in &r.warnings {
         ui.warning(w);
     }
+    // (the engine's own checks, never the document's problems: -v)
+    if o.verbose > 0 || ui.verbose > 0 {
+        for d in r
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+        {
+            ui.line(&st.dim(&format!(
+                "  the engine's check: {}:{}: {}",
+                d.file.trim_start_matches("./"),
+                d.line,
+                d.message
+            )));
+        }
+    }
     // (the problems as `phitex session problems` has them: the engine's,
     // each at its file and line, one count for both)
     let problems = phitex_live::watch::diagnostics(s, r, &log.display().to_string());
@@ -1671,7 +1686,9 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     spin.built(r.pages(), &r.out.pages_changed);
     status.set("writing the outputs");
     phitex_tex::timeline::lap("cli: the build returned");
-    let main = match s.write(&r, true) {
+    // (no page shipped: no PDF file written, the last one kept; pdfTeX's
+    // file of no bytes, hyperref's opened at read time, is no output)
+    let main = match s.write(&r, r.pages() > 0) {
         Ok(w) => w.main,
         Err(e) => {
             spin.done();

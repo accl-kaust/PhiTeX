@@ -411,7 +411,9 @@ impl Document {
         let written = if r.internal.is_some() {
             Err(String::new())
         } else {
-            s.write(&r, true)
+            // (no page shipped: the last PDF file kept, never one of no
+            // bytes)
+            s.write(&r, r.pages() > 0)
         };
         let main = written.as_ref().ok().and_then(|w| w.main.clone());
         let pdf = viewer_pdf(s, &r, None, || {

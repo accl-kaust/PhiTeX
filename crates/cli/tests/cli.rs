@@ -311,6 +311,84 @@ fn tex_doc(program: &str, name: &str) {
     }
 }
 
+/// `phitex build` on LaTeX documents whose text ends inside an argument
+/// after a closed group (an abstract, a quote): pdflatex's two errors
+/// ("File ended while scanning use of \textbf", "Emergency stop"), its
+/// exit status 1, no PDF file (oracle: TeX Live 2026's pdflatex, mc
+/// 90910). The paragraph was dropped, the job finished "2 pages, 1
+/// warning", exit 0. The runaway is placed at its brace's line.
+#[test]
+fn latex_runaway_after_a_closed_group_is_pdflatexs_error() {
+    let _one = one();
+    for (name, doc, line) in [
+        (
+            "abstract",
+            "\\documentclass{article}\n\\begin{document}\n\\begin{abstract}\nWe study.\n\\end{abstract}\nSome \\textbf{bold words\n\\end{document}\n",
+            6,
+        ),
+        (
+            "quote",
+            "\\documentclass{article}\n\\begin{document}\n\\begin{quote}\nx\n\\end{quote}\nText.\n\\section{Results\nMore.\n\\end{document}\n",
+            7,
+        ),
+    ] {
+        let dir = scratch(&format!("runaway-{name}"));
+        std::fs::write(dir.join("doc.tex"), doc).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name}: {err}");
+        assert!(
+            err.contains("File ended while scanning use of")
+                && err.contains("job aborted, no legal \\end found"),
+            "{name}: {err}"
+        );
+        assert!(
+            err.contains(&format!("doc.tex:{line}:")),
+            "{name}: at line {line}: {err}"
+        );
+        assert!(
+            !dir.join("doc.pdf").exists(),
+            "{name}: pdflatex writes none: {err}"
+        );
+    }
+}
+
+/// LaTeX's "`h' float specifier changed to `ht'", written by the output
+/// routine with no line: on its float's line where the file has as many
+/// floats placed `[h]` as such warnings, else with no line, never at the
+/// main file's 1:1 (the VS Code tester's squiggled `\documentclass`).
+#[test]
+fn latex_float_warnings_are_on_their_floats() {
+    let _one = one();
+    let body = "\\documentclass{article}\n\\begin{document}\nText.\n\\begin{figure}[ht]\\centering\\rule{1cm}{12cm}\\caption{A}\\end{figure}\n\\begin{table}[h]\\centering\\rule{1cm}{12cm}\\caption{B}\\end{table}\nMore.\n\\end{document}\n";
+    for (name, doc, want) in [
+        (
+            "one",
+            body.to_owned(),
+            "doc.tex:5: LaTeX Warning: `h' float",
+        ),
+        (
+            "two",
+            body.replace("[ht]", "[h]"),
+            "doc.tex: LaTeX Warning: `h' float",
+        ),
+    ] {
+        let dir = scratch(&format!("floats-{name}"));
+        std::fs::write(dir.join("doc.tex"), doc).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{name}: {err}");
+        assert!(err.contains(want), "{name}: {err}");
+        assert!(!err.contains("doc.tex:1:"), "{name}: {err}");
+    }
+}
+
 #[test]
 #[ignore = "waits for phitex-tex's LaTeX slice (the latex.ltx prelude)"]
 fn latex_sections() {

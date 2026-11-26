@@ -1120,7 +1120,8 @@ impl Ui {
         if o.warnings > 0 {
             facts.push(st.yellow(&plural(o.warnings, "warning", "warnings")));
         }
-        if o.diagnostics > 0 {
+        // (the engine's own checks: ours to read, -v)
+        if o.diagnostics > 0 && self.verbose > 0 {
             facts.push(st.dim(&plural(o.diagnostics, "diagnostic", "diagnostics")));
         }
         let mut how = Vec::new();
@@ -1137,8 +1138,11 @@ impl Ui {
             Some(p) => st.bold(&p.display().to_string()),
             None => st.bold(o.file),
         };
+        // (no page: no output, never a ✓, whatever the errors)
         let mark = if o.errors > 0 {
             st.red(st.sym("✗", "failed:"))
+        } else if o.pages == 0 {
+            st.yellow(st.sym("⚠", "no output:"))
         } else {
             st.green(st.sym("✓", "finished:"))
         };

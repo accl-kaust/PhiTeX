@@ -568,56 +568,6 @@ struct Conn {
 /// How often a request waiting on the watch looks whether it still runs.
 const LOOK_EVERY: Duration = Duration::from_millis(250);
 
-/// A thread that looks, while a request waits, whether the watch still
-/// runs ([`crate::attach::ended`]); once it does not, the connection is
-/// shut, so the read waiting on it ends. A watch that ends closes its
-/// socket itself; one gone without that (its socket held open, the
-/// connection not torn down in a sandbox's network) is seen here.
-struct Guard {
-    stop: Option<std::sync::mpsc::Sender<()>>,
-    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    t: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Guard {
-    fn new(watch: &Value, s: &TcpStream) -> Guard {
-        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (stop, rx) = std::sync::mpsc::channel::<()>();
-        let t = s.try_clone().ok().map(|s| {
-            let (watch, gone) = (watch.clone(), gone.clone());
-            std::thread::spawn(move || {
-                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                    rx.recv_timeout(LOOK_EVERY)
-                {
-                    if crate::attach::ended(&watch) {
-                        gone.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let _ = s.shutdown(std::net::Shutdown::Both);
-                        return;
-                    }
-                }
-            })
-        });
-        Guard {
-            stop: Some(stop),
-            gone,
-            t,
-        }
-    }
-
-    fn gone(&self) -> bool {
-        self.gone.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(t) = self.t.take() {
-            let _ = t.join();
-        }
-    }
-}
-
 fn send(w: &mut TcpStream, v: &Value) -> std::io::Result<()> {
     let body = v.to_string();
     write!(w, "Content-Length: {}\r\n\r\n{body}", body.len())?;
@@ -648,6 +598,49 @@ impl Conn {
         Ok(c)
     }
 
+    /// Waits until the socket has a byte to read (or its end), looking
+    /// every [`LOOK_EVERY`] whether the watch still runs
+    /// ([`crate::attach::ended`]): a watch that ends closes its socket
+    /// itself; one gone without that (its socket held open by another, as
+    /// a sandbox's network or a process that inherited it may) is seen
+    /// here. `within`: from `t0`, the time to wait.
+    fn wait_readable(
+        &mut self,
+        t0: Instant,
+        within: Option<Duration>,
+        late: &dyn Fn(Duration) -> Failed,
+    ) -> Result<(), Failed> {
+        let s = self.r.get_ref();
+        loop {
+            let left = match within {
+                Some(w) => match w.checked_sub(t0.elapsed()) {
+                    Some(d) if !d.is_zero() => d.min(LOOK_EVERY),
+                    _ => return Err(late(w)),
+                },
+                None => LOOK_EVERY,
+            };
+            let _ = s.set_read_timeout(Some(left));
+            match s.peek(&mut [0u8; 1]) {
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    if crate::attach::ended(&self.watch) {
+                        let pid = &self.watch["pid"];
+                        return Err(no_session(format!(
+                            "the watch (pid {pid}) ended while this waited"
+                        )));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                // (a byte, the end, or an error: the read says which)
+                _ => return Ok(()),
+            }
+        }
+    }
+
     /// Request `method`: its result (the notifications in between passed
     /// over); `within`: the time to wait for it.
     fn call(
@@ -663,27 +656,33 @@ impl Conn {
             &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
         )
         .map_err(|e| no_session(format!("the watch's socket: {e}")))?;
-        let _ = self.r.get_ref().set_read_timeout(within);
         let t0 = Instant::now();
-        let guard = Guard::new(&self.watch, self.r.get_ref());
+        let pid = self.watch["pid"].clone();
+        let late = |w: Duration| {
+            Failed(
+                EXIT_TIMEOUT,
+                format!(
+                    "the watch (pid {pid}) did not answer within {}",
+                    crate::ui::ms(w)
+                ),
+            )
+        };
         loop {
+            // (the answer waited for here, LOOK_EVERY at a time, whether
+            // the watch still runs looked at in between by this thread:
+            // on Windows a read blocked on the socket is not ended by
+            // another thread's `shutdown` of a clone of it, a handle of
+            // its own, and a request to a watch gone with its socket held
+            // open waited for ever)
+            if self.r.buffer().is_empty() {
+                self.wait_readable(t0, within, &late)?;
+            }
+            let _ = self.r.get_ref().set_read_timeout(within);
             let Some(m) = crate::lsp::read(&mut self.r) else {
-                let pid = &self.watch["pid"];
-                if guard.gone() {
-                    return Err(no_session(format!(
-                        "the watch (pid {pid}) ended while this waited"
-                    )));
-                }
                 if let Some(w) = within
                     && t0.elapsed() >= w
                 {
-                    return Err(Failed(
-                        EXIT_TIMEOUT,
-                        format!(
-                            "the watch (pid {pid}) did not answer within {}",
-                            crate::ui::ms(w)
-                        ),
-                    ));
+                    return Err(late(w));
                 }
                 return Err(no_session(format!(
                     "the watch (pid {pid}) ended (its socket closed)"
