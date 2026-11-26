@@ -6149,9 +6149,19 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
                 _ => 1,
             }
         };
+        // (a definition: the text's body, or none yet. The bodies a call
+        // reaches name macros they define themselves, inside their own
+        // groups (the Diff's `\phitexdifleadtype`, defined by
+        // `\phitexdifULset` inside the group `\phitexdifuline` opens):
+        // undefined where the node begins, as in TeX, and a call of it
+        // there would define nothing, an error's. What defines it is a
+        // body the bound covers; a definition from elsewhere is an
+        // undeclared one, checked on its own. Such a node's hint was void,
+        // its definitions unbounded, and the Diff listed "hint regime
+        // violated" at a line of diff.tex)
         let ok = match class {
             0 => k == 0,
-            _ => k != 2,
+            _ => true,
         };
         if !ok {
             // (the meaning in full, for the message)

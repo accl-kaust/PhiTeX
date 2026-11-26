@@ -474,15 +474,23 @@ impl<'a> Em<'a> {
     }
 
     fn note_section(&mut self, n: &Tok) {
-        if let Kind::Text { name, .. } = &n.kind
-            && SECTIONS.contains(&name.as_str())
-        {
-            self.section = Some(self.new[n.open_end..n.close_start].trim().to_owned());
+        if let Some(s) = section_of(n, self.new) {
+            self.section = Some(s);
         }
     }
 
     /// Deleted tokens `old` and added `new` (where they are when empty:
-    /// `old_at`, `new_at`): one change.
+    /// `old_at`, `new_at`): one block of markup, a change for each unit of
+    /// it ([`units`]: a float, a display, the bibliography, a sectioning
+    /// command, the text between them), each filed under the section it is
+    /// in. The old side's last unit and the new side's first are one change
+    /// (what was there replaced). (One block was one change: an early
+    /// version's last paragraph followed by a display, a figure, a section,
+    /// a table and the bibliography was one change "Text", filed under the
+    /// last section it added.) The markup is one block's as before: a cut
+    /// between two files is never inside markup of its own
+    /// ([`crate::split`]).
+    #[allow(clippy::too_many_lines)]
     fn block(&mut self, old: &[Tok], new: &[Tok], old_at: usize, new_at: usize, ctx: Ctx) {
         // (comments and labels alone: nothing the pages show changed, so
         // no markup and no change; the new text as it is)
@@ -505,6 +513,11 @@ impl<'a> Em<'a> {
         };
         let o = span(old, old_at);
         let n = span(new, new_at);
+        let (og, ng) = (units(old, self.old), units(new, self.new));
+        // (each unit's change: where its markup begins, its places, its
+        // section: the one before it, or its own, a sectioning command
+        // added; not one it adds further on)
+        let mut parts: Vec<Part> = Vec::new();
         let start = self.out.len();
         let fl = if ctx.fl { "FL" } else { "" };
         // (a deletion the old text set apart from the word before it,
@@ -538,7 +551,17 @@ impl<'a> Em<'a> {
         }
         if !old.is_empty() && fig != crate::FigStyle::New {
             self.push(&format!("\\DIFdelbegin{fl} "));
-            self.mark(old, Side::Del, ctx);
+            for g in &og {
+                let at = self.out.len();
+                parts.push(Part {
+                    at,
+                    old: span(&old[g.clone()], o.1),
+                    new: (n.0, n.0),
+                    section: self.section.clone(),
+                    del: true,
+                });
+                self.mark(&old[g.clone()], Side::Del, ctx);
+            }
             self.push(&format!("\\DIFdelend{fl} "));
             if fig == crate::FigStyle::Over {
                 self.push("\\DIFoverend ");
@@ -553,20 +576,62 @@ impl<'a> Em<'a> {
         }
         if !new.is_empty() {
             self.push(&format!("\\DIFaddbegin{fl} "));
-            self.mark(new, Side::Add, ctx);
+            for g in &ng {
+                let g = &new[g.clone()];
+                let section = match g
+                    .iter()
+                    .find(|t| !matches!(t.kind, Kind::Ws | Kind::Par | Kind::Comment))
+                {
+                    Some(t) if section_of(t, self.new).is_some() => section_of(t, self.new),
+                    _ => self.section.clone(),
+                };
+                parts.push(Part {
+                    at: self.out.len(),
+                    old: (o.1, o.1),
+                    new: span(g, n.1),
+                    section,
+                    del: false,
+                });
+                self.mark(g, Side::Add, ctx);
+            }
             self.push(&format!("\\DIFaddend{fl} "));
         }
         if pair {
             self.push("\\DIFtabularend ");
         }
-        // (the section a change is in: the last one before it, or its own)
-        let section = self.section.clone();
-        self.changes.push(RawChange {
-            old: o,
-            new: n,
-            out: (start, self.out.len()),
-            section,
-        });
+        // (the old side's last unit and the new side's first: one change)
+        if let Some(k) = parts.iter().position(|p| !p.del)
+            && k > 0
+        {
+            let added = parts.remove(k);
+            let p = &mut parts[k - 1];
+            (p.new, p.section) = (added.new, added.section);
+        }
+        if parts.len() <= 1 {
+            // (one unit, or none marked (a new image alone, the look's):
+            // the block's places whole)
+            let section = parts
+                .pop()
+                .map_or_else(|| self.section.clone(), |p| p.section);
+            self.changes.push(RawChange {
+                old: o,
+                new: n,
+                out: (start, self.out.len()),
+                section,
+            });
+            return;
+        }
+        let end = self.out.len();
+        for (i, p) in parts.iter().enumerate() {
+            let from = if i == 0 { start } else { p.at };
+            let to = parts.get(i + 1).map_or(end, |q| q.at);
+            self.changes.push(RawChange {
+                old: p.old,
+                new: p.new,
+                out: (from, to),
+                section: p.section.clone(),
+            });
+        }
     }
 
     fn text(&self, side: Side) -> &'a str {
@@ -1587,6 +1652,105 @@ fn leaves(t: &Tok, out: &mut Vec<u64>) {
             out.push(c.key);
         }
     }
+}
+
+/// The title of sectioning command `t` (in `src`), if it is one.
+fn section_of(t: &Tok, src: &str) -> Option<String> {
+    match &t.kind {
+        Kind::Text { name, .. } if SECTIONS.contains(&name.as_str()) => {
+            Some(src[t.open_end..t.close_start].trim().to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// A unit's change in a block ([`Em::block`]): where its markup begins, its
+/// places on each side, its section, and whether it is the old side's.
+struct Part {
+    at: usize,
+    old: (usize, usize),
+    new: (usize, usize),
+    section: Option<String>,
+    del: bool,
+}
+
+/// What a token is as a change of its own ([`units`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    /// Words, inline math, commands: the text between the others.
+    Text,
+    /// A float, a display or a sectioning command: a unit alone.
+    Alone,
+    /// The bibliography (`\bibliographystyle` and `\bibliography` together,
+    /// `\printbibliography`, `thebibliography`): one unit.
+    Bib,
+    /// White space, a blank line, a comment: the unit before it's.
+    Quiet,
+}
+
+fn unit_of(t: &Tok, src: &str) -> Unit {
+    match &t.kind {
+        Kind::Ws | Kind::Par | Kind::Comment => Unit::Quiet,
+        Kind::Display { .. } => Unit::Alone,
+        Kind::Env { name, .. } if name == "thebibliography" => Unit::Bib,
+        _ if is_float(t) || section_of(t, src).is_some() => Unit::Alone,
+        _ if matches!(
+            cs_at(&src[t.start..t.cend], 0).0,
+            "bibliography" | "bibliographystyle" | "printbibliography" | "nocite"
+        ) =>
+        {
+            Unit::Bib
+        }
+        _ => Unit::Text,
+    }
+}
+
+/// `toks` (of `src`) as the changes they make ([`Em::block`]): each float,
+/// display and sectioning command alone, the bibliography's commands
+/// together, the text between them together; white space and comments
+/// with the unit before them (the first unit, before any).
+fn units(toks: &[Tok], src: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out: Vec<(std::ops::Range<usize>, Unit)> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let u = unit_of(t, src);
+        match (out.last_mut(), u) {
+            (Some((r, _)), Unit::Quiet) => r.end = i + 1,
+            (Some((r, last)), Unit::Text | Unit::Bib) if *last == u || *last == Unit::Quiet => {
+                r.end = i + 1;
+                *last = u;
+            }
+            (Some((r, last)), Unit::Alone) if *last == Unit::Quiet => {
+                r.end = i + 1;
+                *last = u;
+            }
+            _ => out.push((i..i + 1, u)),
+        }
+    }
+    // (a unit with nothing of its own on the page (a `\clearpage` an
+    // `\include` makes, a `\label`, white space): the next one's, else
+    // the one before's)
+    let shown = |r: &std::ops::Range<usize>, u: Unit| {
+        matches!(u, Unit::Alone | Unit::Bib)
+            || toks[r.clone()]
+                .iter()
+                .any(|t| !matches!(t.kind, Kind::Ws | Kind::Par | Kind::Comment | Kind::Unsafe))
+    };
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut lead: Option<usize> = None;
+    for (r, u) in out {
+        if !shown(&r, u) {
+            lead.get_or_insert(r.start);
+            continue;
+        }
+        groups.push(lead.take().unwrap_or(r.start)..r.end);
+    }
+    if let Some(a) = lead {
+        match groups.last_mut() {
+            Some(g) => g.end = toks.len(),
+            None => groups.push(a..toks.len()),
+        }
+    }
+    groups
 }
 
 fn is_float(t: &Tok) -> bool {

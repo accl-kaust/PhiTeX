@@ -207,6 +207,10 @@ jobs:
           # said with Try again; the first build held: Blame's people and versions filled before any
           # page, each page's bars as it comes, nothing read again)
           node tools/dev/mock-run.mjs test/scenarios/changes-slow.json
+          # (an early text-only version against the full one: the Diff keeps the table on its pages,
+          # has no engine-internal problem and lists its problems at the user's own lines; a change
+          # per float, display and the bibliography, each under its section)
+          node tools/dev/mock-run.mjs test/scenarios/changes-floats.json
           # (the loading animation from the moment the panel shows, no page ready: the project's
           # download held, Overleaf's PDF pane laid out late; each opening, "off", gone with the page)
           node tools/dev/mock-run.mjs test/scenarios/opening.json

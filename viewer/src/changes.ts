@@ -75,7 +75,7 @@ export interface ChangesPrefs {
 export interface ChangeItem {
   /** Its index in the diff's changes (the runner's goto takes it, from 1). */
   k: number;
-  kind: "Text" | "Section" | "Citation" | "Table" | "Figure" | "Equation";
+  kind: "Text" | "Section" | "Citation" | "Table" | "Figure" | "Equation" | "Bibliography";
   sec: string;
   old: string;
   neu: string;
@@ -92,7 +92,7 @@ export interface ChangeItem {
   was?: string;
 }
 
-export const KINDS: ChangeItem["kind"][] = ["Text", "Section", "Citation", "Table", "Figure", "Equation"];
+export const KINDS: ChangeItem["kind"][] = ["Text", "Section", "Citation", "Table", "Figure", "Equation", "Bibliography"];
 
 /** A change's words as the page shows them: its source without commands, braces and math marks. */
 export function words(src: string, n = 12): string {
@@ -108,11 +108,13 @@ export function itemOf(c: DiffChange, k: number): ChangeItem {
       ? "Figure"
       : /\\begin\{(tabular|table)|&.*\\\\/.test(both)
         ? "Table"
-        : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, ""))
-          ? "Citation"
-          : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both)
-            ? "Equation"
-            : "Text";
+        : /\\(bibliography|printbibliography)\b|\\begin\{thebibliography\}/.test(both)
+          ? "Bibliography"
+          : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, ""))
+            ? "Citation"
+            : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both)
+              ? "Equation"
+              : "Text";
   const img = (t: string) => /\\includegraphics\*?(?:\[[^\]]*\])?\{([^}]*)\}/.exec(t)?.[1];
   let old = words(c.old_text), neu = words(c.new_text);
   if (kind === "Figure" && (img(c.old_text) || img(c.new_text))) (old = img(c.old_text) ?? old), (neu = img(c.new_text) ? `${img(c.new_text)}${img(c.old_text) ? " replaced" : ""}` : neu);
