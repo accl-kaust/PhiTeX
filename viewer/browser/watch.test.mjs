@@ -972,6 +972,68 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   await w.stop();
 });
 
+test("a note made inside an agent's pending change: a click on the note's own mark selects the note, a click elsewhere in the change the change (the smaller mark wins)", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const at = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  execFileSync(process.env.PHITEX_BIN ?? "phitex", ["config", "experimental-review", "on"], { env: { ...process.env, HOME: at, XDG_CONFIG_HOME: join(at, ".config") } });
+  const kept = `Alpha paragraph stays as it is.\n\n${prose(6, 21)}`;
+  const added = "The agent added this paragraph with its words long enough to hold a note inside them, and many more words after the note so that the change goes on well past it, over the next lines of the page as well.";
+  // (the project in git before the watch: its index the review's baseline)
+  const dir = project({ "main.tex": doc(kept) });
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "one");
+  const w = new Watch(dir, { home: at });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
+  await waitBuild(w, 1);
+  // (the agent's edit: a paragraph added, a change waiting for review)
+  w.write("main.tex", doc(kept.replace("\n\n", `\n\n${added}\n\n`)));
+  await t.until(`$$(".slot .rv.h-add").length > 1`, "the change marked on the pages", 120000);
+  // (a note on two words inside the change, "long enough", selected on the page)
+  const words = await t.until(`(() => { for (const x of $$(".slot .phx-text text")) { const i = x.textContent.indexOf("long enough"); if (i < 0 || !x.firstChild) continue; x.scrollIntoView({ block: "center" }); const r = document.createRange(); r.setStart(x.firstChild, i); r.setEnd(x.firstChild, i + 11); const b = r.getBoundingClientRect(); return b.width ? [b.left + 1, b.right - 1, (b.top + b.bottom) / 2] : null; } return null; })()`, "the words to note");
+  await t.drag(words[0], words[2], words[1], words[2]);
+  await t.until(`$(".rv-pop [data-k='note']")`, "the note's button");
+  await t.click(".rv-pop [data-k='note']");
+  await t.until(`$(".rv-compose textarea")`, "the note's box");
+  await t.q(`(() => { const a = $(".rv-compose textarea"); a.value = "Inside the change"; a.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+  await t.click(".rv-compose [data-save]");
+  await t.until(`$$(".slot .rv.n-note:not(.rv-pin)").length > 0`, "the note's mark", 30000);
+  const notes = JSON.parse(w.read(".phitex/notes.json"));
+  const note = (notes.notes ?? notes).find((n) => n.thread?.[0]?.text === "Inside the change");
+  assert.ok(note, "the note saved");
+  // (a place on the pages at rest: the review's side opening fits the pages again, the marks drawn again there)
+  const rest = async (expr, what) => {
+    let last = "";
+    for (const end = Date.now() + 15000; ; await sleep(200)) {
+      const now = await t.q(expr);
+      if (now && now === last) return JSON.parse(now);
+      assert.ok(Date.now() < end, `${what} at rest`);
+      last = now;
+    }
+  };
+  const onNote = `(() => { const m = $(".slot .rv.n-note:not(.rv-pin)"); if (!m) return ""; const b = m.getBoundingClientRect(); return JSON.stringify([b.left + b.width / 2, b.top + b.height / 2]); })()`;
+  // (the change's mark on a line the note is not on)
+  const onChange = `(() => { const ns = $$(".slot .rv.n-note").map((m) => m.getBoundingClientRect()); const m = $$(".slot .rv.h-add").map((m) => m.getBoundingClientRect()).find((b) => b.width > 40 && ns.every((n) => n.bottom < b.top || n.top > b.bottom)); return m ? JSON.stringify([m.right - 6, m.top + m.height / 2]) : ""; })()`;
+  // (the note's mark lies on the change's)
+  assert.ok(await t.q(`(() => { const n = $(".slot .rv.n-note:not(.rv-pin)").getBoundingClientRect(); return $$(".slot .rv.h-add").some((m) => { const b = m.getBoundingClientRect(); return b.left <= n.left + 1 && b.right >= n.right - 1 && b.top <= n.top + 1 && b.bottom >= n.bottom - 1; }); })()`), "the note's mark inside the change's");
+  const selected = `$$(".slot .rv.on").map((m) => m.dataset.id).filter((v, i, a) => a.indexOf(v) === i)`;
+  const is = (want) => `(() => { const s = ${selected}; return s.length === 1 && (${JSON.stringify(want)} === null ? s[0] !== ${JSON.stringify(note.id)} && $$(".slot .rv.h-add.on").length > 0 : s[0] === ${JSON.stringify(want)}); })()`;
+  const fail = (e) => t.q(selected).then((s) => Promise.reject(new Error(`${e.message}: selected ${JSON.stringify(s)}`)));
+  const n = await rest(onNote, "the note's mark");
+  await t.mouse(n[0], n[1]);
+  await t.until(is(note.id), "a click on the note's mark selects the note", 10000).catch(fail);
+  const c = await rest(onChange, "a mark of the change away from the note");
+  await t.mouse(c[0], c[1]);
+  await t.until(is(null), "a click elsewhere in the change selects the change", 10000).catch(fail);
+  // (and back: the note again, from inside the change)
+  const n2 = await rest(onNote, "the note's mark");
+  await t.mouse(n2[0], n2[1]);
+  await t.until(is(note.id), "the note selected again", 10000).catch(fail);
+  assert.deepEqual(t.errors, []);
+  await w.stop();
+});
+
 /** A right-click at (x, y): the browser's contextmenu event there. */
 async function rightClick(t, x, y) {
   await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });

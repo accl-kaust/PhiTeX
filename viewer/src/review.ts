@@ -1288,12 +1288,28 @@ export class Review {
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
 
-  /** The mark of the pages under a point (the last drawn on top), read when asked (a click, a right-click): no work as the pointer moves. */
-  private markAt(slot: HTMLElement, cx: number, cy: number): HTMLElement | undefined {
-    return [...slot.querySelectorAll<HTMLElement>(".rv:not(.rv-pin):not(.rv-h)")].reverse().find((m) => {
+  /**
+   * The mark of the pages under a point, read when asked (a click, a
+   * right-click): no work as the pointer moves. Of the items marked there,
+   * the smallest (its marks' area on the page): a note made inside an
+   * agent's pending change is the note where its own mark is, the change
+   * anywhere else in it (the change's mark, drawn last, took every click).
+   * The same size: the last drawn, on top. `only`: of those that pass it.
+   */
+  private markAt(slot: HTMLElement, cx: number, cy: number, only?: (m: HTMLElement) => boolean): HTMLElement | undefined {
+    const all = [...slot.querySelectorAll<HTMLElement>(".rv:not(.rv-pin):not(.rv-h)")];
+    const area = new Map<string, number>();
+    for (const m of all) {
       const b = m.getBoundingClientRect();
-      return cx >= b.left - 1 && cx <= b.right + 1 && cy >= b.top - 1 && cy <= b.bottom + 1;
-    });
+      area.set(m.dataset.id ?? "", (area.get(m.dataset.id ?? "") ?? 0) + b.width * b.height);
+    }
+    let best: HTMLElement | undefined;
+    for (const m of all) {
+      const b = m.getBoundingClientRect();
+      if (cx < b.left - 1 || cx > b.right + 1 || cy < b.top - 1 || cy > b.bottom + 1 || (only && !only(m))) continue;
+      if (!best || area.get(m.dataset.id ?? "")! <= area.get(best.dataset.id ?? "")!) best = m;
+    }
+    return best;
   }
 
   /**
@@ -1305,7 +1321,8 @@ export class Review {
   private markMenu(e: MouseEvent): void {
     if (!this.enabled || this.showing) return;
     const slot = (e.target as HTMLElement).closest<HTMLElement>(".slot");
-    const id = slot && this.markAt(slot, e.clientX, e.clientY)?.dataset.id;
+    // (the change under the point, a note inside it or not)
+    const id = slot && this.markAt(slot, e.clientX, e.clientY, (m) => this.s.hunks.some((x) => x.id === m.dataset.id))?.dataset.id;
     const h = id ? this.s.hunks.find((x) => x.id === id) : undefined;
     if (!h) return;
     e.preventDefault();
