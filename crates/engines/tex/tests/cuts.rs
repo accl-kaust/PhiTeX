@@ -248,9 +248,9 @@ fn slide_doc(entries: u32, local: u32, after: &str) -> String {
         "\\count200={entries}\n\\def\\afterthing{{{after}}}\n\\def\\slide{{\\begingroup\\iftrue\n  {{\\count1=0 \\loop\\ifnum\\count1<\\count200 \\advance\\count1 by 1 \\global\\count7=3 \\repeat\\aftergroup\\afterthing}}%\n  \\count5={local} \\def\\x{{local}}%\n"
     );
     for j in 0..3 {
-        let _ = write!(
+        let _ = writeln!(
             s,
-            "  Slide paragraph {j} with the count \\the\\count5, the macro \\x, the global \\the\\count7 and \\the\\count6, long enough to make a line or two when set in the plain format's ten point roman.\\par\n"
+            "  Slide paragraph {j} with the count \\the\\count5, the macro \\x, the global \\the\\count7 and \\the\\count6, long enough to make a line or two when set in the plain format's ten point roman.\\par"
         );
     }
     s.push_str("\\fi\\endgroup}\n\n");
