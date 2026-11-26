@@ -281,7 +281,7 @@ fn hash_segs(segs: &[Seg]) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     for s in segs {
         match s {
-            Seg::Toks(ts) => {
+            Seg::Toks(ts, _) => {
                 1u8.hash(&mut h);
                 for t in ts {
                     match t.as_cs() {
@@ -756,7 +756,7 @@ impl Run<'_, '_> {
                         .filter_map(|&c| char::from_u32(c))
                         .collect::<String>()
                 ),
-                Seg::Toks(t) => format!("toks {}", t.len()),
+                Seg::Toks(t, _) => format!("toks {}", t.len()),
                 Seg::File(_) | Seg::Chunk(..) => "file".to_owned(),
             })
             .collect();
@@ -816,7 +816,7 @@ impl Run<'_, '_> {
         let mut body = Vec::with_capacity(n + 1);
         body.push(self.cur.tok);
         body.extend_from_slice(&toks[..n]);
-        let segs = vec![Seg::Toks(body)];
+        let segs = vec![Seg::Toks(body, crate::input::Lv::default())];
         let hash = hash_segs(&segs);
         Some(Body {
             name,
@@ -832,7 +832,7 @@ impl Run<'_, '_> {
             return None;
         }
         let (name, after) = name_in_chars(&l.buf, l.loc)?;
-        let mut segs = vec![Seg::Toks(vec![self.cur.tok])];
+        let mut segs = vec![Seg::Toks(vec![self.cur.tok], crate::input::Lv::default())];
         // (the end on this line: the body is the line to it)
         if let Some(k) = end_in_chars(&l.buf, after, name) {
             let mut first = l.clone();
@@ -929,7 +929,7 @@ impl Run<'_, '_> {
         let mut frames = Vec::with_capacity(body.segs.len());
         for s in &body.segs {
             match s {
-                Seg::Toks(t) => {
+                Seg::Toks(t, _) => {
                     let mut x = vec![v.str("t"), toks_value(v, t)];
                     x.extend(here.iter().copied());
                     frames.push(v.list(x));

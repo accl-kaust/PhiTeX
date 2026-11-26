@@ -244,8 +244,20 @@ impl Run<'_, '_> {
     /// `insert_dollar_sign` (§1047).
     pub(crate) fn insert_dollar_sign(&mut self) -> R<()> {
         self.back_cur();
-        self.back_input(Tok::ch(3, u32::from(b'$')));
-        self.log("error", "Missing $ inserted")
+        // (`ins_error`, §327: the `$` put back as inserted text, shown so
+        // in the error's context)
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
+        self.push_inserted(Tok::ch(3, u32::from(b'$')));
+        self.log_help(
+            "error",
+            "Missing $ inserted",
+            &[
+                "I've inserted a begin-math/end-math symbol since I think",
+                "you left one out. Proceed, with fingers crossed.",
+            ],
+        )
     }
 
     /// `off_save` (§1064–§1066): a token that closes a group other than

@@ -777,6 +777,12 @@ pub(crate) struct Run<'c, 'a> {
     /// [`Run::park`]): the levels it had, not text it had yet to reach
     /// ([`Run::file_line_here`] looks through them as through levels).
     pub parked_levels: usize,
+    /// The context's levels above TeX's line of the error being logged
+    /// ([`Run::log_help`]), for its diagnostic ([`Run::diag_at`]).
+    pub(crate) diag_ctx: Option<String>,
+    /// `\errhelp` printed for the `\errmessage` being logged (empty: none
+    /// given), [`Run::error_tail`]'s.
+    pub(crate) err_help: Option<String>,
     /// Where each pulled sibling's text begins in the input's text (its
     /// first segment's index), or `None` when it joined the line before
     /// it: [`Run::give_back_peeked`].
@@ -1417,6 +1423,8 @@ impl<'c, 'a> Run<'c, 'a> {
             wd: crate::control::Watchdog::default(),
             pulled: 0,
             parked_levels: 0,
+            diag_ctx: None,
+            err_help: None,
             pull_at: Vec::new(),
             pull_lev: None,
             pull_orig: Vec::new(),
@@ -2328,7 +2336,6 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Location `loc` as a token list.
-    #[allow(dead_code)]
     pub(crate) fn toks_loc(&mut self, loc: Loc) -> R<Rc<[Tok]>> {
         self.load(loc)?;
         Ok(self.st.toks_of(loc, self.v))
@@ -5383,7 +5390,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// its context and help lines after it in the log
     /// ([`crate::context`]); another kind of event as it is.
     pub(crate) fn log_help(&mut self, kind: &str, text: &str, help: &[&str]) -> R<()> {
-        self.log_event(kind, text)?;
+        // (the levels above TeX's line, for the diagnostic the event
+        // makes, [`Run::diag_at`])
+        if (kind == "error" || kind == "errmsg") && self.interp.is_none() {
+            self.diag_ctx = Some(self.context_above_line()?);
+        }
+        let r = self.log_event(kind, text);
+        self.diag_ctx = None;
+        r?;
         if kind != "error" && kind != "errmsg" {
             return Ok(());
         }
@@ -5736,10 +5750,18 @@ impl<'c, 'a> Run<'c, 'a> {
         // culprit where TeX read it from a token list, an argument or a
         // beamer frame's body, lines above the line TeX shows,
         // `crate::api`'s placement)
+        let mut name = String::new();
         if msg == "Undefined control sequence" {
-            let mut name = String::new();
             crate::print::sprint_cs(&mut name, self.cur.tok, i64::from(b'\\'));
+        }
+        // (and the context's levels above TeX's line, `crate::context`,
+        // which the diagnostic shows above its line)
+        let ctx = self.diag_ctx.take().unwrap_or_default();
+        if !name.is_empty() || !ctx.is_empty() {
             xs.push(v.str(&name));
+        }
+        if !ctx.is_empty() {
+            xs.push(v.str(&ctx));
         }
         let e = v.list(xs);
         let s = v.seq_unit(e);
@@ -6620,12 +6642,19 @@ impl<'c, 'a> Run<'c, 'a> {
             Some(FileLine::Piece(name, own)) => piece_here(v, name, own),
             None => Vec::new(),
         };
-        let node = |toks: Vec<ValueId>| -> Vec<ValueId> {
+        // (a node of one level's tokens says what the level was, for an
+        // error's context, `crate::input::Lv`)
+        let node = |toks: Vec<ValueId>, lvs: &mut (usize, crate::input::Lv)| -> Vec<ValueId> {
             let l = v.list(toks);
             let mut t = vec![tag_t, l];
             t.extend(here.iter().copied());
+            if lvs.0 == 1 {
+                t.extend(lv_value(v, lvs.1));
+            }
+            *lvs = (0, crate::input::Lv::default());
             vec![v.list(vec![v.list(t)]), v.int(kind)]
         };
+        let mut lvs = (0usize, crate::input::Lv::default());
         // (the token levels left, in reading order, are one node: TeX
         // reads them one after the other, and a brace or a group they
         // open and close stays inside one run, waiting on no scope)
@@ -6681,17 +6710,21 @@ impl<'c, 'a> Run<'c, 'a> {
         for l in self.input.levels.iter().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {
-                    toks_left(self.input.arena.get(l.rest()), &mut out, &mut run);
+                    let r = self.input.arena.get(l.rest());
+                    if !r.is_empty() {
+                        lvs = (lvs.0 + 1, crate::input::Lv::of_level(l));
+                    }
+                    toks_left(r, &mut out, &mut run);
                 }
                 crate::input::kind::LINE => {
                     if !run.is_empty() {
-                        out.push(node(std::mem::take(&mut run)));
+                        out.push(node(std::mem::take(&mut run), &mut lvs));
                     }
                     line_left(self.input.line(*l), &mut out);
                 }
                 _ => {
                     if !run.is_empty() {
-                        out.push(node(std::mem::take(&mut run)));
+                        out.push(node(std::mem::take(&mut run), &mut lvs));
                     }
                     file_left(self.input.file(*l), &mut out);
                 }
@@ -6705,7 +6738,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 if !chunked && let Some((id, k)) = crate::chunks::chunk_at(std::slice::from_ref(s))
                 {
                     if !run.is_empty() {
-                        out.push(node(std::mem::take(&mut run)));
+                        out.push(node(std::mem::take(&mut run), &mut lvs));
                     }
                     out.push(vec![
                         v.list(vec![crate::chunks::frame(v, id, k)]),
@@ -6716,24 +6749,29 @@ impl<'c, 'a> Run<'c, 'a> {
                 continue;
             }
             match s {
-                Seg::Toks(t) => toks_left(t, &mut out, &mut run),
+                Seg::Toks(t, lv) => {
+                    if !t.is_empty() {
+                        lvs = (lvs.0 + 1, *lv);
+                    }
+                    toks_left(t, &mut out, &mut run);
+                }
                 Seg::Line(l) => {
                     if !run.is_empty() {
-                        out.push(node(std::mem::take(&mut run)));
+                        out.push(node(std::mem::take(&mut run), &mut lvs));
                     }
                     line_left(l, &mut out);
                 }
                 Seg::Chunk(..) => {}
                 Seg::File(f) => {
                     if !run.is_empty() {
-                        out.push(node(std::mem::take(&mut run)));
+                        out.push(node(std::mem::take(&mut run), &mut lvs));
                     }
                     file_left(f, &mut out);
                 }
             }
         }
         if !run.is_empty() {
-            out.push(node(run));
+            out.push(node(run, &mut lvs));
         }
         // (conditionals open when the run closed its scope go on in the
         // first of them, `carried_conds`)
@@ -8007,7 +8045,7 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
         match xs.first().map(|&t| str_of(v, t)).as_deref() {
             Some("t") => {
                 let toks = crate::val::toks_of(v, xs.get(1).copied());
-                out = Some(Seg::Toks(toks));
+                out = Some(Seg::Toks(toks, frame_level(v, xs)));
             }
             Some("u") => {
                 // (a file read as units, not read yet, [`units_frame`])
@@ -8238,7 +8276,7 @@ impl Run<'_, '_> {
         let parked = self.input.text_at..self.parked_levels.min(self.input.text.len());
         for s in self.input.text.get(parked).unwrap_or_default() {
             match s {
-                Seg::Toks(_) | Seg::Chunk(..) => {}
+                Seg::Toks(..) | Seg::Chunk(..) => {}
                 Seg::Line(l) => {
                     if let Some(x) = line_of(l) {
                         return Some(x);
@@ -8346,6 +8384,47 @@ pub(crate) fn piece_here(v: &Values, name: ValueId, own: Option<(u64, u32)>) -> 
         x.push(v.int(i64::from(k)));
     }
     x
+}
+
+/// What a token frame carries after its place of the level it was
+/// ([`crate::input::Lv`], read back by [`frame_level`]): `[type, [name]]`;
+/// nothing for a level of no type the context shows.
+pub(crate) fn lv_value(v: &Values, lv: crate::input::Lv) -> Option<ValueId> {
+    if lv.ty == 0 {
+        return None;
+    }
+    let name = if lv.name == 0 {
+        Vec::new()
+    } else {
+        vec![Tok::from_raw(lv.name)]
+    };
+    Some(v.list(vec![
+        v.int(i64::from(lv.ty)),
+        crate::val::toks_value(v, &name),
+    ]))
+}
+
+/// A token frame's level ([`crate::input::Lv`]): its last item, a list
+/// `[type, [name]]` after the frame's place (`pages::piece`'s
+/// `level_info`); none where it has none.
+pub(crate) fn frame_level(v: &Values, xs: &[ValueId]) -> crate::input::Lv {
+    let none = crate::input::Lv::default();
+    let Some(&last) = xs.last().filter(|_| xs.len() >= 3) else {
+        return none;
+    };
+    let Some(ys) = v.with_list(last, <[ValueId]>::to_vec) else {
+        return none;
+    };
+    let (Some(&t), Some(&n)) = (ys.first(), ys.get(1)) else {
+        return none;
+    };
+    let name = crate::val::toks_of(v, Some(n))
+        .first()
+        .map_or(0, |t| t.raw());
+    crate::input::Lv {
+        ty: u8::try_from(int_of(v, t)).unwrap_or(0),
+        name,
+    }
 }
 
 /// Where the tokens of a token frame (`["t", toks, file, line]`,

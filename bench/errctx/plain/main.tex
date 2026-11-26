@@ -1,0 +1,12 @@
+\def\a#1{\b{#1}x}
+\def\b#1{\c #1 y}
+\def\c{\undefinedH}
+\a{arg}
+\def\d#1#2{#1#2\e}
+\d{\undefinedI}{two}
+\def\f{\futurelet\next\g}\def\g{\h}
+\f\undefinedJ
+\def\n#1\stop{[#1]}
+\n one\undefinedK two\stop
+$x\par$
+\bye

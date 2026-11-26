@@ -200,15 +200,21 @@ impl Arena {
     }
 
     /// §400: `body` with the call's arguments (since `b`) put in for its
-    /// parameters, by its segments, written as one list.
+    /// parameters, by its segments, written as one list. Before it, the
+    /// arguments' lengths, a token each (what the context needs to show
+    /// the call as TeX's levels, `crate::context`; [`Level::nargs`]).
     pub(crate) fn expand_body(
         &mut self,
         body: &[Tok],
         segs: &[crate::val::Seg],
         b: Scratch,
-    ) -> Range {
-        let start = self.mark();
+    ) -> (Range, u8) {
         let (t0, b0) = (b.toks as usize, b.bounds as usize);
+        for &(lo, hi) in &self.sbounds[b0..] {
+            self.toks.push(Tok::from_raw(hi - lo));
+        }
+        let nargs = u8::try_from(self.sbounds.len() - b0).unwrap_or(u8::MAX);
+        let start = self.mark();
         // (the room made once for all the pieces)
         let arg = |sb: &[(u32, u32)], p: u8| {
             if p == 0 {
@@ -228,10 +234,13 @@ impl Arena {
                 push_short(&mut self.toks, &self.scratch[r]);
             }
         }
-        Range {
-            start,
-            end: self.mark(),
-        }
+        (
+            Range {
+                start,
+                end: self.mark(),
+            },
+            nargs,
+        )
     }
 
     /// Argument `i` (0-based) of the call begun at `b`, as matched.
@@ -271,9 +280,18 @@ pub(crate) struct Level {
     /// a template, backed-up tokens, inserted tokens, a macro, an
     /// `\output` or `\every…` or mark or `\write` text. Diagnostics only.
     pub ty: u8,
+    /// For a macro's level ([`ty::MACRO`]), the number of its parameters:
+    /// the lengths of the arguments it was called with are the `nargs`
+    /// tokens before `c` ([`Arena::expand_body`]). Diagnostics only
+    /// (`crate::context`).
+    pub nargs: u8,
     pub a: u32,
     pub b: u32,
     pub c: u32,
+    /// For a macro's level, the name it was called by (the token's raw
+    /// bits; 0 for none: a level the context does not show as a macro's).
+    /// Diagnostics only (`crate::context`): TeX's `name` of §302.
+    pub name: u32,
     /// The macro that read a job-written file back ([`crate::run::Run::read_back_at`]):
     /// while this level is on the stack, the run's definitions keep their
     /// value at the read-back (a checkpoint's input carries it).
@@ -289,6 +307,8 @@ impl Level {
             a: r.start,
             b: r.end,
             c: r.start,
+            nargs: 0,
+            name: 0,
             rb: false,
         }
     }
@@ -301,6 +321,8 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            nargs: 0,
+            name: 0,
             rb: false,
         }
     }
@@ -313,7 +335,20 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            nargs: 0,
+            name: 0,
             rb: false,
+        }
+    }
+
+    /// How many tokens before `c` hold the arguments' lengths
+    /// ([`Level::nargs`]).
+    #[inline]
+    pub(crate) fn lens_len(self) -> u32 {
+        if self.nargs == REST_ONLY {
+            0
+        } else {
+            u32::from(self.nargs)
         }
     }
 
@@ -445,7 +480,7 @@ impl Line {
 #[derive(Clone, Debug)]
 pub(crate) enum Seg {
     Line(Line),
-    Toks(Vec<Tok>),
+    Toks(Vec<Tok>, Lv),
     File(crate::run::FileRest),
     /// A format's text from line `.1` of the chunk named `.0` on, through
     /// the chunks after it (docs/spec-ini-chunks.md): its lines not read
@@ -454,6 +489,37 @@ pub(crate) enum Seg {
     /// input never reaches one.
     Chunk(u64, u32),
 }
+
+/// What a token list of a node's text was as a level of the run that left
+/// it (a continuation's rest, `crate::pages`' `cont_encode_with`): its
+/// §307 type (0: not said, read as [`ty::OTHER`]) and, a macro's, the
+/// name it was called by. The context shows the level as TeX's
+/// (`crate::context`); nothing else reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Lv {
+    pub ty: u8,
+    pub name: u32,
+}
+
+impl Lv {
+    /// What token list level `l` is, as a node's text keeps it: tokens
+    /// put back or inserted, a macro's by its name; else nothing.
+    pub(crate) fn of_level(l: &Level) -> Lv {
+        match l.ty {
+            ty::BACKED_UP | ty::BACKED_UP_CHAR | ty::INSERTED => Lv { ty: l.ty, name: 0 },
+            ty::MACRO if l.name != 0 => Lv {
+                ty: l.ty,
+                name: l.name,
+            },
+            _ => Lv::default(),
+        }
+    }
+}
+
+/// [`Level::nargs`] of a macro's level that holds the rest of its
+/// expansion alone, read from a node's text ([`Lv`]): the place read
+/// is found from its end (`crate::context`).
+pub(crate) const REST_ONLY: u8 = u8::MAX;
 
 /// The input stack.
 #[derive(Default)]
@@ -490,6 +556,35 @@ pub(crate) struct Input {
     /// The levels as the command in progress found them, saved as they
     /// come on top ([`Input::snapshot`]).
     snap: Option<Snap>,
+    /// The tokens last put back by stepping a token list's level back
+    /// ([`Input::back`]), where TeX pushes a list of its own (§325).
+    pub back_mark: BackMark,
+}
+
+/// The tokens a token list's level was stepped back over by
+/// [`Input::back`] (TeX's `back_input` pushes each as a level of its own,
+/// §325, which the context shows, `<to be read again>` and `<recently
+/// read>`): the level's index and start, and the range `lo..hi` of it
+/// put back, one token after another, the last first. A level pushed at
+/// that index or below ends it (the level it names is gone). Diagnostics
+/// only (`crate::context`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BackMark {
+    pub depth: u32,
+    pub c: u32,
+    pub lo: u32,
+    pub hi: u32,
+}
+
+impl Default for BackMark {
+    fn default() -> Self {
+        BackMark {
+            depth: u32::MAX,
+            c: 0,
+            lo: 0,
+            hi: 0,
+        }
+    }
 }
 
 /// The levels a command found, saved lazily ([`Input::snapshot`]): a
@@ -550,6 +645,7 @@ impl Input {
             compact_at: ARENA_COMPACT,
             arena_id: next_arena_id(),
             snap: None,
+            back_mark: BackMark::default(),
         }
     }
 
@@ -614,7 +710,42 @@ impl Input {
             return;
         }
         self.pop_spent();
+        self.mark_pushed();
         self.levels.push(Level::toks(r, ty));
+    }
+
+    /// Pushes a macro's level ([`Input::push_toks`]): its expansion `r`,
+    /// the name it was called by and its number of parameters (the
+    /// arguments' lengths before `r`, [`Arena::expand_body`]).
+    #[inline]
+    pub(crate) fn push_macro(&mut self, r: Range, name: Tok, nargs: u8) {
+        if r.is_empty() {
+            return;
+        }
+        self.pop_spent();
+        self.mark_pushed();
+        let mut l = Level::toks(r, ty::MACRO);
+        l.name = name.raw();
+        l.nargs = nargs;
+        self.levels.push(l);
+    }
+
+    /// A level is pushed at the top: the tokens put back at that index
+    /// or above are no more; pushed just above them, the ones read again
+    /// are gone (§390's and §325's `end_token_list` of the lists read to
+    /// their end, [`BackMark`]).
+    #[inline]
+    fn mark_pushed(&mut self) {
+        let (n, d) = (self.levels.len(), self.back_mark.depth as usize);
+        if n <= d {
+            self.back_mark.depth = u32::MAX;
+        } else if n == d + 1 {
+            let a = self.levels[d].a;
+            let m = &mut self.back_mark;
+            if a > m.lo {
+                m.lo = a.min(m.hi);
+            }
+        }
     }
 
     /// Pops the token-list levels on top that are read to their end.
@@ -669,6 +800,7 @@ impl Input {
         self.pushes += 1;
         self.line_push.resize(self.lines.len(), 0);
         self.line_push[i] = self.pushes;
+        self.mark_pushed();
         self.levels.push(Level::line(i));
         i
     }
@@ -685,6 +817,7 @@ impl Input {
         self.pushes += 1;
         self.file_push.resize(self.files.len(), 0);
         self.file_push[i] = self.pushes;
+        self.mark_pushed();
         self.levels.push(Level::file(i));
         i
     }
@@ -782,9 +915,26 @@ impl Input {
             && self.arena.at(l.a - 1) == t
         {
             l.a -= 1;
+            // (TeX's list of its own for it, §325: the context's)
+            let (c, a) = (l.c, l.a);
+            let d = u32::try_from(self.levels.len() - 1).unwrap_or(u32::MAX);
+            let m = &mut self.back_mark;
+            // (put back again where it stood: a token of it read again
+            // and put back, or the one before its first)
+            if m.depth == d && m.c == c && a + 1 >= m.lo && a < m.hi {
+                m.lo = a;
+            } else {
+                *m = BackMark {
+                    depth: d,
+                    c,
+                    lo: a,
+                    hi: a + 1,
+                };
+            }
             return;
         }
         self.pop_spent();
+        self.mark_pushed();
         let r = self.arena.alloc(&[t]);
         self.levels.push(Level::toks(r, ty::BACKED_UP));
     }
@@ -803,9 +953,16 @@ impl Input {
             Seg::Line(l) => {
                 self.push_line(l);
             }
-            Seg::Toks(t) => {
+            Seg::Toks(t, lv) => {
                 let r = self.arena.alloc(&t);
-                self.levels.push(Level::toks(r, ty::OTHER));
+                self.mark_pushed();
+                // (as the level it was where it was left, for the context)
+                let mut l = Level::toks(r, if lv.ty == 0 { ty::OTHER } else { lv.ty });
+                if lv.ty == ty::MACRO && lv.name != 0 {
+                    l.name = lv.name;
+                    l.nargs = REST_ONLY;
+                }
+                self.levels.push(l);
             }
             Seg::File(f) => {
                 self.push_file(f);
@@ -881,27 +1038,37 @@ impl Input {
     /// (a format's preamble of a million commands) stays as large as what
     /// its input stack holds.
     pub(crate) fn compact(&mut self) {
+        // (a macro's level kept whole, read to its end or not, with its
+        // arguments' lengths before it: the context shows it, §312)
+        let kept = |l: &Level| l.kind == kind::TOKS && (l.a < l.b || l.name != 0);
         let live: usize = self
             .levels
             .iter()
-            .filter(|l| l.kind == kind::TOKS && l.a < l.b)
-            .map(|l| (l.b - l.c) as usize)
+            .filter(|l| kept(l))
+            .map(|l| (l.b - l.c + l.lens_len()) as usize)
             .sum();
         let mut fresh = Arena::with_capacity((live * 2).max(1 << 14));
-        for l in &mut self.levels {
+        let mark = self.back_mark;
+        for (i, l) in self.levels.iter_mut().enumerate() {
             if l.kind != kind::TOKS {
                 continue;
             }
-            if l.a >= l.b {
+            if !kept(l) {
                 let rb = l.rb;
                 *l = Level::toks(Range { start: 0, end: 0 }, l.ty);
                 l.rb = rb;
                 continue;
             }
-            let r = fresh.alloc(&self.arena.toks[l.c as usize..l.b as usize]);
-            let read = l.a - l.c;
-            l.c = r.start;
-            l.a = r.start + read;
+            let from = l.c - l.lens_len();
+            let r = fresh.alloc(&self.arena.toks[from as usize..l.b as usize]);
+            let moved = |x: u32| r.start + (x - from);
+            if mark.depth as usize == i && mark.c == l.c {
+                self.back_mark.c = moved(mark.c);
+                self.back_mark.lo = moved(mark.lo);
+                self.back_mark.hi = moved(mark.hi);
+            }
+            l.a = moved(l.a);
+            l.c = moved(l.c);
             l.b = r.end;
         }
         self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);

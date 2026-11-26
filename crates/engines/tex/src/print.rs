@@ -82,9 +82,38 @@ pub(crate) fn show_toks(
     escape: i64,
     cat: &mut dyn FnMut(u32) -> i64,
 ) {
+    show_toks_split(out, toks, usize::MAX, escape, cat);
+}
+
+/// [`show_toks`], the length of what it printed before token `at` (§319's
+/// `loc`: `first_count`, as `set_trick_count` takes it) returned; the
+/// whole length where `at` is past the end.
+pub(crate) fn show_toks_split(
+    out: &mut String,
+    toks: &[Tok],
+    at: usize,
+    escape: i64,
+    cat: &mut dyn FnMut(u32) -> i64,
+) -> usize {
+    let mut split = None;
+    show_toks_upto(out, toks, at, &mut split, escape, cat);
+    split.unwrap_or(out.len())
+}
+
+fn show_toks_upto(
+    out: &mut String,
+    toks: &[Tok],
+    at: usize,
+    split: &mut Option<usize>,
+    escape: i64,
+    cat: &mut dyn FnMut(u32) -> i64,
+) {
     let mut match_chr = u32::from(b'#');
     let mut n = b'0';
-    for t in toks {
+    for (i, t) in toks.iter().enumerate() {
+        if i == at {
+            *split = Some(out.len());
+        }
         if t.is_cs_or_active() {
             print_cs(out, *t, escape, cat);
             continue;

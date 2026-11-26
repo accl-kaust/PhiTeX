@@ -5447,6 +5447,7 @@ struct OutMemo {
             Option<ValueId>,
             usize,
             u64,
+            u64,
         ),
         (Arc<Vec<u8>>, String),
     )>,
@@ -9456,6 +9457,17 @@ impl Build {
             self.g.eng.acc_value(self.unit, v.field("log")),
             self.g.eng.acc_value(self.unit, v.field("pagehash")),
             self.g.eval_errors.len(),
+            // (the heads of the lines the log shows from a place on, as the
+            // text has them now, `crate::log::HEAD_MARK`)
+            phitex_defuse::hash_bytes(
+                0,
+                self.memo
+                    .locked()
+                    .log
+                    .heads_now(&|r| self.line_text(r))
+                    .concat()
+                    .as_bytes(),
+            ),
             // (the lines before the text's nodes: the log's reports name
             // lines by them, `crate::log::LINE_MARK`)
             self.g.ops.docs.locked().values().fold(
@@ -9480,6 +9492,74 @@ impl Build {
         x
     }
 
+    /// A line as the text holds it, `\n` and `\r` and trailing spaces
+    /// left out (as web2c's `input_line` reads it): what the log shows of
+    /// its head ([`crate::log::HEAD_MARK`]'s request, [`crate::log::LineText`]).
+    fn line_text(&self, req: &str) -> Option<String> {
+        let nth = |text: &str, l: i64| {
+            let i = usize::try_from(l.checked_sub(1)?).ok()?;
+            text.split('\n')
+                .nth(i)
+                .map(|x| x.trim_end_matches(['\r', ' ']).to_owned())
+        };
+        let (kind, rest) = req.split_once(':')?;
+        if kind == "f" {
+            // (line LINE of file NAME: the document's, or a file's text)
+            let (l, name) = rest.split_once(':')?;
+            let l = l.parse::<i64>().ok()?;
+            let bare = name.strip_prefix("./").unwrap_or(name);
+            let main = self.opts.name.strip_prefix("./").unwrap_or(&self.opts.name);
+            if bare == main || name == DOC_NAME {
+                return nth(&self.text, l);
+            }
+            let text = self.g.file_text(name).or_else(|| self.g.file_text(bare))?;
+            return nth(&text, l);
+        }
+        let (n, k) = rest.split_once(':')?;
+        self.piece_line_text(n.parse().ok()?, k.parse().ok()?)
+    }
+
+    /// Line `k` of node `n`'s text as the text holds it (the document's,
+    /// or a cut file's): [`Build::line_text`]'s piece.
+    fn piece_line_text(&self, n: u64, k: u32) -> Option<String> {
+        let nth = |text: &str, l: i64| {
+            let i = usize::try_from(l.checked_sub(1)?).ok()?;
+            text.split('\n')
+                .nth(i)
+                .map(|x| x.trim_end_matches(['\r', ' ']).to_owned())
+        };
+        if let Some(&d) = self.dlines.get(&n) {
+            return nth(&self.text, d + i64::from(k));
+        }
+        if let Some(t) = self.g.ops.docs.locked().values().find_map(|d| {
+            let d = d.locked();
+            let l = d.dlines.get(&n).copied()?;
+            nth(&d.text, l + i64::from(k))
+        }) {
+            return Some(t);
+        }
+        // (a piece of the rest of a file a run read the first lines of
+        // itself, [`rest_lines`]: its file named by its first frame's
+        // origin)
+        let v = self.g.eng.values();
+        let (frames, l) = self
+            .g
+            .ops
+            .rest_lines
+            .locked()
+            .iter()
+            .find_map(|(&f, &l)| (v.stable_raw(f) == n).then_some((f, l)))?;
+        let first = list_of(v, frames).first().copied()?;
+        let name = str_of(v, *list_of(v, first).get(5)?);
+        let bare = name.strip_prefix("./").unwrap_or(&name);
+        let main = self.opts.name.strip_prefix("./").unwrap_or(&self.opts.name);
+        if bare == main || name == DOC_NAME {
+            return nth(&self.text, l + i64::from(k));
+        }
+        let text = self.g.file_text(&name).or_else(|| self.g.file_text(bare))?;
+        nth(&text, l + i64::from(k))
+    }
+
     fn output_made(&self) -> (Arc<Vec<u8>>, String) {
         let v = self.g.eng.values();
         let mut dvi: Arc<Vec<u8>> = self
@@ -9502,6 +9582,7 @@ impl Build {
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
                     .or_else(|| rest_line(v, &self.g.ops.rest_lines, n))
             },
+            &|r| self.line_text(r),
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
         // is closed with the pages shipped and xelatex's xdvipdfmx makes
@@ -9606,6 +9687,7 @@ impl Build {
                     .or_else(|| doc_file_line(&self.g.ops.docs, n))
                     .or_else(|| rest_line(v, &self.g.ops.rest_lines, n))
             },
+            &|r| self.line_text(r),
             &crate::log::TermParts {
                 head,
                 end: &end,
@@ -10209,8 +10291,16 @@ impl Build {
             // UTF-8 where they are, not one character a byte)
             let (shown_before, shown_after) = (shown(&before), shown(&after));
             let lead = format!("l.{line} ");
+            // (the levels above TeX's line, as the log lays them out: a
+            // macro's, its arguments, tokens put back, `crate::context`)
+            let above = xs
+                .get(10)
+                .map(|&x| crate::log::context_lines(&str_of(v, x)))
+                .filter(|a| !a.is_empty())
+                .map(|a| a + "\n")
+                .unwrap_or_default();
             let context = format!(
-                "{lead}{shown_before}\n{}{shown_after}",
+                "{above}{lead}{shown_before}\n{}{shown_after}",
                 " ".repeat(lead.len() + shown_before.chars().count())
             );
             let help = if undefined {

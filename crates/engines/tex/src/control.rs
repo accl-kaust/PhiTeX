@@ -940,7 +940,11 @@ impl Run<'_, '_> {
                 self.ck()?;
                 let mut s = String::new();
                 self.show_toks_into(&mut s, &body)?;
+                if ch != 0 && self.interp.is_none() {
+                    self.note_err_help()?;
+                }
                 self.log(if ch == 0 { "msg" } else { "errmsg" }, &s)?;
+                self.err_help = None;
             }
             cmd::CASE_SHIFT => {
                 // §1288

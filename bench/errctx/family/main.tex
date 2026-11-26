@@ -1,0 +1,6 @@
+\newlinechar=`\^^J
+\def\family#1#2{\def\next{\errmessage{Package fake Error: ^^J(fake)   The font "#2" cannot be^^J(fake)   found.^^J^^JFor immediate help type H <return>.}}\futurelet\tok\next}
+\family\a{Missing}%
+% a comment between
+\family\b{Other}
+\bye

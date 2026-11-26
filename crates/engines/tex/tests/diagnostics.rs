@@ -66,9 +66,13 @@ fn an_undefined_name_read_in_an_argument_is_at_its_spelling() {
                 "-j{threads} {doc:?}: {d:?}"
             );
             assert_eq!(d.line, 3, "-j{threads} {doc:?}: {d:?}");
+            // (TeX's line below the macro's levels, `\\grab #1\\stop ->#1`,
+            // the place read in its argument)
             if !doc.contains("\\stop%") {
                 assert!(
-                    d.context.starts_with("l.5 "),
+                    d.context.starts_with("<argument> A \\undefinedfoo ")
+                        && d.context.contains("\n\\grab #1\\stop ->#1\n")
+                        && d.context.contains("\nl.5 "),
                     "-j{threads} {doc:?}: TeX's line: {d:?}"
                 );
             }
@@ -130,7 +134,12 @@ fn a_header_only_error_names_its_key_at_its_argument() {
         (3, (at, at + "\\a{Missing}".len())),
         "{d:?}"
     );
-    assert!(d.context.starts_with("l.5 "), "{}", d.context);
+    // (TeX's line below the macro the message is in, `\\next`)
+    assert!(
+        d.context.starts_with("\\next ") && d.context.contains("\nl.5 "),
+        "{}",
+        d.context
+    );
 }
 
 /// A paragraph's box report, the paragraph resumed after a display
@@ -728,6 +737,69 @@ fn an_error_has_its_context_and_help_in_the_log() {
                 "-j{threads} {doc:?}: the log has not\n{want}\nlog:\n{log}"
             );
         }
+    }
+}
+
+/// An error's context with TeX's macro levels (§311-§319): a macro's
+/// level (`\\name`, its parameter text, `->`, its body to the place read),
+/// an `<argument>` level above it where the place is in an argument, a
+/// token put back by `\\futurelet` shown as `<to be read again>` and,
+/// read again, `<recently read>`, `\\errorcontextlines` levels and the
+/// `<inserted text>` of a missing `$`. Oracle: pdfTeX 1.40.29 (TeX Live
+/// 2026, mc 90962 and later, bench/errctx/plain), the blocks byte for byte.
+#[test]
+fn an_errors_context_has_its_macro_levels() {
+    let doc = "\\def\\a#1{\\b{#1}x}\n\\def\\b#1{\\c #1 y}\n\\def\\c{\\undefinedH}\n\\a{arg}\n\\def\\d#1#2{#1#2\\e}\n\\d{\\undefinedI}{two}\n\\def\\f{\\futurelet\\next\\g}\\def\\g{\\h}\n\\f\\undefinedJ\n\\def\\n#1\\stop{[#1]}\n\\n one\\undefinedK two\\stop\n$x\\par$\n\\bye\n";
+    let undefined = "The control sequence at the end of the top line\nof your error message was never \\def'ed. If you have\nmisspelled it (e.g., `\\hobx'), type `I' and the correct\nspelling (e.g., `I\\hbox'). Otherwise just continue,\nand I'll forget about whatever was undefined.\n\n";
+    let dollar = "I've inserted a begin-math/end-math symbol since I think\nyou left one out. Proceed, with fingers crossed.\n\n";
+    let blocks = [
+        format!(
+            "! Undefined control sequence.\n\\c ->\\undefinedH \n                 \n\\b #1->\\c \n          #1 y\n\\a #1->\\b {{#1}}\n              x\nl.4 \\a{{arg}}\n           \n{undefined}"
+        ),
+        format!(
+            "! Undefined control sequence.\n<argument> \\undefinedI \n                       \n\\d #1#2->#1\n           #2\\e \nl.6 \\d{{\\undefinedI}}{{two}}\n                        \n{undefined}"
+        ),
+        format!(
+            "! Undefined control sequence.\n\\d #1#2->#1#2\\e \n                \nl.6 \\d{{\\undefinedI}}{{two}}\n                        \n{undefined}"
+        ),
+        format!(
+            "! Undefined control sequence.\n\\g ->\\h \n        \n<to be read again> \n                   \\undefinedJ \nl.8 \\f\\undefinedJ\n                 \n{undefined}"
+        ),
+        format!(
+            "! Undefined control sequence.\n<recently read> \\undefinedJ \n                            \nl.8 \\f\\undefinedJ\n                 \n{undefined}"
+        ),
+        format!(
+            "! Missing $ inserted.\n<inserted text> \n                $\n<to be read again> \n                   \\par \nl.11 $x\\par\n           $\n{dollar}"
+        ),
+        format!(
+            "! Missing $ inserted.\n<inserted text> \n                $\n<to be read again> \n                   \\par \n\\bye ->\\par \n            \\vfill \\supereject \\end \nl.12 \\bye\n         \n{dollar}"
+        ),
+    ];
+    for threads in [1, 4] {
+        let b = build(doc, |o| Options {
+            threads: Some(threads),
+            ..o
+        });
+        let (_, log) = b.output();
+        for want in &blocks {
+            assert!(
+                log.contains(want.as_str()),
+                "-j{threads}: the log has not\n{want}\nlog:\n{log}"
+            );
+        }
+        // (the diagnostic's context: the levels above TeX's line, then
+        // the line)
+        let ds = b.diagnostics();
+        let d = ds
+            .iter()
+            .find(|d| d.message == "Undefined control sequence")
+            .expect("the error");
+        assert!(
+            d.context
+                .starts_with("\\c ->\\undefinedH \n                 \n\\b #1->\\c \n          #1 y\n\\a #1->\\b {#1}\n              x\nl.4 "),
+            "-j{threads}: {:?}",
+            d.context
+        );
     }
 }
 

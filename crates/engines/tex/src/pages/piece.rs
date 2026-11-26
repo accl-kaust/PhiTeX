@@ -1801,11 +1801,16 @@ impl Run<'_, '_> {
             }
             level_here.push(here_of(cur));
         }
-        let toks_frame = |toks: &[crate::val::Tok], here: &[ValueId]| {
+        // (and what the level was, where TeX shows it in an error's
+        // context: tokens put back or inserted, a macro's by its name,
+        // `crate::input::Lv`, read by `crate::run::frame_level`)
+        let toks_frame = |toks: &[crate::val::Tok], here: &[ValueId], lv: crate::input::Lv| {
             let mut t = vec![v.str("t"), toks_value(v, toks)];
             t.extend(here.iter().copied());
+            t.extend(crate::run::lv_value(v, lv));
             v.list(t)
         };
+        let lv_of = crate::input::Lv::of_level;
         let base_here = here_of(base);
         let mut frames = Vec::new();
         let levels: &[crate::input::Level] = if with_frames { &self.input.levels } else { &[] };
@@ -1814,7 +1819,7 @@ impl Run<'_, '_> {
                 crate::input::kind::TOKS => {
                     let r = self.input.arena.get(l.rest());
                     if !r.is_empty() {
-                        frames.push(toks_frame(r, &level_here[i]));
+                        frames.push(toks_frame(r, &level_here[i], lv_of(l)));
                     }
                 }
                 crate::input::kind::LINE => {
@@ -1852,9 +1857,9 @@ impl Run<'_, '_> {
                         frames.push(f);
                     }
                 }
-                Seg::Toks(t) => {
+                Seg::Toks(t, lv) => {
                     if !t.is_empty() {
-                        frames.push(toks_frame(t, &base_here));
+                        frames.push(toks_frame(t, &base_here, *lv));
                     }
                 }
                 Seg::File(f) => frames.extend(file_frames(v, f)),

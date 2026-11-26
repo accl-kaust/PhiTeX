@@ -1181,7 +1181,7 @@ impl Run<'_, '_> {
         let first = self.input.text[at].clone();
         let ok = match (&first, left.as_slice()) {
             // a token list read not at all (the token stepped back)
-            (Seg::Toks(t), [l]) => {
+            (Seg::Toks(t, _), [l]) => {
                 l.kind == kind::TOKS && self.input.arena.get(l.rest()) == t.as_slice()
             }
             // a line of which one token was read and put back
@@ -1212,7 +1212,7 @@ impl Run<'_, '_> {
                     format!(
                         "{} levels left over a {} first segment",
                         left.len(),
-                        if matches!(first, Seg::Toks(_)) {
+                        if matches!(first, Seg::Toks(..)) {
                             "token"
                         } else {
                             "line"
@@ -1287,7 +1287,7 @@ impl Run<'_, '_> {
         {
             return Ok(false);
         }
-        let (Some(Seg::Toks(t)), Some(Seg::Line(rest))) =
+        let (Some(Seg::Toks(t, _)), Some(Seg::Line(rest))) =
             (self.input.text.get(at), self.input.text.get(at + 1))
         else {
             return Ok(false);
@@ -1310,7 +1310,7 @@ impl Run<'_, '_> {
         // node counts it again)
         let begun = match (self.input.text.get(at), self.input.text.get(at + 1)) {
             (Some(Seg::Line(l)), _) if l.starts => Some(l),
-            (Some(Seg::Toks(_)), Some(Seg::Line(l))) if l.starts && l.endch != -2 => Some(l),
+            (Some(Seg::Toks(..)), Some(Seg::Line(l))) if l.starts && l.endch != -2 => Some(l),
             _ => None,
         };
         if let Some(l) = begun {
@@ -1459,7 +1459,7 @@ impl Run<'_, '_> {
         }
         for s in self.input.text_rest() {
             let more = match s {
-                Seg::Toks(t) => !t.is_empty(),
+                Seg::Toks(t, _) => !t.is_empty(),
                 Seg::Line(l) => l.has_more(),
                 // (a chunk's line: one there when the segment was made,
                 // `Run::read_chunk`)
@@ -1518,7 +1518,7 @@ impl Run<'_, '_> {
                 break;
             }
             match sg {
-                Seg::Toks(t) => {
+                Seg::Toks(t, _) => {
                     if !t.is_empty() {
                         return Ok(false);
                     }
@@ -1555,7 +1555,7 @@ impl Run<'_, '_> {
                     }
                     i += 1;
                 }
-                Some(Seg::Toks(t)) => {
+                Some(Seg::Toks(t, _)) => {
                     if !t.is_empty() {
                         return Ok(false);
                     }
@@ -1650,7 +1650,7 @@ impl Run<'_, '_> {
         }
         for s in self.input.text_rest() {
             match s {
-                Seg::Toks(t) if !t.is_empty() => return false,
+                Seg::Toks(t, _) if !t.is_empty() => return false,
                 Seg::Line(l) if l.has_more() => return false,
                 Seg::File(f) if f.has_lines() => return self.doc_file(f),
                 Seg::Chunk(..) => return false,
@@ -2204,6 +2204,7 @@ impl Run<'_, '_> {
         }
         keep.reverse();
         self.input.levels = keep;
+        self.input.back_mark = crate::input::BackMark::default();
         if found {
             return true;
         }
@@ -2225,7 +2226,7 @@ impl Run<'_, '_> {
                         continue;
                     }
                 }
-                Seg::Toks(t) => {
+                Seg::Toks(t, _) => {
                     if t.iter().any(|&t| is_eof(t)) {
                         return true;
                     }
@@ -2258,7 +2259,7 @@ impl Run<'_, '_> {
         }
         let at = self.input.text_at.min(self.input.text.len());
         for s in &mut self.input.text[at..] {
-            if let Seg::Toks(t) = s
+            if let Seg::Toks(t, _) = s
                 && let Some(k) = t.iter().position(|&x| is_plain(x))
                 && let Some(n) = t[k].as_cs()
             {

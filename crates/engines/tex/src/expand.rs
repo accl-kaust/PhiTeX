@@ -504,7 +504,7 @@ impl Run<'_, '_> {
             if self.aopen != 0 {
                 self.end_spent_lists();
             }
-            self.push_range(r, crate::input::ty::MACRO);
+            self.input.push_macro(r, name, 0);
             return;
         }
         // §389: `scanner_status:=matching; warning_index:=warning_index`
@@ -527,8 +527,8 @@ impl Run<'_, '_> {
                 self.end_spent_lists();
             }
             self.input.pop_spent();
-            let range = self.input.arena.expand_body(&m.body, &m.segs, base);
-            self.push_range(range, crate::input::ty::MACRO);
+            let (range, nargs) = self.input.arena.expand_body(&m.body, &m.segs, base);
+            self.input.push_macro(range, name, nargs);
             // (the engine bounds a run on a guess by its work: the tokens
             // written count too, [`Run::tok_work`])
             // (one a `TOK_WORK_TICK` written, the rest carried: a call
@@ -577,7 +577,7 @@ impl Run<'_, '_> {
         }
         self.input.pop_spent();
         let r = self.body_range(&m.body);
-        self.push_range(r, crate::input::ty::MACRO);
+        self.input.push_macro(r, head, 0);
         true
     }
 
@@ -1847,11 +1847,33 @@ impl Run<'_, '_> {
         self.show_toks_into(s, &all)
     }
 
+    /// [`Run::show_toks_into`] of `toks` as two parts: before token `at`
+    /// and from it (§319's pseudoprint: one list, its `#` kept across).
+    pub(crate) fn show_toks_split(&mut self, toks: &[Tok], at: usize) -> R<(String, String)> {
+        let mut s = String::new();
+        let k = self.show_toks_at(&mut s, toks, at)?;
+        let b = s.split_off(k);
+        Ok((s, b))
+    }
+
     /// `show_token_list` with the current `\escapechar` and category codes.
     pub(crate) fn show_toks_into(&mut self, s: &mut String, toks: &[Tok]) -> R<()> {
+        self.show_toks_at(s, toks, usize::MAX).map(|_| ())
+    }
+
+    /// [`Run::show_toks_into`], the length of what it printed before token
+    /// `at` returned (the whole where `at` is past the end).
+    fn show_toks_at(&mut self, s: &mut String, toks: &[Tok], at: usize) -> R<usize> {
         // (a deferred read's symbol prints its digits: forced in a piece,
         // resolved in a finisher, docs/spec-deferred-reads.md §2)
         let digits = crate::defer::digits_of(self, toks)?;
+        // (the place read, in the list with the digits in)
+        let at = match (&digits, toks.get(..at)) {
+            (Some(_), Some(before)) => {
+                crate::defer::digits_of(self, before)?.map_or(at, |d| d.len())
+            }
+            _ => at,
+        };
         let toks = digits.as_deref().unwrap_or(toks);
         let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         // single-character names: their current category code (§262)
@@ -1867,8 +1889,9 @@ impl Run<'_, '_> {
                 }
             }
         }
-        print::show_toks(s, toks, esc, &mut |c| cats.get(&c).copied().unwrap_or(12));
-        Ok(())
+        Ok(print::show_toks_split(s, toks, at, esc, &mut |c| {
+            cats.get(&c).copied().unwrap_or(12)
+        }))
     }
 
     /// `\endinput` (§362): the rest of the current file is skipped once

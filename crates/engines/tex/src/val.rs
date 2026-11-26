@@ -409,6 +409,12 @@ impl Tok {
         Tok(CS_BIT | mark | (u32::try_from(c.index()).unwrap_or(0) & CS_INDEX))
     }
 
+    /// The token whose word ([`Tok::raw`]) is `x`.
+    #[inline]
+    pub(crate) fn from_raw(x: u32) -> Tok {
+        Tok(x)
+    }
+
     /// The word: `cat << 21 | char` for a character (so `raw() >> 21` is
     /// the category, and at least 1024 for a control sequence).
     #[inline]

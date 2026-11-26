@@ -1,0 +1,8 @@
+\documentclass{article}
+\newcommand\barx{a \undefinedC b}
+\newcommand\outerx[1]{<\barx #1>}
+\begin{document}
+Text \barx\ here.
+
+And \outerx{z}.
+\end{document}
