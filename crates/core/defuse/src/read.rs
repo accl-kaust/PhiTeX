@@ -877,9 +877,8 @@ thread_local! {
 /// `prefix`, the digits of `v + j`, `suffix`.
 pub(crate) fn derived_name(vals: &Values, spec: ValueId, v: Option<ValueId>) -> Option<Field> {
     let parts = vals.with_list(spec, <[ValueId]>::to_vec)?;
-    let (prefix, j, suffix) = match parts[..] {
-        [_, p, j, s] | [_, p, j, s, _, _] => (p, j, s),
-        _ => return None,
+    let [_, prefix, j, suffix] = parts[..] else {
+        return None;
     };
     let v = v.and_then(|x| vals.as_int(x)).unwrap_or(0);
     let n = v.checked_add(vals.as_int(j)?)?;
@@ -892,54 +891,22 @@ pub(crate) fn derived_base(vals: &Values, spec: ValueId) -> Option<Field> {
     vals.with_list(spec, |xs| xs.first().copied()).flatten().map(Field)
 }
 
-/// Where a derived read across nodes (`Ctx::read_derived_from`) reads its
-/// base and its named field: before the node its base is read at, and
-/// before the reader's place, both kept in its spec; None for a derived
-/// read whose two reads are at its record's anchor.
-pub(crate) fn derived_places(vals: &Values, spec: ValueId) -> Option<(NodeId, NodeId)> {
-    let node = |x: ValueId| {
-        vals.as_int(x)
-            .map(|n| NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())))
-    };
-    vals.with_list(spec, |xs| match xs {
-        [_, _, _, _, b, g] => Some((node(*b)?, node(*g)?)),
-        _ => None,
-    })
-    .flatten()
-}
-
-/// Where a derived read whose record is at `anchor` reads its named field
-/// (the reader's place for one across nodes, [`derived_places`]).
-pub(crate) fn derived_target_place(eng: &Engine, spec: ValueId, anchor: NodeId, inclusive: bool) -> (NodeId, bool) {
-    match derived_places(eng.values(), spec) {
-        Some((_, g)) => (g, false),
-        None => (anchor, inclusive),
-    }
-}
-
 /// The field a derived read at `anchor` names now (None: the anchor gone).
 pub(crate) fn derived_field_at(eng: &Engine, spec: ValueId, anchor: NodeId, inclusive: bool) -> Option<Field> {
     let base = derived_base(eng.values(), spec)?;
-    let (at, incl) = match derived_places(eng.values(), spec) {
-        Some((b, _)) => (b, false),
-        None => (anchor, inclusive),
-    };
-    let v = reaching_at(eng, base, at, incl)?;
+    let v = reaching_at(eng, base, anchor, inclusive)?;
     derived_name(eng.values(), spec, v.value)
 }
 
 /// A read through path `p` at `anchor` (`At::Before`/`AfterOwn`, the
 /// reader's own position as `Before` itself) of the definition `r`: a
-/// derived path answers its composed look-up there (across nodes: the
-/// named field where the reader reads it, [`derived_places`]), any other
-/// `through`.
+/// derived path answers its composed look-up there, any other `through`.
 pub(crate) fn through_at(eng: &Engine, r: Reaching, p: PathId, anchor: NodeId, inclusive: bool) -> Option<ValueId> {
     let Some(spec) = derived_spec(eng, p) else {
         return through(eng, r, p);
     };
     let g = derived_field_at(eng, spec, anchor, inclusive)?;
-    let (ga, gi) = derived_target_place(eng, spec, anchor, inclusive);
-    let x = reaching_at(eng, g, ga, gi)?.value;
+    let x = reaching_at(eng, g, anchor, inclusive)?.value;
     let steps = eng.path_steps(p)?;
     let mut cur = x;
     for s in &steps[1..] {
@@ -1865,8 +1832,7 @@ pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunR
                 _ => return None,
             };
             let g = derived_field_at(eng, spec, anchor, incl)?;
-            let (ga, gi) = derived_target_place(eng, spec, anchor, incl);
-            let by = reaching_at(eng, g, ga, gi)?.by?;
+            let by = reaching_at(eng, g, anchor, incl)?.by?;
             let x = eng.placed_node(by)?;
             (by != me.id
                 && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)

@@ -127,12 +127,8 @@ impl Run<'_, '_> {
                     // is no runaway, §336)
                     // (only the token is used: of its meaning, the class a
                     // stored token's fetch reads)
-                    // (a derived name's symbol kept: not expanded, its
-                    // digits are not needed, docs/spec-symbol-reads.md B3)
                     let was = self.scanner.take();
-                    self.d_ok = true;
                     self.get_token_stored();
-                    self.d_ok = false;
                     self.scanner = was;
                     self.ck()?;
                     let t = self.cur.tok;
@@ -1270,13 +1266,6 @@ impl Run<'_, '_> {
                 .any(|&t| crate::defer::is_sym(t))
         };
         if !syms(&a) && !syms(&b) {
-            return Ok(false);
-        }
-        // (told apart where the digits cannot matter: no read,
-        // docs/spec-symbol-reads.md B1)
-        if crate::defer::lists_differ(self.ops, &a.params, &b.params)
-            || crate::defer::lists_differ(self.ops, &a.body, &b.body)
-        {
             return Ok(false);
         }
         let d = |r: &mut Self, xs: &[Tok]| -> R<Vec<Tok>> {
