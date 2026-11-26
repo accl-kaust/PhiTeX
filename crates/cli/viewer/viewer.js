@@ -9058,14 +9058,14 @@ var DIFF_COLORS = {
 };
 var DIFF_LOOK = { colors: "blue", ins: "wavy", del: "strike", fig: "side", bars: false };
 var CHANGES_TITLE = "Changes: what changed between two versions, and who wrote what";
-var KINDS3 = ["Text", "Section", "Citation", "Table", "Figure", "Equation"];
+var KINDS3 = ["Text", "Section", "Citation", "Table", "Figure", "Equation", "Bibliography"];
 function words(src, n = 12) {
   return src.replace(/%.*$/gm, " ").replace(/\\(?:cite[tp]?|ref|label|eqref|includegraphics)\*?(\[[^\]]*\])?\{[^}]*\}/g, (m) => /\\cite/.test(m) ? `[${m.replace(/.*\{|\}/g, "")}]` : " ").replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, n).join(" ");
 }
 function itemOf(c, k) {
   const both = `${c.old_text}
 ${c.new_text}`;
-  const kind = /\\(sub)*section\*?\{|\\chapter\*?\{|\\paragraph\{/.test(both) ? "Section" : /\\includegraphics|\\begin\{figure|\\begin\{tikzpicture/.test(both) ? "Figure" : /\\begin\{(tabular|table)|&.*\\\\/.test(both) ? "Table" : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) ? "Citation" : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both) ? "Equation" : "Text";
+  const kind = /\\(sub)*section\*?\{|\\chapter\*?\{|\\paragraph\{/.test(both) ? "Section" : /\\includegraphics|\\begin\{figure|\\begin\{tikzpicture/.test(both) ? "Figure" : /\\begin\{(tabular|table)|&.*\\\\/.test(both) ? "Table" : /\\(bibliography|printbibliography)\b|\\begin\{thebibliography\}/.test(both) ? "Bibliography" : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) ? "Citation" : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both) ? "Equation" : "Text";
   const img = (t) => /\\includegraphics\*?(?:\[[^\]]*\])?\{([^}]*)\}/.exec(t)?.[1];
   let old = words(c.old_text), neu = words(c.new_text);
   if (kind === "Figure" && (img(c.old_text) || img(c.new_text))) old = img(c.old_text) ?? old, neu = img(c.new_text) ? `${img(c.new_text)}${img(c.old_text) ? " replaced" : ""}` : neu;
