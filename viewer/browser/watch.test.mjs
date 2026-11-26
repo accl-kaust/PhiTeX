@@ -835,7 +835,18 @@ test("a note made in one column of a two-column paper is drawn in that column, a
   // full: the selection's bytes hold the footnote's and the float's text, set
   // at the column's foot and atop the other column)
   const body = `${prose(14, 3)}\n\n${prose(9, 5)}\\footnote{Footnote text typeset at the foot of the column.}\n\\begin{figure}[t]\\centering\\fbox{Figure}\\caption{A caption typeset where the float lands.}\\end{figure}\n\n${prose(9, 7)}\n\n${prose(40, 11)}\n\\begin{thebibliography}{1}\\bibitem{k} D. Knuth. 1984.\\end{thebibliography}`;
-  const { w, t } = await open({ "main.tex": `\\documentclass[twocolumn]{article}\n\\begin{document}\n${body}\n\\end{document}\n` }, { at });
+  // (the project its own repository, its file committed, as the review's other tests: the
+  // review's baseline is then its own, nothing waiting, wherever the temporary folder is. In
+  // an untracked folder of another repository, a worktree's, the baseline was that one's index,
+  // the whole file a new file waiting for review: its mark lay over the note's, and the click
+  // after the reload selected that change, not the note)
+  const dir = project({ "main.tex": `\\documentclass[twocolumn]{article}\n\\begin{document}\n${body}\n\\end{document}\n` });
+  git(dir, "init", "-q");
+  git(dir, "add", ".");
+  git(dir, "commit", "-qm", "one");
+  const w = new Watch(dir, { home: at });
+  const t = await browser.tab(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
   await t.send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 1700, deviceScaleFactor: 1, mobile: false });
   // (the pages' layout at rest: the first page's box the same for 400 ms. A
   // resize, or the review's side opening, fits the pages to the narrower stage
