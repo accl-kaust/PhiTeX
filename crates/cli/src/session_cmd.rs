@@ -3247,26 +3247,6 @@ fn locate(
     // page for certain, where its words are few or a neighbour's too, as
     // a display's math is)
     let shot_names: Vec<String> = strs(&v["files"]);
-    // (a source line's every page: a beamer frame's overlays show it on
-    // each, built from the same bytes)
-    let mut line_pages: Vec<usize> = if matches!(what, What::Line(..)) {
-        v["pages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| {
-                let k = usize::try_from(p["page"].as_u64()?).ok()?;
-                page_codes(p)
-                    .iter()
-                    .any(|c| c.end > c.start && in_range_of(&shot_names, c))
-                    .then_some(k)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    line_pages.sort_unstable();
-    line_pages.dedup();
     let by_origins = v["pages"]
         .as_array()
         .into_iter()
@@ -3447,8 +3427,56 @@ fn locate(
         number,
         printed,
         approximate: false,
-        line_pages,
+        line_pages: line_pages(c, &shot, &ranges, &in_range_of, k, count, what)?,
     })
+}
+
+/// A source line's pages: the run of consecutive pages through `k` (from
+/// 0) whose glyph origins it made, a beamer frame's overlays (each built
+/// from the same bytes); empty for a label, or a line not on page `k`.
+fn line_pages(
+    c: &mut Conn,
+    shot: &dyn Fn(&mut Conn, &[(String, usize, usize)], &[usize]) -> Result<Value, Failed>,
+    ranges: &[(String, usize, usize)],
+    in_range_of: &dyn Fn(&[String], &crate::shot::Code) -> bool,
+    k: usize,
+    count: usize,
+    what: &What,
+) -> Result<Vec<usize>, Failed> {
+    if !matches!(what, What::Line(..)) {
+        return Ok(Vec::new());
+    }
+    let near: Vec<usize> = (k.saturating_sub(20)..(k + 21).min(count)).collect();
+    let v = shot(c, ranges, &near)?;
+    let names: Vec<String> = v["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().map(str::to_owned))
+        .collect();
+    let on: std::collections::BTreeSet<usize> = v["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let page = usize::try_from(p["page"].as_u64()?).ok()?;
+            page_codes(p)
+                .iter()
+                .any(|c| c.end > c.start && in_range_of(&names, c))
+                .then_some(page)
+        })
+        .collect();
+    if !on.contains(&k) {
+        return Ok(Vec::new());
+    }
+    let (mut a, mut b) = (k, k);
+    while a > 0 && on.contains(&(a - 1)) {
+        a -= 1;
+    }
+    while on.contains(&(b + 1)) {
+        b += 1;
+    }
+    Ok((a..=b).collect())
 }
 
 fn found_json(f: &Found, what: &What) -> Value {
