@@ -474,16 +474,52 @@ impl<'a> Em<'a> {
     }
 
     fn note_section(&mut self, n: &Tok) {
-        if let Kind::Text { name, .. } = &n.kind
-            && SECTIONS.contains(&name.as_str())
-        {
-            self.section = Some(self.new[n.open_end..n.close_start].trim().to_owned());
+        if let Some(s) = section_of(n, self.new) {
+            self.section = Some(s);
         }
     }
 
     /// Deleted tokens `old` and added `new` (where they are when empty:
-    /// `old_at`, `new_at`): one change.
+    /// `old_at`, `new_at`): a change for each unit of them ([`units`]: a
+    /// float, a display, the bibliography, a sectioning command, the text
+    /// between them), each filed under the section it is in. A unit of the
+    /// old side's last and the new side's first are one change (what was
+    /// there replaced); the old side's others deleted before it, the new
+    /// side's others added after it, the markup in the same order as one
+    /// block's. (One block was one change: an early version's last
+    /// paragraph followed by a display, a figure, a section, a table and
+    /// the bibliography was one change "Text", filed under the last
+    /// section it added.)
     fn block(&mut self, old: &[Tok], new: &[Tok], old_at: usize, new_at: usize, ctx: Ctx) {
+        let og = units(old, self.old);
+        let ng = units(new, self.new);
+        if og.len() <= 1 && ng.len() <= 1 {
+            self.block_one(old, new, old_at, new_at, ctx);
+            return;
+        }
+        let new_first = new.first().map_or(new_at, |t| t.start);
+        let old_end = |i: usize| old.get(i).map_or(old_at, |t| t.start);
+        let (lo, ln) = (og.len().saturating_sub(1), ng.len().min(1));
+        for g in &og[..lo] {
+            self.block_one(&old[g.clone()], &[], old_end(g.end), new_first, ctx);
+        }
+        let o = og.last().map_or(&old[..0], |g| &old[g.clone()]);
+        let n = ng.first().map_or(&new[..0], |g| &new[g.clone()]);
+        let n_end = |i: usize| new.get(i).map_or(new_at, |t| t.start);
+        self.block_one(
+            o,
+            n,
+            old_at,
+            ng.first().map_or(new_at, |g| n_end(g.end)),
+            ctx,
+        );
+        for g in &ng[ln..] {
+            self.block_one(&[], &new[g.clone()], old_at, n_end(g.end), ctx);
+        }
+    }
+
+    /// [`Em::block`]'s one change.
+    fn block_one(&mut self, old: &[Tok], new: &[Tok], old_at: usize, new_at: usize, ctx: Ctx) {
         // (comments and labels alone: nothing the pages show changed, so
         // no markup and no change; the new text as it is)
         let quiet = |t: &Tok, src: &str| {
@@ -505,6 +541,15 @@ impl<'a> Em<'a> {
         };
         let o = span(old, old_at);
         let n = span(new, new_at);
+        // (the section it is in: the one before it, or its own, a
+        // sectioning command added; not one it adds further on)
+        let section = match new
+            .iter()
+            .find(|t| !matches!(t.kind, Kind::Ws | Kind::Par | Kind::Comment))
+        {
+            Some(t) if section_of(t, self.new).is_some() => section_of(t, self.new),
+            _ => self.section.clone(),
+        };
         let start = self.out.len();
         let fl = if ctx.fl { "FL" } else { "" };
         // (a deletion the old text set apart from the word before it,
@@ -559,8 +604,6 @@ impl<'a> Em<'a> {
         if pair {
             self.push("\\DIFtabularend ");
         }
-        // (the section a change is in: the last one before it, or its own)
-        let section = self.section.clone();
         self.changes.push(RawChange {
             old: o,
             new: n,
@@ -1587,6 +1630,71 @@ fn leaves(t: &Tok, out: &mut Vec<u64>) {
             out.push(c.key);
         }
     }
+}
+
+/// The title of sectioning command `t` (in `src`), if it is one.
+fn section_of(t: &Tok, src: &str) -> Option<String> {
+    match &t.kind {
+        Kind::Text { name, .. } if SECTIONS.contains(&name.as_str()) => {
+            Some(src[t.open_end..t.close_start].trim().to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// What a token is as a change of its own ([`units`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Unit {
+    /// Words, inline math, commands: the text between the others.
+    Text,
+    /// A float, a display or a sectioning command: a unit alone.
+    Alone,
+    /// The bibliography (`\bibliographystyle` and `\bibliography` together,
+    /// `\printbibliography`, `thebibliography`): one unit.
+    Bib,
+    /// White space, a blank line, a comment: the unit before it's.
+    Quiet,
+}
+
+fn unit_of(t: &Tok, src: &str) -> Unit {
+    match &t.kind {
+        Kind::Ws | Kind::Par | Kind::Comment => Unit::Quiet,
+        Kind::Display { .. } => Unit::Alone,
+        Kind::Env { name, .. } if name == "thebibliography" => Unit::Bib,
+        _ if is_float(t) || section_of(t, src).is_some() => Unit::Alone,
+        _ if matches!(
+            cs_at(&src[t.start..t.cend], 0).0,
+            "bibliography" | "bibliographystyle" | "printbibliography" | "nocite"
+        ) =>
+        {
+            Unit::Bib
+        }
+        _ => Unit::Text,
+    }
+}
+
+/// `toks` (of `src`) as the changes they make ([`Em::block`]): each float,
+/// display and sectioning command alone, the bibliography's commands
+/// together, the text between them together; white space and comments
+/// with the unit before them (the first unit, before any).
+fn units(toks: &[Tok], src: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out: Vec<(std::ops::Range<usize>, Unit)> = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        let u = unit_of(t, src);
+        match (out.last_mut(), u) {
+            (Some((r, _)), Unit::Quiet) => r.end = i + 1,
+            (Some((r, last)), Unit::Text | Unit::Bib) if *last == u || *last == Unit::Quiet => {
+                r.end = i + 1;
+                *last = u;
+            }
+            (Some((r, last)), Unit::Alone) if *last == Unit::Quiet => {
+                r.end = i + 1;
+                *last = u;
+            }
+            _ => out.push((i..i + 1, u)),
+        }
+    }
+    out.into_iter().map(|(r, _)| r).collect()
 }
 
 fn is_float(t: &Tok) -> bool {
