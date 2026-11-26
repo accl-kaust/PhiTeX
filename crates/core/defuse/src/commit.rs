@@ -1659,7 +1659,30 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         }
                     }
                     made_now[i] = false;
+                    if place_log() && slot == 1 {
+                        eprintln!(
+                            "place-log: kept {} by {} anchor {} floor {} at {} before {:?}",
+                            k.raw(),
+                            node.id.raw(),
+                            anchor.raw(),
+                            floor.0,
+                            kpos.0,
+                            ceiling.map(|c| c.0)
+                        );
+                    }
                     continue;
+                }
+                if place_log() && slot == 1 {
+                    eprintln!(
+                        "place-log: not kept {} by {} anchor {} floor {} at {} before {:?} rank {} of {rank}",
+                        k.raw(),
+                        node.id.raw(),
+                        anchor.raw(),
+                        floor.0,
+                        kpos.0,
+                        ceiling.map(|c| c.0),
+                        kn.rank()
+                    );
                 }
                 move_k = Some(k);
             }
@@ -5775,6 +5798,20 @@ pub(crate) fn place(
 /// (`PHITEX_WAKE_LOG`, profile) A placement: the node, its placer, anchor
 /// and slot, its label, and the node it went after or before.
 fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
+    if place_log() {
+        eprintln!(
+            "place-log: placed {} op {:?} parent {:?} anchor {:?} slot {} rank {} at {} {how} {} (at {:?})",
+            node.id.raw(),
+            node.op(),
+            node.parent.map(NodeId::raw),
+            node.anchor().map(NodeId::raw),
+            node.slot(),
+            node.rank(),
+            node.pos_hint().0,
+            rel.raw(),
+            eng.placed_node(rel).map(|r| r.pos_hint().0)
+        );
+    }
     if crate::obs::enabled() && crate::sched::wake_log() {
         elog!(
             "placed: node {} op {:?} parent {:?} anchor {:?} slot {} at {:?} {how} {} (at {:?})",
@@ -5788,6 +5825,16 @@ fn log_placed(eng: &Engine, node: &Node, how: &str, rel: NodeId) {
             eng.placed_node(rel).map(|r| r.pos_hint().0)
         );
     }
+}
+
+/// `DEFUSE_PLACE_LOG=1`: every placement, every check of a kept placement
+/// after another node, and every relocation printed to stderr, in any
+/// build (`place-log:` lines): where a node stands and who put it there,
+/// for a wrong order that shows only at many threads, where the observe
+/// build's timing hides it.
+pub(crate) fn place_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DEFUSE_PLACE_LOG").is_some())
 }
 
 /// A placement made outside its placer's segment, after the lock: its
@@ -6312,6 +6359,17 @@ pub(crate) fn relocate(
                 crate::sched::requeue(eng, w, m);
             }
         }
+    }
+    if place_log() {
+        eprintln!(
+            "place-log: relocated {} op {:?} by {} with {} of its subtree, after {} (at {})",
+            k.id.raw(),
+            k.op(),
+            placer.raw(),
+            landed.len() - 1,
+            end.raw(),
+            k.pos_hint().0
+        );
     }
     if crate::obs::enabled() && crate::sched::wake_log() {
         elog!(
