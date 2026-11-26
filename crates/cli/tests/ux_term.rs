@@ -675,10 +675,22 @@ Third frame words.
 fn session_pages_of_a_beamer_deck() {
     let dir = scratch("deck");
     std::fs::write(dir.join("deck.tex"), DECK).expect("the deck");
+    // (the deck's every build from this run's own: a graph a run before
+    // saved restores pages with no glyph origins, and the overlays are
+    // found by theirs)
     let session = |args: &[&str]| {
-        let mut all = vec!["session"];
-        all.extend_from_slice(args);
-        let out = run(&dir, &all);
+        let mut c = Command::new("timeout");
+        c.arg("600")
+            .arg(bin())
+            .arg("session")
+            .args(args)
+            .current_dir(&dir);
+        env(&mut c, &dir);
+        let out = c
+            .env("PHITEX_GRAPH", "0")
+            .stdin(Stdio::null())
+            .output()
+            .expect("phitex runs");
         (out.status.code(), text(&out.stdout), text(&out.stderr))
     };
     let (code, _, err) = session(&["start", "deck.tex", "--timeout", "20m"]);
