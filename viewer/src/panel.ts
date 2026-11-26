@@ -943,7 +943,11 @@ export class Panel {
     // not on every call, where after a page's writes it laid the view out
     // again; observed before the window's, whose redraw reads it)
     const stage = this.$("#stage");
-    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks())).observe(stage);
+    // (the opening's sheet fitted again with it: the stage changes size with no change to the
+    // window's when the contents' column comes or goes (opened, its first outline) and when
+    // the tips' room is made or given back; fitted with the window's only, the sheet stayed
+    // where the pages were, under the column or past the stage's edge)
+    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks(), this.fitSheet())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : undefined;
@@ -1996,22 +2000,34 @@ export class Panel {
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
   private animSince = 0;
 
-  /** The sheet as the first page will be: an A4 page, whole in the stage, where the viewer puts page 1. */
+  /**
+   * The sheet as the first page will be: a page whole in the pages' visible box, where the viewer
+   * puts page 1. The box is the stage's own, as it is laid out now (beside the contents' column,
+   * under the tips' room, its scrollbar out), in the coordinates of .body, which the sheet is
+   * placed in; the stage's offsetLeft and offsetTop are its .stagebox's, which the contents'
+   * column moves: the sheet was put the column's width left of the pages, partly under it.
+   */
   private fitSheet(): void {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
+    const st = this.$("#stage"), s = st.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+    const view = { x: s.left - b.left + st.clientLeft, y: s.top - b.top + st.clientTop, w: st.clientWidth, h: st.clientHeight };
+    const put = (x: number, y: number, w: number, h: number) => Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
     // (the first page laid out already (its size told before its drawing): its own box, the
-    // sheet the page it becomes; an A4 sheet over a Letter page overhung it till the dive)
+    // sheet the page it becomes, when it is whole in view; else its shape, fitted (a Rebuild's
+    // opening over pages read further down, or zoomed in: the page's box was partly out of view,
+    // and the opening, centred on it, clipped). An A4 sheet over a Letter page overhung it till the dive)
+    let tall = 297 / 210;
     const slot = this.$("#viewer").querySelector<HTMLElement>(".slot");
     if (slot && slot.offsetWidth > 40) {
-      const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
-      return void Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      const r = slot.getBoundingClientRect(), x = r.left - b.left, y = r.top - b.top;
+      if (x >= view.x - 1 && y >= view.y - 1 && x + r.width <= view.x + view.w + 1 && y + r.height <= view.y + view.h + 1) return void put(x, y, r.width, r.height);
+      tall = r.height / r.width;
     }
-    const st = this.$("#stage");
-    const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
-    let h = room.h, w = (h * 210) / 297;
-    if (w > room.w) (w = room.w), (h = (w * 297) / 210);
-    Object.assign(el.style, { left: `${st.offsetLeft + (st.clientWidth - w) / 2}px`, top: `${st.offsetTop + 12}px`, width: `${w}px`, height: `${h}px` });
+    const room = { w: Math.max(1, view.w - 24), h: Math.max(1, view.h - 24) };
+    let h = room.h, w = h / tall;
+    if (w > room.w) (w = room.w), (h = w * tall);
+    put(view.x + (view.w - w) / 2, view.y + 12, w, h);
   }
 
   /**
@@ -2339,6 +2355,7 @@ export class Panel {
       if (this.prefs.zoom === "fit") this.redraw();
     };
   }
+
 
   /** Keys of the host's own, listed after the viewer's in the keys' help (`?`). */
   addKeys(rows: [string, string][]): void {

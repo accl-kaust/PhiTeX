@@ -1073,3 +1073,42 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
   assert.deepEqual(t.errors, []);
   await w.stop();
 });
+
+test("the opening's sheet is whole in the pages' visible box and centred in it: with the contents' column open, after the window is resized, with the column closed and opened while it plays (the user: the opening off centre or clipped beside the contents, on Overleaf and in VS Code)", async () => {
+  const sections = Array.from({ length: 3 }, (_, i) => `\\section{Part ${i + 1}}\nSome words of part ${i + 1}.\n\\newpage`).join("\n");
+  const { w, t } = await open({ "main.tex": doc(sections, "\\usepackage{hyperref}\n") });
+  await waitBuild(w, 1);
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
+  // (the contents' column open, its outline in)
+  if (!(await t.q(`$(".win").classList.contains("side-on")`))) await t.click("#b-side");
+  await t.until(`$("#side").offsetWidth > 100 && /Part 3/.test($("#side").textContent)`, "the contents beside the pages", 30000);
+  // (the opening kept up: a clean rebuild asked with the watch gone, so no page ends it)
+  await w.stop();
+  await t.until(`$("#stage").classList.contains("offline")`, "the watch lost");
+  await t.q(`($("#b-rec").click(), $("#r-clean").click())`);
+  await t.until(`!$("#opening").hidden`, "the opening up", 5000);
+  // (the sheet's box against the stage's client box, once its easing is over: whole in it, centred across it, clear of the column)
+  const fits = async (what) => {
+    const q = `(() => {
+      const st = $("#stage"), s = st.getBoundingClientRect(), o = $("#opening").getBoundingClientRect(), c = $("#side").getBoundingClientRect();
+      const v = { l: s.left + st.clientLeft, t: s.top + st.clientTop, r: s.left + st.clientLeft + st.clientWidth, b: s.top + st.clientTop + st.clientHeight };
+      return { inside: o.left >= v.l - 1 && o.top >= v.t - 1 && o.right <= v.r + 1 && o.bottom <= v.b + 1, centred: Math.abs((o.left + o.right) / 2 - (v.l + v.r) / 2) <= 1,
+        clear: !$("#side").offsetWidth || o.left >= c.right - 1, shown: o.width > 100 && o.height > 100 };
+    })()`;
+    const want = JSON.stringify({ inside: true, centred: true, clear: true, shown: true });
+    for (const end = Date.now() + 3000; Date.now() < end && JSON.stringify(await t.q(q)) !== want; ) await sleep(50);
+    assert.deepEqual(await t.q(q), JSON.parse(want), what);
+  };
+  await fits("the column open");
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 520, deviceScaleFactor: 1, mobile: false });
+  await fits("after a resize, smaller");
+  await t.click("#b-side");
+  await t.until(`!$(".win").classList.contains("side-on")`, "the column closed", 5000);
+  await fits("the column closed while it plays");
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
+  await t.click("#b-side");
+  await t.until(`$("#side").offsetWidth > 100`, "the column open again", 5000);
+  await fits("the column opened again while it plays");
+  assert.ok(!(await t.q(`$("#opening").hidden`)), "the opening still playing");
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+});
