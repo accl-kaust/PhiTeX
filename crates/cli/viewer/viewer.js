@@ -6017,6 +6017,9 @@ var open = null;
 function closeMenu() {
   open?.close();
 }
+function menuOpen() {
+  return !!open;
+}
 function contextMenu(host2, x, y, items, label = "Actions") {
   closeMenu();
   const el = html`<div class="phx-ctx" role="menu" aria-label="${label}">${items.map((it, i) => html`${it.sep ? html`<hr>` : ""}<button type="button" role="menuitem" class="${it.cls ?? null}" data-i="${String(i)}" tabindex="-1">${it.label}</button>`)}</div>`.firstElementChild;
@@ -7064,12 +7067,28 @@ var Review = class {
     this.scrollbar(where);
     if (moved && this.isOpen && this.tab === "notes") this.render();
   }
-  /** The mark of the pages under a point (the last drawn on top), read when asked (a click, a right-click): no work as the pointer moves. */
-  markAt(slot, cx, cy) {
-    return [...slot.querySelectorAll(".rv:not(.rv-pin):not(.rv-h)")].reverse().find((m) => {
+  /**
+   * The mark of the pages under a point, read when asked (a click, a
+   * right-click): no work as the pointer moves. Of the items marked there,
+   * the smallest (its marks' area on the page): a note made inside an
+   * agent's pending change is the note where its own mark is, the change
+   * anywhere else in it (the change's mark, drawn last, took every click).
+   * The same size: the last drawn, on top. `only`: of those that pass it.
+   */
+  markAt(slot, cx, cy, only) {
+    const all = [...slot.querySelectorAll(".rv:not(.rv-pin):not(.rv-h)")];
+    const area = /* @__PURE__ */ new Map();
+    for (const m of all) {
       const b = m.getBoundingClientRect();
-      return cx >= b.left - 1 && cx <= b.right + 1 && cy >= b.top - 1 && cy <= b.bottom + 1;
-    });
+      area.set(m.dataset.id ?? "", (area.get(m.dataset.id ?? "") ?? 0) + b.width * b.height);
+    }
+    let best;
+    for (const m of all) {
+      const b = m.getBoundingClientRect();
+      if (cx < b.left - 1 || cx > b.right + 1 || cy < b.top - 1 || cy > b.bottom + 1 || only && !only(m)) continue;
+      if (!best || area.get(m.dataset.id ?? "") <= area.get(best.dataset.id ?? "")) best = m;
+    }
+    return best;
   }
   /**
    * A right-click on an agent's change on the pages (its green text, its
@@ -7080,7 +7099,7 @@ var Review = class {
   markMenu(e) {
     if (!this.enabled || this.showing) return;
     const slot = e.target.closest(".slot");
-    const id = slot && this.markAt(slot, e.clientX, e.clientY)?.dataset.id;
+    const id = slot && this.markAt(slot, e.clientX, e.clientY, (m) => this.s.hunks.some((x) => x.id === m.dataset.id))?.dataset.id;
     const h = id ? this.s.hunks.find((x) => x.id === id) : void 0;
     if (!h) return;
     e.preventDefault();
@@ -12427,7 +12446,7 @@ var Panel = class {
       "keydown",
       (e) => {
         if (!(e instanceof KeyboardEvent) || e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
-        if (e.key === "Escape" && this.changes?.open) return;
+        if (e.key === "Escape" && (this.changes?.open || menuOpen())) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
         } else if (e.key === "e" || e.key === "E" || e.key === "F8") this.problemStep(e.shiftKey ? -1 : 1);
         else if (e.key === "t" && this.contents) this.side();
