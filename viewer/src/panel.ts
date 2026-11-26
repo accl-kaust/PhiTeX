@@ -14,7 +14,7 @@
 
 import type { CiteAnswer, PageImage, Status } from "./session.ts";
 import { sentence } from "./words.ts";
-import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
+import { KINDS, kindOf, plainDiagnostics, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer, type Cited } from "./viewer.ts";
@@ -220,7 +220,8 @@ export interface PanelEvents {
   onBoxes?(file: string, start: number, end: number): Promise<{ k: number; boxes: [number, number, number, number][] }[]>;
   /** The last build's log (the job's .log), or null: absent, no "View log". */
   onLog?(): Promise<string | null>;
-  onGoto(file: string, line: number): void;
+  /** To `line` of `file` in the editor, at column `col` (1-based; absent: the line's start). */
+  onGoto(file: string, line: number, col?: number): void;
   /** A double-click on page `k` at (x, y), PDF points from its top left: to the source. */
   onSyncSource?(k: number, x: number, y: number): void;
   /** The anonymized debug report (report.ts), for "Report a problem". */
@@ -389,6 +390,8 @@ export interface PanelPrefs {
   pageCustom: [page: string, text: string];
   /** The marker's colour (where the editor's cursor is, a jump's place): "" the default amber. */
   markColour: string;
+  /** The contents beside the pages, as the user last left them (shown or not); absent: shown, where there is room. */
+  side?: boolean;
   /** Changes' mode and settings (changes.ts). */
   changes?: Partial<ChangesPrefs>;
 }
@@ -433,6 +436,8 @@ const PATHS: Record<string, string> = {
   history: "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
   copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  timer: "M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61 1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.96 8.96 0 0 0 12 4a9 9 0 1 0 9 9c0-2.12-.74-4.07-1.97-5.61zM12 20a7 7 0 1 1 0-14 7 7 0 0 1 0 14z",
+  content_copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
@@ -469,8 +474,13 @@ export function zoomOf(z: unknown): string {
   return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
 }
 
+/** A problem told as a message and a place (no card from the build): as a card, its detail its note. */
+function asProblem(d: Diagnostic): Problem {
+  return { severity: d.severity === "info" ? "note" : d.severity, code: "", message: d.message, notes: d.detail ? [d.detail] : [], help: [], suggestions: [], file: d.file ?? null, line: d.line ?? null, col: null, excerpt: null, context: [], included: [], box: null };
+}
+
 /** The zooms the menu offers: fit the width, the whole page, then percentages. */
-const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
+const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Fit page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 
 /** A page's lines in a tip's demo, as wide as given (%). */
 /** Bytes fetched so far, as the sheet says them (" · 3.8 MB"; nothing before any). */
@@ -557,7 +567,7 @@ const lines = (...w: number[]) => w.map((x) => html`<i style="width:${x}%"></i>`
 const TIPS: { id: string; at: string; title: string; text: string; demo: () => DocumentFragment; fresh?: boolean }[] = [
   {
     id: "live", at: "#st", title: "Typeset as you type",
-    text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
+    text: "No need to compile: pages update as you type. Only what you touched is typeset again, in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
     demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
   },
@@ -644,7 +654,7 @@ export class Panel {
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
     <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
-    <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
+    <button type="button" class="ib wide" id="pdf" title="Download PDF" aria-label="Download PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
     <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
@@ -664,6 +674,8 @@ export class Panel {
     <div class="menu" id="m-more" role="menu" hidden style="right:6px;top:calc(100% + 4px);min-width:250px">
       ${item("x-pdf", "download", "Download PDF")}
       ${item("x-log", "log", "View log")}
+      ${item("x-timings", "timer", "Build timings")}
+      ${item("x-debug", "content_copy", "Copy debug info")}
       ${item("x-contents", "toc", "Contents", "t")}
       ${item("x-review", "rate_review", "Notes and changes", "m")}
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
@@ -715,7 +727,7 @@ export class Panel {
     offer(".if-cache", !!ev.onClearCache);
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
-    offer("#x-keys", !!opts.keys);
+    offer("#x-keys", true);
     offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
@@ -725,6 +737,8 @@ export class Panel {
       this.$(b).addEventListener("click", (e) => {
         e.stopPropagation();
         if (m === "#logs") return this.diagnostics();
+        // (the status says the build's errors: a click shows them, not the timings (one click away under the list))
+        if (m === "#m-time" && this.hasProblems() && this.$("#m-time").hidden) return this.diagnostics();
         this.menu(m);
       });
     this.root.addEventListener("click", (e) => {
@@ -739,6 +753,13 @@ export class Panel {
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
+    this.$("#x-timings").onclick = (e) => (e.stopPropagation(), this.menu(null), this.timingsOpen());
+    this.$("#x-debug").onclick = () => {
+      this.menu(null);
+      void this.debugInfo()
+        .then((t) => navigator.clipboard.writeText(t))
+        .then(() => this.msg("Debug info copied", false, true), () => this.msg("Couldn't copy the debug info", true, true));
+    };
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
     // (What's new: the host's news where it has some (the watch: this version's
@@ -785,15 +806,23 @@ export class Panel {
       const at = (e.target as HTMLElement).closest<HTMLElement>(".phx-place[data-file]");
       if (at) {
         e.preventDefault();
-        return ev.onGoto(at.dataset.file!, Number(at.dataset.line) || 1);
+        // (at its column: a click on main.tex:13:107 put the cursor at the line's start)
+        return ev.onGoto(at.dataset.file!, Number(at.dataset.line) || 1, Number(at.dataset.col) || undefined);
       }
       const d = (e.target as HTMLElement).closest<HTMLElement>(".diag[data-line]");
-      if (d) return ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      if (d) return ev.onGoto(d.dataset.file!, Number(d.dataset.line), Number(d.dataset.col) || undefined);
       // (its place once the latest lookup of the places is done: a card clicked as the build's status came in
       // said "Not on the pages" and went nowhere, its place still being looked up)
-      const card = (e.target as HTMLElement).closest<HTMLElement>(".phx-card[data-key]");
-      if (card)
-        void this.placeOf(card.dataset.key!).then((place) => {
+      if ((e.target as HTMLElement).closest(".timingsln")) return void this.timingsOpen();
+      // (a click on a problem: its source at its line and column, and its place on the pages)
+      const card = (e.target as HTMLElement).closest<HTMLElement>(".phx-card");
+      const i = card ? Number(card.dataset.i) : NaN;
+      if (card && this.listed[i]) {
+        const d = this.listed[i];
+        if (d.file && d.line) ev.onGoto(d.file, d.line, d.problem?.col ?? undefined);
+      }
+      if (card?.dataset.key)
+        void this.placeOf(card.dataset.key).then((place) => {
           if (place) this.viewer.mark(place.k, [place.box]);
           else this.msg("Not on the pages (no text of it was typeset)", false, true);
         });
@@ -868,11 +897,14 @@ export class Panel {
     // (a zoom gesture over the opening's whole page: the zoom it starts from made the user's, the sheet's ease stopped first)
     this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && !(e.target as Element).closest?.(".peek") && this.ownZoom(), { capture: true, passive: true });
     this.drag();
+    // (the contents' heading follows the view as it scrolls, not only the page it is on)
+    let atFrame = 0;
+    this.$("#stage").addEventListener("scroll", () => this.contents && !atFrame && (atFrame = requestAnimationFrame(() => ((atFrame = 0), this.contentsAt()))), { passive: true });
     this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
       need: (k) => ev.onNeed?.(k),
       inView: (k) => {
         this.at = k;
-        this.contents?.at(k);
+        this.contentsAt();
         this.nav();
         ev.onPage(k);
       },
@@ -947,7 +979,7 @@ export class Panel {
     // window's when the contents' column comes or goes (opened, its first outline) and when
     // the tips' room is made or given back; fitted with the window's only, the sheet stayed
     // where the pages were, under the column or past the stage's edge)
-    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks(), this.fitSheet())).observe(stage);
+    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks(), this.fitSheet(), this.bylinePlace())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : undefined;
@@ -974,6 +1006,8 @@ export class Panel {
       this.place();
       // (Changes' settings, as kept)
       this.changes?.kept(this.prefs.changes);
+      // (the contents as the user left them, the host's copy (a VS Code webview's storage is its own each time))
+      if (p.side !== undefined && p.side !== this.sideWant) (this.sideWant = p.side), (this.drawer = null), this.sideFit();
       this.linksShown();
       this.marginApply();
     });
@@ -1003,7 +1037,10 @@ export class Panel {
   }
 
   /** Rebuild: the host's (the files as they are), or its reload. */
+  /** A Rebuild asked for: its build is said as one ("Rebuilt"). */
+  private rebuildAsked = false;
   private rebuild(): void {
+    this.rebuildAsked = true;
     this.again();
     (this.ev.onRebuild ?? this.ev.onReload).call(this.ev);
   }
@@ -1111,18 +1148,14 @@ export class Panel {
     const was = this.wasShown;
     this.wasShown = on;
     this.host.style.display = display;
-    // (the tips' room made before the first page is laid out: the pages never move for them)
-    if (on && was === undefined && !this.opened && !this.last) this.tipsReserve();
     if (on && !was) this.redraw();
-    // (shown with no page yet: the first step said (the status). The sheet goes up, the opening
-    // playing, once a build's own step has been said (the host reading the files, packages
-    // fetched, its phases, typesetting), before the panel showed or after: Overleaf lays out its
-    // PDF pane late, and the panel showed while the project downloaded, a step said once, and
-    // nothing played until the next. Never on being shown alone: then it played while the panel
-    // connected to a document already built (the watch's last build), the pages a moment away)
+    // (shown with no page yet: the sheet goes up at once, the opening chosen playing, its first
+    // step said. No page ready, an opening plays: waiting for a build's own step left the pane
+    // blank under "Starting phitex watch" for seconds (a second project's first open). A document
+    // built already has its pages within 400 ms: the sheet is taken down then with no dive, sheetDown)
     if (on && !this.last) {
-      this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
-      if (this.asked && this.firstPending()) (this.sheetUp(), this.anim && this.hints(true));
+      this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", true);
+      if (this.firstPending()) (this.sheetUp(), this.anim && this.hints(true));
     }
   }
   private wasShown?: boolean;
@@ -1250,7 +1283,8 @@ export class Panel {
   /** The bar's status: what is running, or how the last build went and how fast. */
   private renderStatus(): void {
         const now = performance.now();
-    const running = (!!this.buildSince && now - this.buildSince > 400) || (!!this.prepSince && now - this.prepSince > 400) || !!this.pkgNow;
+    // (a build shipping its pages as it goes (streamed) is running from its first page: never "Built" in the middle of it)
+    const running = (!!this.buildSince && (now - this.buildSince > 400 || !!this.streamed)) || (!!this.prepSince && now - this.prepSince > 400) || !!this.pkgNow;
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t: string, m = "", err = false;
     if (this.offline) (t = "Disconnected"), (err = true);
@@ -1267,8 +1301,17 @@ export class Panel {
     // (an opening up, a rebuild's too: its step, not the last build's status)
     else if (this.reopen || (!this.last && this.viewer.pages === 0)) t = this.stepNow || "Opening…";
     // (the time, errors or not: "Built with 2 errors · 42 ms")
-    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.latest() ? dur(this.latest()!.ms) : ""), (err = true);
-    else (t = this.latest()?.label ?? "Built"), (m = this.latest() ? dur(this.latest()!.ms) : "");
+    // (the first error named, so it is seen before any click: "4 errors · Undefined command \foo, main.tex:13")
+    else if (errs) {
+      const e = this.lastStatus!.diagnostics!.find((d) => d.severity === "error")!;
+      t = `${errs} error${errs === 1 ? "" : "s"} · ${e.message}${e.file && e.line ? `, ${e.file.split("/").pop()}:${e.line}` : ""}`;
+      m = this.latest() ? dur(this.latest()!.ms) : "";
+      err = true;
+    }
+    // (a build that changed nothing: "Up to date", no time (never "built in 0 ms"))
+    // (built, its pages laid out, none drawn yet: never "Built" over a blank page (the first came 11 s after "Built · 709 ms"))
+    else if (!this.drewOnce && this.viewer.pages > 0 && !this.reopen) (t = "Drawing pages…"), (m = "");
+    else (t = this.latest()?.label ?? "Built"), (m = this.latest() && !this.latest()!.still ? dur(this.latest()!.ms) : "");
     // (drawn calmly: at most four times a second, the latest, so a reader can follow it; the state below is said at once)
     this.stLine.set({ t, m, err });
     const was = this.statusNow;
@@ -1576,6 +1619,8 @@ export class Panel {
   }
 
   status(s: Status): void {
+    // (the errors as a reader wants them: the cause first, in plain words (diagnostics.ts))
+    s = { ...s, diagnostics: plainDiagnostics(s.diagnostics ?? []) };
     this.lastStatus = s;
     queueMicrotask(() => this.stopped());
     const diags = s.diagnostics ?? [];
@@ -1620,19 +1665,27 @@ export class Panel {
     for (const [i, d] of this.listed.entries()) {
       // (each error and warning: its own Copy for an AI assistant)
       const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : null;
-      // (a problem the build told whole: its card, its places links)
-      if (d.problem) {
+      // (every problem as a card, laid out alike: one the build told whole with its places, one told
+      // as a message and a line made into one (a source check's, a host's), its detail its note)
+      const prob: Problem | null = d.problem ?? (d.code === "engine" ? null : asProblem(d));
+      if (prob) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
+        card.dataset.i = String(i);
         card.setAttribute("role", "listitem");
-        card.replaceChildren(problemNode(d.problem));
+        card.replaceChildren(problemNode(prob));
         if (copy) card.firstElementChild!.prepend(copy);
         // (a click on the card: its place on the pages; its file:line link: the editor)
-        if (d.problem.file && d.problem.range) {
-          card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
+        if (prob.file && prob.range) {
+          card.dataset.key = `${prob.file}\0${prob.range[0]}`;
           card.title = "Show it on the page (its file:line opens it in the editor)";
         }
         list.append(card);
+        // (the line scrolled to its culprit, marked: a long line showed its start, the error past its end)
+        for (const pre of card.querySelectorAll<HTMLElement>(".phx-excerpt")) {
+          const m = pre.querySelector("mark");
+          if (m) requestAnimationFrame(() => (pre.scrollLeft = Math.max(0, m.offsetLeft - pre.offsetLeft - pre.clientWidth / 3)));
+        }
         continue;
       }
       const row = document.createElement("div");
@@ -1673,6 +1726,12 @@ export class Panel {
       }
       list.append(more);
     }
+    // (the timings, one click away: the status opens this list when there are problems)
+    const tl = document.createElement("button");
+    tl.type = "button";
+    tl.className = "reportbtn timingsln";
+    tl.textContent = "Build timings…";
+    list.append(tl);
     if (this.ev.onReport) {
       const b = document.createElement("button");
       b.className = "reportbtn";
@@ -1949,8 +2008,6 @@ export class Panel {
     el.hidden = false;
     el.classList.remove("in");
     this.win.classList.add("sheet-up");
-    // (the opening's zoom: the whole page, unless the user chose one)
-    if (this.prefs.zoom === "fit") this.zoomNow = "page";
     // (placed at the page's box at once: the sheet's transition (print.ts .opening) is for
     // its dive into the page and for the stage's resizing; from the hidden sheet's 0 x 0 at
     // the corner it grew the sheet across the stage as the opening began)
@@ -1972,8 +2029,11 @@ export class Panel {
   /** The opening for `look` played on `sheet`, in place of one playing there. */
   private playOn(sheet: HTMLElement, look: OpeningLook, first: boolean, dark: boolean): void {
     this.anim?.stop();
-    sheet.replaceChildren();
-    const { id, anim } = play(look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    const art = document.createElement("div");
+    art.className = "art";
+    sheet.replaceChildren(art);
+    this.fitSheet();
+    const { id, anim } = play(look, first, this.lastLook, sheet, dark, this.docShown());
     this.anim = anim;
     if (id !== "off") (this.lastLook = id), this.seen(["opening"]);
     // (one that says the steps itself: the sheet's own not shown)
@@ -2001,33 +2061,70 @@ export class Panel {
   private animSince = 0;
 
   /**
-   * The sheet as the first page will be: a page whole in the pages' visible box, where the viewer
-   * puts page 1. The box is the stage's own, as it is laid out now (beside the contents' column,
-   * under the tips' room, its scrollbar out), in the coordinates of .body, which the sheet is
-   * placed in; the stage's offsetLeft and offsetTop are its .stagebox's, which the contents'
-   * column moves: the sheet was put the column's width left of the pages, partly under it.
+   * The sheet as the first page will be: the page's own box at the user's zoom, where the viewer
+   * puts page 1, so the page that comes is under it at the hand-off, nothing jumping (an A4 sheet
+   * fitted whole, a Letter page at Page width after it: 562 px to 614, the zoom label from 100% to
+   * 42% and 68% as the opening's own zoom came and went). Cut to the part in view (the stage's
+   * client box, measured by getBoundingClientRect: beside the contents' or the files' column, its
+   * scrollbar out), so an opening centred on the sheet is centred in what is seen and never cut.
+   * The stage's offsetLeft and offsetTop were its .stagebox's, which the columns move: the sheet
+   * sat the column's width left of the pages, partly under it.
    */
   private fitSheet(): void {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
     const st = this.$("#stage"), s = st.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
     const view = { x: s.left - b.left + st.clientLeft, y: s.top - b.top + st.clientTop, w: st.clientWidth, h: st.clientHeight };
-    const put = (x: number, y: number, w: number, h: number) => Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
-    // (the first page laid out already (its size told before its drawing): its own box, the
-    // sheet the page it becomes, when it is whole in view; else its shape, fitted (a Rebuild's
-    // opening over pages read further down, or zoomed in: the page's box was partly out of view,
-    // and the opening, centred on it, clipped). An A4 sheet over a Letter page overhung it till the dive)
-    let tall = 297 / 210;
+    const put = (x: number, y: number, w: number, h: number) => {
+      // (the part of that box in view)
+      const x0 = Math.max(x, view.x), y0 = Math.max(y, view.y), x1 = Math.min(x + w, view.x + view.w), y1 = Math.min(y + h, view.y + view.h);
+      const sw = Math.max(1, x1 - x0), sh = Math.max(1, y1 - y0);
+      Object.assign(el.style, { left: `${x0}px`, top: `${y0}px`, width: `${sw}px`, height: `${sh}px` });
+      // (the openings drawn for a page's shape: in the largest page-shaped box the part in view holds,
+      // centred; a page wider than its part in view (Page width, a tall page) cut them off at the bottom)
+      const art = el.querySelector<HTMLElement>(".sheet > .art");
+      if (art) {
+        const tall = h / Math.max(1, w), aw = Math.min(sw, sh / tall), ah = aw * tall;
+        Object.assign(art.style, { left: `${(sw - aw) / 2}px`, top: `${(sh - ah) / 2}px`, width: `${aw}px`, height: `${ah}px` });
+      }
+    };
+    // (page 1 laid out already (its size told before its drawing): its own box, where enough of it is in view;
+    // a Rebuild's over pages read further down has it out of view: then where it would be at the top)
     const slot = this.$("#viewer").querySelector<HTMLElement>(".slot");
     if (slot && slot.offsetWidth > 40) {
       const r = slot.getBoundingClientRect(), x = r.left - b.left, y = r.top - b.top;
-      if (x >= view.x - 1 && y >= view.y - 1 && x + r.width <= view.x + view.w + 1 && y + r.height <= view.y + view.h + 1) return void put(x, y, r.width, r.height);
-      tall = r.height / r.width;
+      const seen = Math.min(y + r.height, view.y + view.h) - Math.max(y, view.y);
+      if (seen >= Math.min(200, view.h * 0.6)) return put(x, y, r.width, r.height);
     }
-    const room = { w: Math.max(1, view.w - 24), h: Math.max(1, view.h - 24) };
-    let h = room.h, w = h / tall;
-    if (w > room.w) (w = room.w), (h = w * tall);
+    const real = (v: number | undefined, or: number) => (v !== undefined && Number.isFinite(v) && v > 0 ? v : or);
+    const pw = real(this.last?.w, 595), ph = real(this.last?.h, 842);
+    const w = this.scale() * pw * (96 / 72), h = (w * ph) / pw;
+    // (the "unofficial" byline seen at once, never over the opening: in the margin beside the sheet
+    // where it has room, else in a strip kept under the sheet)
+    const by = this.bylineRoom((view.w - Math.min(w, view.w)) / 2);
+    if (by === "tight") view.h = Math.max(1, view.h - 34);
     put(view.x + (view.w - w) / 2, view.y + 12, w, h);
+  }
+
+  /**
+   * Where the byline (Overleaf's pane: "Unofficial PhiTeX extension · experimental") goes, given
+   * the margin beside the pages: in it, where it fits; else "tight": under the opening's sheet
+   * while it plays, then faded once the pages are in, back on a hover over its corner. Never over
+   * a page or the opening (it covered Windows 98's Start button and a short pane's page bottom).
+   */
+  private bylineRoom(margin: number): "gutter" | "tight" | "none" {
+    const b = this.$("#byline");
+    if (!b.offsetParent) return "none";
+    const fits = margin >= b.offsetWidth + 20;
+    this.win.classList.toggle("byline-tight", !fits);
+    return fits ? "gutter" : "tight";
+  }
+
+  /** The byline's room beside the pages as they are laid out now. */
+  private bylinePlace(): void {
+    const st = this.$("#stage").getBoundingClientRect(), slot = this.$("#viewer").querySelector<HTMLElement>(".slot");
+    if (!slot || this.anim) return;
+    this.bylineRoom(slot.getBoundingClientRect().left - st.left);
   }
 
   /**
@@ -2159,8 +2256,12 @@ export class Panel {
     stage.classList.toggle("stale", gone);
     if (!gone) return;
     this.placeStrips();
-    const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
-    this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
+    // (the cause first, in red when it is an error; the pages' being the last complete render after it)
+    const ds = s.diagnostics ?? [];
+    const why = ds.find((d) => d.severity === "error" && d.code !== "no-pages") ?? ds.find((d) => d.severity !== "info" && d.code !== "no-pages");
+    const b = this.$("#banner");
+    b.classList.toggle("err", why?.severity === "error");
+    b.textContent = why ? `${why.message}${why.line ? ` (${why.file}:${why.line})` : ""}. Showing the last complete render.` : "This build shipped no page: showing the last complete render.";
   }
 
   /**
@@ -2224,13 +2325,26 @@ export class Panel {
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
-      percent: Math.round(this.scale() * 100),
+      percent: this.percent(),
       status: { ...this.statusNow },
       timing: { summary: this.lat?.summary ?? "", parts: this.timingParts(), message: this.msgText },
     };
   }
 
-    private emit(): void {
+    /**
+   * The zoom's percentage as a host's toolbar shows it: while the opening plays, one value, the
+   * first the laid-out stage gives (it read 100% → 42% → 68% as the pane was laid out and the
+   * sheet fitted); the pages' own once they are in.
+   */
+  private pctHeld: number | null = null;
+  private percent(): number {
+    const now = Math.round(this.scale() * 100);
+    if (!this.anim) return (this.pctHeld = null), now;
+    if (this.pctHeld === null && this.stageSize) this.pctHeld = now;
+    return this.pctHeld ?? now;
+  }
+
+  private emit(): void {
     const s = this.state();
     for (const f of this.listeners) f(s);
   }
@@ -2301,7 +2415,7 @@ export class Panel {
 
   outline(items: Entry[]): void {
     this.contents?.set(items);
-    this.contents?.at(this.at);
+    this.contentsAt();
     this.noOutline(!items.length);
   }
 
@@ -2316,9 +2430,10 @@ export class Panel {
     this.$("#x-contents").title = none ? "This PDF has no outline: hyperref makes one from the sections" : "";
   }
 
-  /** The contents shown or hidden (remembered on this machine). */
+  /** The contents shown or hidden, the user's choice: kept (this browser's, and the host's with the panel's prefs). */
   side(on = !this.win.classList.contains("side-on")): void {
     if (!this.contents) return;
+    this.sideWant = on;
     this.sideOn(on);
     // (the outline is asked for only while it is shown: opened, now)
     if (on) this.ev.onContents?.();
@@ -2327,7 +2442,41 @@ export class Panel {
     } catch {
       /* (no storage: not remembered) */
     }
+    if (this.prefs.side !== on) (this.prefs.side = on), this.save();
     if (this.prefs.zoom === "fit") this.redraw();
+  }
+
+  /**
+   * The contents as the user wants them (true until they close them). Shown so beside the
+   * pages; in a narrow panel, where the column is a drawer over the pages, they start closed
+   * and open only when the user opens them: never by themselves, the panel narrowed or loaded.
+   */
+  private sideWant = true;
+  private drawer: boolean | null = null;
+  private sideFit(): void {
+    if (!this.contents) return;
+    const drawer = this.win.clientWidth > 0 && this.win.clientWidth <= 560;
+    if (drawer === this.drawer) return;
+    const was = this.drawer;
+    this.drawer = drawer;
+    // (into the drawer: closed; out of it: as the user left them)
+    if (drawer) this.sideOn(false);
+    else if (was !== null || this.win.classList.contains("side-on") !== this.sideWant) this.sideOn(this.sideWant);
+    // (shown again (out of the drawer): its outline asked for; at the start, the host asks with its first pages)
+    if (this.sideWant && !drawer && was !== null) this.ev.onContents?.();
+    if (this.prefs.zoom === "fit") this.redraw();
+  }
+
+  /** The contents' heading at the view's top: its page, and how far down it (points; a third of a line's slack). */
+  private contentsAt(): void {
+    if (!this.contents) return;
+    const k = this.at, slot = this.$("#viewer").querySelector<HTMLElement>(`.slot[data-k="${k}"]`);
+    let top = 0;
+    if (slot) {
+      const r = slot.getBoundingClientRect(), v = this.$("#stage").getBoundingClientRect();
+      top = Math.max(0, ((v.top + 24 - r.top) / Math.max(1, r.height)) * this.viewer.pageSize().h);
+    }
+    this.contents.at(k, top);
   }
 
   /** The column's class and the bar's button pressed with it. */
@@ -2467,31 +2616,35 @@ export class Panel {
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
-      let on = true;
       try {
-        on = localStorage.getItem("phitex.side") !== "0";
+        this.sideWant = localStorage.getItem("phitex.side") !== "0";
       } catch {
         /* (shown) */
       }
-      this.sideOn(on);
+      this.sideOn(false);
+      this.sideFit();
+      new ResizeObserver(() => this.sideFit()).observe(this.win);
       // (no outline until one arrives: no empty column while the first build runs)
       this.noOutline(true);
       this.grip(this.$("#side"), "phitex.side.w");
     }
-    if (!opts.keys) return;
+    // (the keys: the whole page's where the host gives them (the watch, VS Code), else the panel's
+    // own, once it has the focus: a click on the pages gives it (Overleaf, its editor's keys its own))
+    const keysOn: Window | HTMLElement = opts.keys ? window : this.host;
+    if (!opts.keys) this.$("#stage").tabIndex = -1;
     const help = this.$("#keyhelp");
-    const extra: [string, string][] = [["e", "the build's errors and warnings"], ...(opts.outline ? ([["t", "the contents beside the pages"]] as [string, string][]) : [])];
+    const extra: [string, string][] = [["e / F8", "the next error or warning: its source and its place"], ["Shift+E / Shift+F8", "the one before"], ...(opts.outline ? ([["t", "the contents beside the pages"]] as [string, string][]) : [])];
     help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
     // (the problems' and the contents' keys first: Esc closes the list before anything else)
-    addEventListener(
+    keysOn.addEventListener(
       "keydown",
-      (e) => {
-        if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
+      (e: Event) => {
+        if (!(e instanceof KeyboardEvent) || e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
         // (Changes' popover open: Esc is its own (a first end let go, the picker or the settings closed, then off))
         if (e.key === "Escape" && this.changes?.open) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
           /* (the list closed, else the highlights cleared) */
-        } else if (e.key === "e") this.diagnostics();
+        } else if (e.key === "e" || e.key === "E" || e.key === "F8") this.problemStep(e.shiftKey ? -1 : 1);
         else if (e.key === "t" && this.contents) this.side();
         else return;
         e.preventDefault();
@@ -2504,7 +2657,7 @@ export class Panel {
       return (this.last?.h ?? 792) * (96 / 72);
     };
     const panel = this;
-    bindKeys(window, {
+    bindKeys(keysOn, {
       get pages() {
         return panel.viewer.pages;
       },
@@ -2588,6 +2741,47 @@ export class Panel {
     if (was !== on) this.emit();
   }
 
+  /** The keyboard shortcuts' help, from a host's own menu (Overleaf's ⋯). */
+  keyHelp(): void {
+    this.menu(null);
+    this.$("#keyhelp").hidden = false;
+  }
+
+  /** The last build has errors or warnings (what the status names; notes alone are not). */
+  private hasProblems(): boolean {
+    return (this.lastStatus?.diagnostics ?? []).some((d) => d.severity === "error" || d.severity === "warning");
+  }
+
+  /** The timings, from the problems' foot or the ⋯ menu: under the status. */
+  private timingsOpen(): void {
+    this.diagnostics(false);
+    if (this.$("#st").offsetParent) this.menu("#m-time");
+    else this.timingAt(this.$(".bar"), true);
+  }
+
+  /** The next problem (e, F8) or the one before (Shift): its card in the list, its place on the pages, its source in the editor. */
+  private problemStep(dir: 1 | -1): void {
+    const all = (this.lastStatus?.diagnostics ?? []).filter((d) => d.severity === "error" || d.severity === "warning");
+    if (!all.length) return;
+    this.probAt = (this.probAt + dir + all.length) % all.length;
+    if (this.$("#logs").hidden) this.diagnostics(true);
+    const cards = [...this.$("#diags").querySelectorAll<HTMLElement>(".phx-card, .diag:not(.more)")];
+    cards.forEach((c, i) => c.classList.toggle("at", i === this.probAt));
+    cards[this.probAt]?.scrollIntoView({ block: "nearest" });
+    this.problemGo(all[this.probAt]);
+  }
+  private probAt = -1;
+
+  /** A problem's source (its line and column) in the editor, and its place on the pages marked. */
+  private problemGo(d: Diagnostic): void {
+    const p = d.problem;
+    if (d.file && d.line) this.ev.onGoto(d.file, d.line, p?.col ?? undefined);
+    if (p?.file && p.range)
+      void this.placeOf(`${p.file}\0${p.range[0]}`).then((place) => {
+        if (place) this.viewer.mark(place.k, [place.box]);
+      });
+  }
+
   /** Esc on the problems: the list closed; false when it wasn't open. */
   /** The pages' highlights cleared (Esc), find's included: whether there were any. */
   private unmark(): boolean {
@@ -2618,11 +2812,20 @@ export class Panel {
   }
 
   zoomTo(z: string): void {
+    // (the view's centre kept where it was on the pages: 150% from Fit showed the page's left margin, its text cut off at the right)
+    const st = this.$("#stage");
+    const cx = (st.scrollLeft + st.clientWidth / 2) / Math.max(1, st.scrollWidth), cy = (st.scrollTop + st.clientHeight / 2) / Math.max(1, st.scrollHeight);
     this.zoomNow = null;
     this.prefs.zoom = zoomOf(z);
     this.zoomShown();
     this.save();
     this.redraw();
+    const keep = () => {
+      st.scrollLeft = Math.max(0, cx * st.scrollWidth - st.clientWidth / 2);
+      st.scrollTop = Math.max(0, cy * st.scrollHeight - st.clientHeight / 2);
+    };
+    keep();
+    requestAnimationFrame(keep);
     this.emit();
   }
 
@@ -2747,6 +2950,8 @@ export class Panel {
     if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
     if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
+    // (a host's zoom label follows the gesture, frame by frame (Overleaf's % stayed at the old zoom))
+    this.emit();
   }
 
   /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
@@ -2913,7 +3118,9 @@ export class Panel {
    * status, where the panel's bar is hidden): moved out of the bar into the
    * window, at the control's left, just under it. Again: closed.
    */
-  timingAt(anchor: Element): void {
+  timingAt(anchor: Element, timings = false): void {
+    // (its status naming errors or warnings: the problems, the timings under them)
+    if (!timings && this.hasProblems()) return this.diagnostics();
     const el = this.$("#m-time");
     if (!el.hidden) return this.menu(null);
     if (el.parentElement !== this.win) this.win.append(el);
@@ -3687,28 +3894,18 @@ export class Panel {
 
   private tips(which: "unseen" | "fresh" | "all", asked = false): void {
     if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
+    // (one tour a visit, by itself: none again till the next, and the next none of these, it is
+    // the same tour: a first visit's "1 of 6" left half-way came back as "1 of 4" the visit after)
+    if (which === "unseen" && !asked && this.toured) return;
+    this.freshUser ??= !TIPS.some((t) => this.seenIds.has(t.id));
     this.tipList = this.offered(which, asked);
+    if (which === "unseen" && this.tipList.length) (this.toured = true), this.seen(this.tipList.map((t) => t.id));
     this.tip(0);
   }
-
-  /**
-   * The room the tips offered by themselves will take above the pages, made
-   * before the first page is laid out (the panel shown, nothing drawn yet):
-   * the tallest of them, so the pages are where they will stay when the
-   * tips come after the opening, and never move under a reader's pointer.
-   * They move once, up, when the user is done with the tips.
-   */
-  private tipsReserve(): void {
-    const list = this.offered("unseen");
-    if (!list.length) return;
-    const el = this.$("#tip");
-    el.style.visibility = "hidden";
-    let gap = 0;
-    for (let i = 0; i < list.length; i++) gap = Math.max(gap, this.tipGap(this.tipCard(list, i)));
-    el.hidden = true;
-    el.style.visibility = "";
-    this.setTipRoom(gap);
-  }
+  /** The tour shown by itself this visit. */
+  private toured = false;
+  /** No tip ever seen before this visit: every feature is new to them, none said "New". */
+  private freshUser: boolean | null = null;
 
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
   private seen(ids: string[]): void {
@@ -3733,34 +3930,24 @@ export class Panel {
   private tipCard(list: typeof TIPS, i: number): HTMLElement {
     const el = this.$("#tip");
     const t = list[i];
-    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${list.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < list.length ? "Next" : "Got it"}</button></div>`);
+    el.replaceChildren(html`<h4>${t.fresh && !this.freshUser ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${list.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < list.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
+    // (floating, as a popover does: the pages never move for a tip (they were pushed down by the
+    // tallest tip's height until "Got it"). Under its control, its arrow at it; beside the pages,
+    // in the stage's margin, where the margin has room for it, so it covers none of a page)
     const bar = this.$(".bar").getBoundingClientRect(), r = this.tipTarget(t).getBoundingClientRect(), w = el.offsetWidth;
-    const cx = r.left + r.width / 2 - bar.left, left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
+    const cx = r.left + r.width / 2 - bar.left;
+    let left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
+    const st = this.$("#stage").getBoundingClientRect(), slots = [...this.$("#viewer").querySelectorAll<HTMLElement>(".slot")].map((e) => e.getBoundingClientRect()).filter((p) => p.bottom > st.top && p.top < st.bottom && p.width > 0);
+    if (slots.length) {
+      const pl = Math.min(...slots.map((p) => p.left)) - bar.left, pr = Math.max(...slots.map((p) => p.right)) - bar.left, sl = st.left - bar.left, sr = st.right - bar.left - 14;
+      const over = left < pr && left + w > pl;
+      if (over && sr - pr >= w + 16 && (cx >= (pl + pr) / 2 || pl - sl < w + 16)) left = Math.min(sr - w - 8, Math.max(pr + 8, cx - w / 2));
+      else if (over && pl - sl >= w + 16) left = Math.max(sl + 8, Math.min(pl - w - 8, cx - w / 2));
+    }
     Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar.top + 9}px` });
-    el.style.setProperty("--ax", `${cx - left}px`);
+    el.style.setProperty("--ax", `${Math.max(14, Math.min(w - 14, cx - left))}px`);
     return el;
-  }
-
-  /** How far a tip's card (placed) reaches down over the pages' box, and a margin: 0 where it is beside them. */
-  private tipGap(el: HTMLElement): number {
-    const b = this.$(".stagebox").getBoundingClientRect(), t = el.getBoundingClientRect();
-    return t.left < b.right && t.right > b.left && t.bottom > b.top ? Math.ceil(t.bottom - b.top + 8) : 0;
-  }
-
-  /**
-   * The pages kept clear of the tips: they start `gap` pixels down (0: at
-   * the top again), so a tip never sits over what is on a page (the diff's
-   * and the review's marks, Blame's colours, a link): nothing a click or a
-   * right-click there means is under it.
-   */
-  private tipRoomNow = 0;
-  private setTipRoom(gap: number): void {
-    if (gap === this.tipRoomNow) return;
-    this.tipRoomNow = gap;
-    const box = this.$(".stagebox");
-    if (gap) box.style.setProperty("--tipgap", `${gap}px`);
-    else box.style.removeProperty("--tipgap");
   }
 
   private tip(i: number): void {
@@ -3770,7 +3957,7 @@ export class Panel {
     this.tipUsed = undefined;
     this.tipAt = i;
     const t = this.tipList[i];
-    if (!t) return void ((el.hidden = true), this.setTipRoom(0));
+    if (!t) return void (el.hidden = true);
     this.seen([t.id]);
     const target = this.tipTarget(t);
     // (its control open already (a click before the tip came): used, so seen; the next one, under none of it)
@@ -3781,8 +3968,6 @@ export class Panel {
     const used = (this.tipUsed = new AbortController());
     target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
     this.tipCard(this.tipList, i);
-    // (the pages below it: the room made for the tips before the pages came, or this one's own)
-    this.setTipRoom(Math.max(this.tipRoomNow, this.tipGap(el)));
     el.onclick = (e) => {
       e.stopPropagation();
       const a = (e.target as HTMLElement).closest<HTMLElement>("[data-t]")?.dataset.t;
@@ -3996,7 +4181,9 @@ export class Panel {
     if (first) this.times = { first: ms, edits: [] };
     else this.times.edits.push(ms);
     const now = performance.now();
-    this.built = { ms, at: now, first, changed };
+    // (the build a Rebuild asked for: said so, "Rebuilt · 120 ms", changed pages or not)
+    this.built = { ms, at: now, first, changed, rebuilt: !first && this.rebuildAsked };
+    this.rebuildAsked = false;
     // (builds back to back, as typing makes them: each is its own, so "Typesetting…" says only one that runs past 400 ms, never the run of them)
     if (this.buildSince) this.buildSince = now;
     if (this.prepSince) this.prepSince = now;
@@ -4007,22 +4194,25 @@ export class Panel {
   }
 
   /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
-  private built?: { ms: number; at: number; first: boolean; joined?: boolean; changed?: number };
+  private built?: { ms: number; at: number; first: boolean; joined?: boolean; changed?: number; rebuilt?: boolean };
 
   /**
    * What the status and the timing popover's head say: the newest of the
    * last paint (its time from the keystroke) and the last build (one that
    * changed no page paints nothing, and was not said before: grail's 7 s).
    */
-  private latest(): { label: string; ms: number; first: boolean } | undefined {
+  private latest(): { label: string; ms: number; first: boolean; still?: boolean } | undefined {
     const s = this.speed, b = this.built;
     if (b && (!s || b.at > s.at)) {
       if (b.first || b.joined) return { label: b.first ? "First build" : "Last build", ms: b.ms, first: b.first };
       // (said only when the core counted no page changed; one that changed pages is said by its paint, on its way)
-      if (b.changed === 0) return { label: "Built, no page changed", ms: b.ms, first: false };
-      if (!s) return { label: "Built", ms: b.ms, first: false };
+      if (b.rebuilt) return { label: "Rebuilt", ms: b.ms, first: false };
+      if (b.changed === 0) return { label: "Up to date", ms: b.ms, first: false, still: true };
+      // (a build newer than the last paint is the one said, its own time: the paint before it
+      // was another's ("First page · 38 s" after a 231 ms edit whose page was not repainted))
+      return { label: "Built", ms: b.ms, first: false };
     }
-    if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
+    if (s) return { label: s.first ? "First page" : b?.rebuilt ? "Rebuilt" : "Built", ms: s.ms, first: !!s.first };
     return undefined;
   }
 
@@ -4077,14 +4267,7 @@ export class Panel {
     const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
     // (the last page drawn: its time as a bar like the build's parts, the watch's probe and draw, the transfer, the decode)
     const strips = framePart(this.$("#stripsline").dataset.frame);
-    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1] as number)}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
-    el.querySelector<HTMLButtonElement>(".copydbg")!.onclick = (e) => {
-      e.stopPropagation();
-      const b = e.currentTarget as HTMLButtonElement;
-      void this.debugInfo()
-        .then((t) => navigator.clipboard.writeText(t))
-        .then(() => (b.textContent = "Copied ✓"), () => (b.textContent = "Couldn't copy"));
-    };
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1] as number)}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`);
     // (the summary line only when there are no parts to say it)
     el.querySelector(".foot")!.textContent = parts.length || this.walk?.ms !== undefined ? "" : (this.lat?.summary ?? "");
     el.querySelector(".msg")!.textContent = this.msgText;
@@ -4195,6 +4378,7 @@ export class Panel {
    */
   mains(names: string[], main: string | null, ask?: boolean): void {
     this.mainFiles = { names, main };
+    this.anim?.rename?.(this.docShown());
     if (ask !== undefined) this.mainAsk = ask;
     this.renderMainAsk();
     if (!this.$("#settings").hidden) void this.settings(true);
@@ -4238,6 +4422,11 @@ export class Panel {
   /** The document's main file as the host names it, where it has no Main file to pick (the watch): the openings that show it (a prompt's, a title bar's). */
   docName(name: string): void {
     this.doc = name;
+    this.anim?.rename?.(this.docShown());
+  }
+  /** The main file's name as an opening shows it (a title bar's, a prompt's). */
+  private docShown(): string {
+    return (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!;
   }
   private doc: string | null = null;
 
@@ -4303,6 +4492,7 @@ export class Panel {
     this.viewer.layout(hashes, previews);
     // (the sheet up: on the first page's box now that it has one)
     this.fitSheet();
+    requestAnimationFrame(() => this.bylinePlace());
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();

@@ -168,11 +168,11 @@ export const PROBLEMS_CSS = `
 .phx-where { margin-top: 2px; font-size: 12px; }
 .phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
 .phx-place:hover { text-decoration: underline; }
-.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--ph-border, #c9ced8) transparent; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
   color: var(--ph-fg2, #495365); background: none; }
 .phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
 .phx-ln { opacity: .6; }
-.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
+.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); white-space: pre-line; }
 .phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
 .phx-ctx summary { cursor: pointer; }
 .phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }

@@ -771,9 +771,33 @@ export class Viewer {
     const pad = 10 / img.w;
     this.peekGeo.set(el, { k, hash: s.hash ?? null, img, l: Math.max(0, il - pad), r: Math.min(1, ir + pad), top });
     this.peekLay(el);
+    // (a float's number, "Table 1": its caption in view, not the float's top, where hyperref puts its anchor)
+    const cap = was ? null : this.captionNear(k, top, this.linkText(this.peekFrom, link));
     if (was) [pv.scrollLeft, pv.scrollTop] = [was[0] * pv.scrollWidth, was[1] * pv.scrollHeight];
+    else if (cap !== null) pv.scrollTop = Math.max(0, (cap / img.h) * pv.scrollHeight - pv.clientHeight * 0.45);
     else pv.scrollTop = Math.max(0, (top / img.h) * pv.scrollHeight - 28);
     this.peekPaint(el);
+  }
+
+  /**
+   * The caption of the float a link's place opens (its top `top`, points, on page `k`): the line
+   * "Table 1: …" or "Figure 1." whose number is the link's text, within half a page below; its
+   * place (points), else null (not a float's number).
+   */
+  private captionNear(k: number, top: number, text: string): number | null {
+    const n = text.trim();
+    const s = this.slots[k];
+    if (!/^[A-Z]?[\d.]+[a-z]?$/.test(n) || !s) return null;
+    ensureText(s.el);
+    const b = s.el.getBoundingClientRect();
+    if (!b.height) return null;
+    const re = new RegExp(`^\\s*(Table|Figure|Fig\\.|Algorithm|Listing|Tab\\.)\\s*${n.replace(/\./g, "\\.")}\\s*[:.]`);
+    for (const el of s.el.querySelectorAll<SVGTextElement>("text")) {
+      const r = el.getBoundingClientRect(), y = ((r.top - b.top) / b.height) * this.size.h;
+      if (y < top - 4 || y > top + this.size.h * 0.6) continue;
+      if (re.test(el.textContent ?? "")) return y;
+    }
+    return null;
   }
 
   /** What a link's window shows of its page: the page, the part across (`l` to `r`, fractions of its width) the window's width shows at zoom 1, the place's height. */

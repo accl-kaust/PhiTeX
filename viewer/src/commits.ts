@@ -305,6 +305,11 @@ export class Commits {
     this.render();
   }
 
+  /** The pair the list shows now (From, and To: null the working tree), a first end clicked included. */
+  get shown(): { from: string | null; to: string | null } {
+    return { from: this.from, to: this.to };
+  }
+
   /** Whether a first end is clicked, the second not yet. */
   get aiming(): boolean {
     return this.anchor !== null;
@@ -349,6 +354,11 @@ export class Commits {
   /** Whether more commits can be read. */
   get hasMore(): boolean {
     return this.more;
+  }
+
+  /** Why the history could not be read (no repository here), else "". */
+  get failed(): string {
+    return this.error;
   }
 
   /** Whether a page is being read. */
@@ -461,10 +471,13 @@ export class Commits {
     // (the first click one end (From, to the working tree till the second); the same again cancels)
     if (this.anchor === null || this.anchor === i) {
       this.anchor = this.anchor === i ? null : i;
+      // (one click compares that version with now, at once: the list's From and To are what is compared;
+      // a second click makes a range of the two)
       if (this.anchor !== null && c) {
         this.from = c.id;
         this.to = null;
         this.host.marked?.(this.from, null);
+        this.host.pick(c.id, null, false);
       }
       this.render();
       this.paintDrag(null, "aim");

@@ -40,7 +40,18 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
     return l;
   };
   // (the command typed at the prompt first, a key at a time)
-  const cmd = `phitex watch ${doc}`, prompt = line(html`<span class="p">$ </span>`);
+  let cmd = `phitex watch ${doc}`;
+  const prompt = line(html`<span class="p">$ </span>`);
+  // (the main file's name told late: the command as typed so far corrected to it)
+  const rename = (n: string) => {
+    const to = `phitex watch ${n}`;
+    if (to === cmd) return;
+    const done = typed >= cmd.length;
+    cmd = to;
+    [...prompt.childNodes].filter((c) => c.nodeType === Node.TEXT_NODE).forEach((c) => c.remove());
+    typed = done ? cmd.length : Math.min(typed, cmd.length);
+    prompt.insertBefore(document.createTextNode(cmd.slice(0, typed)), cursor);
+  };
   let typed = 0, timer = 0;
   const key = () => {
     prompt.insertBefore(document.createTextNode(cmd[typed++]), cursor);
@@ -96,6 +107,6 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
       return 700;
     },
     cleanup,
-    { step, hint },
+    { step, hint, rename },
   );
 }

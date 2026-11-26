@@ -90,6 +90,10 @@ addEventListener("keydown", (e) => {
   } else if ((e.key === "Backspace" || (e.altKey && e.key === "ArrowUp")) && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     files.goUp();
+  } else if (e.key === "b" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // (b, the Files column beside a document's pages: here the files are the whole page, so it goes to them)
+    e.preventDefault();
+    files.focus();
   } else if (/^(ArrowDown|ArrowUp|Home|End|PageDown|PageUp|Enter)$/.test(e.key) && document.activeElement === document.body) {
     e.preventDefault();
     files.focus();
