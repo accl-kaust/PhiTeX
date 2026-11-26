@@ -1313,7 +1313,14 @@ mod tests {
             "{}",
             body(&d)
         );
-        // (the markup as one block's: each change's out its own range, in order)
+        // (the markup one block's, as before: each change's out its own
+        // range of it, in order)
+        assert_eq!(
+            body(&d).matches("\\DIFaddbegin ").count(),
+            1,
+            "{}",
+            body(&d)
+        );
         for w in d.changes.windows(2) {
             assert!(w[0].out.end <= w[1].out.start, "{:?}", d.changes);
         }
