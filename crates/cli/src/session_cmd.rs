@@ -1652,7 +1652,12 @@ fn undefined_name(msg: &str, context: &[&str]) -> Option<String> {
     let top = context.first()?.trim_end();
     let k = top.rfind('\\')?;
     let name = &top[k..];
-    (name.len() > 1 && !name[1..].contains(char::is_whitespace)).then(|| name.to_owned())
+    // (a control sequence's name ends the line, nothing after it: else
+    // TeX stopped inside a macro whose level the context leaves out, and
+    // the line's last name is not the one)
+    let rest: Vec<char> = name[1..].chars().collect();
+    let letters = !rest.is_empty() && rest.iter().all(|c| c.is_ascii_alphabetic() || *c == '@');
+    (letters || rest.len() == 1).then(|| name.to_owned())
 }
 
 /// The line `wait` and `status` end with: what the build changed and the

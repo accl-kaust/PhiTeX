@@ -751,20 +751,28 @@ fn session_pages_of_a_beamer_deck() {
     let (code, out, err) = session(&["png", "--at", &at, "--overlay", "last"]);
     assert_eq!(code, Some(0), "{err}");
     assert!(out.contains(&format!("{at}: page 3,")), "{out}");
-    // (a problem: the command named, TeX's context kept, where to look)
+    // (a problem in a frame: where to look, the frame's line)
     edit(
         "Third frame, other words.",
         "Third frame \\faSyncAlt{} words.",
     );
     let (_, out, _) = session(&["wait", "--timeout", "300s"]);
-    let line = std::fs::read_to_string(dir.join("deck.tex"))
-        .expect("the deck")
-        .lines()
-        .position(|l| l.contains("faSyncAlt"))
-        .expect("the line")
-        + 1;
     assert!(
-        out.contains(&format!("see it: phitex session png --at deck.tex:{line}")),
+        out.contains("1 error · see it: phitex session png --at deck.tex:"),
+        "{out}"
+    );
+    edit(
+        "Third frame \\faSyncAlt{} words.",
+        "Third frame, other words.",
+    );
+    // (one read from the file: the command named, TeX's context kept)
+    edit(
+        "\\documentclass{beamer}\n",
+        "\\documentclass{beamer}\n\\faSyncAlt\n",
+    );
+    let (_, out, _) = session(&["wait", "--timeout", "300s"]);
+    assert!(
+        out.contains("see it: phitex session png --at deck.tex:2"),
         "{out}"
     );
     let (_, problems, _) = session(&["problems"]);
@@ -772,15 +780,12 @@ fn session_pages_of_a_beamer_deck() {
         problems.contains("Undefined control sequence \\faSyncAlt"),
         "{problems}"
     );
-    assert!(problems.contains(&format!("| l.{line} ")), "{problems}");
+    assert!(problems.contains("| l.2 \\faSyncAlt"), "{problems}");
     assert!(
-        problems.contains(&format!("see it: phitex session png --at deck.tex:{line}")),
+        problems.contains("see it: phitex session png --at deck.tex:2"),
         "{problems}"
     );
     let (_, log, _) = session(&["log"]);
-    assert!(
-        log.contains(&format!("l.{line} Third frame \\faSyncAlt")),
-        "{log}"
-    );
+    assert!(log.contains("l.2 \\faSyncAlt"), "{log}");
     let _ = session(&["stop"]);
 }
