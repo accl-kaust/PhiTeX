@@ -31,6 +31,16 @@ async function open(files, { args = [], pages = true, at = home, env = {} } = {}
   if (pages) await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
   return { dir, w, t };
 }
+/**
+ * `t` reloaded, its new document's: Page.reload answers before the navigation, and a wait that
+ * followed it at once read the old document (its pages, its column) and went on there (CI's
+ * runner, 1.2 s for a whole test: a key pressed in the page about to go).
+ */
+async function reloaded(t) {
+  await t.js(`window.__phxOld = 1`);
+  await t.send("Page.reload");
+  await t.until(`!window.__phxOld && document.readyState !== "loading"`, "the reloaded document", 30000);
+}
 const builds = (w) => (w.out.match(/^(ok|failed|✓|✗):?\s+\d+/gm) ?? []).length;
 const waitBuild = async (w, n, ms = 60000) => {
   const end = Date.now() + ms;
@@ -1128,7 +1138,7 @@ test("the contents' column is resized by its handle: a drag widens it and the pa
   assert.ok(Math.abs(c1 - c0 - 120) <= 2, `the column 120 px wider (${c0} to ${c1})`);
   assert.ok(Math.abs(s0 - s1 - (c1 - c0)) <= 2, `the pages' box narrower by as much (${s0} to ${s1})`);
   // (kept after a reload)
-  await t.send("Page.reload");
+  await reloaded(t);
   await t.until(`+$("#pgn")?.textContent > 0 && $("#side")?.offsetWidth > 100`, "the pages and the column again", 60000);
   assert.ok(Math.abs((await t.q(`$("#side").offsetWidth`)) - c1) <= 2, "the width kept after a reload");
   // (the keyboard: ← narrows by 16 px; a double-click, the column's own width)
