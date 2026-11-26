@@ -5661,6 +5661,15 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .rev()
             .find_map(|l| (l.kind == crate::input::kind::LINE).then(|| self.input.line(*l).clone()))
+            // (TeX's last line read, its level ended here once read to its
+            // end: what §313 shows, `l.175 \end{frame}` after a beamer
+            // frame's body read whole, not the node's first line; at the
+            // text's end for good none, TeX's `<*>` terminal line)
+            .or_else(|| {
+                (!self.eof)
+                    .then(|| self.input.last_line().cloned())
+                    .flatten()
+            })
             .or_else(|| {
                 self.input.text_rest().iter().find_map(|s| match s {
                     Seg::Line(l) => Some(l.clone()),
@@ -5719,7 +5728,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let (file, at, unit, seg, loc, owner) = p;
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let e = v.list(vec![
+        let mut xs = vec![
             v.int(kind),
             v.str(msg),
             file,
@@ -5731,7 +5740,17 @@ impl<'c, 'a> Run<'c, 'a> {
             owner.map_or(ValueId::UNIT, |o| {
                 v.int(i64::from_ne_bytes(o.to_ne_bytes()))
             }),
-        ]);
+        ];
+        // (§370's name, the token just read, as the source spells it: its
+        // culprit where TeX read it from a token list, an argument or a
+        // beamer frame's body, lines above the line TeX shows,
+        // `crate::api`'s placement)
+        if msg == "Undefined control sequence" {
+            let mut name = String::new();
+            crate::print::sprint_cs(&mut name, self.cur.tok, i64::from(b'\\'));
+            xs.push(v.str(&name));
+        }
+        let e = v.list(xs);
         let s = v.seq_unit(e);
         self.contribute("diags", s);
     }

@@ -10115,9 +10115,26 @@ impl Build {
             let found = if undefined {
                 // (the name alone: TeX reads on past it where it was in an
                 // argument, `\\textlang{arabic}{... \\foo ...}` read whole)
-                before
+                let just = before
                     .rfind('\\')
-                    .map(|k| (ls + k, ls + k + cs_len(&before[k..])))
+                    .map(|k| (ls + k, ls + k + cs_len(&before[k..])));
+                // (the name TeX read, [`crate::run::Run::diag_at`]: the one
+                // on the line where it is the last read; else its last
+                // spelling in the text TeX read it from, the node's, lines
+                // above (a beamer frame's body, read whole as an argument:
+                // `\arwTHE` on line 165, TeX at `l.175 \end{frame}`);
+                // else none, never another command of the line)
+                match xs.get(9).map(|&x| str_of(v, x)).filter(|n| !n.is_empty()) {
+                    Some(n) => just
+                        .filter(|&(a, z)| text.get(a..z) == Some(n.as_str()))
+                        .or_else(|| {
+                            let from = node_from.map_or(ls, |f| f.min(ls));
+                            last_cs_token(&text[from..b], &n)
+                                .map(|k| (from + k, from + k + n.len()))
+                        })
+                        .or(Some((b, b))),
+                    None => just,
+                }
             } else if (kind == 1 || kind == 3) && !message.starts_with("*** (job aborted") {
                 // (§360's abort names `\end` as what it found none of: no
                 // culprit, the place the text's end has, [`at_text_end`];

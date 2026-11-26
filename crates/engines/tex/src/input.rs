@@ -465,6 +465,9 @@ pub(crate) struct Input {
     /// once its level is popped ([`Input::free_lines`]).
     pub lines: Vec<Line>,
     free_lines: Vec<u32>,
+    /// The slot of the line level popped last, its line kept there until
+    /// the slot is used again ([`Input::last_line`]).
+    last_line: Option<u32>,
     /// The file rests of [`kind::FILE`] levels.
     pub files: Vec<crate::run::FileRest>,
     free_files: Vec<u32>,
@@ -540,6 +543,7 @@ impl Input {
             levels: Vec::with_capacity(64),
             lines: Vec::new(),
             free_lines: Vec::new(),
+            last_line: None,
             files: Vec::new(),
             free_files: Vec::new(),
             line_push: Vec::new(),
@@ -660,6 +664,9 @@ impl Input {
     /// Pushes a line on top.
     pub(crate) fn push_line(&mut self, line: Line) -> usize {
         let i = if let Some(i) = self.free_lines.pop() {
+            if self.last_line == Some(i) {
+                self.last_line = None;
+            }
             self.lines[i as usize] = line;
             i as usize
         } else {
@@ -693,12 +700,22 @@ impl Input {
     pub(crate) fn pop(&mut self) -> Option<Level> {
         let l = self.levels.pop()?;
         match l.kind {
-            kind::LINE => self.free_lines.push(l.a),
+            kind::LINE => {
+                self.free_lines.push(l.a);
+                self.last_line = Some(l.a);
+            }
             kind::FILE => self.free_files.push(l.a),
             _ => {}
         }
         self.uncovered();
         Some(l)
+    }
+
+    /// The line of the line level popped last, while its slot is not used
+    /// again: TeX's line read last where none is on the stack (§313
+    /// shows it, read to its end).
+    pub(crate) fn last_line(&self) -> Option<&Line> {
+        self.last_line.and_then(|i| self.lines.get(i as usize))
     }
 
     /// The line of a [`kind::LINE`] level.
