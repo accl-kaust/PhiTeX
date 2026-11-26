@@ -89,7 +89,10 @@ export function play(look: OpeningLook, first: boolean, last: string | null, she
   const others = ids.filter((id) => id !== last);
   const pool = others.length ? others : ids;
   const id = first && ids.includes("phitex") ? "phitex" : pool[Math.floor(Math.random() * pool.length)];
-  return { id, anim: LOOKS.find((l) => l.id === id)!.make(sheet, dark, doc) };
+  // (PhiTeX's on the whole sheet: it fits itself to any box, and dives into the page under it all;
+  // the others in the sheet's page-shaped box, .art, where there is one)
+  const box = id === "phitex" ? sheet : (sheet.querySelector<HTMLElement>(":scope > .art") ?? sheet);
+  return { id, anim: LOOKS.find((l) => l.id === id)!.make(box, dark, doc) };
 }
 
 /**

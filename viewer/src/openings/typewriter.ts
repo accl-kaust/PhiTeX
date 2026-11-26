@@ -5,7 +5,7 @@
 // dissolve into the typeset page under them (typewritten → typeset).
 
 import { html } from "../html.ts";
-import { layer, ending, PAPER, type Opening } from "./kit.ts";
+import { layer, ending, ellipsis, PAPER, type Opening } from "./kit.ts";
 import { plain } from "../hints.ts";
 
 export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"): Opening {
@@ -80,13 +80,30 @@ export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"
     timer = window.setTimeout(key, next === "\n" ? 200 : next === " " ? pace + 20 : pace);
   };
   const chars = (s: string) => [...s];
-  type(...chars(doc), "\n", ...chars("─".repeat(24)), "\n");
+  // (the main file's name, its first line: told late (a host says it after the opening began),
+  // the line corrected to it and the rest of it typed)
+  const nameRun = roll.firstElementChild!.firstElementChild as HTMLElement;
+  let name = [...doc];
+  type(...name, "\n", ...chars("─".repeat(24)), "\n");
+  const rename = (n: string) => {
+    const to = [...n];
+    if (to.join("") === name.join("")) return;
+    const typed = nameRun.querySelectorAll(".k").length;
+    const left = Math.max(0, name.length - typed);
+    queue.splice(0, left);
+    const keep = Math.min(typed, to.length);
+    nameRun.querySelectorAll(".k").forEach((k) => k.remove());
+    for (const c of to.slice(0, keep)) nameRun.append(Object.assign(document.createElement("span"), { className: "k", textContent: c }));
+    queue.unshift(...to.slice(keep));
+    name = to;
+    if (!timer) timer = window.setTimeout(key, 60);
+  };
   let what = "", pkgs = new Set<string>(), page = "";
   const step = (w: string, pct: number | undefined, detail: string) => {
     if (w !== what) {
       if (what) type("\n");
       what = w;
-      type(...chars(`${w}…`));
+      type(...chars(ellipsis(w)));
       if (pct === undefined && detail && !/^Page /.test(detail)) type(...chars(` ${detail}`));
     }
     const pkg = pct !== undefined ? detail.split(" · ")[0] : "";
@@ -94,5 +111,5 @@ export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"
     if (/^Page \d+/.test(detail) && detail !== page) (page = detail), type(...chars(` p.${detail.slice(5)}`));
   };
   const hint = (text: string) => type("\n", "\n", { red: true }, ...chars(`Did you know? ${plain(text)}`), { red: false }, "\n");
-  return ending(el, () => (clearTimeout(timer), el.classList.add("out"), 520), () => clearTimeout(timer), { step, hint });
+  return ending(el, () => (clearTimeout(timer), el.classList.add("out"), 520), () => clearTimeout(timer), { step, hint, rename });
 }

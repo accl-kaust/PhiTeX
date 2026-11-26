@@ -16,7 +16,7 @@ export const HINTS: Hint[] = [
   { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
   { text: "Press {`} to see everything phitex watch printed in the terminal.", hosts: ["watch"] },
   { text: "Press {?} over the pages for the keyboard shortcuts.", hosts: ["watch"] },
-  { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
+  { text: "± Changes shows what changed since an earlier version, marked on the pages as latexdiff marks it.", hosts: ["watch", "vscode"] },
   { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
   { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
   { text: "You can pick your favourite loading animation, or turn them off, in Settings › View." },

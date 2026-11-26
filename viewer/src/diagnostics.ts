@@ -215,3 +215,122 @@ export function diagnose(files: Record<string, string>, main: string | null, bui
   const rank = { error: 0, warning: 1, info: 2 };
   return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
 }
+
+/**
+ * The build's errors as a reader wants them (the drawer, the strip, the card over the pages, a
+ * host's editor marks): the cause first, in plain words, its consequences folded under it.
+ * - An undefined control sequence names the command, its culprit the command itself:
+ *   "Undefined command \foobar".
+ * - A brace left open says so, where: "Missing } after \section{Results", never the internal
+ *   macro TeX was reading ("File ended while scanning use of \@xdblarg").
+ * - TeX's interactive help ("type `I' and the correct spelling…") is for its terminal, not
+ *   here: dropped, a one-line hint of ours where we have one.
+ * - TeX stopping because of an error ("*** (job aborted, no legal \end found)", "Emergency
+ *   stop") is that error's consequence: a note on it, not an error of its own listed first.
+ * - LaTeX's internal names (\@sect, \@xdblarg) are said as what they are.
+ */
+export function plainDiagnostics<D extends Diagnostic>(ds: readonly D[]): D[] {
+  const out: D[] = [];
+  const stops: string[] = [];
+  for (const d0 of ds) {
+    if (d0.severity === "error" && STOP.test(d0.message)) {
+      stops.push(stopWords(d0.message));
+      continue;
+    }
+    out.push(d0.severity === "error" ? plainError(d0) : d0);
+  }
+  const cause = out.find((d) => d.severity === "error");
+  if (stops.length && cause) {
+    const note = `Then TeX stopped: ${stops[0]}.`;
+    if (cause.problem) cause.problem = { ...cause.problem, notes: [...cause.problem.notes, note] };
+    else cause.detail = cause.detail ? `${cause.detail}\n${note}` : note;
+  } else if (stops.length) {
+    // (no cause told: the stop said in plain words, still an error)
+    const first = ds.find((d) => d.severity === "error" && STOP.test(d.message))!;
+    out.unshift(plainError({ ...first, message: `TeX stopped: ${stops[0]}` }));
+  }
+  return out;
+}
+
+/** TeX giving up, after an error said before it. */
+const STOP = /^\*\*\* \(job aborted|^Emergency stop|^==> Fatal error|Fatal error occurred|^\*\*\* \(cannot \\read/;
+
+function stopWords(m: string): string {
+  if (/no legal \\end found/.test(m)) return "the file ended with no \\end{document}";
+  if (/^Emergency stop/.test(m)) return "it could not go on";
+  return "it could not go on";
+}
+
+/** LaTeX's internal macros (\@sect, \@xdblarg) said as what they are. */
+const internal = (s: string) => s.replace(/\\@[A-Za-z@]*/g, "a LaTeX internal command");
+
+/** TeX's own help for its terminal ("type `I'…", "I'll forget about whatever was undefined"). */
+const TEX_HELP = /type [`'‘]?I[`'’]?|I'll |I'm |I've |Otherwise just continue|Try typing|Type\s+<return>|\\def'ed|misspelled/i;
+
+function plainError<D extends Diagnostic>(d: D): D {
+  const p = d.problem;
+  const ex = p?.excerpt ?? null;
+  let message = d.message, hint: string | null = null, mark: [number, number] | null = null;
+  if (/^Undefined control sequence/.test(message)) {
+    const cmd = ex ? commandAt(ex.text, ex.start, ex.len) : null;
+    if (cmd) (message = `Undefined command ${cmd.name}`), (mark = [cmd.at, cmd.name.length]);
+    else message = "Undefined command";
+    hint = "Check its spelling, or load the package that defines it.";
+  } else if (/^File ended while scanning use of|^Runaway argument|^Paragraph ended before .* was complete/.test(message)) {
+    const open = ex ? openBrace(ex.text) : null;
+    message = open ? `Missing } after ${open.text}` : "Missing }: a brace opened and never closed";
+    if (open) mark = [open.at, [...open.text].length];
+    hint = "Close the brace where the argument ends.";
+  } else message = internal(message);
+  const r = { ...d, message } as D;
+  if (d.detail && TEX_HELP.test(d.detail)) r.detail = hint ?? undefined;
+  else if (hint && !d.detail) r.detail = undefined;
+  if (p) {
+    r.problem = {
+      ...p,
+      message,
+      help: hint ? [hint] : p.help.filter((h) => !TEX_HELP.test(h)),
+      // (TeX's "not defined" and the like: said by the message now)
+      notes: hint ? [] : p.notes.map(internal),
+      excerpt: ex && mark ? { text: ex.text, start: mark[0], len: mark[1] } : ex,
+    };
+  }
+  return r;
+}
+
+/**
+ * The undefined command in `text`: the culprit TeX marked ([start, start + len)) when it is one,
+ * else the last command before its end (TeX's top line ends at it), else the first after it.
+ */
+function commandAt(text: string, start: number, len: number): { name: string; at: number } | null {
+  const chars = [...text];
+  const mark = chars.slice(start, start + len).join("");
+  const own = /^\\(?:[A-Za-z@]+|.)/.exec(mark);
+  if (own) return { name: own[0], at: start };
+  const upto = chars.slice(0, Math.min(chars.length, Math.max(0, start + len))).join("");
+  const all = [...upto.matchAll(/\\(?:[A-Za-z@]+|[^A-Za-z@\s])/g)];
+  const last = all[all.length - 1];
+  if (last && last.index! + last[0].length >= upto.trimEnd().length - 1) return { name: last[0], at: [...upto.slice(0, last.index)].length };
+  const after = /\\[A-Za-z@]+/.exec(chars.slice(start + len).join(""));
+  if (after) return { name: after[0], at: start + len + [...chars.slice(start + len).join("").slice(0, after.index)].length };
+  return last ? { name: last[0], at: [...upto.slice(0, last.index)].length } : null;
+}
+
+/** The last brace in `text` never closed, and the command it belongs to: "\section{Results". */
+function openBrace(text: string): { text: string; at: number } | null {
+  const chars = [...text];
+  const stack: number[] = [];
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] === "\\") i++;
+    else if (chars[i] === "{") stack.push(i);
+    else if (chars[i] === "}") stack.pop();
+  }
+  const b = stack.length ? stack[stack.length - 1] : -1;
+  if (b < 0) return null;
+  // (the command before it, its options too: \section[short]{Results)
+  const before = chars.slice(0, b).join("");
+  const m = /\\[A-Za-z@]+\*?(?:\[[^\]]*\])?\s*$/.exec(before);
+  const at = m ? [...before.slice(0, m.index)].length : b;
+  const tail = chars.slice(at).join("").trimEnd();
+  return { text: tail.length > 48 ? `${[...tail].slice(0, 47).join("")}…` : tail, at };
+}

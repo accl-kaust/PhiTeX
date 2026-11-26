@@ -84,13 +84,20 @@ export class Outline {
   }
 
   /** The page in view: the last item that starts on it or before is the one being read. */
-  at(page: number): void {
+  /**
+   * The heading the reader is in: the last one at or above the view's top (page `page`, `top`
+   * points down it; absent: the page's top). By the page alone, every heading on page 1 was
+   * passed at once, and the last of them ("Results") marked while the Introduction was in view.
+   */
+  at(page: number, top = 0): void {
     let best: HTMLElement | null = null;
     for (const { e, row } of this.flat) {
       if (e.p == null) continue;
-      if (e.p > page) break;
+      if (e.p > page || (e.p === page && (e.y ?? 0) > top)) break;
       best = row;
     }
+    // (above the first heading: the first one, the document's start)
+    best ??= this.flat.find((f) => f.e.p != null)?.row ?? null;
     if (best === this.marked) return;
     this.marked?.classList.remove("here");
     best?.classList.add("here");

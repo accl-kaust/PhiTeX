@@ -78,6 +78,8 @@ const CRISP_IS = { o: 1, f: "", pe: "auto", hit: true };
 test("a page that is ready is never dimmed by a build: one that ships none, a new watch's build from nothing keep the last pages crisp and usable; the watch lost dims them until taken in (a click, Dismiss) or until it is back; a clean rebuild plays the opening (the user: rebuilding the new version dimmed the pages)", async () => {
   const { dir, w, t } = await open({ "main.tex": doc("Hello, a first page.") });
   await waitBuild(w, 1);
+  // (the first page drawn: the opening, up from the panel's first showing, dives into it first)
+  await t.until(`JSON.stringify(${CRISP}) === ${JSON.stringify(JSON.stringify(CRISP_IS))}`, "the first page drawn", 10000).catch(() => {});
   assert.deepEqual(await t.q(CRISP), CRISP_IS, "the first page");
   // (a build that ships no page: the last pages as they are, a strip saying so)
   w.write("main.tex", doc(""));
@@ -85,7 +87,7 @@ test("a page that is ready is never dimmed by a build: one that ships none, a ne
   // (pdflatex's "No pages of output.": no error, no output, never an ok)
   assert.match(w.out, /^no output:\s+2\s/m);
   await t.until(`$("#stage").classList.contains("stale")`, "the strip: the last complete render");
-  assert.match(await t.q(`$("#banner").textContent`), /^Showing the last complete render/);
+  assert.match(await t.q(`$("#banner").textContent`), /^This build shipped no page: showing the last complete render\./, "the strip: the cause first, then what is shown");
   assert.deepEqual(await t.q(CRISP), CRISP_IS, "the last pages after a build that shipped none");
   // (the watch gone: the pages dimmed until taken in, the strip saying the engine is lost, with Dismiss)
   const DIM = { ...CRISP_IS, o: 0.4 };
@@ -134,7 +136,7 @@ test("a build with errors says its time; the badge counts the last build's error
   await waitBuild(w, 1);
   w.write("main.tex", bad);
   await waitBuild(w, 2);
-  await t.until(`/Built with 1 error · \\d/.test($("#st").innerText.replace(/\\n/g, " "))`, "the time beside the errors");
+  await t.until(`/^1 error · .+· \\d/.test($("#st").innerText.replace(/\\n/g, " "))`, "the time beside the errors");
   assert.equal(await t.q(`$("#phx-bar .new").textContent`), "1 error");
   w.write("main.tex", good);
   await waitBuild(w, 3);
@@ -640,8 +642,23 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   assert.match(copied, /Undefined control sequence/);
   assert.match(copied, /Hello \\nosuch/, "the source line");
   await t.key("Escape", "Escape", 27);
+  // (the status names the first error; a click on it shows the problems, the error first, the timings under them)
+  await t.until(`$("#diags") && $("#logs").hidden`, "the problems closed", 5000);
+  assert.match(await t.q(`$("#sttext").textContent`), /^1 error · Undefined command \\nosuch, main\.tex:\d+$/, "the status names the error");
+  await t.click("#st");
+  await t.until(`!$("#logs").hidden && $("#m-time").hidden`, "a click on an error's status: the problems", 5000);
+  assert.match(await t.q(`$("#diags .phx-card, #diags .diag").textContent`), /Undefined command \\nosuch/, "the error first");
+  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-status-errors.png"));
+  await t.click("#diags .timingsln");
+  await t.until(`!$("#m-time").hidden`, "Build timings from the list's foot", 5000);
+  await t.key("Escape", "Escape", 27);
   w.write("main.tex", good);
   await waitBuild(w, 4);
+  // (a clean build: the status's click, the timings)
+  await t.until(`$("#sttext").textContent.startsWith("Built") || $("#sttext").textContent === "Up to date"`, "built clean", 10000);
+  await t.click("#st");
+  await t.until(`!$("#m-time").hidden && $("#logs").hidden`, "a click on a clean build's status: the timings", 5000);
+  await t.key("Escape", "Escape", 27);
   // (What's new: this version's entry, from the binary)
   await t.click("#b-more");
   await t.click("#x-tips");
@@ -982,6 +999,7 @@ test("Compare: an added run ending in a control space (e.g.\\ ) builds the diff'
   assert.equal(await t.q(`$("#stage").classList.contains("stale")`), false, "the diff's pages shown, not the last complete render");
   assert.equal(await t.q(`globalThis.__stale`), 0, "no 'last complete render' strip at any time, not even a flash");
   // (Caret only: the deleted words leave a caret; the popover closed (Esc), the diff stays)
+  if (!(await t.q(`$("#chg-look").offsetHeight > 0`))) await t.click("#chg-gear");
   await t.click(`#chg-look [data-look="del"][data-v="caret"]`);
   await t.until(`fetch(new URL("diff.tex", location.href)).then((r) => r.text()).then((x) => /scriptstyle\\\\wedge/.test(x))`, "the caret look", 60000);
   await t.key("Escape", "Escape", 27);
@@ -1057,8 +1075,8 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
   const bare = async ([x, y]) => {
     const over = await t.q(`(() => { const e = $("#stage").getRootNode().elementFromPoint(${x}, ${y}); return e?.closest(".slot") ? "" : e ? e.tagName + "." + (e.className?.baseVal ?? e.className) : "nothing"; })()`);
     assert.equal(over, "", `the mark at ${x}, ${y} under the pointer, not covered`);
-    // (a tip up: above the pages, none of it over them)
-    assert.ok(await t.q(`$("#tip").hidden || $("#tip").getBoundingClientRect().bottom <= $("#stage").getBoundingClientRect().top`), "a tip up stays above the pages");
+    // (a tip up: floating, as a popover, never over the mark: in the margin beside the pages, else one line over the page's top margin)
+    assert.ok(await t.q(`(() => { const t = $("#tip"); if (t.hidden) return true; const a = t.getBoundingClientRect(); return !(a.left < ${x} && a.right > ${x} && a.top < ${y} && a.bottom > ${y}); })()`), "a tip up is not over the mark");
   };
   const add = await mark("h-add");
   await bare(add);
@@ -1157,6 +1175,44 @@ test("the contents' column is resized by its handle: a drag widens it and the pa
   await w.stop();
 });
 
+test("links work with a real mouse at a zoom under 100% (Fit at about 71%): a \\ref's window on hover, a \\cite's card, a click jumps and Back comes (the user: hover, cards and clicks did nothing at 71%)", async () => {
+  const filler = (n) => Array.from({ length: n }, (_, i) => `Paragraph ${i} of filler words around nothing in particular, long enough to wrap.`).join("\n\n");
+  const body = `\\section{Start}\nSee Section~\\ref{far} and \\cite{knuth} here.\n\n${filler(40)}\n\\section{Far}\\label{far}\nThe far section.\n\\begin{thebibliography}{9}\\bibitem{knuth} D. Knuth. The TeXbook. 1984.\\end{thebibliography}`;
+  const { w, t } = await open({ "main.tex": doc(body, "\\usepackage{hyperref}\n") });
+  await waitBuild(w, 1);
+  // (a narrow pane, the contents beside the pages, zoomed to 75%: the page wider than the pane, as the user's at 71%)
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
+  await t.click("#b-zoom");
+  await t.click(`[data-zoom="0.75"]`);
+  await sleep(1500);
+  const word = (s, off) => `(() => { for (const e of $$(".phx-text text")) { const s = e.textContent, i = s.indexOf(${JSON.stringify(s)}); if (i < 0) continue; const x = e.getExtentOfChar(i + ${off}), p = new DOMPoint(x.x + x.width / 2, x.y + x.height / 2).matrixTransform(e.getScreenCTM()); return [p.x, p.y]; } return null; })()`;
+  const ref = await t.until(word("Section 2", 8), "the \\ref on the page", 30000);
+  const zoom = await t.q(`$("#zs").textContent + " (" + Math.round($("#viewer .slot").getBoundingClientRect().width / 8.16) + "%)"`);
+  const move = (x, y) => t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  // (hovered with the mouse's own moves: the target's window)
+  await move(ref[0] - 40, ref[1] + 30);
+  await move(ref[0], ref[1]);
+  await t.until(`!!$(".peek:not([hidden])")`, `the \\ref's window on hover at ${zoom}`, 5000);
+  await move(5, 600);
+  await t.until(`!$(".peek:not([hidden])")`, "gone with the pointer", 5000);
+  // (the \cite: its card)
+  const cite = await t.until(word("[1]", 1), "the \\cite on the page", 10000);
+  await move(cite[0], cite[1]);
+  await t.until(`!!$(".peek.cite:not([hidden])") && /Knuth/.test($(".peek").textContent)`, `the \\cite's card on hover at ${zoom}`, 5000);
+  await move(5, 600);
+  await t.until(`!$(".peek:not([hidden])")`, "the card gone with the pointer", 5000);
+  // (a click on the \ref: the view at the far section, and Back offered)
+  const top0 = await t.q(`$("#stage").scrollTop`);
+  await move(ref[0], ref[1]);
+  await t.send("Input.dispatchMouseEvent", { type: "mousePressed", x: ref[0], y: ref[1], button: "left", buttons: 1, clickCount: 1 });
+  await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: ref[0], y: ref[1], button: "left", buttons: 0, clickCount: 1 });
+  await t.until(`$("#stage").scrollTop > ${top0} + 200`, `the click jumped at ${zoom}`, 5000);
+  await t.until(`!!$(".pback") && !$(".pback").hidden`, "Back offered after the jump", 5000);
+  assert.deepEqual(t.errors, []);
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});
+
 test("the column's handle dragged over a 120-page document holds the frame rate (no main-thread task over 50 ms, the pages laid out once, at its end); then the column closed, every page box at Page width is as wide as the others, scrolled through the whole document (the user: a 113-page deck crawled; page 13 narrower and indented over page 14)", async () => {
   const pages = Array.from({ length: 120 }, (_, i) => `${i % 10 === 0 ? `\\section{Part ${i / 10 + 1}}\n` : ""}Page ${i + 1} of the long document.\\newpage`).join("\n");
   const { w, t } = await open({ "main.tex": doc(pages, "\\usepackage{hyperref}\n") });
@@ -1201,5 +1257,97 @@ test("the column's handle dragged over a 120-page document holds the frame rate 
   assert.ok(pw <= sw && pw >= sw - 60, `the page as wide as the stage gives (${pw} in ${sw})`);
   assert.deepEqual(t.errors, []);
   await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});
+
+test("the contents' open or closed is the user's: a narrow panel (a drawer) starts with them closed and never opens them by itself; opened there, kept open when it widens; closed, kept closed after a resize and a reload (the user: Contents opened itself again when the window narrowed)", async () => {
+  const sections = Array.from({ length: 3 }, (_, i) => `\\section{Part ${i + 1}}\nSome words of part ${i + 1}.`).join("\n");
+  const size = (width) => t.send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
+  const dir = project({ "main.tex": doc(sections, "\\usepackage{hyperref}\n") });
+  const w = new Watch(dir, { home });
+  const t = await browser.tab("about:blank");
+  await size(480);
+  await t.go(await w.url());
+  await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
+  const on = () => t.q(`$(".win").classList.contains("side-on")`);
+  await sleep(1500);
+  assert.equal(await on(), false, "a narrow panel: the contents closed at first");
+  await t.click("#b-side");
+  await t.until(`$(".win").classList.contains("side-on")`, "opened by the user", 5000);
+  await size(1200);
+  await sleep(500);
+  assert.equal(await on(), true, "opened, kept open as the panel widens");
+  await t.click("#b-side");
+  await t.until(`!$(".win").classList.contains("side-on")`, "closed by the user", 5000);
+  await size(480);
+  await sleep(300);
+  await size(1200);
+  await sleep(500);
+  assert.equal(await on(), false, "closed, kept closed through a narrow and a wide panel");
+  await reloaded(t);
+  await t.until(`+$("#pgn")?.textContent > 0`, "the pages again", 60000);
+  await sleep(800);
+  assert.equal(await on(), false, "closed, kept closed after a reload");
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});
+
+test("the tips never move the pages: the tour floats over them as a popover does, the stage where it is without it; one tour a visit, none on the next (the user: the tour pushed the pages 280 px down until Got it)", async () => {
+  const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  const dir = project({ "main.tex": doc("\\section{One}\nA first page with some words on it.") });
+  const w = new Watch(dir, { home: fresh });
+  const t = await browser.tab(await w.url());
+  const top = `Math.round($("#stage").getBoundingClientRect().top - $(".bar").getBoundingClientRect().bottom)`;
+  const before = await t.until(`$("#stage") && $(".bar") ? String(${top}) : null`, "the panel", 30000).then(Number);
+  await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
+  await t.until(`!$("#tip").hidden`, "the tour, by itself after the first page", 15000);
+  assert.equal(await t.q(top), before, "the stage where it was, the tour up");
+  assert.equal(await t.q(`getComputedStyle($(".stagebox")).paddingTop`), "0px", "no room made above the pages");
+  await t.q(`$("#tip [data-t=skip]").click()`);
+  await t.until(`$("#tip").hidden`, "the tour skipped", 5000);
+  assert.equal(await t.q(top), before, "the stage where it was, the tour gone");
+  // (the next visit: no tour by itself)
+  await reloaded(t);
+  await t.until(`+$("#pgn")?.textContent > 0`, "the pages again", 60000);
+  await sleep(3000);
+  assert.equal(await t.q(`$("#tip").hidden`), true, "no tour on the next visit");
+  await w.stop();
+});
+
+test("the opening plays whenever no page is ready: a first open shows it before the first page, never a blank pane (the user: a second project's first open was blank for 2-3 s)", async () => {
+  const dir = project({ "main.tex": doc(`\\section{One}\n${"Words to typeset on a page. ".repeat(200)}`) });
+  const w = new Watch(dir, { home });
+  const t = await browser.tab(await w.url());
+  let seen = false;
+  for (const end = Date.now() + 240000; Date.now() < end; await sleep(30)) {
+    const s = await t.q(`[!!$("#opening") && !$("#opening").hidden, +($("#pgn")?.textContent ?? 0)]`).catch(() => [false, 0]);
+    if (s[0]) seen = true;
+    if (s[1] > 0) break;
+  }
+  assert.ok(seen, "the opening up before the first page");
+  await w.stop();
+});
+
+test("the status says the last build's own time; a build that changed nothing says Up to date, no time; Rebuild says Rebuilt and its time (the user: First page · 38 s after a 231 ms edit; built in 0 ms; Rebuild did nothing to see)", async () => {
+  const body = "\\section{One}\nA first page.\n% a comment\n";
+  const { w, t } = await open({ "main.tex": doc(body) });
+  await waitBuild(w, 1);
+  const st = () => t.q(`[$("#sttext").textContent, $("#stmore").textContent]`);
+  w.write("main.tex", doc(body.replace("A first page.", "A first page, edited.")));
+  await waitBuild(w, 2);
+  await sleep(800);
+  const [a, am] = await st();
+  assert.ok(!/^First/.test(a), `an edit's own status, not the first build's: ${a} ${am}`);
+  assert.match(am, /\d+(\.\d+)? m?s/, "with its time");
+  w.write("main.tex", doc(body.replace("A first page.", "A first page, edited.").replace("% a comment", "% a comment, changed")));
+  await waitBuild(w, 3);
+  await sleep(800);
+  const [b, bm] = await st();
+  assert.equal(b, "Up to date", "a build that changed no page");
+  assert.equal(bm, "", "no time for it");
+  await t.click("#go");
+  await waitBuild(w, 4);
+  await t.until(`$("#sttext").textContent === "Rebuilt"`, "Rebuild says it rebuilt", 10000);
+  assert.match(await t.q(`$("#stmore").textContent`), /\d/, "with its time");
   await w.stop();
 });

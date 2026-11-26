@@ -8,7 +8,7 @@
 // and frame going off the edges.
 
 import { html } from "../html.ts";
-import { layer, ending, type Opening } from "./kit.ts";
+import { layer, ending, ellipsis, type Opening } from "./kit.ts";
 import { keyed } from "../hints.ts";
 
 const RESTORED = { left: 8, top: 17, width: 84, height: 66 };
@@ -69,7 +69,7 @@ export function mac9(box: HTMLElement, doc = "document.tex"): Opening {
   $(".ck").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const bar = $(".bar"), fill = $(".bar span"), bal = $(".bal");
   const step = (what: string, pct: number | undefined, detail: string) => {
-    $(".msg").textContent = `${what}…`;
+    $(".msg").textContent = ellipsis(what);
     $(".det").textContent = detail;
     bar.classList.toggle("pole", pct === undefined);
     fill.style.width = pct === undefined ? "" : `${pct}%`;

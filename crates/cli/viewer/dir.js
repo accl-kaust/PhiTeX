@@ -1130,12 +1130,18 @@ header:active { cursor: grabbing; }
 .status { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; min-width: 0;
   border-radius: var(--ph-radius); color: var(--ph-fg2); cursor: pointer; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
 .status:hover, .status[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
-/* (squeezed: its detail goes first, then its words end in an ellipsis; the leading word kept) */
+/* (squeezed: its time goes first, whole (it wraps onto a hidden second line: never cut to "\xB7 0.'"), then
+   its words end in an ellipsis; the words are always there, never a bare time) */
+.status { flex-wrap: wrap; align-content: flex-start; }
+.status > * { line-height: 26px; }
 .status b { flex: 0 1 auto; min-width: 4.5ch; font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
-#stmore { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
+#stmore { flex: none; }
 /* (a fixed slot: its words change as builds come, the buttons after it never move; a narrow bar squeezes it, as wide as the bar, not its words) */
 .bar > .status { flex: 0 1 auto; width: calc(26ch + 12px); min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
+.status.err:hover b { text-decoration: underline; }
+/* (the problem e / F8 is at) */
+.diags .phx-card.at { outline: 2px solid var(--ph-accent); outline-offset: -2px; }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* (the count three digits wide at least, as the page box: panel.ts's nav) */
 .pageno #pgn { display: inline-block; min-width: 3ch; }
@@ -1307,6 +1313,7 @@ header:active { cursor: grabbing; }
 .grip:hover::after, .grip.drag::after, .grip:focus-visible::after { opacity: .8; }
 .win.resizing, .win.resizing * { cursor: col-resize !important; user-select: none; }
 @container (max-width: 560px) { .win.side-on .side { position: absolute; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgb(0 0 0 / 20%); } }
+.stage:focus { outline: none; }
 .stage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--ph-stage); text-align: center; overscroll-behavior: contain; will-change: scroll-position; }
 .win.docked .stage { overflow-y: scroll; }
 .win.docked .viewer { min-height: 100%; }
@@ -1459,7 +1466,7 @@ header:active { cursor: grabbing; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
-.smarks { position: absolute; right: 0; top: var(--tipgap, 0px); bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
 .smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
 /* (a target larger than the tick: it is 3 px tall) */
@@ -1500,11 +1507,12 @@ header:active { cursor: grabbing; }
 
 /* strips over the pages: plain, in the host's colours */
 /* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
-.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; padding-top: var(--tipgap, 0px); }
-.strips { position: absolute; top: var(--tipgap, 0px); left: 0; right: 0; z-index: 2; pointer-events: none; }
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
 .strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
 .stage.stale ~ .strips .banner, .approx.on { display: block; }
+.strip.banner.err { --sev: var(--ph-danger); }
 /* the main file asked (a first build on a guess): over the opening's sheet too, until answered */
 .strips:has(.mainask.on) { z-index: 4; }
 .mainask { --sev: var(--ph-info); }
@@ -1528,6 +1536,7 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
 .win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
 .opening .phx-open { position: absolute; inset: 0; width: 100%; height: 100%; }
+.opening .sheet > .art { position: absolute; left: 0; top: 0; width: 100%; height: 100%; container-type: inline-size; }
 .steps { position: absolute; left: 10%; right: 10%; bottom: 13%; text-align: center; color: #5d6778; font: 400 13px/1.4 var(--ph-font);
   font-variant-numeric: tabular-nums; transition: opacity .3s; }
 .steps .what { color: #1b222c; }
@@ -1575,6 +1584,11 @@ header:active { cursor: grabbing; }
 .tip .new { display: inline-block; margin-right: 6px; padding: 0 7px; border-radius: var(--ph-pill); font-size: 11px; font-weight: 600; vertical-align: 1px;
   background: var(--ph-accent); color: var(--ph-accent-fg); }
 .tip h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+/* (no margin beside the pages for the card: one line, its title and its buttons; the whole card on a click on its title,
+   never on a hover, which moved its buttons from under the pointer) */
+.tip.compact:not(.open) { width: auto; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 12px; }
+.tip.compact:not(.open) h4 { margin: 0; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.tip.compact:not(.open) :is(.demo, p, .acts .n) { display: none; }
 .tip p { margin: 0 0 10px; color: var(--ph-fg2); }
 .tip .acts { display: flex; align-items: center; gap: 8px; }
 .tip .acts .n { flex: 1; color: var(--ph-fg2); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -1706,6 +1720,10 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
+/* (no margin beside the pages for it: under the opening's sheet while it plays (a strip kept for it), then faded once the
+   pages are in, back on a hover over its corner; never over a page) */
+.win.byline-tight:not(.sheet-up) .byline { opacity: 0; transition: opacity .5s ease 1.5s; }
+.win.byline-tight:not(.sheet-up) .byline:hover, .win.byline-tight:not(.sheet-up) .byline:focus-visible { opacity: 1; transition-delay: 0s; }
 /* Settings: the panel's own rows and the host's, one dialog in every host: a tab per section (one line at any width), sub-headings inside, a search over them all */
 .settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; container-type: inline-size; }
 .settings > header { padding: 10px 10px 0 16px; gap: 10px; }
@@ -1929,6 +1947,9 @@ addEventListener("keydown", (e) => {
   } else if ((e.key === "Backspace" || e.altKey && e.key === "ArrowUp") && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     files.goUp();
+  } else if (e.key === "b" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    files.focus();
   } else if (/^(ArrowDown|ArrowUp|Home|End|PageDown|PageUp|Enter)$/.test(e.key) && document.activeElement === document.body) {
     e.preventDefault();
     files.focus();

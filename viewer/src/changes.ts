@@ -195,7 +195,8 @@ ${COMMITS_CSS}
   --phc-sel: color-mix(in srgb, var(--phc-focus) 13%, transparent); --phc-aim: color-mix(in srgb, var(--phc-focus) 60%, transparent);
   --phc-danger: var(--ph-danger, #c23a2f);
   position: fixed; z-index: 24; /* (under the panel's dialogs (25) and menus (31), over its pages) */ width: min(var(--chg-w, 380px), calc(100vw - 16px)); max-height: min(680px, var(--chg-h, calc(100vh - 70px))); display: flex; flex-direction: column;
-  background: var(--phc-bg); color: var(--phc-fg); border: 1px solid var(--phc-line); border-radius: 12px; box-shadow: 0 10px 30px rgb(15 25 40 / 22%);
+  /* (opaque whatever the host's menu colour is: one with alpha let the page show through it) */
+  background: linear-gradient(var(--phc-bg), var(--phc-bg)), var(--ph-stage-solid, Canvas); color: var(--phc-fg); border: 1px solid var(--phc-line); border-radius: 12px; box-shadow: 0 10px 30px rgb(15 25 40 / 22%);
   font: 13px/1.4 var(--ph-font, "Noto Sans", system-ui, sans-serif); transform-origin: top right; transition: opacity .15s, transform .15s; }
 .chg-pop[hidden] { display: flex; opacity: 0; transform: scale(.97); pointer-events: none; visibility: hidden; }
 .chg-pop::before { content: ""; position: absolute; top: -6px; right: var(--chg-arrow, 40px); width: 10px; height: 10px; background: var(--phc-bg); border-left: 1px solid var(--phc-line); border-top: 1px solid var(--phc-line); transform: rotate(45deg); }
@@ -291,6 +292,9 @@ ${COMMITS_CSS}
 .chg-pop .toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 .chg-pop .pickhead { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 10px 12px 6px; }
 .chg-pop .pickhead b { font-size: 13px; }
+.chg-pop .look.folded { display: none; }
+.chg-pop .boff .qb { flex: none; white-space: nowrap; }
+.chg-pop .boff { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--phc-line); font-size: 12px; color: var(--phc-muted); }
 .chg-pop .done { border: 1px solid var(--phc-line); background: var(--phc-chip); border-radius: 7px; padding: 4px 12px; cursor: pointer; font-size: 12.5px; font-weight: 600; }
 .chg-pop .quick { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 12px 10px; border-bottom: 1px solid var(--phc-line); }
 .chg-pop .qb { font-size: 12px; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
@@ -430,6 +434,8 @@ export class Changes {
   private seenItems = new Set<string>();
   private lastCount = -1;
   private width: number | null = null;
+  /** The look's options shown (⚙), else folded away. */
+  private lookOpen = false;
   private blameSig = "";
 
   constructor(p: ChangesPanel, host: ChangesHost, blame: Blame | null) {
@@ -567,7 +573,7 @@ export class Changes {
       if (at && document.activeElement === at) this.el.querySelector<HTMLElement>("[data-m][aria-pressed=true], button")?.focus({ preventScroll: true });
     } else {
       this.pick = null;
-      this.graph?.cancel();
+      this.letGo();
       this.marks();
       // (the keyboard back on the button that opened it)
       if (refocus && this.el.contains(this.el.getRootNode() instanceof ShadowRoot ? (this.el.getRootNode() as ShadowRoot).activeElement : null)) (this.anchor ?? this.anchors[0])?.focus({ preventScroll: true });
@@ -597,7 +603,8 @@ export class Changes {
     // (a diff stays on the pages with the popover closed, to be read with nothing over them: only Stop comparing,
     // or Current, puts the current version back)
     const diff = this.mode === "diff" && !!this.ran;
-    const blame = this.open && this.mode === "blame" && this.blameAsked;
+    // (Blame too stays on the pages, the popover closed, until it is turned off: closing it took its colours away)
+    const blame = this.mode === "blame" && this.blameAsked;
     // (the pages back to the editor's before Blame marks them; asked only when that changes: opened with
     // no diff, nothing is asked of the host)
     const pages = diff && this.pages === "diff";
@@ -612,9 +619,10 @@ export class Changes {
     const r = a.getBoundingClientRect();
     const pane = this.p.win.getBoundingClientRect();
     const lo = Math.max(0, pane.left), hi = Math.min(innerWidth, pane.right > lo ? pane.right : innerWidth);
-    const w = Math.max(260, Math.min(this.width ?? 380, hi - lo - 16));
+    // (narrow, docked to the pane's right side: about a third of the pages at most, the rest of them readable beside it)
+    const w = Math.max(260, Math.min(this.width ?? Math.max(280, Math.min(340, (hi - lo) / 3)), hi - lo - 16));
     this.el.style.setProperty("--chg-w", `${w}px`);
-    const left = Math.max(lo + 8, Math.min(hi - w - 8, r.right - w + 10));
+    const left = Math.max(lo + 8, hi - w - 8);
     const top = r.bottom + 8;
     const bottom = Math.min(innerHeight, pane.bottom > top ? pane.bottom : innerHeight);
     this.el.style.setProperty("--chg-h", `${Math.max(220, bottom - top - 8)}px`);
@@ -640,7 +648,7 @@ export class Changes {
       if (this.p.root.querySelector(".dialog:not([hidden])")) return;
       // (a person or a commit picked out in Blame's lists: let go first)
       if (this.mode === "blame" && this.blame?.unfocus()) return done();
-      if (this.pick && this.graph?.aiming) (this.graph.cancel(), this.refreshHint());
+      if (this.pick && this.graph?.aiming) (this.letGo(), this.refreshHint());
       else if (this.pick) (this.pick = null), this.render(), this.el.querySelector<HTMLElement>("#chg-from")?.focus();
       else this.off();
       done();
@@ -691,6 +699,8 @@ export class Changes {
       if (this.pair) this.graph!.mark(this.pair.from, this.pair.to);
       if (this.open) this.renderHead();
       if (this.open && this.pick) this.refreshQuick();
+      // (no history, or the first page of it in: the list's empty state says which)
+      else if (this.open && !this.ran && this.mode === "diff" && (this.graph!.failed || this.graph!.commits.length < 2)) this.render();
     });
     return this.graph;
   }
@@ -702,6 +712,12 @@ export class Changes {
     if (this.pick) g.open(which);
     this.render();
     this.el.querySelector<HTMLElement>(".phx-commits .row[data-i], .qb, #chg-done")?.focus({ preventScroll: true });
+  }
+
+  /** A first end clicked let go (Esc, the popover closed): the list marks the pair compared again, nothing changed. */
+  private letGo(): void {
+    this.graph?.cancel();
+    this.graph?.mark(this.pair?.from ?? null, this.pair?.to ?? null);
   }
 
   /** A pair chosen: the diff run; `done` closes the picker. */
@@ -976,7 +992,7 @@ export class Changes {
 
   private head(): DocumentFragment {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.mode === "blame" ? "Blame's look: colour by, style, not committed (at the top of the list)" : "Diff's look: colours and marks (at the top of the list)"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
+    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-controls="chg-look" aria-expanded="${String(this.lookOpen)}" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.mode === "blame" ? "Blame's look: colour by, style, not committed (at the top of the list)" : "Diff's look: colours and marks (at the top of the list)"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
     let below: DocumentFragment;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
@@ -1075,9 +1091,10 @@ export class Changes {
       if (cs[0]) q.push([cs[0].id, word === "version" ? "The last version" : "Last commit · HEAD", `Up to the newest ${word}`]);
     }
     const hint = g.aiming
-      ? html`<b>Now click the other end</b> (the ${this.host.tree === null ? "editor's text" : "working tree"} for now). The same ${word} again cancels.`
-      : html`Click one end, then the other. Drag for a range. <b>Shift</b>-click: To. Double-click: one ${word}'s changes.`;
-    return html`<div class="pickhead"><b>${w === "from" ? "Compare from…" : "…up to"}</b><button type="button" class="done" id="chg-done" title="Back to the list, nothing changed (Esc)">Done</button></div><div class="quick">${q.map(([h, l, t]) => html`<button type="button" class="qb" data-q="${h ?? ""}" title="${t}">${l}</button>`)}</div><div class="hint" id="chg-hint">${hint}</div>`;
+      ? html`Compared with now. <b>Click another</b> for a range; Done when it's right.`
+      : html`Click a ${word} to compare it with now.`;
+    const more = `A second click: a range between the two. Drag for a range. Shift-click: To. Double-click: one ${word}'s own changes.`;
+    return html`<div class="pickhead"><b>${w === "from" ? "Compare from…" : "…up to"}</b><button type="button" class="done" id="chg-done" title="Compare what the list shows (Esc: nothing changed)">Done</button></div><div class="quick">${q.map(([h, l, t]) => html`<button type="button" class="qb" data-q="${h ?? ""}" title="${t}">${l}</button>`)}</div><div class="hint" id="chg-hint" title="${more}">${hint}</div>`;
   }
 
   /** A list's skeleton: rows shaped like the changes'. */
@@ -1095,8 +1112,11 @@ export class Changes {
     });
     const filters = all.length ? html`<div class="filters" role="group" aria-label="Kinds of change">${chips}<label class="toggle hd" title="Leave deleted text out of the list and the pages"><input type="checkbox" id="chg-hide" checked="${this.hide}"> Hide deletions</label></div>` : html``;
     if (!this.ran) {
-      const g = this.graph;
-      if (g && !g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${word === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
+      // (the history read at once, so a folder with none says so up front, not after "Choose a version…")
+      const g = this.ensureGraph();
+      if (!g.commits.length && g.hasMore && !g.busy) void g.load();
+      if (g.failed && !g.commits.length) return html`<div class="empty"><b>${word === "version" ? "No history here" : "No git repository here"}</b>${word === "version" ? g.failed : "Changes compares versions from git's history: run git init and commit once, and what changes after shows here."}</div>`;
+      if (!g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${word === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
       return html`<div class="empty"><b>Pick a version to compare with</b>Choose From: a ${word}, a ${word === "version" ? "label" : "tag"} or your last visit. What changed since then is listed here and marked on the pages.<button type="button" class="primary" id="chg-start" title="Open the history to choose From">Choose a version…</button></div>`;
     }
     if (!all.length && this.busy) return this.skeleton();
@@ -1158,7 +1178,7 @@ export class Changes {
     rows.sort((a, b2) => b2.time - a.time);
     // (the count only once every file is in; till then the lists are said to be partial)
     const count = s.waiting ? `so far · ${(s.files - s.waiting).toLocaleString()} of ${s.files.toLocaleString()} files` : `${s.lines.toLocaleString()} ${s.unit}`;
-    return html`${look}<div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
+    return html`${look}<div class="boff"><span>Blame stays on the pages until you turn it off.</span><button type="button" class="qb boffb" id="chg-blame-off" title="The pages without Blame's colours">Turn off Blame</button></div><div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
   }
 
   /** A commit by its id, from the history read (a skipped one, kept from before, named). */
@@ -1175,7 +1195,7 @@ export class Changes {
     const L = this.blame!.look;
     const word = this.blame!.words.commit;
     const ramp = AGE_RAMPS[L.ages] ?? AGE_RAMPS.violet;
-    return html`<div class="look" id="chg-look" role="group" aria-label="Blame's look">
+    return html`<div class="${`look${this.lookOpen ? "" : " folded"}`}" id="chg-look" role="group" aria-label="Blame's look">
       <div class="opt2"><span class="lab2">Colour by</span>${this.segOf("color", L.color, [["author", "Author", "A colour per person"], ["age", "Age", "Newer lines stronger"]])}</div>
       ${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}
       <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "highlight", [["highlight", "Highlight", "A soft highlight behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
@@ -1186,7 +1206,7 @@ export class Changes {
   /** Diff's look, at the top of its list: colours, added and deleted text; the rest in Settings. */
   private diffLook(): DocumentFragment {
     const L = this.look;
-    return html`<div class="look" id="chg-look" role="group" aria-label="Diff's look">
+    return html`<div class="${`look${this.lookOpen ? "" : " folded"}`}" id="chg-look" role="group" aria-label="Diff's look">
       <div class="opt2"><span class="lab2">Colours</span><div class="swatches">${(Object.entries(DIFF_COLORS) as [ChangesDiffLook["colors"], [string, string, string]][]).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
       <div class="opt2"><span class="lab2">Added</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
       <div class="opt2"><span class="lab2">Deleted</span>${this.segOf("del", L.del, [["strike", "Struck", "Struck through"], ["mark", "Marker", "Struck, a highlight behind it"], ["caret", "Caret", "A caret where it was, the text left out"]])}</div>
@@ -1263,8 +1283,12 @@ export class Changes {
     const $ = <T extends HTMLElement>(s: string) => this.el.querySelector<T>(s);
     $("#chg-x")!.onclick = () => this.off();
     // (⚙: to the look at the top of the list, marked a moment (its animation, once); from the picker, the list back first)
+    // (the look folded away until ⚙ opens it: what is compared comes first, how it is drawn after)
     $("#chg-gear")!.onclick = () => {
-      if (this.pick) (this.pick = null), this.graph?.cancel(), this.render();
+      if (this.pick) (this.pick = null), this.letGo();
+      this.lookOpen = !this.lookOpen;
+      this.render();
+      if (!this.lookOpen) return;
       const body = this.el.querySelector<HTMLElement>(".body"), look = this.el.querySelector<HTMLElement>("#chg-look");
       if (!body || !look) return;
       body.scrollTo({ top: 0, behavior: reduced() ? "auto" : "smooth" });
@@ -1377,13 +1401,24 @@ export class Changes {
     const done = $("#chg-done");
     if (done)
       done.onclick = () => {
+        // (what the list shows is what is compared: a first end clicked, From it to the working tree;
+        // Done closed the picker on it and compared nothing, From still "Choose…", "No diff yet")
+        const g = this.graph, s = g?.shown;
+        g?.cancel();
         this.pick = null;
-        this.graph?.cancel();
+        if (s?.from && (s.from !== this.pair?.from || s.to !== (this.pair?.to ?? null))) return this.choose({ from: s.from, to: s.to }, true);
         this.render();
         this.el.querySelector<HTMLElement>("#chg-from")?.focus();
       };
     const start = $("#chg-start");
     if (start) start.onclick = () => this.openPicker("from");
+    const boff = $("#chg-blame-off");
+    if (boff)
+      boff.onclick = () => {
+        this.blameAsked = false;
+        this.marks();
+        this.render();
+      };
     const go = $("#chg-blame-go");
     if (go)
       go.onclick = () => {
@@ -1391,7 +1426,7 @@ export class Changes {
         this.marks();
         this.render();
       };
-    for (const q of body.querySelectorAll<HTMLButtonElement>(".qb"))
+    for (const q of body.querySelectorAll<HTMLButtonElement>(".qb[data-q]"))
       q.onclick = () => {
         const h = q.dataset.q || null;
         const p = this.pair;

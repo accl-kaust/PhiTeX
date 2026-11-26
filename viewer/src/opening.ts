@@ -148,6 +148,8 @@ export interface Opening {
   step?(what: string, pct: number | undefined, detail: string): void;
   /** "Did you know", said by the opening itself (with step). */
   hint?(text: string): void;
+  /** The main file's name, told after the opening began (one that shows it: the typewriter's first line, the terminal's command). */
+  rename?(doc: string): void;
 }
 
 /**

@@ -15,6 +15,8 @@ export const INK = { light: "#1d3e72", dark: "#e4e6ea" };
 export const PAPER = { light: "#ffffff", dark: "#2c2e33" };
 /** The logo's ribbon (ACCL's stripes). */
 export const RIBBON = ["#00a8a4", "#d3c72a", "#f0b225", "#f58f2d"];
+/** A step's words ending in one ellipsis: a step said with its own ("Downloading the project…") gets no second. */
+export const ellipsis = (s: string) => (/(…|\.\.\.)\s*$/.test(s) ? s : `${s}…`);
 export const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let registered = false;
@@ -101,7 +103,7 @@ export function loop(frame: (t: number, dt: number) => void) {
  * and says how long it takes, in ms), then the layer is removed; stop() at once.
  * `cleanup` runs either way (timers, frame loops).
  */
-export function ending(el: HTMLElement, exit: (page?: HTMLCanvasElement) => number, cleanup: () => void = () => {}, says?: Pick<Opening, "step" | "hint">): Opening {
+export function ending(el: HTMLElement, exit: (page?: HTMLCanvasElement) => number, cleanup: () => void = () => {}, says?: Pick<Opening, "step" | "hint" | "rename">): Opening {
   let over = false, ending: Promise<void> | null = null;
   const stop = () => {
     if (over) return;
