@@ -1516,6 +1516,7 @@ impl Build {
             incr,
             loads_ran,
             staged: false,
+            date_due: None,
             evaluated,
             origins: Arc::default(),
             stages,
@@ -1606,21 +1607,34 @@ impl Build {
     /// Call between [`Build::load`] and the first evaluation.
     pub fn reask_environment(&mut self) -> EnvReask {
         let mut out = EnvReask::default();
-        // (the job's bindings)
+        // (the job's bindings. Its date alone moved (this process's now,
+        // not the saved build's): kept until something else makes the
+        // build run, as latexmk leaves a PDF whose sources did not change
+        // as it is, its date the run's that made it; then the date is
+        // this process's, its readers each re-asked at its own resolution
+        // (`\time` the minute, `\day` the day, the PDF's date the second):
+        // [`Build::date_due`])
         if let Some(base) = self.g.env_base.clone() {
             let v = self.g.eng.values();
             let fresh = super::by_field(super::job_sets(v, &base, &self.opts));
             if fresh != self.g.job {
-                out.moved.extend(
-                    fresh
-                        .iter()
-                        .filter(|e| !self.g.job.contains(e))
-                        .map(|&(f, _)| crate::val::field_name(v, f)),
-                );
-                self.g.job = fresh;
-                let env = self.g.environment(self.opts.fixpoint);
-                self.g.push_env_as(env, true);
-                self.staged = true;
+                let moved: Vec<String> = fresh
+                    .iter()
+                    .filter(|e| !self.g.job.contains(e))
+                    .map(|&(f, _)| crate::val::field_name(v, f))
+                    .collect();
+                if moved
+                    .iter()
+                    .all(|n| super::DATE_FIELDS.contains(&n.as_str()))
+                {
+                    self.date_due = Some(fresh);
+                } else {
+                    out.moved.extend(moved);
+                    self.g.job = fresh;
+                    let env = self.g.environment(self.opts.fixpoint);
+                    self.g.push_env_as(env, true);
+                    self.staged = true;
+                }
             }
         }
         // (the provider as an evaluation installs it)
@@ -1679,6 +1693,7 @@ impl Build {
         if !moved.is_empty() {
             self.staged = true;
         }
+        out.date_kept = self.date_due.is_some();
         out
     }
 }
@@ -1690,4 +1705,7 @@ impl Build {
 pub struct EnvReask {
     pub asked: usize,
     pub moved: Vec<String>,
+    /// Whether only the job's date moved: the saved build's date kept
+    /// until the build next runs ([`Build::date_due`]).
+    pub date_kept: bool,
 }

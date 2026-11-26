@@ -233,7 +233,7 @@ export interface PreviewSink {
    * (a plain rebuild); then "ready", once.
    */
   warmup?(w: { state: "preparing" | "ready"; since?: number; slow?: boolean }): void;
-  /** The document's outline (its PDF's bookmarks), after each build: Options.remote's, the `outline` op's. */
+  /** The document's outline (its PDF's bookmarks, else its .toc's entries), after each build: Options.remote's, the `outline` op's. */
   outline?(items: Entry[]): void;
   /** The session's citation lookup, given once (the `cites` op: the citation under a point of page `k`, in the origins' points; null: none, or no answer). */
   citesBy?(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void;
@@ -1746,18 +1746,23 @@ export class PreviewSession {
     if (r.ok) this.onWatch({ event: "diagnostics", items: (r.json?.items ?? []) as Problem[] });
   }
 
-  /** The document's outline asked for now and given to the view (it shows the contents). */
+  /**
+   * The document's outline asked for now and given to the view (it shows the contents): the
+   * PDF's bookmarks, else the entries of its `.toc`, which the core makes when asked (the
+   * answer "pending" asked again; given up once a newer build's outline is asked).
+   */
   async outline(): Promise<void> {
     if (!this.sink.outline) return;
-    const r = await this.core.request({ op: "outline" } as never);
-    if (r.ok) this.sink.outline((r.json?.items ?? []) as Entry[]);
+    const gen = ++this.outlineGen;
+    const r = await this.untilMade({ op: "outline" } as never, () => gen !== this.outlineGen).catch(() => null);
+    if (r?.ok && !r.json?.pending && gen === this.outlineGen) this.sink.outline((r.json?.items ?? []) as Entry[]);
   }
+  private outlineGen = 0;
 
   /** After a build: the outline, only while the view shows it (else asked when it does). */
   private async watchOutline(): Promise<void> {
     if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
-    const r = await this.core.request({ op: "outline" } as never);
-    if (r.ok) this.sink.outline((r.json?.items ?? []) as Entry[]);
+    await this.outline();
   }
 
   private onWatch(e: WatchEvent): void {

@@ -7061,6 +7061,12 @@ pub struct Build {
     /// [`Build::absorb_pending`] evaluates them with the text sent, one
     /// evaluation (its stats the nodes both ran).
     staged: bool,
+    /// The job's bindings with this process's date, where a loaded build
+    /// had only its date move ([`Build::reask_environment`]): pushed at
+    /// the start of the next evaluation that runs for another change, its
+    /// readers re-asked then; until then the saved build's date holds and
+    /// a reopened document whose sources did not change runs nothing.
+    date_due: Option<Vec<(Field, ValueId)>>,
     /// Whether the build has evaluated (its cold build done).
     evaluated: bool,
     /// Glyph origins' memos ([`Build::page_origins`]), shared with the
@@ -7333,6 +7339,7 @@ impl Build {
             serial: next_serial(),
             loads_ran: false,
             staged: false,
+            date_due: None,
             evaluated: false,
             origins: Arc::default(),
             stages: 0,
@@ -7569,6 +7576,13 @@ impl Build {
     fn settle(&mut self) {
         if self.nothing_to_settle() {
             return;
+        }
+        // (a loaded build's date, kept while nothing else changed: this
+        // evaluation runs, so its date is now the job's)
+        if let Some(job) = self.date_due.take() {
+            self.g.job = job;
+            let env = self.g.environment(self.opts.fixpoint);
+            self.g.push_env_as(env, true);
         }
         self.settles += 1;
         self.staged = false;
@@ -11351,6 +11365,19 @@ fn job_env(
     let env = g.environment(opts.fixpoint);
     g.push_env(env);
 }
+
+/// The job's bindings that are its date ([`job_sets`]): the PDF's
+/// (`pdfdate`, XeTeX's `epoch`), the DVI comment's, and `\time`, `\day`,
+/// `\month`, `\year`.
+pub(crate) const DATE_FIELDS: &[&str] = &[
+    "pdfdate",
+    crate::xdvpdf::EPOCH,
+    "dvicomment",
+    "param:time",
+    "param:day",
+    "param:month",
+    "param:year",
+];
 
 /// The job's bindings (its name, program, date, shell escape, TCX), as
 /// the options give them over the format's (`base`): [`job_env`]'s, and

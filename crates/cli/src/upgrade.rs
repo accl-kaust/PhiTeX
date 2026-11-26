@@ -410,7 +410,8 @@ fn record_for(
     read: impl Fn(&Path) -> Option<Vec<u8>>,
 ) -> Option<Value> {
     let same = |a: &Path, b: &Path| {
-        a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+        same_folder(a, b)
+            || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if same_folder(&x, &y))
     };
     // (the folders the binary may be the prefix's: `PREFIX/bin/phitex` (install.sh), `PREFIX\phitex.exe` (install.ps1))
     let dir = exe.parent()?;
@@ -427,6 +428,25 @@ fn record_for(
                 .as_str()
                 .is_some_and(|p| prefixes.iter().any(|q| same(Path::new(p), q)))
         })
+}
+
+/// Whether `a` and `b` name one folder as the system compares names: by
+/// their components (either separator on Windows, a trailing one
+/// ignored), and on Windows ignoring case, as NTFS does (install.ps1's
+/// `PHITEX_PREFIX` may be typed `c:\users\…` and the binary run from
+/// `C:\Users\…`, and canonicalize fails on some drives: a RAM disk, a
+/// network share).
+fn same_folder(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        let key = |p: &Path| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+                .collect::<Vec<_>>()
+        };
+        key(a) == key(b)
+    } else {
+        a == b
+    }
 }
 
 /// `bytes` as the executable `exe`, by rename from beside it.
@@ -813,7 +833,13 @@ mod tests {
                 r#"{"method": "script", "prefix": "/w/Programs/phitex", "channel": "stable"}"#,
             ),
         ]);
-        let read = |p: &Path| files.get(p.to_str()?).map(|s| s.as_bytes().to_vec());
+        // (by the path's components: on Windows the record's path is joined with `\`)
+        let read = |p: &Path| {
+            files
+                .iter()
+                .find(|(f, _)| Path::new(f) == p)
+                .map(|(_, s)| s.as_bytes().to_vec())
+        };
         let rec = |exe: &str, data: Option<&str>| {
             record_for(Path::new(exe), data.map(Path::new), read)
                 .map(|r| r["channel"].as_str().unwrap_or("").to_owned())
@@ -840,6 +866,25 @@ mod tests {
         );
         // (a binary elsewhere: none)
         assert_eq!(rec("/usr/bin/phitex", Some("/home/v/data/phitex")), None);
+        // (Windows: the prefix as typed, another case and separator, a trailing one)
+        if cfg!(windows) {
+            let files = [(
+                r"C:\Users\U\AppData\Local\phitex\install.json",
+                r#"{"method": "script", "prefix": "c:/users/u/apps/PhiTeX/", "channel": "nightly"}"#,
+            )];
+            let read = |p: &Path| {
+                files
+                    .iter()
+                    .find(|(f, _)| Path::new(f) == p)
+                    .map(|(_, s)| s.as_bytes().to_vec())
+            };
+            let r = record_for(
+                Path::new(r"C:\Users\U\Apps\phitex\phitex.exe"),
+                Some(Path::new(r"C:\Users\U\AppData\Local\phitex")),
+                read,
+            );
+            assert_eq!(r.map(|r| r["channel"].clone()), Some("nightly".into()));
+        }
     }
 
     /// `update-channel`'s default is the channel this phitex came from: a

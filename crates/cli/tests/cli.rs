@@ -4030,7 +4030,8 @@ fn report_has_no_document_text() {
 }
 
 /// `--help` is short (the commands, the common options, where the rest
-/// are: the user, 2026-10-30) and `--help-all` sectioned with every option
+/// are: the user, 2026-10-30; one screen, the agents' loop its last
+/// section since 2026-11-26) and `--help-all` sectioned with every option
 /// (commands, options, examples), both plain off a terminal.
 #[test]
 fn help_is_sectioned() {
@@ -4051,6 +4052,14 @@ fn help_is_sectioned() {
     assert!(
         !short.contains("--no-view"),
         "--help lists every option:\n{short}"
+    );
+    let at = |what: &str| short.find(what).unwrap_or(usize::MAX);
+    assert!(
+        at("Commands:") < at("Options:")
+            && at("Options:") < at("Settings:")
+            && at("Settings:") < at("For agents:")
+            && at("For agents:") < usize::MAX,
+        "--help's sections are not commands, options, settings, then the agents' loop:\n{short}"
     );
     assert!(
         !short.contains('\x1b'),

@@ -1,9 +1,10 @@
 // The document's contents beside the pages, from its PDF outline (its
-// bookmarks: what hyperref makes of \chapter, \section and the rest): a
-// title clicked goes to its place, the section being read is marked as
-// the pages scroll, and a part folds. Host-neutral: the host gives the
-// items (the core's `outline`: the PDF's /Outlines, crates/output/render)
-// and the viewer.
+// bookmarks: what hyperref makes of \chapter, \section and the rest), else
+// from the entries LaTeX wrote to its .toc: a title clicked goes to its
+// place, the section being read is marked as the pages scroll, and a part
+// folds. Host-neutral: the host gives the items (the core's `outline`: the
+// PDF's /Outlines, crates/output/render; else the .toc's, placed where the
+// pages show each heading, crates/editor/live/src/toc.rs) and the viewer.
 
 import { html } from "./html.ts";
 
@@ -64,7 +65,7 @@ export class Outline {
     this.flat = [];
     this.marked = null;
     if (!items.length) {
-      this.el.innerHTML = `<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>`;
+      this.el.innerHTML = `<p class="phx-none">No contents: the document has no sections.</p>`;
       return;
     }
     const list = (es: Entry[], path: string, depth: number): DocumentFragment =>
@@ -84,13 +85,20 @@ export class Outline {
   }
 
   /** The page in view: the last item that starts on it or before is the one being read. */
-  at(page: number): void {
+  /**
+   * The heading the reader is in: the last one at or above the view's top (page `page`, `top`
+   * points down it; absent: the page's top). By the page alone, every heading on page 1 was
+   * passed at once, and the last of them ("Results") marked while the Introduction was in view.
+   */
+  at(page: number, top = 0): void {
     let best: HTMLElement | null = null;
     for (const { e, row } of this.flat) {
       if (e.p == null) continue;
-      if (e.p > page) break;
+      if (e.p > page || (e.p === page && (e.y ?? 0) > top)) break;
       best = row;
     }
+    // (above the first heading: the first one, the document's start)
+    best ??= this.flat.find((f) => f.e.p != null)?.row ?? null;
     if (best === this.marked) return;
     this.marked?.classList.remove("here");
     best?.classList.add("here");

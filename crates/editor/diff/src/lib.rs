@@ -1269,6 +1269,63 @@ mod tests {
         assert!(!d.changes.is_empty(), "no change found");
     }
 
+    /// An early text-only version against the full one (the tester's on
+    /// Overleaf, 2026-11-26): its paragraph finished, then a display, a
+    /// figure, a section with a paragraph, a table and the bibliography
+    /// added. Each float, display and the bibliography is a change of its
+    /// own, filed under the section it is in, as are the text and the
+    /// section: one change "Text" filed under "Results" was all of them.
+    #[test]
+    fn units_added_are_changes_each() {
+        use ChangeKind::Add;
+        let d = run(
+            "\\section{Introduction}\nHello world, and I\n",
+            "\\section{Introduction}\nHello world, and I want more.\n\n\
+             I can write math:\n\\begin{equation}\nx = y\n\\end{equation}\n\n\
+             \\begin{figure}[h]\n\\centering\n\\includegraphics{a}\n\\caption{A.}\n\\end{figure}\n\n\
+             \\section{Results}\nTable~\\ref{t} shows it~\\cite{k}.\n\
+             \\begin{table}[h]\n\\begin{tabular}{lr}\na & 1 \\\\\n\\end{tabular}\n\\caption{T.}\\label{t}\n\\end{table}\n\n\
+             \\bibliographystyle{plain}\n\\bibliography{refs}\n",
+        );
+        let got: Vec<(ChangeKind, &str, &str)> = d
+            .changes
+            .iter()
+            .map(|c| {
+                let t = c.new_text.trim();
+                (
+                    c.kind,
+                    c.section.as_deref().unwrap_or(""),
+                    &t[..t.len().min(18)],
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (Add, "Introduction", "want more.\n\nI can "),
+                (Add, "Introduction", "\\begin{equation}\nx"),
+                (Add, "Introduction", "\\begin{figure}[h]\n"),
+                (Add, "Results", "\\section{Results}"),
+                (Add, "Results", "Table~\\ref{t} show"),
+                (Add, "Results", "\\begin{table}[h]\n\\"),
+                (Add, "Results", "\\bibliographystyle"),
+            ],
+            "{}",
+            body(&d)
+        );
+        // (the markup one block's, as before: each change's out its own
+        // range of it, in order)
+        assert_eq!(
+            body(&d).matches("\\DIFaddbegin ").count(),
+            1,
+            "{}",
+            body(&d)
+        );
+        for w in d.changes.windows(2) {
+            assert!(w[0].out.end <= w[1].out.start, "{:?}", d.changes);
+        }
+    }
+
     #[test]
     fn text_command_inside() {
         let d = run("\\section{Intro}\nText.\n", "\\section{Overview}\nText.\n");

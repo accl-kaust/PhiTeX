@@ -9,7 +9,7 @@
 // taskbar going off the edges, the page alone left.
 
 import { html } from "../html.ts";
-import { layer, ending, type Opening } from "./kit.ts";
+import { layer, ending, ellipsis, type Opening } from "./kit.ts";
 import { keyed } from "../hints.ts";
 
 /** The PDF's window before it is maximized, in percent of the sheet: its page area (the frame and bars around it). */
@@ -72,7 +72,7 @@ export function win98(box: HTMLElement, doc = "document.tex"): Opening {
   const w = $(".w"), fly = $(".fly"), bar = $(".bar"), fill = $(".bar span"), btn = $(".btn"), tip = $(".tip");
   $(".clock").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const step = (what: string, pct: number | undefined, detail: string) => {
-    $(".msg").textContent = `${what}…`;
+    $(".msg").textContent = ellipsis(what);
     $(".det").textContent = detail;
     bar.classList.toggle("march", pct === undefined);
     // (in blocks, as Windows fills it)

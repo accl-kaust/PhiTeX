@@ -16,7 +16,8 @@
 import { diffPlace, diffSource, type DiffChange, type DiffMarkup, type DiffOut, type DiffSubtype } from "./diff.ts";
 import { DIFF_COLORS, type ChangesDiffLook, type ChangesRunner, type DiffMark } from "./changes.ts";
 import { byteOffset, charOffset } from "./edits.ts";
-import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink } from "./session.ts";
+import { PreviewSession, type CoreTransport, type EditorHost, type Options, type PreviewSink, type Status } from "./session.ts";
+import type { Diagnostic } from "./diagnostics.ts";
 import type { Glyph } from "./sync.ts";
 
 
@@ -33,6 +34,61 @@ export function gate(sink: PreviewSink, on: () => boolean, drop: string[] = []):
       if (typeof v !== "function") return v;
       return (...a: unknown[]) => (on() && !drop.includes(String(k)) ? v.apply(t, a) : undefined);
     },
+  });
+}
+
+/**
+ * The marked-up document's problems at the user's own lines: each one at
+ * a place of `file` (the marked-up text `d.tex`, by its bytes where the
+ * build gave them, else its line and column) taken through the diff's map
+ * (diffSource) to the user's file and line, its excerpt that line's text;
+ * one in the markup's own definitions (no run of the user's text before
+ * it) has no place. `texts`: the user's files (the version diffed to).
+ * Before, the Diff listed "main.tex:161", a line of diff.tex the user's
+ * main.tex did not have.
+ */
+export function diffDiagnostics(ds: readonly Diagnostic[], d: DiffOut, file: string, texts: (f: string) => string | undefined): Diagnostic[] {
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const tex = enc.encode(d.tex);
+  // (byte offset of line `n` (1-based), column `c` (1-based, characters), in the marked-up text)
+  const at = (n: number, c: number): number => {
+    let i = 0;
+    for (let k = 1; k < n && i < tex.length; k++) {
+      const j = tex.indexOf(10, i);
+      if (j < 0) return tex.length;
+      i = j + 1;
+    }
+    const e = tex.indexOf(10, i);
+    const line = dec.decode(tex.subarray(i, e < 0 ? tex.length : e));
+    return i + enc.encode([...line].slice(0, Math.max(0, c - 1)).join("")).length;
+  };
+  return ds.map((x) => {
+    const p = x.problem;
+    if (x.file !== file || !x.line) return x;
+    // (its bytes where the build gave a range of them; an empty one, [0, 0], is none)
+    const from = p?.range && p.range[1] > p.range[0] ? p.range[0] : at(x.line, p?.col ?? 1);
+    const a = diffSource(d, from);
+    const text = a ? texts(a.file) : undefined;
+    if (!a || text === undefined) {
+      // (in latexdiff's own markup: no line of the user's)
+      return { ...x, file: undefined, line: undefined, problem: p && { ...p, file: null, line: null, col: null, excerpt: null, range: undefined } };
+    }
+    const src = enc.encode(text);
+    const s0 = src.lastIndexOf(10, a.at - 1) + 1;
+    const e0 = src.indexOf(10, a.at);
+    const lineText = dec.decode(src.subarray(s0, e0 < 0 ? src.length : e0));
+    let line = 1;
+    for (let i = 0; i < s0; i++) if (src[i] === 10) line++;
+    const col = dec.decode(src.subarray(s0, a.at)).length;
+    const b = p?.range && p.range[1] > p.range[0] ? diffSource(d, p.range[1] - 1) : null;
+    const end = b && b.file === a.file && b.at >= a.at && b.at < s0 + lineText.length + 1 ? b.at + 1 : a.at + (p?.excerpt?.len ?? 0);
+    const len = Math.max(0, Math.min(dec.decode(src.subarray(a.at, Math.min(end, src.length))).length, lineText.length - col));
+    return {
+      ...x,
+      file: a.file,
+      line,
+      problem: p && { ...p, file: a.file, line, col: col + 1, range: [a.at, a.at + enc.encode(lineText.slice(col, col + len)).length], excerpt: { text: lineText, start: col, len } },
+    };
   });
 }
 
@@ -176,8 +232,14 @@ export class Compare<V> {
     // selection, is at the marked-up text: taken to the user's file
     // through the diff's map, before the host's gate drops it)
     const sink = this.h.sink(() => this.showing === "diff");
+    // (its problems, at the user's own lines through the same map)
     const mapped = new Proxy(sink, {
-      get: (o, k, r) => (k === "goto" ? (_f: string, from: number, to: number) => this.toSource(from, to) : Reflect.get(o, k, r)),
+      get: (o, k, r) =>
+        k === "goto"
+          ? (_f: string, from: number, to: number) => this.toSource(from, to)
+          : k === "status"
+            ? (st: Status) => o.status(this.c ? { ...st, diagnostics: st.diagnostics && diffDiagnostics(st.diagnostics, this.c.d, this.c.file, (f) => (this.c?.neu ?? this.h.session().texts())[f]) } : st)
+            : Reflect.get(o, k, r),
     });
     // (the marked-up text as the editor's main file, the project's other files beside it: the
     // editor's job, so its persisted graph holds for it; a double-click on its pages, in the

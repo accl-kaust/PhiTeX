@@ -707,6 +707,7 @@ fn is_read(a: &Ask) -> bool {
         Ask::Origins(_)
             | Ask::PageOf { .. }
             | Ask::Cites { .. }
+            | Ask::Outline
             | Ask::Transcript
             | Ask::WritePdf { .. }
             | Ask::Shot { .. }
@@ -791,6 +792,11 @@ impl ReadsWorker {
                             let v = v.clone();
                             Box::new(move || v.put_page_of(file, at, pages))
                         }
+                        Ask::Outline => {
+                            let items = reads.outline(v.page_count());
+                            let v = v.clone();
+                            Box::new(move || v.put_outline(items))
+                        }
                         Ask::Cites { page, x, y } => {
                             let links = v.cite_links(
                                 page,
@@ -836,7 +842,10 @@ impl ReadsWorker {
 
     /// A read the thread answers (one it does not: false).
     fn ask(&self, a: &Ask) -> bool {
-        if !matches!(a, Ask::Origins(_) | Ask::PageOf { .. } | Ask::Cites { .. }) {
+        if !matches!(
+            a,
+            Ask::Origins(_) | Ask::PageOf { .. } | Ask::Cites { .. } | Ask::Outline
+        ) {
             return false;
         }
         let _ = self.tx.send(a.clone());

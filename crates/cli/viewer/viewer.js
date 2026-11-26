@@ -153,6 +153,95 @@ function diagnose(files, main, build2) {
   const rank2 = { error: 0, warning: 1, info: 2 };
   return out.sort((a, b) => rank2[a.severity] - rank2[b.severity]);
 }
+function plainDiagnostics(ds) {
+  const out = [];
+  const stops = [];
+  for (const d0 of ds) {
+    if (d0.severity === "error" && STOP.test(d0.message)) {
+      stops.push(stopWords(d0.message));
+      continue;
+    }
+    out.push(d0.severity === "error" ? plainError(d0) : d0);
+  }
+  const cause = out.find((d) => d.severity === "error");
+  if (stops.length && cause) {
+    const note = `Then TeX stopped: ${stops[0]}.`;
+    if (cause.problem) cause.problem = { ...cause.problem, notes: [...cause.problem.notes, note] };
+    else cause.detail = cause.detail ? `${cause.detail}
+${note}` : note;
+  } else if (stops.length) {
+    const first = ds.find((d) => d.severity === "error" && STOP.test(d.message));
+    out.unshift(plainError({ ...first, message: `TeX stopped: ${stops[0]}` }));
+  }
+  return out;
+}
+var STOP = /^\*\*\* \(job aborted|^Emergency stop|^==> Fatal error|Fatal error occurred|^\*\*\* \(cannot \\read/;
+function stopWords(m) {
+  if (/no legal \\end found/.test(m)) return "the file ended with no \\end{document}";
+  if (/^Emergency stop/.test(m)) return "it could not go on";
+  return "it could not go on";
+}
+var internal = (s) => s.replace(/\\@[A-Za-z@]*/g, "a LaTeX internal command");
+var TEX_HELP = /type [`'‘]?I[`'’]?|I'll |I'm |I've |Otherwise just continue|Try typing|Type\s+<return>|\\def'ed|misspelled/i;
+function plainError(d) {
+  const p = d.problem;
+  const ex = p?.excerpt ?? null;
+  let message = d.message, hint = null, mark = null;
+  if (/^Undefined control sequence/.test(message)) {
+    const cmd = ex ? commandAt(ex.text, ex.start, ex.len) : null;
+    if (cmd) message = `Undefined command ${cmd.name}`, mark = [cmd.at, cmd.name.length];
+    else message = "Undefined command";
+    hint = "Check its spelling, or load the package that defines it.";
+  } else if (/^File ended while scanning use of|^Runaway argument|^Paragraph ended before .* was complete/.test(message)) {
+    const open2 = ex ? openBrace(ex.text) : null;
+    message = open2 ? `Missing } after ${open2.text}` : "Missing }: a brace opened and never closed";
+    if (open2) mark = [open2.at, [...open2.text].length];
+    hint = "Close the brace where the argument ends.";
+  } else message = internal(message);
+  const r = { ...d, message };
+  if (d.detail && TEX_HELP.test(d.detail)) r.detail = hint ?? void 0;
+  else if (hint && !d.detail) r.detail = void 0;
+  if (p) {
+    r.problem = {
+      ...p,
+      message,
+      help: hint ? [hint] : p.help.filter((h) => !TEX_HELP.test(h)),
+      // (TeX's "not defined" and the like: said by the message now)
+      notes: hint ? [] : p.notes.map(internal),
+      excerpt: ex && mark ? { text: ex.text, start: mark[0], len: mark[1] } : ex
+    };
+  }
+  return r;
+}
+function commandAt(text, start, len) {
+  const chars = [...text];
+  const mark = chars.slice(start, start + len).join("");
+  const own = /^\\(?:[A-Za-z@]+|.)/.exec(mark);
+  if (own) return { name: own[0], at: start };
+  const upto = chars.slice(0, Math.min(chars.length, Math.max(0, start + len))).join("");
+  const all = [...upto.matchAll(/\\(?:[A-Za-z@]+|[^A-Za-z@\s])/g)];
+  const last = all[all.length - 1];
+  if (last && last.index + last[0].length >= upto.trimEnd().length - 1) return { name: last[0], at: [...upto.slice(0, last.index)].length };
+  const after = /\\[A-Za-z@]+/.exec(chars.slice(start + len).join(""));
+  if (after) return { name: after[0], at: start + len + [...chars.slice(start + len).join("").slice(0, after.index)].length };
+  return last ? { name: last[0], at: [...upto.slice(0, last.index)].length } : null;
+}
+function openBrace(text) {
+  const chars = [...text];
+  const stack = [];
+  for (let i = 0; i < chars.length; i++) {
+    if (chars[i] === "\\") i++;
+    else if (chars[i] === "{") stack.push(i);
+    else if (chars[i] === "}") stack.pop();
+  }
+  const b = stack.length ? stack[stack.length - 1] : -1;
+  if (b < 0) return null;
+  const before = chars.slice(0, b).join("");
+  const m = /\\[A-Za-z@]+\*?(?:\[[^\]]*\])?\s*$/.exec(before);
+  const at = m ? [...before.slice(0, m.index)].length : b;
+  const tail = chars.slice(at).join("").trimEnd();
+  return { text: tail.length > 48 ? `${[...tail].slice(0, 47).join("")}\u2026` : tail, at };
+}
 
 // viewer/src/engines.ts
 var ENGINES = {
@@ -1010,9 +1099,31 @@ var Viewer = class _Viewer {
     const pad = 10 / img.w;
     this.peekGeo.set(el, { k, hash: s.hash ?? null, img, l: Math.max(0, il - pad), r: Math.min(1, ir + pad), top });
     this.peekLay(el);
+    const cap = was ? null : this.captionNear(k, top, this.linkText(this.peekFrom, link));
     if (was) [pv.scrollLeft, pv.scrollTop] = [was[0] * pv.scrollWidth, was[1] * pv.scrollHeight];
+    else if (cap !== null) pv.scrollTop = Math.max(0, cap / img.h * pv.scrollHeight - pv.clientHeight * 0.45);
     else pv.scrollTop = Math.max(0, top / img.h * pv.scrollHeight - 28);
     this.peekPaint(el);
+  }
+  /**
+   * The caption of the float a link's place opens (its top `top`, points, on page `k`): the line
+   * "Table 1: …" or "Figure 1." whose number is the link's text, within half a page below; its
+   * place (points), else null (not a float's number).
+   */
+  captionNear(k, top, text) {
+    const n = text.trim();
+    const s = this.slots[k];
+    if (!/^[A-Z]?[\d.]+[a-z]?$/.test(n) || !s) return null;
+    ensureText(s.el);
+    const b = s.el.getBoundingClientRect();
+    if (!b.height) return null;
+    const re = new RegExp(`^\\s*(Table|Figure|Fig\\.|Algorithm|Listing|Tab\\.)\\s*${n.replace(/\./g, "\\.")}\\s*[:.]`);
+    for (const el of s.el.querySelectorAll("text")) {
+      const r = el.getBoundingClientRect(), y = (r.top - b.top) / b.height * this.size.h;
+      if (y < top - 4 || y > top + this.size.h * 0.6) continue;
+      if (re.test(el.textContent ?? "")) return y;
+    }
+    return null;
   }
   /** What a link's window shows of its page: the page, the part across (`l` to `r`, fractions of its width) the window's width shows at zoom 1, the place's height. */
   peekGeo = /* @__PURE__ */ new WeakMap();
@@ -2568,12 +2679,18 @@ header:active { cursor: grabbing; }
 .status { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px; min-width: 0;
   border-radius: var(--ph-radius); color: var(--ph-fg2); cursor: pointer; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }
 .status:hover, .status[aria-expanded="true"] { background: var(--ph-hover); color: var(--ph-fg); }
-/* (squeezed: its detail goes first, then its words end in an ellipsis; the leading word kept) */
+/* (squeezed: its time goes first, whole (it wraps onto a hidden second line: never cut to "\xB7 0.'"), then
+   its words end in an ellipsis; the words are always there, never a bare time) */
+.status { flex-wrap: wrap; align-content: flex-start; }
+.status > * { line-height: 26px; }
 .status b { flex: 0 1 auto; min-width: 4.5ch; font-weight: 400; color: var(--ph-fg); overflow: hidden; text-overflow: ellipsis; }
-#stmore { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
+#stmore { flex: none; }
 /* (a fixed slot: its words change as builds come, the buttons after it never move; a narrow bar squeezes it, as wide as the bar, not its words) */
 .bar > .status { flex: 0 1 auto; width: calc(26ch + 12px); min-width: calc(4.5ch + 12px); }
 .status.err b { color: var(--ph-danger); }
+.status.err:hover b { text-decoration: underline; }
+/* (the problem e / F8 is at) */
+.diags .phx-card.at { outline: 2px solid var(--ph-accent); outline-offset: -2px; }
 .pageno { display: inline-flex; align-items: center; gap: 4px; color: var(--ph-fg2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* (the count three digits wide at least, as the page box: panel.ts's nav) */
 .pageno #pgn { display: inline-block; min-width: 3ch; }
@@ -2745,6 +2862,7 @@ header:active { cursor: grabbing; }
 .grip:hover::after, .grip.drag::after, .grip:focus-visible::after { opacity: .8; }
 .win.resizing, .win.resizing * { cursor: col-resize !important; user-select: none; }
 @container (max-width: 560px) { .win.side-on .side { position: absolute; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgb(0 0 0 / 20%); } }
+.stage:focus { outline: none; }
 .stage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--ph-stage); text-align: center; overscroll-behavior: contain; will-change: scroll-position; }
 .win.docked .stage { overflow-y: scroll; }
 .win.docked .viewer { min-height: 100%; }
@@ -2897,7 +3015,7 @@ header:active { cursor: grabbing; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
-.smarks { position: absolute; right: 0; top: var(--tipgap, 0px); bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
 .smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
 /* (a target larger than the tick: it is 3 px tall) */
@@ -2938,11 +3056,12 @@ header:active { cursor: grabbing; }
 
 /* strips over the pages: plain, in the host's colours */
 /* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
-.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; padding-top: var(--tipgap, 0px); }
-.strips { position: absolute; top: var(--tipgap, 0px); left: 0; right: 0; z-index: 2; pointer-events: none; }
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
 .strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
 .stage.stale ~ .strips .banner, .approx.on { display: block; }
+.strip.banner.err { --sev: var(--ph-danger); }
 /* the main file asked (a first build on a guess): over the opening's sheet too, until answered */
 .strips:has(.mainask.on) { z-index: 4; }
 .mainask { --sev: var(--ph-info); }
@@ -2966,6 +3085,7 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
 .win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
 .opening .phx-open { position: absolute; inset: 0; width: 100%; height: 100%; }
+.opening .sheet > .art { position: absolute; left: 0; top: 0; width: 100%; height: 100%; container-type: inline-size; }
 .steps { position: absolute; left: 10%; right: 10%; bottom: 13%; text-align: center; color: #5d6778; font: 400 13px/1.4 var(--ph-font);
   font-variant-numeric: tabular-nums; transition: opacity .3s; }
 .steps .what { color: #1b222c; }
@@ -3013,6 +3133,11 @@ header:active { cursor: grabbing; }
 .tip .new { display: inline-block; margin-right: 6px; padding: 0 7px; border-radius: var(--ph-pill); font-size: 11px; font-weight: 600; vertical-align: 1px;
   background: var(--ph-accent); color: var(--ph-accent-fg); }
 .tip h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+/* (no margin beside the pages for the card: one line, its title and its buttons; the whole card on a click on its title,
+   never on a hover, which moved its buttons from under the pointer) */
+.tip.compact:not(.open) { width: auto; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 12px; }
+.tip.compact:not(.open) h4 { margin: 0; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.tip.compact:not(.open) :is(.demo, p, .acts .n) { display: none; }
 .tip p { margin: 0 0 10px; color: var(--ph-fg2); }
 .tip .acts { display: flex; align-items: center; gap: 8px; }
 .tip .acts .n { flex: 1; color: var(--ph-fg2); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -3144,6 +3269,10 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
+/* (no margin beside the pages for it: under the opening's sheet while it plays (a strip kept for it), then faded once the
+   pages are in, back on a hover over its corner; never over a page) */
+.win.byline-tight:not(.sheet-up) .byline { opacity: 0; transition: opacity .5s ease 1.5s; }
+.win.byline-tight:not(.sheet-up) .byline:hover, .win.byline-tight:not(.sheet-up) .byline:focus-visible { opacity: 1; transition-delay: 0s; }
 /* Settings: the panel's own rows and the host's, one dialog in every host: a tab per section (one line at any width), sub-headings inside, a search over them all */
 .settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; container-type: inline-size; }
 .settings > header { padding: 10px 10px 0 16px; gap: 10px; }
@@ -3413,11 +3542,11 @@ var PROBLEMS_CSS = `
 .phx-where { margin-top: 2px; font-size: 12px; }
 .phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
 .phx-place:hover { text-decoration: underline; }
-.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; scrollbar-width: thin; scrollbar-color: var(--ph-border, #c9ced8) transparent; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
   color: var(--ph-fg2, #495365); background: none; }
 .phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
 .phx-ln { opacity: .6; }
-.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
+.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); white-space: pre-line; }
 .phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
 .phx-ctx summary { cursor: pointer; }
 .phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
@@ -3575,7 +3704,7 @@ var Outline = class {
     this.flat = [];
     this.marked = null;
     if (!items.length) {
-      this.el.innerHTML = `<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>`;
+      this.el.innerHTML = `<p class="phx-none">No contents: the document has no sections.</p>`;
       return;
     }
     const list = (es, path, depth) => html`<ul>${es.map((e) => {
@@ -3593,13 +3722,19 @@ var Outline = class {
     }
   }
   /** The page in view: the last item that starts on it or before is the one being read. */
-  at(page) {
+  /**
+   * The heading the reader is in: the last one at or above the view's top (page `page`, `top`
+   * points down it; absent: the page's top). By the page alone, every heading on page 1 was
+   * passed at once, and the last of them ("Results") marked while the Introduction was in view.
+   */
+  at(page, top = 0) {
     let best = null;
     for (const { e, row } of this.flat) {
       if (e.p == null) continue;
-      if (e.p > page) break;
+      if (e.p > page || e.p === page && (e.y ?? 0) > top) break;
       best = row;
     }
+    best ??= this.flat.find((f) => f.e.p != null)?.row ?? null;
     if (best === this.marked) return;
     this.marked?.classList.remove("here");
     best?.classList.add("here");
@@ -4244,6 +4379,7 @@ function still() {
 var INK = { light: "#1d3e72", dark: "#e4e6ea" };
 var PAPER = { light: "#ffffff", dark: "#2c2e33" };
 var RIBBON = ["#00a8a4", "#d3c72a", "#f0b225", "#f58f2d"];
+var ellipsis = (s) => /(…|\.\.\.)\s*$/.test(s) ? s : `${s}\u2026`;
 var reduced2 = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 var registered = false;
 function register() {
@@ -4361,7 +4497,7 @@ var HINTS = [
   { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
   { text: "Press {`} to see everything phitex watch printed in the terminal.", hosts: ["watch"] },
   { text: "Press {?} over the pages for the keyboard shortcuts.", hosts: ["watch"] },
-  { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
+  { text: "\xB1 Changes shows what changed since an earlier version, marked on the pages as latexdiff marks it.", hosts: ["watch", "vscode"] },
   { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
   { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
   { text: "You can pick your favourite loading animation, or turn them off, in Settings \u203A View." },
@@ -4448,7 +4584,7 @@ function win98(box, doc = "document.tex") {
   const w = $(".w"), fly = $(".fly"), bar2 = $(".bar"), fill = $(".bar span"), btn = $(".btn"), tip = $(".tip");
   $(".clock").textContent = (/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const step = (what, pct, detail) => {
-    $(".msg").textContent = `${what}\u2026`;
+    $(".msg").textContent = ellipsis(what);
     $(".det").textContent = detail;
     bar2.classList.toggle("march", pct === void 0);
     fill.style.width = pct === void 0 ? "" : `calc(${Math.round(pct / 5) * 5}% - 4px)`;
@@ -4543,7 +4679,7 @@ function mac9(box, doc = "document.tex") {
   $(".ck").textContent = (/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   const bar2 = $(".bar"), fill = $(".bar span"), bal = $(".bal");
   const step = (what, pct, detail) => {
-    $(".msg").textContent = `${what}\u2026`;
+    $(".msg").textContent = ellipsis(what);
     $(".det").textContent = detail;
     bar2.classList.toggle("pole", pct === void 0);
     fill.style.width = pct === void 0 ? "" : `${pct}%`;
@@ -4611,7 +4747,19 @@ function terminal(box, doc = "document.tex") {
     while (txt.scrollHeight > txt.clientHeight + 2 && txt.children.length > 1) txt.firstElementChild.remove();
     return l;
   };
-  const cmd = `phitex watch ${doc}`, prompt = line(html`<span class="p">$ </span>`);
+  let cmd = `phitex watch ${doc}`;
+  const prompt = line(html`<span class="p">$ </span>`);
+  const rename = (n) => {
+    const to = `phitex watch ${n}`;
+    if (to === cmd) return;
+    const done = typed >= cmd.length;
+    cmd = to;
+    [...prompt.childNodes].filter((c) => c.nodeType === Node.TEXT_NODE).forEach((c) => c.remove());
+    typed = done ? cmd.length : Math.min(typed, cmd.length);
+    const t = document.createTextNode(cmd.slice(0, typed));
+    if (cursor.parentNode === prompt) prompt.insertBefore(t, cursor);
+    else prompt.append(t);
+  };
   let typed = 0, timer = 0;
   const key = () => {
     prompt.insertBefore(document.createTextNode(cmd[typed++]), cursor);
@@ -4662,7 +4810,7 @@ function terminal(box, doc = "document.tex") {
       return 700;
     },
     cleanup,
-    { step, hint }
+    { step, hint, rename }
   );
 }
 
@@ -4805,13 +4953,28 @@ function typewriter(box, dark, doc = "document.tex") {
     timer = window.setTimeout(key, next === "\n" ? 200 : next === " " ? pace + 20 : pace);
   };
   const chars = (s) => [...s];
-  type(...chars(doc), "\n", ...chars("\u2500".repeat(24)), "\n");
+  const nameRun = roll.firstElementChild.firstElementChild;
+  let name = [...doc];
+  type(...name, "\n", ...chars("\u2500".repeat(24)), "\n");
+  const rename = (n) => {
+    const to = [...n];
+    if (to.join("") === name.join("")) return;
+    const typed = nameRun.querySelectorAll(".k").length;
+    const left = Math.max(0, name.length - typed);
+    queue.splice(0, left);
+    const keep = Math.min(typed, to.length);
+    nameRun.querySelectorAll(".k").forEach((k) => k.remove());
+    for (const c of to.slice(0, keep)) nameRun.append(Object.assign(document.createElement("span"), { className: "k", textContent: c }));
+    queue.unshift(...to.slice(keep));
+    name = to;
+    if (!timer) timer = window.setTimeout(key, 60);
+  };
   let what = "", pkgs = /* @__PURE__ */ new Set(), page = "";
   const step = (w, pct, detail) => {
     if (w !== what) {
       if (what) type("\n");
       what = w;
-      type(...chars(`${w}\u2026`));
+      type(...chars(ellipsis(w)));
       if (pct === void 0 && detail && !/^Page /.test(detail)) type(...chars(` ${detail}`));
     }
     const pkg = pct !== void 0 ? detail.split(" \xB7 ")[0] : "";
@@ -4819,7 +4982,7 @@ function typewriter(box, dark, doc = "document.tex") {
     if (/^Page \d+/.test(detail) && detail !== page) page = detail, type(...chars(` p.${detail.slice(5)}`));
   };
   const hint = (text) => type("\n", "\n", { red: true }, ...chars(`Did you know? ${plain(text)}`), { red: false }, "\n");
-  return ending(el, () => (clearTimeout(timer), el.classList.add("out"), 520), () => clearTimeout(timer), { step, hint });
+  return ending(el, () => (clearTimeout(timer), el.classList.add("out"), 520), () => clearTimeout(timer), { step, hint, rename });
 }
 
 // viewer/src/openings/ink.ts
@@ -5661,7 +5824,8 @@ function play(look2, first, last, sheet, dark, doc) {
   const others = ids.filter((id2) => id2 !== last);
   const pool = others.length ? others : ids;
   const id = first && ids.includes("phitex") ? "phitex" : pool[Math.floor(Math.random() * pool.length)];
-  return { id, anim: LOOKS.find((l) => l.id === id).make(sheet, dark, doc) };
+  const box = id === "phitex" ? sheet : sheet.querySelector(":scope > .art") ?? sheet;
+  return { id, anim: LOOKS.find((l) => l.id === id).make(box, dark, doc) };
 }
 function preview(id, tile, dark, doc, steps, hint) {
   const look2 = LOOKS.find((l) => l.id === id);
@@ -8678,6 +8842,10 @@ var Commits = class _Commits {
     this.paintDrag(null, "aim");
     this.render();
   }
+  /** The pair the list shows now (From, and To: null the working tree), a first end clicked included. */
+  get shown() {
+    return { from: this.from, to: this.to };
+  }
   /** Whether a first end is clicked, the second not yet. */
   get aiming() {
     return this.anchor !== null;
@@ -8716,6 +8884,10 @@ var Commits = class _Commits {
   /** Whether more commits can be read. */
   get hasMore() {
     return this.more;
+  }
+  /** Why the history could not be read (no repository here), else "". */
+  get failed() {
+    return this.error;
   }
   /** Whether a page is being read. */
   get busy() {
@@ -8817,6 +8989,7 @@ var Commits = class _Commits {
         this.from = c.id;
         this.to = null;
         this.host.marked?.(this.from, null);
+        this.host.pick(c.id, null, false);
       }
       this.render();
       this.paintDrag(null, "aim");
@@ -8887,14 +9060,14 @@ var DIFF_COLORS = {
 };
 var DIFF_LOOK = { colors: "blue", ins: "wavy", del: "strike", fig: "side", bars: false };
 var CHANGES_TITLE = "Changes: what changed between two versions, and who wrote what";
-var KINDS3 = ["Text", "Section", "Citation", "Table", "Figure", "Equation"];
+var KINDS3 = ["Text", "Section", "Citation", "Table", "Figure", "Equation", "Bibliography"];
 function words(src, n = 12) {
   return src.replace(/%.*$/gm, " ").replace(/\\(?:cite[tp]?|ref|label|eqref|includegraphics)\*?(\[[^\]]*\])?\{[^}]*\}/g, (m) => /\\cite/.test(m) ? `[${m.replace(/.*\{|\}/g, "")}]` : " ").replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, n).join(" ");
 }
 function itemOf(c, k) {
   const both = `${c.old_text}
 ${c.new_text}`;
-  const kind = /\\(sub)*section\*?\{|\\chapter\*?\{|\\paragraph\{/.test(both) ? "Section" : /\\includegraphics|\\begin\{figure|\\begin\{tikzpicture/.test(both) ? "Figure" : /\\begin\{(tabular|table)|&.*\\\\/.test(both) ? "Table" : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) ? "Citation" : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both) ? "Equation" : "Text";
+  const kind = /\\(sub)*section\*?\{|\\chapter\*?\{|\\paragraph\{/.test(both) ? "Section" : /\\includegraphics|\\begin\{figure|\\begin\{tikzpicture/.test(both) ? "Figure" : /\\begin\{(tabular|table)|&.*\\\\/.test(both) ? "Table" : /\\(bibliography|printbibliography)\b|\\begin\{thebibliography\}/.test(both) ? "Bibliography" : /\\(cite[a-z]*|bibitem)\b/.test(both) && words(c.new_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) === words(c.old_text.replace(/\\cite[a-z]*\{[^}]*\}/g, "")) ? "Citation" : /\\begin\{(equation|align|gather|multline)|\$\$|\\\[/.test(both) ? "Equation" : "Text";
   const img = (t) => /\\includegraphics\*?(?:\[[^\]]*\])?\{([^}]*)\}/.exec(t)?.[1];
   let old = words(c.old_text), neu = words(c.new_text);
   if (kind === "Figure" && (img(c.old_text) || img(c.new_text))) old = img(c.old_text) ?? old, neu = img(c.new_text) ? `${img(c.new_text)}${img(c.old_text) ? " replaced" : ""}` : neu;
@@ -8908,7 +9081,8 @@ ${COMMITS_CSS}
   --phc-sel: color-mix(in srgb, var(--phc-focus) 13%, transparent); --phc-aim: color-mix(in srgb, var(--phc-focus) 60%, transparent);
   --phc-danger: var(--ph-danger, #c23a2f);
   position: fixed; z-index: 24; /* (under the panel's dialogs (25) and menus (31), over its pages) */ width: min(var(--chg-w, 380px), calc(100vw - 16px)); max-height: min(680px, var(--chg-h, calc(100vh - 70px))); display: flex; flex-direction: column;
-  background: var(--phc-bg); color: var(--phc-fg); border: 1px solid var(--phc-line); border-radius: 12px; box-shadow: 0 10px 30px rgb(15 25 40 / 22%);
+  /* (opaque whatever the host's menu colour is: one with alpha let the page show through it) */
+  background: linear-gradient(var(--phc-bg), var(--phc-bg)), var(--ph-stage-solid, Canvas); color: var(--phc-fg); border: 1px solid var(--phc-line); border-radius: 12px; box-shadow: 0 10px 30px rgb(15 25 40 / 22%);
   font: 13px/1.4 var(--ph-font, "Noto Sans", system-ui, sans-serif); transform-origin: top right; transition: opacity .15s, transform .15s; }
 .chg-pop[hidden] { display: flex; opacity: 0; transform: scale(.97); pointer-events: none; visibility: hidden; }
 .chg-pop::before { content: ""; position: absolute; top: -6px; right: var(--chg-arrow, 40px); width: 10px; height: 10px; background: var(--phc-bg); border-left: 1px solid var(--phc-line); border-top: 1px solid var(--phc-line); transform: rotate(45deg); }
@@ -9004,6 +9178,9 @@ ${COMMITS_CSS}
 .chg-pop .toggle { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
 .chg-pop .pickhead { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 10px 12px 6px; }
 .chg-pop .pickhead b { font-size: 13px; }
+.chg-pop .look.folded { display: none; }
+.chg-pop .boff .qb { flex: none; white-space: nowrap; }
+.chg-pop .boff { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--phc-line); font-size: 12px; color: var(--phc-muted); }
 .chg-pop .done { border: 1px solid var(--phc-line); background: var(--phc-chip); border-radius: 7px; padding: 4px 12px; cursor: pointer; font-size: 12.5px; font-weight: 600; }
 .chg-pop .quick { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 12px 10px; border-bottom: 1px solid var(--phc-line); }
 .chg-pop .qb { font-size: 12px; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
@@ -9134,6 +9311,8 @@ var Changes = class {
   seenItems = /* @__PURE__ */ new Set();
   lastCount = -1;
   width = null;
+  /** The look's options shown (⚙), else folded away. */
+  lookOpen = false;
   blameSig = "";
   constructor(p, host2, blame2) {
     this.p = p;
@@ -9251,7 +9430,7 @@ var Changes = class {
       if (at && document.activeElement === at) this.el.querySelector("[data-m][aria-pressed=true], button")?.focus({ preventScroll: true });
     } else {
       this.pick = null;
-      this.graph?.cancel();
+      this.letGo();
       this.marks();
       if (refocus && this.el.contains(this.el.getRootNode() instanceof ShadowRoot ? this.el.getRootNode().activeElement : null)) (this.anchor ?? this.anchors[0])?.focus({ preventScroll: true });
     }
@@ -9273,7 +9452,7 @@ var Changes = class {
   /** The marks of the mode shown on the pages while open (only what was asked for: a diff run, Blame clicked), else none. */
   marks() {
     const diff2 = this.mode === "diff" && !!this.ran;
-    const blame2 = this.open && this.mode === "blame" && this.blameAsked;
+    const blame2 = this.mode === "blame" && this.blameAsked;
     const pages2 = diff2 && this.pages === "diff";
     if (pages2 !== this.diffShown) this.diffShown = pages2, this.host.diff?.show(pages2);
     this.blame?.toggle(blame2);
@@ -9285,9 +9464,9 @@ var Changes = class {
     const r = a.getBoundingClientRect();
     const pane2 = this.p.win.getBoundingClientRect();
     const lo = Math.max(0, pane2.left), hi = Math.min(innerWidth, pane2.right > lo ? pane2.right : innerWidth);
-    const w = Math.max(260, Math.min(this.width ?? 380, hi - lo - 16));
+    const w = Math.max(260, Math.min(this.width ?? Math.max(280, Math.min(340, (hi - lo) / 3)), hi - lo - 16));
     this.el.style.setProperty("--chg-w", `${w}px`);
-    const left = Math.max(lo + 8, Math.min(hi - w - 8, r.right - w + 10));
+    const left = Math.max(lo + 8, hi - w - 8);
     const top = r.bottom + 8;
     const bottom = Math.min(innerHeight, pane2.bottom > top ? pane2.bottom : innerHeight);
     this.el.style.setProperty("--chg-h", `${Math.max(220, bottom - top - 8)}px`);
@@ -9309,7 +9488,7 @@ var Changes = class {
     if (e.key === "Escape") {
       if (this.p.root.querySelector(".dialog:not([hidden])")) return;
       if (this.mode === "blame" && this.blame?.unfocus()) return done();
-      if (this.pick && this.graph?.aiming) this.graph.cancel(), this.refreshHint();
+      if (this.pick && this.graph?.aiming) this.letGo(), this.refreshHint();
       else if (this.pick) this.pick = null, this.render(), this.el.querySelector("#chg-from")?.focus();
       else this.off();
       done();
@@ -9353,6 +9532,7 @@ var Changes = class {
       if (this.pair) this.graph.mark(this.pair.from, this.pair.to);
       if (this.open) this.renderHead();
       if (this.open && this.pick) this.refreshQuick();
+      else if (this.open && !this.ran && this.mode === "diff" && (this.graph.failed || this.graph.commits.length < 2)) this.render();
     });
     return this.graph;
   }
@@ -9363,6 +9543,11 @@ var Changes = class {
     if (this.pick) g.open(which);
     this.render();
     this.el.querySelector(".phx-commits .row[data-i], .qb, #chg-done")?.focus({ preventScroll: true });
+  }
+  /** A first end clicked let go (Esc, the popover closed): the list marks the pair compared again, nothing changed. */
+  letGo() {
+    this.graph?.cancel();
+    this.graph?.mark(this.pair?.from ?? null, this.pair?.to ?? null);
   }
   /** A pair chosen: the diff run; `done` closes the picker. */
   choose(p, done) {
@@ -9610,7 +9795,7 @@ var Changes = class {
   }
   head() {
     const seg = html`<div class="seg" role="group" aria-label="Mode"><button type="button" data-m="diff" aria-pressed="${String(this.mode === "diff")}" disabled="${!this.host.diff}" title="Diff: what changed between two versions, marked on the pages">Diff</button><button type="button" data-m="blame" aria-pressed="${String(this.mode === "blame")}" disabled="${!this.blame}" title="Blame: who wrote each line of the paper as it is now">Blame</button></div>`;
-    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-controls="chg-look" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.mode === "blame" ? "Blame's look: colour by, style, not committed (at the top of the list)" : "Diff's look: colours and marks (at the top of the list)"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
+    const ttl = html`<div class="ttl"><h2>Changes</h2><span class="acts"><button type="button" class="ib2" id="chg-gear" aria-controls="chg-look" aria-expanded="${String(this.lookOpen)}" aria-label="${this.mode === "blame" ? "Blame's look" : "Diff's look"}" title="${this.mode === "blame" ? "Blame's look: colour by, style, not committed (at the top of the list)" : "Diff's look: colours and marks (at the top of the list)"}">⚙</button><button type="button" class="ib2" id="chg-x" aria-label="Close Changes" title="Close (Esc)">✕</button></span></div>`;
     let below;
     if (this.mode === "blame") below = html`<p class="sub">Who last changed each line of the paper as it is now</p>`;
     else {
@@ -9700,8 +9885,9 @@ var Changes = class {
       q.push([null, this.host.tree?.title ?? "Working tree", "Up to the text as it is now"]);
       if (cs[0]) q.push([cs[0].id, word === "version" ? "The last version" : "Last commit \xB7 HEAD", `Up to the newest ${word}`]);
     }
-    const hint = g.aiming ? html`<b>Now click the other end</b> (the ${this.host.tree === null ? "editor's text" : "working tree"} for now). The same ${word} again cancels.` : html`Click one end, then the other. Drag for a range. <b>Shift</b>-click: To. Double-click: one ${word}'s changes.`;
-    return html`<div class="pickhead"><b>${w === "from" ? "Compare from\u2026" : "\u2026up to"}</b><button type="button" class="done" id="chg-done" title="Back to the list, nothing changed (Esc)">Done</button></div><div class="quick">${q.map(([h, l, t]) => html`<button type="button" class="qb" data-q="${h ?? ""}" title="${t}">${l}</button>`)}</div><div class="hint" id="chg-hint">${hint}</div>`;
+    const hint = g.aiming ? html`Compared with now. <b>Click another</b> for a range; Done when it's right.` : html`Click a ${word} to compare it with now.`;
+    const more = `A second click: a range between the two. Drag for a range. Shift-click: To. Double-click: one ${word}'s own changes.`;
+    return html`<div class="pickhead"><b>${w === "from" ? "Compare from\u2026" : "\u2026up to"}</b><button type="button" class="done" id="chg-done" title="Compare what the list shows (Esc: nothing changed)">Done</button></div><div class="quick">${q.map(([h, l, t]) => html`<button type="button" class="qb" data-q="${h ?? ""}" title="${t}">${l}</button>`)}</div><div class="hint" id="chg-hint" title="${more}">${hint}</div>`;
   }
   /** A list's skeleton: rows shaped like the changes'. */
   skeleton(n = 5) {
@@ -9717,8 +9903,10 @@ var Changes = class {
     });
     const filters = all.length ? html`<div class="filters" role="group" aria-label="Kinds of change">${chips}<label class="toggle hd" title="Leave deleted text out of the list and the pages"><input type="checkbox" id="chg-hide" checked="${this.hide}"> Hide deletions</label></div>` : html``;
     if (!this.ran) {
-      const g = this.graph;
-      if (g && !g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${word === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
+      const g = this.ensureGraph();
+      if (!g.commits.length && g.hasMore && !g.busy) void g.load();
+      if (g.failed && !g.commits.length) return html`<div class="empty"><b>${word === "version" ? "No history here" : "No git repository here"}</b>${word === "version" ? g.failed : "Changes compares versions from git's history: run git init and commit once, and what changes after shows here."}</div>`;
+      if (!g.commits.length && !g.hasMore) return html`<div class="empty"><b>No history yet</b>${word === "version" ? "The project's versions show here once Overleaf has saved them." : "Commit once, and what changes after shows here."}</div>`;
       return html`<div class="empty"><b>Pick a version to compare with</b>Choose From: a ${word}, a ${word === "version" ? "label" : "tag"} or your last visit. What changed since then is listed here and marked on the pages.<button type="button" class="primary" id="chg-start" title="Open the history to choose From">Choose a version…</button></div>`;
     }
     if (!all.length && this.busy) return this.skeleton();
@@ -9775,7 +9963,7 @@ var Changes = class {
     }
     rows.sort((a, b2) => b2.time - a.time);
     const count = s.waiting ? `so far \xB7 ${(s.files - s.waiting).toLocaleString()} of ${s.files.toLocaleString()} files` : `${s.lines.toLocaleString()} ${s.unit}`;
-    return html`${look2}<div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
+    return html`${look2}<div class="boff"><span>Blame stays on the pages until you turn it off.</span><button type="button" class="qb boffb" id="chg-blame-off" title="The pages without Blame's colours">Turn off Blame</button></div><div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
   }
   /** A commit by its id, from the history read (a skipped one, kept from before, named). */
   commitOf(id) {
@@ -9790,7 +9978,7 @@ var Changes = class {
     const L = this.blame.look;
     const word = this.blame.words.commit;
     const ramp = AGE_RAMPS[L.ages] ?? AGE_RAMPS.violet;
-    return html`<div class="look" id="chg-look" role="group" aria-label="Blame's look">
+    return html`<div class="${`look${this.lookOpen ? "" : " folded"}`}" id="chg-look" role="group" aria-label="Blame's look">
       <div class="opt2"><span class="lab2">Colour by</span>${this.segOf("color", L.color, [["author", "Author", "A colour per person"], ["age", "Age", "Newer lines stronger"]])}</div>
       ${L.color === "age" ? html`<div class="ramp">newer ${ramp.light.map((c) => html`<i style="${`background:${c}`}"></i>`)} older</div>` : ""}
       <div class="opt2"><span class="lab2">Style</span>${this.segOf("style", L.style ?? "highlight", [["highlight", "Highlight", "A soft highlight behind each line's words"], ["text", "Text", "The words themselves coloured"], ["bar", "Bar", "A bar in the margin of each line"]])}</div>
@@ -9800,7 +9988,7 @@ var Changes = class {
   /** Diff's look, at the top of its list: colours, added and deleted text; the rest in Settings. */
   diffLook() {
     const L = this.look;
-    return html`<div class="look" id="chg-look" role="group" aria-label="Diff's look">
+    return html`<div class="${`look${this.lookOpen ? "" : " folded"}`}" id="chg-look" role="group" aria-label="Diff's look">
       <div class="opt2"><span class="lab2">Colours</span><div class="swatches">${Object.entries(DIFF_COLORS).map(([k, v]) => html`<button type="button" class="swb" data-look="colors" data-v="${k}" aria-pressed="${String(L.colors === k)}" title="${v[2]}" aria-label="${v[2]}"><i style="${`background:${v[0]}`}"></i><i style="${`background:${v[1]}`}"></i></button>`)}</div></div>
       <div class="opt2"><span class="lab2">Added</span>${this.segOf("ins", L.ins, [["wavy", "Wavy", "A wavy underline"], ["line", "Underline", "A straight underline"], ["mark", "Marker", "A highlight behind it"], ["colour", "Colour", "Its colour only"]])}</div>
       <div class="opt2"><span class="lab2">Deleted</span>${this.segOf("del", L.del, [["strike", "Struck", "Struck through"], ["mark", "Marker", "Struck, a highlight behind it"], ["caret", "Caret", "A caret where it was, the text left out"]])}</div>
@@ -9871,7 +10059,10 @@ var Changes = class {
     const $ = (s) => this.el.querySelector(s);
     $("#chg-x").onclick = () => this.off();
     $("#chg-gear").onclick = () => {
-      if (this.pick) this.pick = null, this.graph?.cancel(), this.render();
+      if (this.pick) this.pick = null, this.letGo();
+      this.lookOpen = !this.lookOpen;
+      this.render();
+      if (!this.lookOpen) return;
       const body = this.el.querySelector(".body"), look2 = this.el.querySelector("#chg-look");
       if (!body || !look2) return;
       body.scrollTo({ top: 0, behavior: reduced3() ? "auto" : "smooth" });
@@ -9977,13 +10168,22 @@ var Changes = class {
     const done = $("#chg-done");
     if (done)
       done.onclick = () => {
+        const g2 = this.graph, s = g2?.shown;
+        g2?.cancel();
         this.pick = null;
-        this.graph?.cancel();
+        if (s?.from && (s.from !== this.pair?.from || s.to !== (this.pair?.to ?? null))) return this.choose({ from: s.from, to: s.to }, true);
         this.render();
         this.el.querySelector("#chg-from")?.focus();
       };
     const start = $("#chg-start");
     if (start) start.onclick = () => this.openPicker("from");
+    const boff = $("#chg-blame-off");
+    if (boff)
+      boff.onclick = () => {
+        this.blameAsked = false;
+        this.marks();
+        this.render();
+      };
     const go = $("#chg-blame-go");
     if (go)
       go.onclick = () => {
@@ -9991,7 +10191,7 @@ var Changes = class {
         this.marks();
         this.render();
       };
-    for (const q of body.querySelectorAll(".qb"))
+    for (const q of body.querySelectorAll(".qb[data-q]"))
       q.onclick = () => {
         const h = q.dataset.q || null;
         const p = this.pair;
@@ -10336,6 +10536,8 @@ var PATHS2 = {
   history: "M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z",
   copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  timer: "M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61 1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.96 8.96 0 0 0 12 4a9 9 0 1 0 9 9c0-2.12-.74-4.07-1.97-5.61zM12 20a7 7 0 1 1 0-14 7 7 0 0 1 0 14z",
+  content_copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
   dark: "M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z",
@@ -10356,7 +10558,10 @@ function zoomOf(z) {
   const n = typeof z === "number" ? z : typeof z === "string" && z.trim() ? Number(z) : NaN;
   return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
 }
-var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
+function asProblem(d) {
+  return { severity: d.severity === "info" ? "note" : d.severity, code: "", message: d.message, notes: d.detail ? [d.detail] : [], help: [], suggestions: [], file: d.file ?? null, line: d.line ?? null, col: null, excerpt: null, context: [], included: [], box: null };
+}
+var ZOOMS = [["fit", "Page width"], ["page", "Fit page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
 var bars = (parts, cycle = Infinity) => html`<div class="tbar">${parts.map(([, ms], i) => html`<i class="c${i % cycle}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`)}</div><div class="legend">${parts.map(([n, ms], i) => html`<span><i class="c${i % cycle}"></i>${n} ${dur(ms)}</span>`)}</div>`;
 function framePart(json) {
@@ -10411,7 +10616,7 @@ var TIPS = [
     id: "live",
     at: "#st",
     title: "Typeset as you type",
-    text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
+    text: "No need to compile: pages update as you type. Only what you touched is typeset again, in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
     demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon2("bolt", 11)}12 ms</span></div>`
   },
@@ -10509,7 +10714,7 @@ var Panel = class {
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
     <button type="button" class="ib chg-btn" id="b-changes" title="Changes: what changed between two versions, and who wrote what" aria-label="Changes" aria-pressed="false" hidden><span class="chg-glyph" aria-hidden="true">±</span><span class="wide">Changes</span><span class="chg-badge" id="chg-n"></span></button>
-    <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
+    <button type="button" class="ib wide" id="pdf" title="Download PDF" aria-label="Download PDF"><span class="icon">download</span></button>
     <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
     <button type="button" class="ib rvb" id="b-review" title="Notes and changes (m)" aria-label="Notes and changes" aria-pressed="false" hidden><span class="icon">rate_review</span><span id="rvcount"></span></button>
@@ -10529,6 +10734,8 @@ var Panel = class {
     <div class="menu" id="m-more" role="menu" hidden style="right:6px;top:calc(100% + 4px);min-width:250px">
       ${item2("x-pdf", "download", "Download PDF")}
       ${item2("x-log", "log", "View log")}
+      ${item2("x-timings", "timer", "Build timings")}
+      ${item2("x-debug", "content_copy", "Copy debug info")}
       ${item2("x-contents", "toc", "Contents", "t")}
       ${item2("x-review", "rate_review", "Notes and changes", "m")}
       ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
@@ -10577,7 +10784,7 @@ var Panel = class {
     offer(".if-cache", !!ev.onClearCache);
     offer("#x-log", !!ev.onLog);
     offer("#x-contents, #b-side", !!opts.outline);
-    offer("#x-keys", !!opts.keys);
+    offer("#x-keys", true);
     offer("#x-review, #b-review", !!opts.review);
     offer("#b-find, #x-find", !!ev.onFind);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
@@ -10586,6 +10793,7 @@ var Panel = class {
       this.$(b).addEventListener("click", (e) => {
         e.stopPropagation();
         if (m === "#logs") return this.diagnostics();
+        if (m === "#m-time" && this.hasProblems() && this.$("#m-time").hidden) return this.diagnostics();
         this.menu(m);
       });
     this.root.addEventListener("click", (e) => {
@@ -10600,6 +10808,11 @@ var Panel = class {
     this.$("#r-cache").onclick = () => (this.menu(null), ev.onClearCache?.());
     this.$("#pdf").onclick = this.$("#x-pdf").onclick = () => (this.menu(null), ev.onPdf());
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
+    this.$("#x-timings").onclick = (e) => (e.stopPropagation(), this.menu(null), this.timingsOpen());
+    this.$("#x-debug").onclick = () => {
+      this.menu(null);
+      void this.debugInfo().then((t) => navigator.clipboard.writeText(t)).then(() => this.msg("Debug info copied", false, true), () => this.msg("Couldn't copy the debug info", true, true));
+    };
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
     this.$("#x-tips").onclick = () => (this.menu(null), ev.onNews ? ev.onNews() : this.tips("fresh"));
@@ -10642,12 +10855,18 @@ var Panel = class {
       const at = e.target.closest(".phx-place[data-file]");
       if (at) {
         e.preventDefault();
-        return ev.onGoto(at.dataset.file, Number(at.dataset.line) || 1);
+        return ev.onGoto(at.dataset.file, Number(at.dataset.line) || 1, Number(at.dataset.col) || void 0);
       }
       const d = e.target.closest(".diag[data-line]");
-      if (d) return ev.onGoto(d.dataset.file, Number(d.dataset.line));
-      const card = e.target.closest(".phx-card[data-key]");
-      if (card)
+      if (d) return ev.onGoto(d.dataset.file, Number(d.dataset.line), Number(d.dataset.col) || void 0);
+      if (e.target.closest(".timingsln")) return void this.timingsOpen();
+      const card = e.target.closest(".phx-card");
+      const i = card ? Number(card.dataset.i) : NaN;
+      if (card && this.listed[i]) {
+        const d2 = this.listed[i];
+        if (d2.file && d2.line) ev.onGoto(d2.file, d2.line, d2.problem?.col ?? void 0);
+      }
+      if (card?.dataset.key)
         void this.placeOf(card.dataset.key).then((place4) => {
           if (place4) this.viewer.mark(place4.k, [place4.box]);
           else this.msg("Not on the pages (no text of it was typeset)", false, true);
@@ -10709,11 +10928,13 @@ var Panel = class {
     });
     this.$("#stage").addEventListener("wheel", (e) => e.ctrlKey && !e.target.closest?.(".peek") && this.ownZoom(), { capture: true, passive: true });
     this.drag();
+    let atFrame = 0;
+    this.$("#stage").addEventListener("scroll", () => this.contents && !atFrame && (atFrame = requestAnimationFrame(() => (atFrame = 0, this.contentsAt()))), { passive: true });
     this.viewer = new Viewer(this.$("#viewer"), this.$("#stage"), {
       need: (k) => ev.onNeed?.(k),
       inView: (k) => {
         this.at = k;
-        this.contents?.at(k);
+        this.contentsAt();
         this.nav();
         ev.onPage(k);
       },
@@ -10775,7 +10996,7 @@ var Panel = class {
     this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
-    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet(), this.fitPages())).observe(stage);
+    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet(), this.fitPages(), this.bylinePlace())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
@@ -10798,6 +11019,7 @@ var Panel = class {
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.changes?.kept(this.prefs.changes);
+      if (p.side !== void 0 && p.side !== this.sideWant) this.sideWant = p.side, this.drawer = null, this.sideFit();
       this.linksShown();
       this.marginApply();
     });
@@ -10824,7 +11046,10 @@ var Panel = class {
     if (m !== "#logs" && m !== null) this.diagnostics(false);
   }
   /** Rebuild: the host's (the files as they are), or its reload. */
+  /** A Rebuild asked for: its build is said as one ("Rebuilt"). */
+  rebuildAsked = false;
   rebuild() {
+    this.rebuildAsked = true;
     this.again();
     (this.ev.onRebuild ?? this.ev.onReload).call(this.ev);
   }
@@ -10915,11 +11140,10 @@ var Panel = class {
     const was = this.wasShown;
     this.wasShown = on;
     this.host.style.display = display;
-    if (on && was === void 0 && !this.opened && !this.last) this.tipsReserve();
     if (on && !was) this.redraw();
     if (on && !this.last) {
-      this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", false);
-      if (this.asked && this.firstPending()) this.sheetUp(), this.anim && this.hints(true);
+      this.step(this.firstStep(), this.lineNow?.pct, this.lineNow?.detail ?? "", true);
+      if (this.firstPending()) this.sheetUp(), this.anim && this.hints(true);
     }
   }
   wasShown;
@@ -11023,7 +11247,7 @@ var Panel = class {
   /** The bar's status: what is running, or how the last build went and how fast. */
   renderStatus() {
     const now = performance.now();
-    const running = !!this.buildSince && now - this.buildSince > 400 || !!this.prepSince && now - this.prepSince > 400 || !!this.pkgNow;
+    const running = !!this.buildSince && (now - this.buildSince > 400 || !!this.streamed) || !!this.prepSince && now - this.prepSince > 400 || !!this.pkgNow;
     const errs = this.lastStatus?.diagnostics?.filter((d) => d.severity === "error").length ?? 0;
     let t, m = "", err = false;
     if (this.offline) t = "Disconnected", err = true;
@@ -11037,8 +11261,13 @@ var Panel = class {
     } else if (this.warm) t = "Preparing instant typing\u2026", m = `${Math.round((Date.now() - this.warm.since) / 1e3)} s`;
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
-    else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.latest() ? dur(this.latest().ms) : "", err = true;
-    else t = this.latest()?.label ?? "Built", m = this.latest() ? dur(this.latest().ms) : "";
+    else if (errs) {
+      const e = this.lastStatus.diagnostics.find((d) => d.severity === "error");
+      t = `${errs} error${errs === 1 ? "" : "s"} \xB7 ${e.message}${e.file && e.line ? `, ${e.file.split("/").pop()}:${e.line}` : ""}`;
+      m = this.latest() ? dur(this.latest().ms) : "";
+      err = true;
+    } else if (!this.drewOnce && this.viewer.pages > 0 && !this.reopen) t = "Drawing pages\u2026", m = "";
+    else t = this.latest()?.label ?? "Built", m = this.latest() && !this.latest().still ? dur(this.latest().ms) : "";
     this.stLine.set({ t, m, err });
     const was = this.statusNow;
     if (was.text !== t || was.more !== m || was.err !== err || was.busy !== running) {
@@ -11307,6 +11536,7 @@ var Panel = class {
     else this.ev.onGoto(file, line ?? 1);
   }
   status(s) {
+    s = { ...s, diagnostics: plainDiagnostics(s.diagnostics ?? []) };
     this.lastStatus = s;
     queueMicrotask(() => this.stopped());
     const diags = s.diagnostics ?? [];
@@ -11344,17 +11574,23 @@ var Panel = class {
     this.listed = shown.slice(0, this.listedMax);
     for (const [i, d] of this.listed.entries()) {
       const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : null;
-      if (d.problem) {
+      const prob = d.problem ?? (d.code === "engine" ? null : asProblem(d));
+      if (prob) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
+        card.dataset.i = String(i);
         card.setAttribute("role", "listitem");
-        card.replaceChildren(problemNode(d.problem));
+        card.replaceChildren(problemNode(prob));
         if (copy) card.firstElementChild.prepend(copy);
-        if (d.problem.file && d.problem.range) {
-          card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
+        if (prob.file && prob.range) {
+          card.dataset.key = `${prob.file}\0${prob.range[0]}`;
           card.title = "Show it on the page (its file:line opens it in the editor)";
         }
         list.append(card);
+        for (const pre of card.querySelectorAll(".phx-excerpt")) {
+          const m = pre.querySelector("mark");
+          if (m) requestAnimationFrame(() => pre.scrollLeft = Math.max(0, m.offsetLeft - pre.offsetLeft - pre.clientWidth / 3));
+        }
         continue;
       }
       const row = document.createElement("div");
@@ -11395,6 +11631,11 @@ var Panel = class {
       }
       list.append(more);
     }
+    const tl = document.createElement("button");
+    tl.type = "button";
+    tl.className = "reportbtn timingsln";
+    tl.textContent = "Build timings\u2026";
+    list.append(tl);
     if (this.ev.onReport) {
       const b = document.createElement("button");
       b.className = "reportbtn";
@@ -11630,7 +11871,6 @@ var Panel = class {
     el.hidden = false;
     el.classList.remove("in");
     this.win.classList.add("sheet-up");
-    if (this.prefs.zoom === "fit") this.zoomNow = "page";
     el.style.transition = "none";
     this.fitSheet();
     void el.offsetWidth;
@@ -11644,8 +11884,11 @@ var Panel = class {
   /** The opening for `look` played on `sheet`, in place of one playing there. */
   playOn(sheet, look2, first, dark) {
     this.anim?.stop();
-    sheet.replaceChildren();
-    const { id, anim } = play(look2, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
+    const art3 = document.createElement("div");
+    art3.className = "art";
+    sheet.replaceChildren(art3);
+    this.fitSheet();
+    const { id, anim } = play(look2, first, this.lastLook, sheet, dark, this.docShown());
     this.anim = anim;
     if (id !== "off") this.lastLook = id, this.seen(["opening"]);
     this.$("#opening").classList.toggle("owns", !!anim.step);
@@ -11667,29 +11910,61 @@ var Panel = class {
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
   animSince = 0;
   /**
-   * The sheet as the first page will be: a page whole in the pages' visible box, where the viewer
-   * puts page 1. The box is the stage's own, as it is laid out now (beside the contents' column,
-   * under the tips' room, its scrollbar out), in the coordinates of .body, which the sheet is
-   * placed in; the stage's offsetLeft and offsetTop are its .stagebox's, which the contents'
-   * column moves: the sheet was put the column's width left of the pages, partly under it.
+   * The sheet as the first page will be: the page's own box at the user's zoom, where the viewer
+   * puts page 1, so the page that comes is under it at the hand-off, nothing jumping (an A4 sheet
+   * fitted whole, a Letter page at Page width after it: 562 px to 614, the zoom label from 100% to
+   * 42% and 68% as the opening's own zoom came and went). Cut to the part in view (the stage's
+   * client box, measured by getBoundingClientRect: beside the contents' or the files' column, its
+   * scrollbar out), so an opening centred on the sheet is centred in what is seen and never cut.
+   * The stage's offsetLeft and offsetTop were its .stagebox's, which the columns move: the sheet
+   * sat the column's width left of the pages, partly under it.
    */
   fitSheet() {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
     const st = this.$("#stage"), s = st.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
     const view = { x: s.left - b.left + st.clientLeft, y: s.top - b.top + st.clientTop, w: st.clientWidth, h: st.clientHeight };
-    const put = (x, y, w2, h2) => Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w2}px`, height: `${h2}px` });
-    let tall = 297 / 210;
+    const put = (x, y, w2, h2) => {
+      const x0 = Math.max(x, view.x), y0 = Math.max(y, view.y), x1 = Math.min(x + w2, view.x + view.w), y1 = Math.min(y + h2, view.y + view.h);
+      const sw = Math.max(1, x1 - x0), sh = Math.max(1, y1 - y0);
+      Object.assign(el.style, { left: `${x0}px`, top: `${y0}px`, width: `${sw}px`, height: `${sh}px` });
+      const art3 = el.querySelector(".sheet > .art");
+      if (art3) {
+        const tall = h2 / Math.max(1, w2), aw = Math.min(sw, sh / tall), ah = aw * tall;
+        Object.assign(art3.style, { left: `${(sw - aw) / 2}px`, top: `${(sh - ah) / 2}px`, width: `${aw}px`, height: `${ah}px` });
+      }
+    };
     const slot = this.$("#viewer").querySelector(".slot");
     if (slot && slot.offsetWidth > 40) {
       const r = slot.getBoundingClientRect(), x = r.left - b.left, y = r.top - b.top;
-      if (x >= view.x - 1 && y >= view.y - 1 && x + r.width <= view.x + view.w + 1 && y + r.height <= view.y + view.h + 1) return void put(x, y, r.width, r.height);
-      tall = r.height / r.width;
+      const seen = Math.min(y + r.height, view.y + view.h) - Math.max(y, view.y);
+      if (seen >= Math.min(200, view.h * 0.6)) return put(x, y, r.width, r.height);
     }
-    const room = { w: Math.max(1, view.w - 24), h: Math.max(1, view.h - 24) };
-    let h = room.h, w = h / tall;
-    if (w > room.w) w = room.w, h = w * tall;
+    const real = (v, or) => v !== void 0 && Number.isFinite(v) && v > 0 ? v : or;
+    const pw = real(this.last?.w, 595), ph = real(this.last?.h, 842);
+    const w = this.scale() * pw * (96 / 72), h = w * ph / pw;
+    const by = this.bylineRoom((view.w - Math.min(w, view.w)) / 2);
+    if (by === "tight") view.h = Math.max(1, view.h - 34);
     put(view.x + (view.w - w) / 2, view.y + 12, w, h);
+  }
+  /**
+   * Where the byline (Overleaf's pane: "Unofficial PhiTeX extension · experimental") goes, given
+   * the margin beside the pages: in it, where it fits; else "tight": under the opening's sheet
+   * while it plays, then faded once the pages are in, back on a hover over its corner. Never over
+   * a page or the opening (it covered Windows 98's Start button and a short pane's page bottom).
+   */
+  bylineRoom(margin) {
+    const b = this.$("#byline");
+    if (!b.offsetParent) return "none";
+    const fits = margin >= b.offsetWidth + 20;
+    this.win.classList.toggle("byline-tight", !fits);
+    return fits ? "gutter" : "tight";
+  }
+  /** The byline's room beside the pages as they are laid out now. */
+  bylinePlace() {
+    const st = this.$("#stage").getBoundingClientRect(), slot = this.$("#viewer").querySelector(".slot");
+    if (!slot || this.anim) return;
+    this.bylineRoom(slot.getBoundingClientRect().left - st.left);
   }
   /**
    * The first page is in: the sheet eases to the page's box (its height
@@ -11800,8 +12075,11 @@ var Panel = class {
     stage.classList.toggle("stale", gone2);
     if (!gone2) return;
     this.placeStrips();
-    const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
-    this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
+    const ds = s.diagnostics ?? [];
+    const why = ds.find((d) => d.severity === "error" && d.code !== "no-pages") ?? ds.find((d) => d.severity !== "info" && d.code !== "no-pages");
+    const b = this.$("#banner");
+    b.classList.toggle("err", why?.severity === "error");
+    b.textContent = why ? `${why.message}${why.line ? ` (${why.file}:${why.line})` : ""}. Showing the last complete render.` : "This build shipped no page: showing the last complete render.";
   }
   /**
    * The connection to the engine lost (`up` false: the watch stopped or
@@ -11858,10 +12136,22 @@ var Panel = class {
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
-      percent: Math.round(this.scale() * 100),
+      percent: this.percent(),
       status: { ...this.statusNow },
       timing: { summary: this.lat?.summary ?? "", parts: this.timingParts(), message: this.msgText }
     };
+  }
+  /**
+  * The zoom's percentage as a host's toolbar shows it: while the opening plays, one value, the
+  * first the laid-out stage gives (it read 100% → 42% → 68% as the pane was laid out and the
+  * sheet fitted); the pages' own once they are in.
+  */
+  pctHeld = null;
+  percent() {
+    const now = Math.round(this.scale() * 100);
+    if (!this.anim) return this.pctHeld = null, now;
+    if (this.pctHeld === null && this.stageSize) this.pctHeld = now;
+    return this.pctHeld ?? now;
   }
   emit() {
     const s = this.state();
@@ -11909,7 +12199,6 @@ var Panel = class {
   outlineWanted() {
     return !!this.contents && this.win.classList.contains("side-on");
   }
-  /** The document's outline (its PDF's bookmarks), from the host after each build. */
   /** The session's citation lookup (PreviewSink.citesBy: the engine's `cites` op), the viewer's for its citation cards. */
   citesAsk;
   citesBy(ask2) {
@@ -11920,9 +12209,10 @@ var Panel = class {
   zoomBy(ask2) {
     this.zoomAsk = ask2;
   }
+  /** The document's outline (its PDF's bookmarks, else its .toc's entries), from the host after each build. */
   outline(items) {
     this.contents?.set(items);
-    this.contents?.at(this.at);
+    this.contentsAt();
     this.noOutline(!items.length);
   }
   /** No outline (none yet, or a PDF without one): the column hidden, the menu's Contents saying so. */
@@ -11932,18 +12222,49 @@ var Panel = class {
     if (was !== none && this.win.classList.contains("side-on") && this.prefs.zoom === "fit") this.redraw();
     const label = this.$("#x-contents").querySelector("span:not(.sub)");
     if (label) label.textContent = none ? "Contents (none)" : "Contents";
-    this.$("#x-contents").title = none ? "This PDF has no outline: hyperref makes one from the sections" : "";
+    this.$("#x-contents").title = none ? "The document has no sections" : "";
   }
-  /** The contents shown or hidden (remembered on this machine). */
+  /** The contents shown or hidden, the user's choice: kept (this browser's, and the host's with the panel's prefs). */
   side(on = !this.win.classList.contains("side-on")) {
     if (!this.contents) return;
+    this.sideWant = on;
     this.sideOn(on);
     if (on) this.ev.onContents?.();
     try {
       localStorage.setItem("phitex.side", on ? "1" : "0");
     } catch {
     }
+    if (this.prefs.side !== on) this.prefs.side = on, this.save();
     if (this.prefs.zoom === "fit") this.redraw();
+  }
+  /**
+   * The contents as the user wants them (true until they close them). Shown so beside the
+   * pages; in a narrow panel, where the column is a drawer over the pages, they start closed
+   * and open only when the user opens them: never by themselves, the panel narrowed or loaded.
+   */
+  sideWant = true;
+  drawer = null;
+  sideFit() {
+    if (!this.contents) return;
+    const drawer = this.win.clientWidth > 0 && this.win.clientWidth <= 560;
+    if (drawer === this.drawer) return;
+    const was = this.drawer;
+    this.drawer = drawer;
+    if (drawer) this.sideOn(false);
+    else if (was !== null || this.win.classList.contains("side-on") !== this.sideWant) this.sideOn(this.sideWant);
+    if (this.sideWant && !drawer && was !== null) this.ev.onContents?.();
+    if (this.prefs.zoom === "fit") this.redraw();
+  }
+  /** The contents' heading at the view's top: its page, and how far down it (points; a third of a line's slack). */
+  contentsAt() {
+    if (!this.contents) return;
+    const k = this.at, slot = this.$("#viewer").querySelector(`.slot[data-k="${k}"]`);
+    let top = 0;
+    if (slot) {
+      const r = slot.getBoundingClientRect(), v = this.$("#stage").getBoundingClientRect();
+      top = Math.max(0, (v.top + 24 - r.top) / Math.max(1, r.height) * this.viewer.pageSize().h);
+    }
+    this.contents.at(k, top);
   }
   /** The column's class and the bar's button pressed with it. */
   sideOn(on) {
@@ -12087,26 +12408,28 @@ var Panel = class {
     if (opts.outline) {
       this.win.classList.add("has-side");
       this.contents = new Outline(this.$("#side"), { goToPlace: (k, top) => this.viewer.goToPlace(k, top) });
-      let on = true;
       try {
-        on = localStorage.getItem("phitex.side") !== "0";
+        this.sideWant = localStorage.getItem("phitex.side") !== "0";
       } catch {
       }
-      this.sideOn(on);
+      this.sideOn(false);
+      this.sideFit();
+      new ResizeObserver(() => this.sideFit()).observe(this.win);
       this.noOutline(true);
       this.grip(this.$("#side"), "phitex.side.w");
     }
-    if (!opts.keys) return;
+    const keysOn = opts.keys ? window : this.host;
+    if (!opts.keys) this.$("#stage").tabIndex = -1;
     const help = this.$("#keyhelp");
-    const extra = [["e", "the build's errors and warnings"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
+    const extra = [["e / F8", "the next error or warning: its source and its place"], ["Shift+E / Shift+F8", "the one before"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
     help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon2("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
-    addEventListener(
+    keysOn.addEventListener(
       "keydown",
       (e) => {
-        if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
+        if (!(e instanceof KeyboardEvent) || e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
         if (e.key === "Escape" && this.changes?.open) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
-        } else if (e.key === "e") this.diagnostics();
+        } else if (e.key === "e" || e.key === "E" || e.key === "F8") this.problemStep(e.shiftKey ? -1 : 1);
         else if (e.key === "t" && this.contents) this.side();
         else return;
         e.preventDefault();
@@ -12119,7 +12442,7 @@ var Panel = class {
       return (this.last?.h ?? 792) * (96 / 72);
     };
     const panel2 = this;
-    bindKeys(window, {
+    bindKeys(keysOn, {
       get pages() {
         return panel2.viewer.pages;
       },
@@ -12193,6 +12516,42 @@ var Panel = class {
     if (was && !on) this.dismissed = this.problemsKey();
     if (was !== on) this.emit();
   }
+  /** The keyboard shortcuts' help, from a host's own menu (Overleaf's ⋯). */
+  keyHelp() {
+    this.menu(null);
+    this.$("#keyhelp").hidden = false;
+  }
+  /** The last build has errors or warnings (what the status names; notes alone are not). */
+  hasProblems() {
+    return (this.lastStatus?.diagnostics ?? []).some((d) => d.severity === "error" || d.severity === "warning");
+  }
+  /** The timings, from the problems' foot or the ⋯ menu: under the status. */
+  timingsOpen() {
+    this.diagnostics(false);
+    if (this.$("#st").offsetParent) this.menu("#m-time");
+    else this.timingAt(this.$(".bar"), true);
+  }
+  /** The next problem (e, F8) or the one before (Shift): its card in the list, its place on the pages, its source in the editor. */
+  problemStep(dir) {
+    const all = (this.lastStatus?.diagnostics ?? []).filter((d) => d.severity === "error" || d.severity === "warning");
+    if (!all.length) return;
+    this.probAt = (this.probAt + dir + all.length) % all.length;
+    if (this.$("#logs").hidden) this.diagnostics(true);
+    const cards = [...this.$("#diags").querySelectorAll(".phx-card, .diag:not(.more)")];
+    cards.forEach((c, i) => c.classList.toggle("at", i === this.probAt));
+    cards[this.probAt]?.scrollIntoView({ block: "nearest" });
+    this.problemGo(all[this.probAt]);
+  }
+  probAt = -1;
+  /** A problem's source (its line and column) in the editor, and its place on the pages marked. */
+  problemGo(d) {
+    const p = d.problem;
+    if (d.file && d.line) this.ev.onGoto(d.file, d.line, p?.col ?? void 0);
+    if (p?.file && p.range)
+      void this.placeOf(`${p.file}\0${p.range[0]}`).then((place4) => {
+        if (place4) this.viewer.mark(place4.k, [place4.box]);
+      });
+  }
   /** Esc on the problems: the list closed; false when it wasn't open. */
   /** The pages' highlights cleared (Esc), find's included: whether there were any. */
   unmark() {
@@ -12219,11 +12578,19 @@ var Panel = class {
     this.ev.onPdf();
   }
   zoomTo(z) {
+    const st = this.$("#stage");
+    const cx = (st.scrollLeft + st.clientWidth / 2) / Math.max(1, st.scrollWidth), cy = (st.scrollTop + st.clientHeight / 2) / Math.max(1, st.scrollHeight);
     this.zoomNow = null;
     this.prefs.zoom = zoomOf(z);
     this.zoomShown();
     this.save();
     this.redraw();
+    const keep = () => {
+      st.scrollLeft = Math.max(0, cx * st.scrollWidth - st.clientWidth / 2);
+      st.scrollTop = Math.max(0, cy * st.scrollHeight - st.clientHeight / 2);
+    };
+    keep();
+    requestAnimationFrame(keep);
     this.emit();
   }
   /** The zoom menu at the zoom now: a zoom not on it (a pinch's) by its percentage. */
@@ -12318,6 +12685,7 @@ var Panel = class {
     if (g.at) this.viewer.keepAt(g.at, g.x - dx, g.y - dy);
     if (dx || dy) g.at = this.viewer.pointAt(g.x, g.y);
     if (final) this.viewer.redraw();
+    this.emit();
   }
   /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
   zoomEnd() {
@@ -12463,7 +12831,8 @@ var Panel = class {
    * status, where the panel's bar is hidden): moved out of the bar into the
    * window, at the control's left, just under it. Again: closed.
    */
-  timingAt(anchor) {
+  timingAt(anchor, timings = false) {
+    if (!timings && this.hasProblems()) return this.diagnostics();
     const el = this.$("#m-time");
     if (!el.hidden) return this.menu(null);
     if (el.parentElement !== this.win) this.win.append(el);
@@ -13160,27 +13529,16 @@ var Panel = class {
   }
   tips(which, asked = false) {
     if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
+    if (which === "unseen" && !asked && this.toured) return;
+    this.freshUser ??= !TIPS.some((t) => this.seenIds.has(t.id));
     this.tipList = this.offered(which, asked);
+    if (which === "unseen" && this.tipList.length) this.toured = true, this.seen(this.tipList.map((t) => t.id));
     this.tip(0);
   }
-  /**
-   * The room the tips offered by themselves will take above the pages, made
-   * before the first page is laid out (the panel shown, nothing drawn yet):
-   * the tallest of them, so the pages are where they will stay when the
-   * tips come after the opening, and never move under a reader's pointer.
-   * They move once, up, when the user is done with the tips.
-   */
-  tipsReserve() {
-    const list = this.offered("unseen");
-    if (!list.length) return;
-    const el = this.$("#tip");
-    el.style.visibility = "hidden";
-    let gap = 0;
-    for (let i = 0; i < list.length; i++) gap = Math.max(gap, this.tipGap(this.tipCard(list, i)));
-    el.hidden = true;
-    el.style.visibility = "";
-    this.setTipRoom(gap);
-  }
+  /** The tour shown by itself this visit. */
+  toured = false;
+  /** No tip ever seen before this visit: every feature is new to them, none said "New". */
+  freshUser = null;
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
   seen(ids) {
     const before = this.seenIds.size;
@@ -13201,32 +13559,30 @@ var Panel = class {
   tipCard(list, i) {
     const el = this.$("#tip");
     const t = list[i];
-    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${list.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < list.length ? "Next" : "Got it"}</button></div>`);
+    el.replaceChildren(html`<h4>${t.fresh && !this.freshUser ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${list.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < list.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar2 = this.$(".bar").getBoundingClientRect(), r = this.tipTarget(t).getBoundingClientRect(), w = el.offsetWidth;
-    const cx = r.left + r.width / 2 - bar2.left, left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
+    const cx = r.left + r.width / 2 - bar2.left;
+    let left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
+    const st = this.$("#stage").getBoundingClientRect(), slots = [...this.$("#viewer").querySelectorAll(".slot")].map((e) => e.getBoundingClientRect()).filter((p) => p.bottom > st.top && p.top < st.bottom && p.width > 0);
+    el.classList.remove("compact", "open");
+    if (slots.length) {
+      const pl = Math.min(...slots.map((p) => p.left)) - bar2.left, pr = Math.max(...slots.map((p) => p.right)) - bar2.left, sl = st.left - bar2.left, sr = st.right - bar2.left - 14;
+      const over = left < pr && left + w > pl;
+      if (over && sr - pr >= w + 16 && (cx >= (pl + pr) / 2 || pl - sl < w + 16)) left = Math.min(sr - w - 8, Math.max(pr + 8, cx - w / 2));
+      else if (over && pl - sl >= w + 16) left = Math.max(sl + 8, Math.min(pl - w - 8, cx - w / 2));
+      else if (over) {
+        el.classList.add("compact");
+        const cw = el.offsetWidth;
+        left = Math.max(8, Math.min(bar2.width - cw - 8, cx - cw / 2));
+        Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar2.top + 9}px` });
+        el.style.setProperty("--ax", `${Math.max(14, Math.min(cw - 14, cx - left))}px`);
+        return el;
+      }
+    }
     Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar2.top + 9}px` });
-    el.style.setProperty("--ax", `${cx - left}px`);
+    el.style.setProperty("--ax", `${Math.max(14, Math.min(w - 14, cx - left))}px`);
     return el;
-  }
-  /** How far a tip's card (placed) reaches down over the pages' box, and a margin: 0 where it is beside them. */
-  tipGap(el) {
-    const b = this.$(".stagebox").getBoundingClientRect(), t = el.getBoundingClientRect();
-    return t.left < b.right && t.right > b.left && t.bottom > b.top ? Math.ceil(t.bottom - b.top + 8) : 0;
-  }
-  /**
-   * The pages kept clear of the tips: they start `gap` pixels down (0: at
-   * the top again), so a tip never sits over what is on a page (the diff's
-   * and the review's marks, Blame's colours, a link): nothing a click or a
-   * right-click there means is under it.
-   */
-  tipRoomNow = 0;
-  setTipRoom(gap) {
-    if (gap === this.tipRoomNow) return;
-    this.tipRoomNow = gap;
-    const box = this.$(".stagebox");
-    if (gap) box.style.setProperty("--tipgap", `${gap}px`);
-    else box.style.removeProperty("--tipgap");
   }
   tip(i) {
     const el = this.$("#tip");
@@ -13235,7 +13591,7 @@ var Panel = class {
     this.tipUsed = void 0;
     this.tipAt = i;
     const t = this.tipList[i];
-    if (!t) return void (el.hidden = true, this.setTipRoom(0));
+    if (!t) return void (el.hidden = true);
     this.seen([t.id]);
     const target = this.tipTarget(t);
     if (target.getAttribute("aria-expanded") === "true") return this.tip(i + 1);
@@ -13243,9 +13599,9 @@ var Panel = class {
     const used = this.tipUsed = new AbortController();
     target.addEventListener("click", () => this.tip(-1), { capture: true, once: true, signal: used.signal });
     this.tipCard(this.tipList, i);
-    this.setTipRoom(Math.max(this.tipRoomNow, this.tipGap(el)));
     el.onclick = (e) => {
       e.stopPropagation();
+      if (el.classList.contains("compact") && e.target.closest("h4")) return void el.classList.toggle("open");
       const a = e.target.closest("[data-t]")?.dataset.t;
       if (a === "skip") this.seen(this.tipList.map((t2) => t2.id));
       if (a) this.tip(a === "next" ? i + 1 : -1);
@@ -13438,7 +13794,8 @@ var Panel = class {
     if (first) this.times = { first: ms, edits: [] };
     else this.times.edits.push(ms);
     const now = performance.now();
-    this.built = { ms, at: now, first, changed };
+    this.built = { ms, at: now, first, changed, rebuilt: !first && this.rebuildAsked };
+    this.rebuildAsked = false;
     if (this.buildSince) this.buildSince = now;
     if (this.prepSince) this.prepSince = now;
     this.renderStatus();
@@ -13456,10 +13813,11 @@ var Panel = class {
     const s = this.speed, b = this.built;
     if (b && (!s || b.at > s.at)) {
       if (b.first || b.joined) return { label: b.first ? "First build" : "Last build", ms: b.ms, first: b.first };
-      if (b.changed === 0) return { label: "Built, no page changed", ms: b.ms, first: false };
-      if (!s) return { label: "Built", ms: b.ms, first: false };
+      if (b.rebuilt) return { label: "Rebuilt", ms: b.ms, first: false };
+      if (b.changed === 0) return { label: "Up to date", ms: b.ms, first: false, still: true };
+      return { label: "Built", ms: b.ms, first: false };
     }
-    if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
+    if (s) return { label: s.first ? "First page" : b?.rebuilt ? "Rebuilt" : "Built", ms: s.ms, first: !!s.first };
     return void 0;
   }
   /**
@@ -13504,12 +13862,7 @@ var Panel = class {
     const head = !l ? e2e !== void 0 ? ["Keystroke to page", e2e] : null : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
     const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1])}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips2}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
-    el.querySelector(".copydbg").onclick = (e) => {
-      e.stopPropagation();
-      const b = e.currentTarget;
-      void this.debugInfo().then((t) => navigator.clipboard.writeText(t)).then(() => b.textContent = "Copied \u2713", () => b.textContent = "Couldn't copy");
-    };
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1])}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips2}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`);
     el.querySelector(".foot").textContent = parts.length || this.walk?.ms !== void 0 ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
@@ -13609,6 +13962,7 @@ var Panel = class {
    */
   mains(names, main, ask2) {
     this.mainFiles = { names, main };
+    this.anim?.rename?.(this.docShown());
     if (ask2 !== void 0) this.mainAsk = ask2;
     this.renderMainAsk();
     if (!this.$("#settings").hidden) void this.settings(true);
@@ -13648,6 +14002,11 @@ var Panel = class {
   /** The document's main file as the host names it, where it has no Main file to pick (the watch): the openings that show it (a prompt's, a title bar's). */
   docName(name) {
     this.doc = name;
+    this.anim?.rename?.(this.docShown());
+  }
+  /** The main file's name as an opening shows it (a title bar's, a prompt's). */
+  docShown() {
+    return (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop();
   }
   doc = null;
   /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
@@ -13721,6 +14080,7 @@ var Panel = class {
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes, previews);
     this.fitSheet();
+    requestAnimationFrame(() => this.bylinePlace());
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
@@ -13772,7 +14132,7 @@ var Panel = class {
     this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
-    this.$("#stage").classList.remove("stale");
+    if (this.lastStatus?.pages !== 0) this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
@@ -16294,17 +16654,22 @@ var PreviewSession = class {
     const r = await this.core.request({ op: "diagnostics" });
     if (r.ok) this.onWatch({ event: "diagnostics", items: r.json?.items ?? [] });
   }
-  /** The document's outline asked for now and given to the view (it shows the contents). */
+  /**
+   * The document's outline asked for now and given to the view (it shows the contents): the
+   * PDF's bookmarks, else the entries of its `.toc`, which the core makes when asked (the
+   * answer "pending" asked again; given up once a newer build's outline is asked).
+   */
   async outline() {
     if (!this.sink.outline) return;
-    const r = await this.core.request({ op: "outline" });
-    if (r.ok) this.sink.outline(r.json?.items ?? []);
+    const gen = ++this.outlineGen;
+    const r = await this.untilMade({ op: "outline" }, () => gen !== this.outlineGen).catch(() => null);
+    if (r?.ok && !r.json?.pending && gen === this.outlineGen) this.sink.outline(r.json?.items ?? []);
   }
+  outlineGen = 0;
   /** After a build: the outline, only while the view shows it (else asked when it does). */
   async watchOutline() {
     if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
-    const r = await this.core.request({ op: "outline" });
-    if (r.ok) this.sink.outline(r.json?.items ?? []);
+    await this.outline();
   }
   onWatch(e) {
     switch (e.event) {
@@ -17096,7 +17461,7 @@ var panel = new Panel(
     onLog: () => session.log(),
     onBoxes: (file, start, end) => session.boxesOf(file, start, end),
     onClearCache: () => void clearCache(),
-    onGoto: (file, line) => source(file, line),
+    onGoto: (file, line, col) => source(file, line, col ?? 1),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),

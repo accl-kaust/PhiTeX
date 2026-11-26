@@ -54,9 +54,8 @@ says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
 /// document in (a person reads the description and the commands first).
 const AGENTS: &str = "\
 For agents: phitex session start main.tex; edit; phitex session wait; then look at the pages:
-  phitex session png --changed | --page N | --at file:line | --label L
-  phitex session problems; phitex session stop. The PDF on disk may be older than the live
-  build while a watch runs: session png and session pdf are the live build.
+  phitex session png --changed | --page N | --at file:line | --label L; phitex session problems;
+  phitex session stop. While a watch runs, the PDF on disk may lag: session png and pdf are live.
   In a sandbox that ends each command's processes: phitex build, then phitex png --page N";
 
 /// `phitex build --help`'s last lines: the session, for builds again and
@@ -81,9 +80,9 @@ and why; the engine is picked from the document (xelatex for fontspec), LuaLaTeX
 fn short_after_help() -> String {
     let l = STYLES.get_literal();
     format!(
-        "Settings: phitex.toml (the project's), ~/.config/phitex/phitex.toml (yours; PHITEX_CONFIG: another file):
-  {l}phitex config KEY VALUE{l:#}, e.g. {l}phitex config update-check on{l:#}; {l}phitex config --init{l:#} writes one with every setting
-Engine: picked from the document (xelatex for fontspec), or {l}--engine NAME{l:#}; LuaLaTeX not supported yet
+        "Settings: the project's phitex.toml, yours in ~/.config/phitex/phitex.toml (or PHITEX_CONFIG):
+  {l}phitex config KEY VALUE{l:#} (e.g. update-check on); {l}phitex config --init{l:#}: a file with every setting
+Engine: from the document (xelatex for fontspec), or {l}--engine NAME{l:#}; LuaLaTeX not supported yet
 Every option: {l}phitex --help-all{l:#} · https://phitex.org
 
 {AGENTS}"
@@ -230,9 +229,7 @@ enum Sub {
         #[command(flatten)]
         watch: WatchArgs,
     },
-    /// Incremental rebuilds for you and your agent: problems at
-    /// file:line, PNG crops of figures, tables and equations (`phitex
-    /// session --help`)
+    /// Incremental rebuilds for you and your agent: problems at file:line, figures as PNGs
     ///
     /// Each verb finds the watch running in this folder
     /// (docs/spec-editor-protocol.md §9): `phitex session start` runs one
@@ -297,7 +294,7 @@ enum Sub {
     /// :PhiTeXDoctor) and for a bug report: it names files and folders,
     /// never a document's text, and ends with where to open an issue.
     Doctor,
-    /// Shell completions: phitex completions bash > ~/.local/share/bash-completion/completions/phitex
+    /// Shell completions: phitex completions bash, zsh or fish (where to put them: --help)
     ///
     /// The script for SHELL on standard output. bash: into
     /// ~/.local/share/bash-completion/completions/phitex; zsh: a file
@@ -311,8 +308,7 @@ enum Sub {
     /// Its signature checked, for an install made by phitex.org/install.sh
     /// (Windows: install.ps1).
     Upgrade,
-    /// Your settings: all of them (phitex config), one (phitex config
-    /// synctex), or change one (phitex config update-check on)
+    /// Your settings: phitex config [KEY [VALUE]], e.g. phitex config update-check on
     ///
     /// Written into ~/.config/phitex/phitex.toml, its other lines kept.
     Config {
@@ -377,8 +373,7 @@ struct Global {
     /// Only problems and the result
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
-    /// Yes to every question: upgrade's, and watch's whether to write
-    /// the PDF on quitting
+    /// Yes to every question (upgrade's, watch's PDF on quitting)
     #[arg(short = 'y', long = "no-confirm", visible_alias = "yes", global = true)]
     no_confirm: bool,
     /// The build's events on standard output, one JSON object a line
