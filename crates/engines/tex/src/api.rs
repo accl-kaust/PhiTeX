@@ -5807,6 +5807,17 @@ fn named_cs(msg: &str) -> Option<String> {
     }
 }
 
+/// [`last_cs_token`]'s first.
+fn first_cs_token(text: &str, cs: &str) -> Option<usize> {
+    let word = cs.len() > 2 || cs.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic);
+    text.match_indices(cs)
+        .find(|&(k, _)| {
+            (!word || !text[k + cs.len()..].starts_with(|c: char| c.is_ascii_alphabetic()))
+                && !text[..k].ends_with('\\')
+        })
+        .map(|(k, _)| k)
+}
+
 /// Where `cs` is last in `text` as a token: a control word not followed
 /// by a letter, its backslash not escaped.
 fn last_cs_token(text: &str, cs: &str) -> Option<usize> {
@@ -9885,6 +9896,9 @@ impl Build {
             // (the document's text node the line is in: where a culprit
             // is looked for past the line, [`culprit`])
             let mut node_from: Option<usize> = None;
+            // (where TeX read no line: the node's text, its start to the
+            // next node's, where an undefined name is looked for)
+            let mut node_text: Option<(usize, usize)> = None;
             let (file, text, at): (String, &str, usize) = if int(3) >= 0 && in_doc {
                 // a line of the document's own text: the position the
                 // node's frame carries is the byte in the document as the
@@ -10010,6 +10024,9 @@ impl Build {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
                 let i = top(node);
                 let from = spans.get(i).copied().unwrap_or(0);
+                if seg.is_empty() {
+                    node_text = Some((from, spans.get(i + 1).copied().unwrap_or(doc.len())));
+                }
                 // (the line as the text holds it: its characters, or, read
                 // by XeTeX, their UTF-8 bytes one character each)
                 let held: String = if xe {
@@ -10121,16 +10138,23 @@ impl Build {
                 // (the name TeX read, [`crate::run::Run::diag_at`]: the one
                 // on the line where it is the last read; else its last
                 // spelling in the text TeX read it from, the node's, lines
-                // above (a beamer frame's body, read whole as an argument:
-                // `\arwTHE` on line 165, TeX at `l.175 \end{frame}`);
-                // else none, never another command of the line)
+                // above; where TeX read no line (a beamer frame's body, read
+                // whole as an argument and run from its tokens: `\arwTHE` on
+                // line 165, TeX at `l.175 \end{frame}`), its first in the
+                // node's text; else none, never another command of the line
+                // (`{\darkslide` underlined as not defined))
                 match xs.get(9).map(|&x| str_of(v, x)).filter(|n| !n.is_empty()) {
                     Some(n) => just
                         .filter(|&(a, z)| text.get(a..z) == Some(n.as_str()))
                         .or_else(|| {
-                            let from = node_from.map_or(ls, |f| f.min(ls));
-                            last_cs_token(&text[from..b], &n)
-                                .map(|k| (from + k, from + k + n.len()))
+                            if let Some((a, z)) = node_text {
+                                first_cs_token(text.get(a..z)?, &n)
+                                    .map(|k| (a + k, a + k + n.len()))
+                            } else {
+                                let from = node_from.map_or(ls, |f| f.min(ls));
+                                last_cs_token(&text[from..b], &n)
+                                    .map(|k| (from + k, from + k + n.len()))
+                            }
                         })
                         .or(Some((b, b))),
                     None => just,

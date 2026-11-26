@@ -5661,15 +5661,6 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .rev()
             .find_map(|l| (l.kind == crate::input::kind::LINE).then(|| self.input.line(*l).clone()))
-            // (TeX's last line read, its level ended here once read to its
-            // end: what §313 shows, `l.175 \end{frame}` after a beamer
-            // frame's body read whole, not the node's first line; at the
-            // text's end for good none, TeX's `<*>` terminal line)
-            .or_else(|| {
-                (!self.eof)
-                    .then(|| self.input.last_line().cloned())
-                    .flatten()
-            })
             .or_else(|| {
                 self.input.text_rest().iter().find_map(|s| match s {
                     Seg::Line(l) => Some(l.clone()),
