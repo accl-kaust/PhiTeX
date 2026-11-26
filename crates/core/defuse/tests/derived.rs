@@ -154,3 +154,24 @@ fn the_named_field_changing_runs_the_reader_again() {
         assert_eq!(d.e.output(d.r), Some(ValueId::UNIT), "threads {threads}");
     }
 }
+
+/// A reader whose name moves (n to 6) to a field that changed since its
+/// last run (p@6 to 10) answers 10. A later change of p@6 left the change
+/// counts of the fields its records name as they were: asked by those
+/// counts, it stood on 10 with p@6 at 70, the invariant check's stale
+/// read. A derived read is asked through its path, which names the field
+/// its name gives now.
+#[test]
+fn a_reader_whose_name_moved_reads_the_new_name_when_it_changes() {
+    for threads in [1, 4] {
+        let d = doc(threads);
+        d.set(d.d5, "p@5", 50);
+        assert_eq!(d.eval(threads), 50, "threads {threads}");
+        d.set(d.d6, "p@6", 10);
+        assert_eq!(d.eval(threads), 50, "threads {threads}");
+        d.set(d.n, "n", 6);
+        assert_eq!(d.eval(threads), 10, "threads {threads}");
+        d.set(d.d6, "p@6", 70);
+        assert_eq!(d.eval(threads), 70, "threads {threads}");
+    }
+}

@@ -805,10 +805,16 @@ impl RunRecord {
             ReadKind::Env { .. } => true,
             _ => false,
         };
+        // (a derived read's answer is that of the field its name gives
+        // now, which may be no field it recorded: one that stood where its
+        // name moved recorded the old name's, and a change of the new
+        // one left both its fields' counts as they were, so it is asked
+        // through its path, `read::through_at`)
         if placed
             && !scope_moved
             && rd.epoch != u64::MAX
             && rd.kind().field().is_some_and(|f| eng.field_epoch(f) == rd.epoch)
+            && crate::read::derived_spec(eng, rd.path()).is_none()
         {
             return true;
         }
