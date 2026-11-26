@@ -1195,6 +1195,13 @@ pub(crate) struct Run<'c, 'a> {
     /// node, left no group or conditional open. A file every line of
     /// which only defines is read back per field ([`Run::read_back`]).
     pub interp_plain: bool,
+    /// The lines this run wrote that did more than define, by file and
+    /// text (`Run::write_out`): what they defined and read until they
+    /// did. The same text written again is taken to do more, unread: a
+    /// file one of whose lines does more is read as its text, or mixed
+    /// with what its parts share checked where it is read
+    /// ([`Run::mixed_end`]).
+    pub more_memo: phitex_defuse::FxHashMap<(String, String), (ValueId, ValueId)>,
     /// The files a line this run wrote did more than define in
     /// (`Run::write_out`): their later lines are told apart only where
     /// the file has a read-back point.
@@ -1596,6 +1603,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_errs: Vec::new(),
             runaway_due: None,
             interp_plain: false,
+            more_memo: phitex_defuse::FxHashMap::default(),
             text_written: Vec::new(),
             seeded: Vec::new(),
             cont_lines: Vec::new(),
@@ -9051,33 +9059,4 @@ pub(crate) fn same_dir(name: &str) -> &str {
         n = r;
     }
     n
-}
-
-/// The lines a run found to do more than define, by file and text: taken
-/// to do more by every run after, unread (every page's finisher writes the
-/// same `\\babel@aux` lines, and every piece that switches the language;
-/// each interpreted, its font loading and all, once per run, 11 G
-/// instructions more on the beamer deck's clean build). A line that does
-/// more in one state and only defines in another is then read as text
-/// where it would have read per field: TeX's reading, whatever the order
-/// the runs found it in. Its entry says nothing else
-/// ([`crate::api::more_entry`]), so a run's lines are the same whether it
-/// interpreted them or found them here.
-static MORE_SEEN: std::sync::Mutex<Option<phitex_defuse::FxHashSet<(String, String)>>> =
-    std::sync::Mutex::new(None);
-
-/// Whether a run found line `key` (file, text) to do more ([`MORE_SEEN`]).
-pub(crate) fn more_seen(key: &(String, String)) -> bool {
-    let g = MORE_SEEN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    g.as_ref().is_some_and(|m| m.contains(key))
-}
-
-/// Line `key` (file, text) found to do more ([`MORE_SEEN`]).
-pub(crate) fn more_found(key: (String, String)) {
-    let mut g = MORE_SEEN
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    g.get_or_insert_with(Default::default).insert(key);
 }

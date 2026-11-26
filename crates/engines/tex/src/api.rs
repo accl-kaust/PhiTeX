@@ -5147,11 +5147,24 @@ pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String
 }
 
 /// A written line whose read-back does more than define, as
-/// [`crate::run::Run::write_out`] found it: `[name, line, UNIT, 1]`
-/// (`[name, line, UNIT]` is a line not interpreted). The same whether the
-/// run interpreted it or found it done (`run::more_seen`).
-pub(crate) fn more_entry(v: &Values, name: &str, line: &str) -> ValueId {
-    v.list(vec![v.str(name), v.str(line), ValueId::UNIT, v.int(1)])
+/// [`crate::run::Run::write_out`] found it: `[name, line, UNIT, 1, made,
+/// reads]`, what it defined and read up to the command that did more
+/// (`[name, line, UNIT]` is a line not interpreted).
+pub(crate) fn more_entry(
+    v: &Values,
+    name: &str,
+    line: &str,
+    made: ValueId,
+    reads: ValueId,
+) -> ValueId {
+    v.list(vec![
+        v.str(name),
+        v.str(line),
+        ValueId::UNIT,
+        v.int(1),
+        made,
+        reads,
+    ])
 }
 
 /// A job-written file read back as its text (a line of it does more than
@@ -5270,8 +5283,10 @@ pub(crate) fn written_mixed(
         let ml = match xs[..] {
             // (a line that does more, with what it defined and read until
             // it did)
-            [_, _, made, more] if made == ValueId::UNIT && v.as_int(more) == Some(1) => {
-                line_of(line, true, ValueId::UNIT, ValueId::UNIT)
+            [_, _, made, more, partial, rs]
+                if made == ValueId::UNIT && v.as_int(more) == Some(1) =>
+            {
+                line_of(line, true, partial, rs)
             }
             // (a defining line)
             [_, _, made, rs] if made != ValueId::UNIT => line_of(line, false, made, rs),

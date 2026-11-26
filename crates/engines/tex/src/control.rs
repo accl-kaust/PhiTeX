@@ -2648,13 +2648,12 @@ impl Run<'_, '_> {
             // does more: a file one of whose lines does more is read back
             // as its text, and mixed at its first read-back point,
             // docs/spec-symbol-reads.md §2. Each where it is written: a
-            // line's read-back depends on the state there. A text a run
-            // found to do more before does more again, unread
-            // (`run::more_seen`): read as text, a line that defines is read
-            // as TeX reads it, and a mixed read-back checks what its parts
-            // share where it is read. A memo of the lines that define gave
-            // bibtopic's `\citation{*}` the read-back of its first
-            // writing. After a
+            // line's read-back depends on the state there. A text this run
+            // found to do more before does more again ([`Run::more_memo`]):
+            // read as text, a line that defines is read as TeX reads it,
+            // and a mixed read-back checks what its parts share where it
+            // is read. A memo of the lines that define gave bibtopic's
+            // `\citation{*}` the read-back of its first writing. After a
             // line of this run that did more, only a file with a read-back
             // point, which may read back mixed there: `\enddocument`'s
             // 1345 `\babel@toc` lines to a `.toc` no one reads took 1 s
@@ -2670,8 +2669,9 @@ impl Run<'_, '_> {
                     .get(&format!("write:pend:{k}"))?
                     .is_none_or(|x| x == ValueId::UNIT))
             .then(|| (name.clone(), line.clone()));
-            let e = if more.as_ref().is_some_and(crate::run::more_seen) {
-                crate::api::more_entry(v, &name, &line)
+            let seen = more.as_ref().and_then(|m| self.more_memo.get(m).copied());
+            let e = if let Some((made, reads)) = seen {
+                crate::api::more_entry(v, &name, &line, made, reads)
             } else if per_field {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
@@ -2731,15 +2731,15 @@ impl Run<'_, '_> {
                         v.list(ds)
                     };
                     v.list(vec![v.str(&name), v.str(&line), made, self.interp_reads])
-                } else if r.is_some() {
+                } else if let Some(made) = r {
                     self.muts += 1;
                     if !self.text_written.contains(&name) {
                         self.text_written.push(name.clone());
                     }
                     if let Some(m) = more {
-                        crate::run::more_found(m);
+                        self.more_memo.insert(m, (made, self.interp_reads));
                     }
-                    crate::api::more_entry(v, &name, &line)
+                    crate::api::more_entry(v, &name, &line, made, self.interp_reads)
                 } else {
                     self.set(&format!("write:pend:{k}"), v.str(&text), true);
                     v.list(vec![v.str(&name), v.str(&line)])
