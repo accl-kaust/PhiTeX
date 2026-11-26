@@ -64,9 +64,9 @@ libc = "=0.2.190"
 # sequences on: the console API without `unsafe` here)
 [target.'cfg(windows)'.dependencies]
 crossterm = { version = "=0.29.0", default-features = false, features = ["windows"] }
-# (a file's change time for the watch's stamps, a process's state for
-# attach: already in the lock)
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+# (a file's change time for the watch's stamps, a process's state and a
+# port refused at once for attach: already in the lock)
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
 
 [lints]
 workspace = true
