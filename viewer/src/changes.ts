@@ -31,7 +31,7 @@ import { Commits, COMMITS_CSS, initials, mergedVia, type Commit } from "./commit
 import { AGE_RAMPS, AUTHOR_COLORS, BLAME_LOOK, OVERLEAF_COLORS, UNCOMMITTED, agoWords, type Blame, type BlameCommit, type BlameLook } from "./blame.ts";
 import type { DiffChange } from "./diff.ts";
 import { html } from "./html.ts";
-import { closeMenu, contextMenu, menuOpen, type MenuItem } from "./ctxmenu.ts";
+import { closeMenu, contextMenu, type MenuItem } from "./ctxmenu.ts";
 
 /** Two versions: `from` a commit (a version), `to` another, null the working tree (the editor's text). */
 export interface Pair {
@@ -1563,9 +1563,9 @@ export class Changes {
       this.delPinned = false;
       this.delOver(null);
     }, { capture: true });
-    // (Esc: the card first, the topmost thing open; a menu over it is its own)
+    // (Esc: the card first, the topmost thing open)
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !this.delCard || this.delCard.hidden || menuOpen()) return;
+      if (e.key !== "Escape" || !this.delCard || this.delCard.hidden) return;
       this.delPinned = false;
       this.delOver(null);
       e.stopPropagation();
@@ -1643,9 +1643,6 @@ export class Changes {
 
   /** The card for change `at`'s deleted text, near the pointer: drawn once a change. */
   private delShow(at: DiffMark, px: number, py: number): void {
-    // (a change's menu open: the menu is what the pointer asked for; the card,
-    // shown by the dwell after it, took the menu's Esc)
-    if (menuOpen()) return;
     const it = this.items[at.n - 1];
     if (!it?.was) return;
     if (!this.delCard) {
