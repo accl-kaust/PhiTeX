@@ -6593,8 +6593,15 @@ impl<'c, 'a> Run<'c, 'a> {
         let tag_f = tag("f");
         let mut out: Vec<Vec<ValueId>> = Vec::new();
         let tag_t = tag("t");
-        // (a document's leftovers stay a document's, [`Run::run_all`])
-        let kind = if self.doc { 2 } else { 0 };
+        // (a document's leftovers stay a document's, [`Run::run_all`],
+        // and the document's text's: what follows the last of them is
+        // what follows this run, the end of the file where nothing does.
+        // As kind 2 alone, a leftover that read past the text's end (the
+        // rest of the line after `\end{quote}`, `Some \textbf{bold
+        // words` with no `}`) starved silently: no "File ended while
+        // scanning use of \textbf", no "Emergency stop", its paragraph
+        // dropped and the job ended as if it had read `\end{document}`)
+        let kind = if self.doc { 2 | i64::from(self.top) } else { 0 };
         let mut run: Vec<ValueId> = Vec::new();
         // (the token levels' node reads `\inputlineno` of the file they
         // are read in: its line, or its name for a document's piece)

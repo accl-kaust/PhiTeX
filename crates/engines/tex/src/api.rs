@@ -5676,6 +5676,48 @@ fn culprit(
     None
 }
 
+/// Whether `message` is one TeX gives at the end of the text, with no
+/// line read: §338's runaway ("File ended while scanning use of
+/// \textbf") or §360's abort.
+fn at_text_end(message: &str) -> bool {
+    message.starts_with("File ended while scanning")
+        || message == "*** (job aborted, no legal \\end found)"
+}
+
+/// Just after the first brace `text[from..]` leaves open, as its source
+/// reads (`\{` and `\}` no braces, a comment read past to its line's
+/// end): where a runaway argument or definition began.
+fn runaway_open(text: &str, from: usize) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut open: Vec<usize> = Vec::new();
+    let mut i = from.min(b.len());
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                i += 1;
+                if b.get(i).is_some_and(u8::is_ascii_alphabetic) {
+                    while b.get(i).is_some_and(u8::is_ascii_alphabetic) {
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+            b'%' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'{' => open.push(i),
+            b'}' => {
+                open.pop();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    open.first().map(|&k| k + 1)
+}
+
 /// Whether `message` is an error of a font not found: fontspec's (`The
 /// font "X" cannot be found`), TeX's (`Font \\x="X" not loadable:
 /// Metric (TFM) file or installed font not found`), NFSS's (`Font
@@ -9984,6 +10026,20 @@ impl Build {
                     })
                     .map_or(from, |k| column_in(doc, from + k, &units, xe));
                 let at = if self.nodes.is_empty() { 0 } else { at };
+                // (the text's end met with an argument or a definition
+                // open, §338, and §360's abort after it: TeX read no line
+                // there, `<*> paper.tex`. Placed after the brace the
+                // runaway opened, the first one the text from the node's
+                // start leaves open, where the culprit is the command
+                // before it (`\textbf{bold words`, `\section{Results`);
+                // else at the text's end. At the node's start, it named
+                // the paragraph the run began at, lines above, an
+                // abstract's for a `\textbf` left open in the last one)
+                let at = if seg.is_empty() && at_text_end(&message) {
+                    runaway_open(doc, from).unwrap_or(doc.len())
+                } else {
+                    at
+                };
                 (docname.clone(), doc, at)
             };
             // the line around `at`, a byte of the text (the document's,
@@ -10062,7 +10118,11 @@ impl Build {
                 before
                     .rfind('\\')
                     .map(|k| (ls + k, ls + k + cs_len(&before[k..])))
-            } else if kind == 1 || kind == 3 {
+            } else if (kind == 1 || kind == 3) && !message.starts_with("*** (job aborted") {
+                // (§360's abort names `\end` as what it found none of: no
+                // culprit, the place the text's end has, [`at_text_end`];
+                // as a culprit, the last `\end{align}` read before the
+                // runaway, a line above the runaway's error)
                 // (from the node's start, and at least from the line
                 // with text before this one: a command that looked ahead
                 // for an optional argument, `\newfontfamily\x{F}`, fails

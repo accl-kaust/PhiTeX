@@ -589,6 +589,70 @@ fn the_text_ending_inside_an_argument_or_a_definition() {
     }
 }
 
+/// The text ending inside an argument in a node's leftover: a run that
+/// closes a group a node before it opened (`\endgroup`, LaTeX's
+/// `\end{quote}`) ends there, and the rest of its line runs as its
+/// children. Those are the document's text too, so a read past the last
+/// of them is the file's end: §338's "File ended while scanning use of
+/// \a", then §360's abort, the job's exit status an error's, no page
+/// shipped. As children of no text, they starved silently: no error, the
+/// paragraph dropped, and the job ended as if it had read `\bye` (the
+/// VS Code tester's `\textbf{bold words` after an abstract, a missing
+/// `}` in `\section{Results`). Oracle: pdflatex on the same shapes under
+/// LaTeX (TeX Live 2026, mc 90910): the two errors, no PDF file.
+#[test]
+fn the_text_ending_inside_an_argument_after_a_closed_group() {
+    for threads in [1, 4] {
+        for doc in [
+            "\\long\\def\\a#1{}\\def\\e{\\endgroup\\relax}\n\\begingroup\nx\n\ny\\e\nText \\a{one\ntwo.\n\\end\n",
+            "\\long\\def\\a#1{}\\def\\e{\\endgroup\\relax}\n\\begingroup\nx\n\ny\\e Text \\a{one\n\ntwo.\n\\end\n",
+            "\\long\\def\\a#1{}\\def\\e{\\egroup\\relax}\n\\bgroup\nx\n\n\\e\nText \\a{one\ntwo.\n\\end\n",
+            // (an `\end` read before the runaway, in a definition)
+            "\\long\\def\\a#1{}\\def\\e{\\egroup\\relax}\n\\bgroup\nx\n\n\\e\\def\\y{\\end}\nText \\a{one\ntwo.\n\\end\n",
+        ] {
+            let b = build(doc, |o| Options {
+                threads: Some(threads),
+                ..o
+            });
+            let ds = b.diagnostics();
+            show(&ds);
+            let errs: Vec<&str> = ds
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .map(|d| d.message.as_str())
+                .collect();
+            let at = errs
+                .iter()
+                .position(|m| m.trim_end_matches('.') == "File ended while scanning use of \\a");
+            let abort = errs.iter().position(|m| m.contains("no legal \\end found"));
+            assert!(
+                at.is_some_and(|i| abort.is_some_and(|a| i < a)),
+                "-j{threads} {doc:?}: the runaway, then the abort: {errs:?}"
+            );
+            // (placed where the runaway began: after `\a{`, line 5 or 6)
+            let d = ds
+                .iter()
+                .find(|d| d.message.starts_with("File ended"))
+                .expect("the runaway");
+            let line = doc
+                .lines()
+                .position(|l| l.contains("\\a{"))
+                .expect("its line")
+                + 1;
+            assert_eq!(d.line, line, "-j{threads} {doc:?}: {d:?}");
+            // (and the abort there too, after it: as a culprit, its
+            // `\end` was the last one read before, a line above)
+            let a = ds
+                .iter()
+                .find(|d| d.message.contains("no legal"))
+                .expect("the abort");
+            assert_eq!(a.line, line, "-j{threads} {doc:?}: {a:?}");
+            assert!(a.range.0 >= d.range.0, "-j{threads} {doc:?}: {a:?}");
+            assert!(b.pages().is_empty(), "-j{threads} {doc:?}: no page");
+        }
+    }
+}
+
 /// An error's context and help in the log as pdfTeX's `error` writes them
 /// in a run that cannot ask (§90): the list so far of a runaway (§306),
 /// the message, the context's two lines a level (§311-§318: the line of
