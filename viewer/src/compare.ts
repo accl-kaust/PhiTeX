@@ -65,7 +65,8 @@ export function diffDiagnostics(ds: readonly Diagnostic[], d: DiffOut, file: str
   return ds.map((x) => {
     const p = x.problem;
     if (x.file !== file || !x.line) return x;
-    const from = p?.range ? p.range[0] : at(x.line, p?.col ?? 1);
+    // (its bytes where the build gave a range of them; an empty one, [0, 0], is none)
+    const from = p?.range && p.range[1] > p.range[0] ? p.range[0] : at(x.line, p?.col ?? 1);
     const a = diffSource(d, from);
     const text = a ? texts(a.file) : undefined;
     if (!a || text === undefined) {

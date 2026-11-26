@@ -41,6 +41,9 @@ test("a problem of the marked-up text is at the user's line, its excerpt that li
   const [y] = diffDiagnostics([at(line, 5)], d, "main.tex", texts);
   assert.equal(y.line, 3);
   assert.equal(y.problem?.col, 5);
+  // (an empty range, [0, 0], is no place: its line and column are)
+  const [z] = diffDiagnostics([at(line, 5, [0, 0])], d, "main.tex", texts);
+  assert.equal(z.line, 3);
 });
 
 test("a problem in the markup's own definitions has no line of the user's; another file's is as it was", () => {
