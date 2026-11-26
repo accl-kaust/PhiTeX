@@ -157,7 +157,42 @@ placer has settled (no change), a hold of a placement while its placer
 is to run again (no change), a minimum of commands inside the group
 (amsldoc -j8 runs back to dev's at 400, but the deck's cut moves between
 rounds: its clean build at -j8 3.7 s to 6.1-6.5 s), and
-`Ctx::settled_here` at the close (the deck's clean build at -j1 hung).
+`Ctx::settled_here` at the close (see "A cut of the confirmed state").
+
+## A cut of the confirmed state (tried, not taken)
+
+The extra cuts at -j8 come from runs on a guessed state, which -j1 never
+makes. The rule tried: a group close is a cut only where the run's state
+is confirmed.
+
+- Taken at the close, `Ctx::settled_here` (every node before settled,
+  the page frontier past, the run's reads standing). Its first trial did
+  not finish in 30 minutes, near idle, in a binary carrying two other
+  experiments; alone, with the observe build and the release build, at
+  -j1 and -j8, clean and insert, it finished every time (6 builds), and
+  the no-finish did not come back. On the numbers it fails: at -j8 almost
+  no frame of the deck runs on a settled state, so the clean build ends
+  with few group cuts, its structure is not -j1's, and the insert loses
+  the gain (deck2 -j8 clean 6.27 s against 3.67 s, insert 8.6 s against
+  1.55 s). amsldoc -j8 runs 11.3 k against 13.8 k (dev 9.1 k), -j16 12.8 k
+  against 15.8 k (dev 10.0 k): not dev's either.
+- Realised later, once the run stood ("a re-split"): a run that stands
+  is confirmed only after the fact, at a quiet point. A cut then needs the
+  continuation at the close, and a record split at it; the engine has
+  neither (a run's record is one, and the continuation is the state at
+  the close), so the split is a run again: the piece up to the close
+  and, as a new node, the rest. At -j8 nearly every piece's first run is
+  on a guess, so that is about one more run of all text after each
+  piece's first group close: more than the +17-19 % it would save.
+- A cut that appears in a later round kept cheap (the rest keeping its
+  pictures and finishers, so a rule on work done could move a cut
+  between rounds): a node's parent is fixed at its making, and a
+  placement's commit asks its parent (`ask_placer`), so the rest cannot
+  take over the piece's children without a placement's parent becoming
+  mutable across the engine. Not done.
+
+So the -j8/-j16 clean-build cost of group cuts stands (amsldoc +17 % and
++19 %); -j1, the deck's gain and every PDF are as above.
 
 Clean builds at many threads, the merged binary, six at once on 16 cores:
 deck2 360 (180 at -j8, 180 at -j16), the lab3 deck 312 (156 and 156), no
