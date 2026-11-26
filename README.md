@@ -39,7 +39,7 @@
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/edit-dark.png"><img src="assets/readme/edit.png" alt="Edits in milliseconds" width="100%"></picture><br>
 <b>Edits in milliseconds</b><br>
-Change a word and only what it touches is rebuilt. A 60-page paper in ⟨~5 ms⟩; a thesis as quick as a letter. <!-- TODO(number): LaTeX word edit, 60 pp and 400 pp, save → page · Phi, mc gate-fast edits (today, an 18-page paper at -j16: pdfLaTeX word edit 46–80 ms, mc 76801; XeLaTeX letter edit 42–50 ms, mc 76836) -->
+Change a word and only what it touches is rebuilt. On a laptop, at one thread: an edit of a 2-page paper reaches the page in about 90 ms, a beamer talk in 120 to 140 ms. <!-- TODO(number): LaTeX word edit, 60 pp and 400 pp, save → page · Phi, mc gate-fast edits (today, an 18-page paper at -j16: pdfLaTeX word edit 46–80 ms, mc 76801; XeLaTeX letter edit 42–50 ms, mc 76836) -->
 </td>
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/exact-dark.png"><img src="assets/readme/exact.png" alt="Exactly as {pdf,Xe}LaTeX" width="100%"></picture><br>
@@ -101,7 +101,8 @@ If `~/.local/bin` is not on your `PATH`, `export PATH="$HOME/.local/bin:$PATH"`
 makes `phitex` work in this terminal at once; add that line to
 `~/.profile` for new ones.
 
-`phitex watch` builds your document, opens it live in your browser, and
+`phitex watch` builds your document, opens it live in your browser (over
+SSH, or with `--no-open`, it prints the page's address instead), and
 rebuilds on every save. Double-click the page to jump to the source.
 
 <p align="center">
@@ -135,8 +136,9 @@ phitex upgrade                            # the latest release, after a [Y/n] (-
 |---|---|---|
 | **Overleaf** | A browser extension adds a **PDF \| ⚡ Instant** switch to Overleaf's toolbar. The page follows your typing. It compiles inside your browser: your document is never sent anywhere. | [Chrome](https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl) · [Firefox](https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/) · [Edge](https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd) |
 | **VS Code** | A live page beside your editor, errors in the Problems panel, click-to-source both ways. | [Marketplace](https://marketplace.visualstudio.com/items?itemName=accl-kaust.phitex) · [Open VSX](https://open-vsx.org/extension/accl-kaust/phitex) |
-| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [apps/editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/nvim/phitex.lua) |
-| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [apps/editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/emacs/phitex.el) |
+| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [apps/editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/tree/main/apps/editors/nvim) |
+| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [apps/editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/tree/main/apps/editors/emacs) |
+| **Vim** | [vim-lsp](https://github.com/prabirshrestha/vim-lsp) with `phitex watch --lsp` as a server: the page's address comes as a message when it starts; `phitex session list` shows it again, `phitex doctor` checks the setup. | [setup](https://phitex.org/install.html#lsp) |
 | **Any LSP editor** | `phitex watch --lsp` is a language server: your buffers are built as you type, problems published, your cursor shown on the page. | built in |
 | **Any browser** | `phitex watch` serves the live page at `http://127.0.0.1`. | built in |
 | **latexmk, scripts, CI** | Under the name `pdflatex` (or `--compat=pdflatex`), PhiTeX takes pdflatex's command line and makes one run, as pdflatex would. | built in |
@@ -187,7 +189,7 @@ byte with pdfTeX 1.40.29 at every thread count.
 
 ## Status
 
-PhiTeX is in **alpha**: expect updates often. What changed, and what does
+PhiTeX 1.0 is released, with updates often. What changed, and what does
 not work yet, is in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Build from source

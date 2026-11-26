@@ -591,3 +591,58 @@ fn lsp_viewer_address_and_columns() {
         }
     }
 }
+
+/// `phitex session wait` after a file is put back in place (`cp
+/// orig.tex main.tex`) to a text an earlier build read: it waits for the
+/// build that reads it, never answers with that earlier build; `status`
+/// then says the new build. Twenty times over, two texts in turn.
+#[test]
+fn session_wait_after_a_copy_in_place() {
+    let dir = scratch("wait-cp");
+    let a = TINY.replace("Hi", "Alpha");
+    let b = TINY.replace("Hi", "Beta");
+    std::fs::write(dir.join("a.tex"), &a).expect("text a");
+    std::fs::write(dir.join("b.tex"), &b).expect("text b");
+    std::fs::write(dir.join("doc.tex"), &a).expect("the document");
+    let session = |args: &[&str]| {
+        let mut all = vec!["session"];
+        all.extend_from_slice(args);
+        run(&dir, &all)
+    };
+    let out = session(&[
+        "start",
+        "doc.tex",
+        "--timeout",
+        "10m",
+        "--",
+        "--no-view",
+        "--ini",
+        "--etex",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let json = |args: &[&str]| -> Value {
+        let mut all = args.to_vec();
+        all.push("--json");
+        let out = session(&all);
+        serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|_| panic!("{args:?}: {} {}", text(&out.stdout), text(&out.stderr)))
+    };
+    let mut last = json(&["wait", "--timeout", "120s"])["build"]
+        .as_u64()
+        .expect("a build");
+    for k in 0..20 {
+        let from = if k % 2 == 0 { "b.tex" } else { "a.tex" };
+        // (as cp: the file truncated and written in place)
+        std::fs::copy(dir.join(from), dir.join("doc.tex")).expect("cp");
+        let w = json(&["wait", "--disk", "--timeout", "120s"]);
+        let s = json(&["status"]);
+        let n = w["build"].as_u64().unwrap_or_else(|| panic!("{k}: {w}"));
+        assert!(
+            n > last,
+            "{k}: wait answered with build {n}, not one after {last}: {w}"
+        );
+        assert_eq!(s["build"], w["build"], "{k}: status {s} after wait {w}");
+        last = n;
+    }
+    let _ = session(&["stop"]);
+}

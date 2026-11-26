@@ -1292,12 +1292,27 @@ impl Hub {
                 return Err(ended());
             }
             let latest = st.builds.back().map(|b| b.n);
-            let found = st
-                .builds
-                .iter()
-                .rev()
-                .find(|b| first || matches(b))
-                .cloned();
+            // (an older build answers only while every build after it read
+            // the same, or an editor's text of a file it holds: a file put
+            // back to an earlier text (`cp orig.tex main.tex`) after a
+            // build of other text waits for the build that reads it, never
+            // the earlier build that read that text once)
+            let found = {
+                let builds: Vec<&BuildRec> = st.builds.iter().collect();
+                let current = |k: usize| {
+                    builds[k + 1..].iter().all(|later| {
+                        want.iter().all(|(n, w)| {
+                            let r = later.read.get(n).copied().flatten();
+                            r == builds[k].read.get(n).copied().flatten()
+                                || (w.buffer.is_some() && r == w.buffer)
+                        })
+                    })
+                };
+                (0..builds.len())
+                    .rev()
+                    .find(|&k| first || (matches(builds[k]) && current(k)))
+                    .map(|k| builds[k].clone())
+            };
             if let Some(b) = found {
                 // (a build superseded: what it left pending is never made)
                 let last = Some(b.n) == latest;
