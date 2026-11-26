@@ -551,6 +551,11 @@ struct State {
     /// found once at the start: the terminal's tree lists them, so Enter
     /// starts one with no browser first.
     found: Vec<String>,
+    /// The document whose session holds the build's turn, as the sessions
+    /// said it, and the turns said taken by others meanwhile, told once it
+    /// lets go ([`told`]).
+    turn: Option<String>,
+    turns_waiting: Vec<(String, Value)>,
 }
 
 /// What wakes the watch's loop.
@@ -938,6 +943,31 @@ fn told(sh: &Shared, rel: &str, epoch: u64, v: &Value) {
                     }
                 }
                 "queued" => d.queued = e["on"] == true,
+                // (a turn taken while another session's is still said held:
+                // that one let go first (the lock is one), its "off" on
+                // another pipe not read yet. Told after it, so that the
+                // turns the watch says are in the order they were held)
+                "turn" => {
+                    let mut e = e.clone();
+                    if let Some(o) = e.as_object_mut() {
+                        o.insert("doc".into(), json!(rel));
+                    }
+                    if e["on"] == true {
+                        if st.turn.as_deref().is_some_and(|h| h != rel) {
+                            st.turns_waiting.push((rel.to_owned(), e));
+                            return;
+                        }
+                        st.turn = Some(rel.to_owned());
+                        ui.event(&e);
+                    } else {
+                        if st.turn.as_deref() == Some(rel) {
+                            st.turn = None;
+                        }
+                        ui.event(&e);
+                        next_turn(&sh.ui, &mut st);
+                    }
+                    return;
+                }
                 "build" => {
                     d.build = if e["ok"] == true { "ok" } else { "errors" };
                     d.errors = e["errors"].as_array().map_or(0, Vec::len);
@@ -992,9 +1022,26 @@ fn told(sh: &Shared, rel: &str, epoch: u64, v: &Value) {
     }
 }
 
+/// The turn let go: the first one taken meanwhile told, now held.
+fn next_turn(ui: &Ui, st: &mut State) {
+    if st.turn.is_none() && !st.turns_waiting.is_empty() {
+        let (rel, e) = st.turns_waiting.remove(0);
+        st.turn = Some(rel);
+        ui.event(&e);
+    }
+}
+
 /// Session `epoch` of `rel` ended (`code`: its exit status).
 fn ended(sh: &Shared, rel: &str, epoch: u64, code: Option<i32>) {
     let mut st = lock(&sh.st);
+    // (its turn let go with it (its lock is the process's), told or not)
+    st.turns_waiting.retain(|(r, _)| r != rel);
+    if st.turn.as_deref() == Some(rel) {
+        st.turn = None;
+        sh.ui
+            .event(&json!({"event": "turn", "on": false, "doc": rel}));
+        next_turn(&sh.ui, &mut st);
+    }
     let Some(d) = st.docs.get_mut(rel) else {
         return;
     };

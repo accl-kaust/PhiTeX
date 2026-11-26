@@ -2,8 +2,9 @@
 //! 2026-11-25): the help's order, a chapter built for its document, the
 //! main file picked, Ctrl-C and q in a watch, the viewer opened, a folder
 //! watch's tree and its one "nothing written" line, `phitex doctor`, and
-//! an LSP client with no `PhiTeX` plugin. TeX's files come from Shelf (the
-//! test machines need no TeX Live).
+//! an LSP client with no `PhiTeX` plugin. TeX's files are TeX Live's where
+//! its `kpsewhich` is on the path (the gate's machines, which reach no
+//! network), else Shelf's (a machine with no TeX Live).
 
 #![allow(clippy::too_many_lines)]
 
@@ -18,7 +19,15 @@ fn bin() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_phitex"))
 }
 
-/// A fresh directory for a test's run, its settings saying `files = "shelf"`.
+/// Whether TeX Live is here: its `kpsewhich` on the path.
+fn texlive() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("kpsewhich").is_file()))
+}
+
+/// A fresh directory for a test's run, its settings saying `files =
+/// "shelf"` where there is no TeX Live. (Shelf's always: the gate, with no
+/// network, failed every test here at Shelf's release index.)
 fn scratch(name: &str) -> PathBuf {
     let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("ux-term")
@@ -27,7 +36,7 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::create_dir_all(d.join(".home/config/phitex")).expect("a scratch directory");
     std::fs::write(
         d.join(".home/config/phitex/phitex.toml"),
-        "files = \"shelf\"\n",
+        if texlive() { "" } else { "files = \"shelf\"\n" },
     )
     .expect("the settings");
     d
