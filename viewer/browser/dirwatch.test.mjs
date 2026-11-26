@@ -269,3 +269,33 @@ test("the Running strip: what runs, its state and tabs, Stop and Stop all; a dot
   w.key("quit");
   await w.exited;
 });
+
+test("folder mode: the opening's sheet beside the Files column, centred in the pages' box, never over the column (the user: it covered the Files panel and its A–Z button)", async () => {
+  const dir = project({ "paper/main.tex": doc("Paper", "\\section{One}\nThe paper's words.") });
+  const w = new Watch(dir, { file: ".", home });
+  const index = await browser.tab("about:blank");
+  await index.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await index.go(await w.url());
+  await index.until(`$$(".fm-row").length >= 1`, "the folder's rows");
+  await index.click(`.fm-row[data-path="paper"]`);
+  await index.until(`$$(".fm-row").some((r) => r.dataset.path === "paper/main.tex")`, "paper's files");
+  await index.click(`.fm-row[data-path="paper/main.tex"]`);
+  const t = index;
+  await t.until(`/\\/d\\/[0-9a-f]{12}\\/$/.test(location.pathname)`, "the paper's address");
+  await t.until(`+$("#pgn")?.textContent > 0`, "the paper's first page", 240000);
+  await t.until(`!!$(".fcol") && $(".fcol").offsetWidth > 100`, "the Files column open", 10000);
+  // (the opening kept up: a clean rebuild asked with the watch gone)
+  await w.stop();
+  await t.until(`$("#stage").classList.contains("offline")`, "the watch lost", 30000);
+  await t.q(`($("#b-rec").click(), $("#r-clean").click())`);
+  await t.until(`!$("#opening").hidden`, "the opening up", 5000);
+  const q = `(() => {
+    const st = $("#stage"), s = st.getBoundingClientRect(), o = $("#opening").getBoundingClientRect(), c = $(".fcol").getBoundingClientRect();
+    const v = { l: s.left + st.clientLeft, r: s.left + st.clientLeft + st.clientWidth, t: s.top, b: s.top + st.clientHeight };
+    return { clear: o.left >= c.right - 1, inside: o.left >= v.l - 1 && o.right <= v.r + 1 && o.top >= v.t - 1 && o.bottom <= v.b + 1, centred: Math.abs((o.left + o.right) / 2 - (v.l + v.r) / 2) <= 1 };
+  })()`;
+  const want = JSON.stringify({ clear: true, inside: true, centred: true });
+  for (const end = Date.now() + 3000; Date.now() < end && JSON.stringify(await t.q(q)) !== want; ) await sleep(50);
+  assert.deepEqual(await t.q(q), JSON.parse(want), "the sheet clear of the Files column, inside the pages' box, centred");
+  await shot(t, "folder-opening-files-column");
+});

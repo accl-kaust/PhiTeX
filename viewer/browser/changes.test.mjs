@@ -106,7 +106,9 @@ const from = `($("#chg-from code")?.textContent.split(" · ")[0])`;
 const to = `($("#chg-to code")?.textContent.split(" · ")[0] ?? null)`;
 const counted = `/^\\d+ changes?$/.test($(".chg-pop .foot .count")?.textContent ?? "")`;
 /** Changes' and Blame's requests since the page loaded (the history, a diff, its pages, blame). */
-const asked = `globalThis.__ops.filter((o) => /^(blame|diff_)/.test(o))`;
+// (what opening asks of the watch: nothing worked out; the history's first page only, read at once so a folder with
+// no git says so up front (diff_log), is no work asked)
+const asked = `globalThis.__ops.filter((o) => /^(blame|diff_)/.test(o) && o !== "diff_log")`;
 const dark = (t, on) => t.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: on ? "dark" : "light" }] });
 
 test("Changes, Diff: the tip once; a hover does nothing; a click opens it, starting nothing; a press outside closes it, a drag from inside does not; the picker's rules; the look at the top and in Settings; closed, the diff stays on the pages till Stop comparing; Esc and ✕", async () => {
@@ -131,8 +133,8 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   assert.deepEqual(await t.q(asked), [], "opened: nothing asked of the watch");
   assert.ok(await t.q(`[...$(".chg-pop").querySelectorAll("button")].filter((x) => x.offsetParent).every((x) => x.title || x.getAttribute("aria-label"))`), "every control says what it does");
   await shot("empty-light");
-  // (the look at the top of the list, open: no fold anywhere)
-  assert.ok(await t.q(`(() => { const l = $("#chg-look"), b = $(".chg-pop .body"); return !!l && l.offsetHeight > 0 && b.firstElementChild === l && !$(".chg-pop .lookbox, .chg-pop .lookhead, .chg-pop details"); })()`), "Diff's look at the top, open, no fold");
+  // (what is compared first: the look folded away behind ⚙ till asked for)
+  assert.ok(await t.q(`(() => { const l = $("#chg-look"); return !!l && l.offsetHeight === 0 && $("#chg-gear").getAttribute("aria-expanded") === "false"; })()`), "Diff's look folded behind ⚙");
   // (the pointer over the pages: still open; a drag begun inside it and let go on the pages: still open)
   await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 60, y: 400 });
   await sleep(300);
@@ -166,9 +168,10 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await shot("picker-light");
   const ids = await t.q(`$$(".phx-commits .row[data-i]").map((r) => r.dataset.id)`);
   const at = (i) => `.phx-commits .row[data-i="${i}"]`;
-  // (one end, the pointer moved: the rows between aimed; the other end: the range, closed)
+  // (one click: that version against now, compared at once, as the list shows it; the pointer moved:
+  // the rows between aimed; the other end: the range, closed)
   await click(at(3));
-  await t.until(`/^Now click the other end/.test($("#chg-hint").textContent)`, "one end clicked: the hint asks for the other", 5000);
+  await t.until(`/^Compared with now/.test($("#chg-hint").textContent) && ${from} === ${JSON.stringify(ids[3].slice(0, 7))}`, "one click: compared with now, From that version", 5000);
   const p1 = await t.point(at(1));
   await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p1.x, y: p1.y });
   await t.until(`$$(".phx-commits .row.aim").map((r) => r.dataset.i).join() === "1,2,3"`, "the aim from the first end to the pointer", 5000);
@@ -182,7 +185,7 @@ test("Changes, Diff: the tip once; a hover does nothing; a click opens it, start
   await click("#chg-from");
   await click(at(2));
   await click(at(2));
-  await t.until(`/^Click one end/.test($("#chg-hint").textContent)`, "the same again cancels", 5000);
+  await t.until(`/^Click a commit/.test($("#chg-hint").textContent)`, "the same again cancels", 5000);
   await click(at(2));
   await t.key("Escape", "Escape", 27);
   assert.equal(await t.q(view), "diff-pick");
@@ -304,8 +307,8 @@ test("Changes, Blame: asked by its half; every line coloured (a highlight, by de
   assert.match(await t.q(`$(".chg-pop .sec h3 span").textContent`), /· [\d,]+ words$/, "counted in the sources' words");
   assert.ok(await t.q(`$$('.slot svg.bl-paint rect[fill^="url(#blh-"]').length >= 1`), "the sentence not committed hatched");
   assert.ok(await t.q(`${paint}.some((r) => r.getBoundingClientRect().height > 30)`), "the figure's picture: a highlight of its own (its image's last commit)");
-  // (the look at the top, open, no fold: Colour by, Style, Not committed; no pinned footer)
-  assert.ok(await t.q(`(() => { const l = $("#chg-look"); return $(".chg-pop .body").firstElementChild === l && ["color", "style", "wip"].every((k) => l.querySelector('[data-look="' + k + '"]')) && !$(".chg-pop .lookbox, .chg-pop .lookhead, .chg-pop .skips, .chg-pop details, .chg-pop > .foot"); })()`), "Blame's look at the top, open; no fold, no footer");
+  // (the look at the top, folded behind ⚙: Colour by, Style, Not committed; no pinned footer)
+  assert.ok(await t.q(`(() => { const l = $("#chg-look"); return $(".chg-pop .body").firstElementChild === l && l.classList.contains("folded") && ["color", "style", "wip"].every((k) => l.querySelector('[data-look="' + k + '"]')) && !$(".chg-pop .lookbox, .chg-pop .lookhead, .chg-pop .skips, .chg-pop details, .chg-pop > .foot"); })()`), "Blame's look at the top, open; no fold, no footer");
   await shot("blame-author-light");
   await dark(t, true);
   await shot("blame-author-dark");
@@ -458,8 +461,18 @@ test("Changes, Blame: asked by its half; every line coloured (a highlight, by de
   await t.until(`!$("#settings").hidden && !!$('#settings [data-id="bl-reset"] button')`, "Settings", 5000);
   await t.click(`#settings [data-id="bl-reset"] button`);
   await t.key("Escape", "Escape", 27);
+  // (closed: Blame's colours stay on the pages, as a diff does, till Turn off Blame)
   await click("#chg-x");
-  assert.equal(await t.q(`$$(".slot .bl").length`), 0, "closed: nothing over the pages");
+  await sleep(300);
+  assert.ok((await t.q(`$$(".slot .bl").length`)) > 0, "closed: Blame still on the pages");
+  await click("#b-changes");
+  await t.until(`!!$("#chg-blame-off")`, "Turn off Blame offered", 5000);
+  await click("#chg-blame-off");
+  await t.until(`!!$("#chg-blame-go")`, "turned off: Blame offered again", 5000);
+  await click("#chg-x");
+  await t.until(`!$$(".slot .bl").length`, "turned off: nothing over the pages", 5000).catch(async (e) => {
+    throw new Error(`${e.message}: ${await t.q(`JSON.stringify($$(".slot .bl").map((b) => b.tagName + "." + (b.className.baseVal ?? b.className)).slice(0, 5))`)}`);
+  });
   assert.deepEqual(t.errors, []);
   await w.stop();
 });
