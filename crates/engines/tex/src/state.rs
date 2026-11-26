@@ -2499,18 +2499,6 @@ impl State {
             .collect()
     }
 
-    /// The locations defined after stamp `since` whose definition is in
-    /// force (a local one in a group opened after `gids` has ended,
-    /// §282): [`State::defined_since_in_order`]'s, no value made.
-    pub(crate) fn defined_locs_since(&self, since: u64, gids: u32) -> Vec<Loc> {
-        self.metas
-            .iter()
-            .filter(|m| m.ldef_stamp > since)
-            .filter(|m| !(m.ldef_local && m.ldef_gid.is_some_and(|g| g > gids)))
-            .map(|m| m.loc)
-            .collect()
-    }
-
     /// The definitions made after stamp `since`, at any level (a line
     /// read back is interpreted wherever the run is): the location, the
     /// value in force and the locality of the latest one. A local one

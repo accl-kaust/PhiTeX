@@ -608,15 +608,6 @@ impl Run<'_, '_> {
         self.step_reads = was;
     }
 
-    /// [`Run::get_token_stored`] for the token after `\noexpand`: a
-    /// derived name's symbol kept, as it is not expanded and its digits
-    /// are not needed (docs/spec-symbol-reads.md B3).
-    pub(crate) fn get_token_stored_d(&mut self) {
-        self.d_ok = true;
-        self.get_token_stored();
-        self.d_ok = false;
-    }
-
     /// Whether `get_x_token` stops at the current token, a symbol, for
     /// `\\if`'s operand ([`Run::size_stop`]).
     #[cold]
@@ -832,12 +823,6 @@ impl Run<'_, '_> {
                     // the file, §362)
                     if self.input.file(top).lazy() {
                         self.load_written(top)?;
-                    }
-                    // (a mixed read-back's skeleton: each line begins
-                    // where the one before left the run balanced,
-                    // `Run::mixed_line`)
-                    if self.input.file(top).mixed {
-                        self.mixed_line();
                     }
                     let f = self.input.file_mut(top);
                     if f.has_lines() {
