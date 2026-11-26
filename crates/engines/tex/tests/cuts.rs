@@ -354,3 +354,24 @@ fn group_cut_carries_the_open_groups_the_conditional_and_the_aftergroup_tokens()
         }
     }
 }
+
+/// A `\begingroup` scope a macro opens and closes is no cut, nor is a
+/// brace group opened at a line's brace: only a brace group or a box
+/// opened in a macro's expansion still read at its close
+/// (docs/spec-group-cuts.md).
+#[test]
+fn group_cut_not_at_a_semi_simple_group_or_a_line_s_brace() {
+    let semi = slide_doc(5, 7, "\\count6=9 ")
+        .replace("{\\count1=0 \\loop", "\\begingroup\\count1=0 \\loop");
+    let semi = semi.replace(
+        "\\aftergroup\\afterthing}%",
+        "\\aftergroup\\afterthing\\endgroup%",
+    );
+    let b = build("gcut-semi", &semi, 1);
+    assert_eq!(b.output().0, cold("gcut-semi", &semi));
+    assert_eq!(b.stats.group_cuts, 0, "a \\begingroup scope is no cut");
+    let line = doc(12, 6, "{\\count1=5 \\count2=6 }");
+    let b = build("gcut-line", &line, 1);
+    assert_eq!(b.output().0, cold("gcut-line", &line));
+    assert_eq!(b.stats.group_cuts, 0, "a line's brace group is no cut");
+}

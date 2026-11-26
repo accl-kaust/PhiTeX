@@ -35,13 +35,13 @@
 //! only a split of sequential work: the output is the same wherever the
 //! cuts are, and none at all (`cut_min` = `u64::MAX`).
 //!
-//! Group closes ([`Run::group_cut`], docs/spec-group-cuts.md): a group
-//! of the run's own that closes is a cut too, its input going on (a
-//! macro's expansion, its text), where only groups of its own owning no
-//! list stay open and the state is nameable as above; at every such
-//! close, whatever the work before it (`cut_min` never: none). The closed group's local bindings are
-//! gone; the continuation carries the input's levels (the `\aftergroup`
-//! tokens the close put back among them), the groups still open and the
+//! Group closes ([`Run::group_cut`], docs/spec-group-cuts.md): a brace
+//! group or a box of the run's own opened in a macro's expansion is a
+//! cut where it closes while that expansion is still being read, only
+//! groups of its own owning no list stay open, and the state is
+//! nameable as above. The closed group's local bindings are gone; the
+//! continuation carries the input's levels (the `\aftergroup` tokens
+//! the close put back among them), the groups still open and the
 //! conditionals. A read inside the closed group that moves (a loop over
 //! a list read back from the last run, a box set to measure a footline)
 //! runs the piece up to the close again, and the rest only if what it
@@ -111,20 +111,25 @@ impl Run<'_, '_> {
         true
     }
 
-    /// At the end of a command that closed a group of the run's own
-    /// ([`Run::pop_level`]), its input going on (a macro's expansion, its
-    /// text): it ends here, its rest a continuation (true), where the
-    /// state is nameable (see the module's "Group closes").
+    /// At the end of a command that closed a brace group or a box of the
+    /// run's own opened in a macro's expansion that is still being read
+    /// ([`Run::pop_level`], [`cuts_at_close`]): it ends here, its rest a
+    /// continuation (true), where the state is nameable (see the module's
+    /// "Group closes").
     ///
-    /// No bar of commands: where a group closes is the text's structure,
-    /// the same whatever the run read before it. A bar made the cut move
-    /// with the work before it, a loop over a list read back from the
-    /// last run among it: the pieces after it were made anew between a
-    /// clean build's rounds and after an edit (the 112-page beamer deck's
-    /// clean build 1.8 times as long with a bar of 200 commands in the
-    /// closed group or 1000 since the run's start; none, as long as
-    /// before). The hot path: every group close sets a flag; the run
-    /// looks at it once per command.
+    /// No bar of commands: where such a group closes is the macro's text,
+    /// the same whatever the run read before it. A bar moved the cut with
+    /// the work before it (the `.nav` loop is empty in a clean build's
+    /// first round and full in its second), and the pieces after it were
+    /// made anew between the rounds: the 112-page beamer deck's clean
+    /// build took 1.5 to 1.8 times as long with a bar. Groups opened at a
+    /// line's brace, across expansions (an environment's `\begin` and
+    /// `\end`) or by `\begingroup` are no cut: LaTeX's and expl3's
+    /// `\begingroup` scopes are many and small (a paragraph's start,
+    /// `\@ifundefined`), and cut at, amsldoc's clean build took twice as
+    /// long at eight threads. The hot path: a level's close compares its
+    /// group code and walks the input's levels for its list; the run
+    /// looks at the flag once per command.
     pub(crate) fn group_cut(&mut self) -> R<bool> {
         let op = self.cx.op();
         if !self.doc
@@ -201,6 +206,11 @@ impl Run<'_, '_> {
         }
         if self.main_items_since(self.cand_marks.last().map_or(0, |m| m.contribs)) {
             return Ok(Some("items pending for the page"));
+        }
+        // (a `\\csname` look-up put off: made before the command after
+        // it, which may bind its name, `Run::csname_defer`)
+        if self.csname_defer.is_some() {
+            return Ok(Some("a look-up put off"));
         }
         // (a rest of blank input makes no node: the run reads it, as at a
         // candidate, `Run::finish_candidate_at`)
@@ -346,6 +356,18 @@ impl Run<'_, '_> {
             );
         }
     }
+}
+
+/// The levels whose close may be a cut ([`Run::group_cut`]): a brace
+/// group (`{`, `\\bgroup`, §1063) and a box (`\\hbox`, `\\vbox`,
+/// `\\vtop`, §1083); never `\\begingroup`, math, an alignment, an
+/// insert or the output routine.
+pub(crate) fn cuts_at_close(group: i64) -> bool {
+    use crate::val::group;
+    matches!(
+        group,
+        group::SIMPLE | group::HBOX | group::ADJUSTED_HBOX | group::VBOX | group::VTOP
+    )
 }
 
 /// Whether `PHITEX_CUT_CHECK` is set (any build: the tests' check).

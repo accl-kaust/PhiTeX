@@ -296,6 +296,10 @@ pub(crate) struct Level {
     /// while this level is on the stack, the run's definitions keep their
     /// value at the read-back (a checkpoint's input carries it).
     pub rb: bool,
+    /// A token list's number among the lists the input pushed, from 1
+    /// (0: none): which expansion a group opened in, so its close can
+    /// tell whether that expansion still goes on ([`Input::toks_open`]).
+    pub serial: u32,
 }
 
 impl Level {
@@ -310,6 +314,7 @@ impl Level {
             nargs: 0,
             name: 0,
             rb: false,
+            serial: 0,
         }
     }
 
@@ -324,6 +329,7 @@ impl Level {
             nargs: 0,
             name: 0,
             rb: false,
+            serial: 0,
         }
     }
 
@@ -338,6 +344,7 @@ impl Level {
             nargs: 0,
             name: 0,
             rb: false,
+            serial: 0,
         }
     }
 
@@ -541,6 +548,8 @@ pub(crate) struct Input {
     line_push: Vec<u64>,
     file_push: Vec<u64>,
     pushes: u64,
+    /// The token lists pushed ([`Level::serial`]).
+    serials: u32,
     /// The node's text below the levels: segments in order, `text_at`
     /// the next to reach.
     pub text: Vec<Seg>,
@@ -640,6 +649,7 @@ impl Input {
             line_push: Vec::new(),
             file_push: Vec::new(),
             pushes: 0,
+            serials: 0,
             text: Vec::new(),
             text_at: 0,
             compact_at: ARENA_COMPACT,
@@ -711,7 +721,49 @@ impl Input {
         }
         self.pop_spent();
         self.mark_pushed();
-        self.levels.push(Level::toks(r, ty));
+        let l = self.numbered(Level::toks(r, ty));
+        self.levels.push(l);
+    }
+
+    /// A token list's level numbered ([`Level::serial`]).
+    #[inline]
+    fn numbered(&mut self, mut l: Level) -> Level {
+        self.serials = self.serials.wrapping_add(1).max(1);
+        l.serial = self.serials;
+        l
+    }
+
+    /// The macro's token list a group opened now opens in
+    /// ([`Level::serial`]): the innermost list with tokens left, if no
+    /// line or file is above it and it is a macro's expansion; 0
+    /// otherwise. A list read to its end is not it (the group cannot
+    /// close in it): a brace a scan backed up and read again is read
+    /// from a level of its own.
+    pub(crate) fn toks_open(&self) -> u32 {
+        for l in self.levels.iter().rev() {
+            if l.kind != kind::TOKS {
+                return 0;
+            }
+            if l.a < l.b {
+                return if l.ty == ty::MACRO { l.serial } else { 0 };
+            }
+        }
+        0
+    }
+
+    /// Whether the token list numbered `serial` ([`Input::toks_open`])
+    /// is still being read at a group's close: on the stack with tokens
+    /// left, or on top read to its end (the close was its last token).
+    pub(crate) fn toks_going_on(&self, serial: u32) -> bool {
+        if serial == 0 {
+            return false;
+        }
+        let top = self.levels.len().wrapping_sub(1);
+        self.levels
+            .iter()
+            .enumerate()
+            .rev()
+            .any(|(i, l)| l.kind == kind::TOKS && l.serial == serial && (l.a < l.b || i == top))
     }
 
     /// Pushes a macro's level ([`Input::push_toks`]): its expansion `r`,
@@ -727,6 +779,7 @@ impl Input {
         let mut l = Level::toks(r, ty::MACRO);
         l.name = name.raw();
         l.nargs = nargs;
+        let l = self.numbered(l);
         self.levels.push(l);
     }
 
@@ -936,7 +989,8 @@ impl Input {
         self.pop_spent();
         self.mark_pushed();
         let r = self.arena.alloc(&[t]);
-        self.levels.push(Level::toks(r, ty::BACKED_UP));
+        let l = self.numbered(Level::toks(r, ty::BACKED_UP));
+        self.levels.push(l);
     }
 
     /// Reaches the next segment of the text: pushed as a level (a line,
@@ -962,6 +1016,7 @@ impl Input {
                     l.name = lv.name;
                     l.nargs = REST_ONLY;
                 }
+                let l = self.numbered(l);
                 self.levels.push(l);
             }
             Seg::File(f) => {

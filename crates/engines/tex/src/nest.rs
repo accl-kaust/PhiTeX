@@ -74,6 +74,12 @@ pub(crate) struct Level {
     pub open_stamp: u64,
     /// `\aftergroup` tokens (§282).
     pub ag: Vec<Tok>,
+    /// For a brace group or a box, the macro's token list it opened in
+    /// ([`crate::input::Input::toks_open`]); 0 for any other level, and
+    /// for one opened at a line's or a file's brace or carried in by a
+    /// continuation: its close is a cut only while that list is still
+    /// being read ([`Run::group_cut`]).
+    pub opener: u32,
 }
 
 /// An item of a list of this run's: a value, or a node kept native
@@ -157,8 +163,15 @@ impl Level {
             def_base: 0,
             open_stamp: 0,
             ag: Vec::new(),
+            opener: 0,
         }
     }
+}
+
+/// Whether a level closing now ends a brace group or a box opened in a
+/// macro's token list that is still being read ([`Run::group_cut`]).
+fn cuts_at_close_now(group: i64, opener: u32, input: &crate::input::Input) -> bool {
+    crate::cut::cuts_at_close(group) && input.toks_going_on(opener)
 }
 
 impl Run<'_, '_> {
@@ -217,6 +230,9 @@ impl Run<'_, '_> {
         l.save_base = sb;
         l.def_base = db;
         l.open_stamp = st;
+        if crate::cut::cuts_at_close(l.group) {
+            l.opener = self.input.toks_open();
+        }
     }
 
     /// The innermost group of this run open now (a paragraph is not one).
@@ -233,7 +249,9 @@ impl Run<'_, '_> {
         let l = self.nest.pop()?;
         // (a paragraph is no group: its definitions are the level's below)
         if l.group != 0 {
-            self.group_closed = true;
+            // (a brace group or a box opened and closed in one macro's
+            // expansion, its list still read: a cut, `crate::cut`)
+            self.group_closed = cuts_at_close_now(l.group, l.opener, &self.input);
             // (a restore after a read-back point changes what the point
             // had, as a definition does: kept for the lines written
             // later, [`Run::note_pre`])

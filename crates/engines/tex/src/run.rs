@@ -1377,7 +1377,8 @@ pub(crate) struct Run<'c, 'a> {
     /// The cut is at no candidate: at the run's text's end
     /// ([`Run::text_cut`]) or at a group's close ([`Run::group_cut`]).
     pub(crate) text_cut: bool,
-    /// A group of the run's own closed in the command in progress
+    /// The command in progress closed a brace group or a box of the
+    /// run's own opened in a macro's expansion still being read
     /// ([`Run::pop_level`]): at its end the run may be cut there
     /// ([`Run::group_cut`]).
     pub(crate) group_closed: bool,

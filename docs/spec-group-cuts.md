@@ -1,7 +1,8 @@
 # Cuts at group closes (2026-11-26)
 
-Status: implemented in `crates/engines/tex/src/cut.rs` (`Run::group_cut`),
-tests in `crates/engines/tex/tests/cuts.rs` (`group_cut_*`).
+Status: implemented on branch `beamer-cuts` (`Run::group_cut` in
+`crates/engines/tex/src/cut.rs`, tests `cuts::group_cut_*`). NOT MERGED:
+at eight threads it exposes an engine placement race (see "Open defect").
 
 ## Why
 
@@ -23,27 +24,29 @@ Both reads sit inside a group that closes before the frame's real work:
 
 ## Rule
 
-A group of the run's own that closes is a cut, its input going on (a
-macro's tokens, the text), where:
+A level of the run's own that closes is a cut, its input going on,
+where:
 
 1. the run is a document piece (`exec` or `resume`, the document's text);
-2. no bar of commands (the text cut's `cut_min`): where a group closes
-   is the text's structure, the same whatever the run read before it.
-   A bar moved the cut with the work before it. The `.nav` loop runs
-   empty in a clean build's first round and full in its second, so the
-   pieces after it were made anew (pictures, finishers) between the
-   rounds. On the deck, the clean build took 1.8 times as long with a
-   bar of 200 commands in the closed group or 1000 since the run's
-   start, and as long as before with none. `cut_min = u64::MAX` (never)
-   still turns every cut off;
-3. what stays open is only groups of its own that own no list (on the
+2. the level is a brace group (`{`, `\bgroup`) or a box (`\hbox`,
+   `\vbox`, `\vtop`), opened in a macro's expansion (a token list
+   pushed by a macro call), and that list is still being read at the
+   close: the group lies within one expansion (`Input::toks_open`,
+   `Input::toks_going_on`; token lists are numbered as pushed). Not a
+   `\begingroup` scope, not a group opened at a line's brace or across
+   expansions (an environment's `\begin` and `\end`), never math, an
+   alignment, an insert or the output routine;
+3. no bar of commands (the text cut's `cut_min`): see "Why no bar";
+   `cut_min = u64::MAX` (never) still turns every cut off;
+4. what stays open is only groups of its own that own no list (on the
    main vertical list, as at a forced candidate inside groups,
    `Run::cuttable_here`), so the continuation carries no list, only the
    groups' bindings;
-4. the state is nameable: `Run::open_state_refusal` (no scan, read-back,
+5. the state is nameable: `Run::open_state_refusal` (no scan, read-back,
    alignment, math, finisher, second pass, scope effect, ...), no
    children but the ones a cut keeps, no insertion pending, nothing on
-   the main list since the last candidate, and more than blank input left.
+   the main list since the last candidate, no `\csname` look-up put off,
+   and more than blank input left.
 
 No environment, package or macro is named anywhere.
 
@@ -73,17 +76,62 @@ and `\iterate` are not in the continuation, so the piece that ran the
 loop again hands over the same continuation, and the rest stands unless
 a global it reads changed.
 
+## Why no bar, and why not every close
+
+Measured on n11, `-j1` unless said (release build, rule toggled in the
+same binary; seconds):
+
+| rule | deck clean | deck insert | amsldoc clean j1 / j8 |
+|---|---|---|---|
+| none (dev) | 29.3 | 7.1 | 1.85 / 2.2 |
+| every close, no bar | 28.0 | 4.4 | 2.9 / 5.8 |
+| bar 3000 since the run's start | 29.8 | 6.7 | - |
+| bar 1000 since the run's start | 51 | 5.3 | - |
+| bar 200 in the closed group | 49 | 4.9 | - |
+| one expansion, any group, no bar | 27.6 | 4.4 | 2.7 / 4.9 |
+| one expansion, brace or box, no bar (this rule) | 27.1-29.5 | 4.4-5.0 | 1.9-2.2 / 2.4-2.6 |
+
+- A bar of commands moves the cut with the work before it. The `.nav`
+  loop runs empty in a clean build's first round and full in its second,
+  so the cut appears in round 2 and every slide's pictures and finishers
+  are made anew (deck clean build 1.5-1.8x).
+- Every close cuts LaTeX's `\begingroup` scopes too: one at every
+  paragraph's start (ltpara's `\group_begin: \tex_par:D \group_end:`),
+  `\@ifundefined`, keyval: 3017 cuts in amsldoc, each a node that
+  re-reads its working set (j1 +40%, j8 2x).
+- Brace groups and boxes inside one expansion: 234 cuts in amsldoc; the
+  deck keeps `\beamer@setuplinks`'s `{...\dohead}` and
+  `\beamer@calculateheadfoot`'s `\hbox{...}`.
+
+Deck insert at -j8: 7.9-9.6 s on dev, 3.7-4.1 s with this rule.
+
 ## Cost
 
-Hot path: `Run::pop_level` sets a flag; the command loop tests it after
-each command. A close with a list of the run's own open (inside a
-paragraph or a box: most closes) is refused by the first check, a walk
-of the nest. The other checks run cheapest first; the main-list look
-and the blank-rest look come last.
+Hot path: a level's close compares its group code and, for a brace
+group or a box with a numbered opener, walks the input's levels; a
+group's open records its opener the same way. The command loop tests a
+flag once per command. para4000's edit and clean times are unchanged.
 
-Clean build: one more node per cut, and the continuation's encoding
-(the input's token levels, the open groups' bindings). Rule 3 keeps cuts
-out of paragraphs, boxes and pictures, so ordinary text makes none. The
-deck's nodes went from 1391 to 6763, and its clean build took as long.
-Measured on para4000, amsldoc and a TikZ document as well (the branch's
-report).
+## Open defect (why this is not merged)
+
+At eight threads, the frame insert on decks with overlay pictures gives
+a wrong PDF in 25-40% of runs (deck2 fixture: 7 of 24; the lab3 deck: 4
+of 12); with the rule turned off in the same binary, none (0 of 36). The pages of one frame's slides come
+out rotated. In every failing run exactly one finisher stands at the end
+of its frame's chain of rests instead of right after the piece its page
+fired in (`PHITEX_PAGE_PLACE` names the right cursor; the node order has
+it after the cursor's whole continuation chain). The likely mechanism
+(not proven): the loop's commit keeps the finisher's old place (`commit.rs`, the kept check of a
+`FollowAfter`): its `stranded` check sees the nodes between its floor and
+it in its own segment under the lock and in other segments only through
+`foreign_between`, read before the lock. The piece's continuation
+(`Follow`, slot 2) placed concurrently by the piece's own commit is not
+seen, and nothing re-asks the loop afterwards. Read checks
+(`PHITEX_CHECK_READS`) find nothing stale; the order is wrong, not a
+read. Cuts at group closes make many short pieces whose pages fire just
+before their continuation is placed, which is that window.
+
+Repro: `bench/group-cuts/` (`deck2.tex`, a 27-frame beamer fixture with
+overlay rows of pictures; `fixins.py` inserts a frame; `parfx.sh` runs
+six watch builds at once at -j8 and prints each edit's md5). The cold
+build's md5 is `7930ee1ad4`, the edit's `ea27d8c13a`.
