@@ -78,6 +78,8 @@ const CRISP_IS = { o: 1, f: "", pe: "auto", hit: true };
 test("a page that is ready is never dimmed by a build: one that ships none, a new watch's build from nothing keep the last pages crisp and usable; the watch lost dims them until taken in (a click, Dismiss) or until it is back; a clean rebuild plays the opening (the user: rebuilding the new version dimmed the pages)", async () => {
   const { dir, w, t } = await open({ "main.tex": doc("Hello, a first page.") });
   await waitBuild(w, 1);
+  // (the first page drawn: the opening, up from the panel's first showing, dives into it first)
+  await t.until(`JSON.stringify(${CRISP}) === ${JSON.stringify(JSON.stringify(CRISP_IS))}`, "the first page drawn", 10000).catch(() => {});
   assert.deepEqual(await t.q(CRISP), CRISP_IS, "the first page");
   // (a build that ships no page: the last pages as they are, a strip saying so)
   w.write("main.tex", doc(""));
@@ -997,6 +999,7 @@ test("Compare: an added run ending in a control space (e.g.\\ ) builds the diff'
   assert.equal(await t.q(`$("#stage").classList.contains("stale")`), false, "the diff's pages shown, not the last complete render");
   assert.equal(await t.q(`globalThis.__stale`), 0, "no 'last complete render' strip at any time, not even a flash");
   // (Caret only: the deleted words leave a caret; the popover closed (Esc), the diff stays)
+  if (!(await t.q(`$("#chg-look").offsetHeight > 0`))) await t.click("#chg-gear");
   await t.click(`#chg-look [data-look="del"][data-v="caret"]`);
   await t.until(`fetch(new URL("diff.tex", location.href)).then((r) => r.text()).then((x) => /scriptstyle\\\\wedge/.test(x))`, "the caret look", 60000);
   await t.key("Escape", "Escape", 27);
@@ -1072,8 +1075,8 @@ test("the review: a right-click on an agent's change accepts or rejects it as it
   const bare = async ([x, y]) => {
     const over = await t.q(`(() => { const e = $("#stage").getRootNode().elementFromPoint(${x}, ${y}); return e?.closest(".slot") ? "" : e ? e.tagName + "." + (e.className?.baseVal ?? e.className) : "nothing"; })()`);
     assert.equal(over, "", `the mark at ${x}, ${y} under the pointer, not covered`);
-    // (a tip up: above the pages, none of it over them)
-    assert.ok(await t.q(`$("#tip").hidden || $("#tip").getBoundingClientRect().bottom <= $("#stage").getBoundingClientRect().top`), "a tip up stays above the pages");
+    // (a tip up: floating, as a popover, never over the mark: in the margin beside the pages, else one line over the page's top margin)
+    assert.ok(await t.q(`(() => { const t = $("#tip"); if (t.hidden) return true; const a = t.getBoundingClientRect(); return !(a.left < ${x} && a.right > ${x} && a.top < ${y} && a.bottom > ${y}); })()`), "a tip up is not over the mark");
   };
   const add = await mark("h-add");
   await bare(add);
@@ -1295,7 +1298,7 @@ test("the tips never move the pages: the tour floats over them as a popover does
   const w = new Watch(dir, { home: fresh });
   const t = await browser.tab(await w.url());
   const top = `Math.round($("#stage").getBoundingClientRect().top - $(".bar").getBoundingClientRect().bottom)`;
-  const before = await t.q(top);
+  const before = await t.until(`$("#stage") && $(".bar") ? String(${top}) : null`, "the panel", 30000).then(Number);
   await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
   await t.until(`!$("#tip").hidden`, "the tour, by itself after the first page", 15000);
   assert.equal(await t.q(top), before, "the stage where it was, the tour up");

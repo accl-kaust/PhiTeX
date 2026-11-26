@@ -3961,11 +3961,22 @@ export class Panel {
     const cx = r.left + r.width / 2 - bar.left;
     let left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
     const st = this.$("#stage").getBoundingClientRect(), slots = [...this.$("#viewer").querySelectorAll<HTMLElement>(".slot")].map((e) => e.getBoundingClientRect()).filter((p) => p.bottom > st.top && p.top < st.bottom && p.width > 0);
+    el.classList.remove("compact");
     if (slots.length) {
       const pl = Math.min(...slots.map((p) => p.left)) - bar.left, pr = Math.max(...slots.map((p) => p.right)) - bar.left, sl = st.left - bar.left, sr = st.right - bar.left - 14;
       const over = left < pr && left + w > pl;
       if (over && sr - pr >= w + 16 && (cx >= (pl + pr) / 2 || pl - sl < w + 16)) left = Math.min(sr - w - 8, Math.max(pr + 8, cx - w / 2));
       else if (over && pl - sl >= w + 16) left = Math.max(sl + 8, Math.min(pl - w - 8, cx - w / 2));
+      // (no margin for it: one line under its control, over the page's top margin, never over what is on
+      // the page (a mark, a link); the whole card while the pointer or the focus is on it)
+      else if (over) {
+        el.classList.add("compact");
+        const cw = el.offsetWidth;
+        left = Math.max(8, Math.min(bar.width - cw - 8, cx - cw / 2));
+        Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar.top + 9}px` });
+        el.style.setProperty("--ax", `${Math.max(14, Math.min(cw - 14, cx - left))}px`);
+        return el;
+      }
     }
     Object.assign(el.style, { left: `${left}px`, top: `${r.bottom - bar.top + 9}px` });
     el.style.setProperty("--ax", `${Math.max(14, Math.min(w - 14, cx - left))}px`);

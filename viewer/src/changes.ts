@@ -291,7 +291,8 @@ ${COMMITS_CSS}
 .chg-pop .pickhead { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 8px; padding: 10px 12px 6px; }
 .chg-pop .pickhead b { font-size: 13px; }
 .chg-pop .look.folded { display: none; }
-.chg-pop .boff { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 0 0 8px; font-size: 12px; color: var(--phc-muted); }
+.chg-pop .boff .qb { flex: none; white-space: nowrap; }
+.chg-pop .boff { display: flex; align-items: center; gap: 8px; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--phc-line); font-size: 12px; color: var(--phc-muted); }
 .chg-pop .done { border: 1px solid var(--phc-line); background: var(--phc-chip); border-radius: 7px; padding: 4px 12px; cursor: pointer; font-size: 12.5px; font-weight: 600; }
 .chg-pop .quick { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 12px 10px; border-bottom: 1px solid var(--phc-line); }
 .chg-pop .qb { font-size: 12px; border: 1px solid var(--phc-line); background: var(--phc-bg); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
@@ -1175,7 +1176,7 @@ export class Changes {
     rows.sort((a, b2) => b2.time - a.time);
     // (the count only once every file is in; till then the lists are said to be partial)
     const count = s.waiting ? `so far · ${(s.files - s.waiting).toLocaleString()} of ${s.files.toLocaleString()} files` : `${s.lines.toLocaleString()} ${s.unit}`;
-    return html`${look}<div class="boff"><span>Blame stays on the pages until you turn it off.</span><button type="button" class="qb" id="chg-blame-off" title="The pages without Blame's colours">Turn off Blame</button></div><div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
+    return html`${look}<div class="boff"><span>Blame stays on the pages until you turn it off.</span><button type="button" class="qb boffb" id="chg-blame-off" title="The pages without Blame's colours">Turn off Blame</button></div><div class="sec"><h3><span title="${s.unit === "words" ? "Words as a reader counts them: runs of letters, no numbers, commands, comments or options" : ""}">Who wrote this version · ${count}</span></h3>${people}</div><div class="sec"><h3><span>${word === "version" ? "Versions" : "Commits"} that still own lines</span></h3>${rows.map((r) => r.row)}</div>`;
   }
 
   /** A commit by its id, from the history read (a skipped one, kept from before, named). */
@@ -1423,7 +1424,7 @@ export class Changes {
         this.marks();
         this.render();
       };
-    for (const q of body.querySelectorAll<HTMLButtonElement>(".qb"))
+    for (const q of body.querySelectorAll<HTMLButtonElement>(".qb[data-q]"))
       q.onclick = () => {
         const h = q.dataset.q || null;
         const p = this.pair;
