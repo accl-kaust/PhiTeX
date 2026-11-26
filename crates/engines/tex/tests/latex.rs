@@ -1412,6 +1412,135 @@ fn latex_pictures_that_all_change_take_one_run() {
     assert!(out[0] == out[1], "-j8's PDF is not -j1's");
 }
 
+/// [`latex_pictures_that_all_change_take_one_run`]'s document with five
+/// pictures, at -j8, where its paragraph's run in the second pass meets
+/// its pictures still to run: each picture's child, asked again by the
+/// label's number, is held (`set_pic_hook`) until the paragraph's run has
+/// passed the last picture's `\begin`. The pictures still ask their
+/// paragraph once at most: the interleaving behind that test's two
+/// failures at -j8 (gates 88045 and 91032: the paragraph asked once, a
+/// picture asked again by its view and the paragraph asked a second
+/// time).
+#[test]
+fn latex_pictures_pending_while_their_paragraph_runs_ask_it_once() {
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-pending");
+    let _ = std::fs::create_dir_all(&dir);
+    let pic = "\\begin{tikzpicture}\\foreach \\i in {1,...,12}{\\draw (\\i*0.3,0) circle (0.1);}\\node at (1,0.5) {seen \\lastref};\\end{tikzpicture}";
+    let doc = format!(
+        "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\usepackage{{refcount}}\n\\begin{{document}}\n\\xdef\\lastref{{\\getrefnumber{{last}}}}First words, a paragraph of its own.\n\nWords {pic} and {pic} then {pic} and {pic} and {pic} end the paragraph.\n\n\\section{{One}}\\section{{Two}}Last words.\\label{{last}}\n\\end{{document}}\n"
+    );
+    std::fs::write(dir.join("pending.tex"), &doc).expect("write");
+    // (the pictures' hash: the one a run has a fifth picture of)
+    let hash = Arc::new(AtomicU64::new(0));
+    let children = Arc::new(AtomicU32::new(0));
+    // (the paragraph's runs past its last picture)
+    let passed = Arc::new(AtomicU32::new(0));
+    let held = Arc::new(AtomicBool::new(false));
+    // (the paragraph's runs past its pictures when the second pass's first
+    // child came: every child of that pass waits for one more)
+    let base = Arc::new(Mutex::new(None::<u32>));
+    let released = Arc::new(AtomicBool::new(false));
+    {
+        let (hash, children, passed, held, base, released) = (
+            hash.clone(),
+            children.clone(),
+            passed.clone(),
+            held.clone(),
+            base.clone(),
+            released.clone(),
+        );
+        phitex_tex::set_pic_hook(Box::new(move |at, _node, h, k| {
+            if at == "begin" && k == 4 {
+                let _ = hash.compare_exchange(0, h, Ordering::SeqCst, Ordering::SeqCst);
+                if hash.load(Ordering::SeqCst) == h {
+                    passed.fetch_add(1, Ordering::SeqCst);
+                }
+                return;
+            }
+            if at != "child" || h == 0 || hash.load(Ordering::SeqCst) != h {
+                return;
+            }
+            // (the first pass's five children run; the second pass's are
+            // held in their runs)
+            if children.fetch_add(1, Ordering::SeqCst) < 5 {
+                return;
+            }
+            // (the first waits for the paragraph's run past them; the
+            // others for one more, or three seconds: still in their runs
+            // when the first commits, they are its siblings to come)
+            let (at, first) = {
+                let mut b = base
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match *b {
+                    Some(x) => (x + 1, false),
+                    None => {
+                        let x = passed.load(Ordering::SeqCst);
+                        *b = Some(x);
+                        (x, true)
+                    }
+                }
+            };
+            let wait = |secs: u64, until: &dyn Fn() -> bool| {
+                let t = std::time::Instant::now();
+                while t.elapsed() < std::time::Duration::from_secs(secs) {
+                    if until() {
+                        return true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                false
+            };
+            if first {
+                // (once the paragraph has run past them and all five are
+                // in their runs)
+                if wait(20, &|| {
+                    passed.load(Ordering::SeqCst) > at && children.load(Ordering::SeqCst) >= 10
+                }) {
+                    held.store(true, Ordering::SeqCst);
+                }
+                released.store(true, Ordering::SeqCst);
+            } else {
+                // (in their runs until the first has gone and committed:
+                // the paragraph's next run past them, or three seconds)
+                wait(30, &|| released.load(Ordering::SeqCst));
+                wait(3, &|| passed.load(Ordering::SeqCst) > at);
+            }
+        }));
+    }
+    let opts = Options {
+        threads: Some(8),
+        fixpoint: true,
+        ..pdf_opts("pending", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), &doc);
+    let asked = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, why)| (*op == "exec" || *op == "resume") && why == "Output pic")
+        .count();
+    eprintln!(
+        "pictures' children {}, the paragraph past them {} times, held {}, asked {asked}, pic runs {}",
+        children.load(Ordering::SeqCst),
+        passed.load(Ordering::SeqCst),
+        held.load(Ordering::SeqCst),
+        common::runs_of(&b, "pic")
+    );
+    assert!(
+        held.load(Ordering::SeqCst),
+        "a picture's child was held while its paragraph ran: {:?}",
+        b.stats.reruns
+    );
+    assert!(
+        asked <= 1,
+        "the pictures asked their paragraph {asked} times: {:?}",
+        b.stats.reruns
+    );
+}
+
 /// A picture asked again for a read late in its run (the definition of
 /// `\mymark` before it deleted: the picture, in a figure of its own
 /// file, defines it at its end now, as a first use does; put back; its

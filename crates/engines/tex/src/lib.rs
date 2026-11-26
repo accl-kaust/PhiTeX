@@ -89,6 +89,7 @@ pub use exec::{
     set_spawn_worker, start_threads,
 };
 pub use native::NativeFonts;
+pub use pic::{PicHook, set_pic_hook};
 
 /// Whether lists are left open across nodes (`PHITEX_BOXSCOPE`,
 /// docs/spec-slices.md §6.1): pictures are then no children, their
