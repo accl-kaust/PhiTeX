@@ -41,7 +41,7 @@ async function reloaded(t) {
   await t.send("Page.reload");
   await t.until(`!window.__phxOld && document.readyState !== "loading"`, "the reloaded document", 30000);
 }
-const builds = (w) => (w.out.match(/^(ok|failed|✓|✗):?\s+\d+/gm) ?? []).length;
+const builds = (w) => (w.out.match(/^(ok|failed|no output|✓|✗|⚠):?\s+\d+/gm) ?? []).length;
 const waitBuild = async (w, n, ms = 60000) => {
   const end = Date.now() + ms;
   while (builds(w) < n) {
@@ -82,6 +82,8 @@ test("a page that is ready is never dimmed by a build: one that ships none, a ne
   // (a build that ships no page: the last pages as they are, a strip saying so)
   w.write("main.tex", doc(""));
   await waitBuild(w, 2);
+  // (pdflatex's "No pages of output.": no error, no output, never an ok)
+  assert.match(w.out, /^no output:\s+2\s/m);
   await t.until(`$("#stage").classList.contains("stale")`, "the strip: the last complete render");
   assert.match(await t.q(`$("#banner").textContent`), /^Showing the last complete render/);
   assert.deepEqual(await t.q(CRISP), CRISP_IS, "the last pages after a build that shipped none");
