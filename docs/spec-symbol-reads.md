@@ -51,20 +51,93 @@ where the digits cannot change it, else forced as today):
   stays one. `\let\x=<derived name>` gives `\x` the meaning read through
   the derived read (`defer::dname_meaning`). Elsewhere it is made
   concrete as today.
-- **B4. Read-back keyed by symbol.** A line a finisher writes with S in
-  it keeps S's mark (spec-relative-counters §2.7, there for
-  `\immediate\write` only), and the definitions its read-back makes are
-  keyed by the mark: the field they define is named with S resolved
-  where the file is read back now, not where the line was written. After
-  a shift, P's line defines `pos@pgfid<new number>` with P's own old
-  position from the first round, so P's picture reads its own position
-  and stands; the round after writes the same line. Exact at the fixed
-  point: the file is written with the digits TeX writes, and a round
-  that writes what it read is the last, as before.
+- **B4. Read-back keyed by symbol** (built 2026-11-26, below).
+
+### B4: why not resolve the name where the file is read back
+
+The first design defined `pos@pgfid<S resolved where the file is read
+back>`: `\begin{document}`'s read-back (node R) resolving each marked
+line's symbol S = (count, P, j) to the count reaching P now. P is a
+picture's piece long after R, and the picture serial is a register the
+page layer also steps (a picture in a headline or a footline steps it at
+every shipout), so the count reaching P is known only once the pages
+before P are made: R's read of it is held at the page frontier
+(`Ctx::hold_at_frontier`) until the layer passes P. The layer cannot
+pass P while R, at the document's start, has not committed: every piece
+and every page after R reads what R defines. Tried on the text level
+(the marked units resolved by `\begin{document}`'s run), node 90 waited
+at the frontier on `count:316` before its P, and the pages waited on node
+90: a livelock. It is no scheduling accident: the name such a read-back
+defines depends on the layout after it, which depends on the read-back,
+a cycle inside one round. The mergeless engine's rounds read only
+backwards in the text (a later node's value reaches an earlier one only
+across rounds, through the files), and nothing short of a serial
+re-ordering of that round would break it. A definition of a derived
+name made at R and resolved by the engine later (a definition whose
+field moves with its base) meets the same cycle at any reader between R
+and P that reads such a name with its digits: it would have to know the
+count before P to know whether the definition is its field.
+
+### B4 as built: keyed, read where the name is read
+
+Nothing is resolved where the file is read. The written line's
+definitions get a key each, a field named by the symbol, not its digits:
+
+- A finisher's line to an open file (`\pgfsyspdfmark{pgfid<S>}{x}{y}`,
+  written at shipout) and a piece's `\immediate\write` line keep each
+  symbol with its digits where the line is written (the finisher forces
+  S, as it did to print it). Each definition the line's read-back makes
+  of a name holding those digits after the text before the mark
+  (`pos@pgfid` + `17`) gets key `pos@pgfid<S>`, defined `[17,
+  pos@pgfid17]`: the digits S had and the field the name was then
+  (`defer::sym_keys`, `defer::sym_key`). The keys are read-back keys like
+  the others (per field; a mixed fold's through `wmsym:`, defined by the
+  read-back child).
+- A name made with a symbol (`\csname pgf@sys@pdf@mark@pos@\pgfpictureid
+  \endcsname`) is a keyed derived read (`Ctx::read_derived_keyed`): the
+  base read before S's piece, the key and the named field where the
+  reader stands, all through the derived path. Where the key says other
+  digits than the base gives now, the field the key names is read for
+  the name (`read::key_redirect`); else the name, as TeX reads it.
+  Re-asked on a change of the base, the key or the field read, it stands
+  where the answer is the same.
+
+After a shift the base gives 18 for P's picture; its key still says
+`[17, pos@pgfid17]`, so it reads `pos@pgfid17`, its own position from
+the round before, and stands (unkeyed it read `pos@pgfid18`, the next
+picture's, and ran again, and again in the round after). The round after
+writes `[18, pos@pgfid18]` and `pos@pgfid18` its position: the key moved,
+the answer did not, it stands again.
+
+Exact at the fixed point: in the round that reads what it writes, every
+symbol's line was written with the digits the base gives now, so every
+keyed read is the name's, TeX's. A key that says other digits exists only
+in a round whose files change, whose output is not the build's; its
+readers are asked again when the key moves. A key matched to the wrong
+definition (the text before the mark found elsewhere in the name) costs a
+run, never a wrong answer at the fixed point. No read crosses forward:
+the key is a field defined at the read-back point like any other.
+
+The engine's part: `Step::Derived`'s spec may carry the key (a seventh
+element); `read::derived_field_at`, `through_at` and the witnesses use the
+field the key redirects to; the reader records its read of the key with
+the derived path. A derived read across nodes that stood where its name
+moved recorded the old name's field, and a change of the new name's
+field leaves both recorded fields' change counts as they were: such a
+read is now checked through its path, never by its fields' counts
+(`RunRecord::read_holds`; before, it stood on 10 with the field at 30,
+derived.rs).
+
+Not keyed: a name met undefined (TeX makes it `\relax` where it is
+looked up, a binding in the run): its symbol is forced, as before. A
+picture that remembers nothing (no line of its own in the `.aux`) looks
+its position up undefined in every round, binds the `\relax`, and reads
+the picture serial: after a shift it runs again. On the deck that is
+the most of what pictures still run again on (see the numbers).
 
 Cost: B1 and B3 only where a symbol is met (none in a document without
 relative counters). B2 one read more per cross-node name (it replaced a
-forced read). B4 a resolution per marked key per read-back.
+forced read). B4 one key per marked definition, one read more per name made with a symbol.
 
 ## 2. Per-line read-back (cause C)
 
@@ -125,8 +198,30 @@ As built (2026-11-26):
 Measured on the deck's frame insert (-j1, n11): `\begin{document}`
 runs once in the edit's round before and after (it reads
 `\@abspage@last`, which the insert changes); its rerun before was the
-`.aux` text's, now the key's. B4 (read-back keyed by symbol) is not
-built: the remember pictures still run again on the positions their
-shifted numbers name until the second round; making the derived
-definition (`pos@pgfid<S>`) read back by symbol needs the engine to
-define a derived name's field at a place, which it has not.
+`.aux` text's, now the key's.
+
+### What `\begin{document}` reads of the read-back keys
+
+Traced on the deck (the run's first touch of each key, where the
+read-back child's value is taken into the run, `Run::rb_check`):
+
+- `\@abspage@last`: `\ifnum\@abspage@last<\maxdimen
+  \xdef\PreviousTotalPages{\@abspage@last}\fi` (the LaTeX kernel's
+  `\UseOneTimeHook` at `\begin{document}`). The value is used, not its
+  presence: it becomes `\PreviousTotalPages`, which the run defines and
+  later pieces read. An inserted frame makes it 113 for 112, so the run
+  defines another `\PreviousTotalPages` and must run again; a finer read
+  of the key (presence, or the `\ifnum`'s answer alone) leaves the copy,
+  which needs the digits. What would spare that run is a copy that is no
+  read: `\PreviousTotalPages` defined as the key's field where it is read
+  back (an alias the engine follows, `read::alias_of`), with the
+  `\ifnum` against `\maxdimen` a predicate read of the key. Neither
+  exists for macro bodies taken by an `\xdef`; it is a change to how a
+  run expands a macro into another's body, not to how it reads the key.
+- `HyPL@Labels`: `\ifx\HyPL@Labels\@empty \Hy@WarningNoLine{…}`
+  (hyperref). Only its equality with `\@empty` is used there. It is
+  taken first after `\@abspage@last`, whose use already runs the node
+  again on the insert, so a finer read of it saves nothing on this edit.
+
+No change is made for either: on the frame insert the run's rerun is
+TeX's own (`\PreviousTotalPages` moves).

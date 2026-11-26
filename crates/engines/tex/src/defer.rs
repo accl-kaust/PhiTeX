@@ -945,11 +945,12 @@ pub(crate) fn derived_read(
     let loc = s.loc(r);
     let base = r.loc_field(loc);
     let pre = format!("cs:{prefix}");
-    let (x, g) = if s.node == r.sym_node() {
-        r.cx.read_derived(base, &pre, i64::from(s.j), suffix, p)?
-    } else {
-        r.cx.read_derived_from(base, s.node, &pre, i64::from(s.j), suffix, p)?
-    };
+    // (keyed by the symbol: where the file that defines the name was
+    // written with other digits for it, the field it named then,
+    // docs/spec-symbol-reads.md B4)
+    let key = r.v.field(&sym_key(&pre, s, suffix));
+    let (x, g) =
+        r.cx.read_derived_keyed(base, s.node, key, &pre, i64::from(s.j), suffix, p)?;
     if crate::exec::obs_flag!("PHITEX_SYM_TRACE") {
         eprintln!(
             "sym-derived: node {} count {} j {} name {} answer {:?}",
@@ -1051,6 +1052,81 @@ pub(crate) const WSYM: &str = "\u{10FFFE}wsym\u{2}";
 /// Symbol `s`'s mark in a written line ([`WSYM`]).
 pub(crate) fn wsym_mark(s: Sym) -> String {
     format!("{WSYM}{}\u{2}{}\u{2}{}\u{3}", s.reg, s.node.raw(), s.j)
+}
+
+/// The key of a name made with symbol `s` between `prefix` and `suffix`
+/// (a field's name, `cs:` and the rest): the field a file's read-back
+/// defines as `[digits, field]`, the digits `s` had where the line was
+/// written and the field the name was then (docs/spec-symbol-reads.md
+/// B4). It names no control sequence TeX can make.
+pub(crate) fn sym_key(prefix: &str, s: Sym, suffix: &str) -> String {
+    format!(
+        "{prefix}\u{10FFFE}k{}\u{2}{}\u{2}{}\u{3}{suffix}",
+        s.reg,
+        s.node.raw(),
+        s.j
+    )
+}
+
+/// The symbols marked in `text` ([`WSYM`]), each with the text before
+/// its mark back to a brace, a space, a backslash or the line's start
+/// (what a name made with it holds before its digits): a written line's
+/// marks, for the keys its read-back defines ([`sym_keys`]).
+pub(crate) fn marks_of(text: &str) -> Vec<(Sym, String)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(i) = text[at..].find(WSYM) {
+        let i = at + i;
+        let tail = &text[i + WSYM.len()..];
+        let Some(e) = tail.find('\u{3}') else { break };
+        if let Some(s) = parse_mark(&tail[..e]) {
+            let before = &text[..i];
+            let from = before.rfind(['{', '}', ' ', '\\', '\u{3}']).map_or(0, |k| {
+                k + before[k..].chars().next().map_or(1, char::len_utf8)
+            });
+            out.push((s, before[from..].to_owned()));
+        }
+        at = i + WSYM.len() + e + 1;
+    }
+    out
+}
+
+/// The keys of a written line's definitions `made` (`[[field, value,
+/// global]…]`) whose field's name holds a symbol of `marks` as digits
+/// `d` after its text before the mark ([`marks_of`], each symbol's
+/// digits where the line was written): each `[key, [d, field], global]`
+/// ([`sym_key`], docs/spec-symbol-reads.md B4).
+pub(crate) fn sym_keys(
+    v: &phitex_defuse::Values,
+    made: ValueId,
+    marks: &[(Sym, String, i32)],
+) -> Vec<ValueId> {
+    let mut out = Vec::new();
+    if marks.is_empty() {
+        return out;
+    }
+    for d in crate::val::list_of(v, made) {
+        let xs = crate::val::list_of(v, d);
+        let [f, _, g] = xs[..] else { continue };
+        let Some(name) = v.as_str(f) else { continue };
+        for (s, pre, digits) in marks {
+            let pat = format!("{pre}{digits}");
+            let Some(k) = name.rfind(&pat) else { continue };
+            let end = k + pat.len();
+            if name[end..].starts_with(|c: char| c.is_ascii_digit())
+                || name[..k + pre.len()].ends_with(|c: char| c.is_ascii_digit())
+            {
+                continue;
+            }
+            let key = sym_key(&name[..k + pre.len()], *s, &name[end..]);
+            out.push(v.list(vec![
+                v.str(&key),
+                v.list(vec![v.int(i64::from(*digits)), f]),
+                g,
+            ]));
+        }
+    }
+    out
 }
 
 /// Whether `text` holds a symbol's mark ([`WSYM`]).

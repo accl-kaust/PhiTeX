@@ -1164,3 +1164,74 @@ fn a_noexpanded_derived_name_let_reads_through_the_name() {
         )
     });
 }
+
+/// A document whose paragraphs each name a field with a stepped count's
+/// symbol (`\gid`, a remember picture's id) and write, at shipout, the
+/// line that defines it with that symbol (`\mark{<id>}{<i>}`, pgf's
+/// `\pgfsyspdfmark`), reading it back from the `.aux` the round before.
+fn keyed_text(shift: bool) -> String {
+    let mut s = String::from(
+        "\\count200=5\n\\countdef\\cn=200\n\
+         \\def\\posmark#1#2{\\expandafter\\gdef\\csname pos@#1\\endcsname{#2}}\n\
+         \\openin15=\\jobname.aux \\ifeof15 \\else\\closein15 \\input\\jobname.aux \\fi\n\
+         \\immediate\\openout1=\\jobname.aux\n",
+    );
+    if shift {
+        s.push_str("\\global\\advance\\cn 1\n");
+    }
+    for i in 0..40 {
+        let _ = write!(
+            s,
+            "\\global\\advance\\cn 1 \\xdef\\gid{{\\the\\cn}}\\edef\\w{{\\write1{{\\noexpand\\noexpand\\noexpand\\posmark{{\\gid}}{{{i}}}}}}}\\w\
+             [\\csname pos@\\gid\\endcsname] Paragraph {i}, long enough to make a line \
+             or two when set in the plain format's ten point roman.\n\n"
+        );
+    }
+    s.push_str("\\bye\n");
+    s
+}
+
+/// docs/spec-symbol-reads.md B4: the definitions a written line makes of
+/// a name made with a symbol are keyed by the symbol too. A shift of the
+/// count before every paragraph (a picture inserted before the others):
+/// each paragraph's name moves, and the file read back is the round
+/// before's, whose line for the new name is the next paragraph's. Keyed,
+/// each paragraph reads the field its own line named and stands; the
+/// round after reads the new names, which hold the same. The PDF is a
+/// cold build's of the shifted text. Unkeyed, every paragraph ran again
+/// on the next one's value, and again in the round after.
+#[test]
+fn a_read_back_name_made_with_a_symbol_follows_the_symbol() {
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-keyed-{threads}"));
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./k.tex", "k", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &keyed_text(false));
+        let moved = keyed_text(true);
+        common::rebuild(&mut b, &moved);
+        let cdir = common::scratch(&format!("defer-keyed-cold-{threads}"));
+        let copts = Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./k.tex", "k", "", &cdir)
+        };
+        let cold = common::build(copts, Some(&common::plain()), &moved);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(d.is_none(), "-j{threads}: shifted differs from cold: {d:?}");
+        let all: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect();
+        // (9 keyed, the shifted text's edit and its pages; 87 unkeyed)
+        assert!(
+            all.len() <= 15,
+            "-j{threads}: ran again on moved names: {} {all:#?}",
+            all.len()
+        );
+    }
+}

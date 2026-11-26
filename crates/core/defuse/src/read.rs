@@ -878,7 +878,7 @@ thread_local! {
 pub(crate) fn derived_name(vals: &Values, spec: ValueId, v: Option<ValueId>) -> Option<Field> {
     let parts = vals.with_list(spec, <[ValueId]>::to_vec)?;
     let (prefix, j, suffix) = match parts[..] {
-        [_, p, j, s] | [_, p, j, s, _, _] => (p, j, s),
+        [_, p, j, s] | [_, p, j, s, _, _] | [_, p, j, s, _, _, _] => (p, j, s),
         _ => return None,
     };
     let v = v.and_then(|x| vals.as_int(x)).unwrap_or(0);
@@ -902,10 +902,41 @@ pub(crate) fn derived_places(vals: &Values, spec: ValueId) -> Option<(NodeId, No
             .map(|n| NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())))
     };
     vals.with_list(spec, |xs| match xs {
-        [_, _, _, _, b, g] => Some((node(*b)?, node(*g)?)),
+        [_, _, _, _, b, g] | [_, _, _, _, b, g, _] => Some((node(*b)?, node(*g)?)),
         _ => None,
     })
     .flatten()
+}
+
+/// The key of a keyed derived read (`Ctx::read_derived_keyed`): a field
+/// whose value `[n, g]` says the name was field `g` when its base gave
+/// `n` (docs/spec-symbol-reads.md B4).
+pub(crate) fn derived_key(vals: &Values, spec: ValueId) -> Option<Field> {
+    vals.with_list(spec, |xs| match xs {
+        [_, _, _, _, _, _, k] => Some(Field(*k)),
+        _ => None,
+    })
+    .flatten()
+}
+
+/// The digits a derived read's spec gives where its base has value `v`.
+pub(crate) fn derived_digits(vals: &Values, spec: ValueId, v: Option<ValueId>) -> Option<i64> {
+    let j = vals.with_list(spec, |xs| xs.get(2).copied()).flatten()?;
+    v.and_then(|x| vals.as_int(x)).unwrap_or(0).checked_add(vals.as_int(j)?)
+}
+
+/// A keyed derived read's field where its key's value `k` says the
+/// name was another when written (`[n, g]` with `n` not `digits`): `g`,
+/// the field the name had; None where the name is the one it was, or no
+/// key says (docs/spec-symbol-reads.md B4).
+pub(crate) fn key_redirect(vals: &Values, k: Option<ValueId>, digits: Option<i64>) -> Option<Field> {
+    let k = k?;
+    let parts = vals.with_list(k, <[ValueId]>::to_vec)?;
+    let [n, g] = parts[..] else {
+        return None;
+    };
+    let n = vals.as_int(n)?;
+    (Some(n) != digits).then_some(Field(g))
 }
 
 /// Where a derived read whose record is at `anchor` reads its named field
@@ -925,7 +956,18 @@ pub(crate) fn derived_field_at(eng: &Engine, spec: ValueId, anchor: NodeId, incl
         None => (anchor, inclusive),
     };
     let v = reaching_at(eng, base, at, incl)?;
-    derived_name(eng.values(), spec, v.value)
+    let g = derived_name(eng.values(), spec, v.value)?;
+    // (a keyed read: the field its key says the name was, where the
+    // base moved since, docs/spec-symbol-reads.md B4)
+    if let Some(k) = derived_key(eng.values(), spec) {
+        let (ga, gi) = derived_target_place(eng, spec, anchor, inclusive);
+        let kx = reaching_at(eng, k, ga, gi)?.value;
+        let d = derived_digits(eng.values(), spec, v.value);
+        if let Some(g0) = key_redirect(eng.values(), kx, d) {
+            return Some(g0);
+        }
+    }
+    Some(g)
 }
 
 /// A read through path `p` at `anchor` (`At::Before`/`AfterOwn`, the

@@ -2527,9 +2527,31 @@ impl Run<'_, '_> {
             && !to_log
             && k != 18
             && self.interp.is_none();
+        // (a finisher's line to an open file: its symbols forced, as the
+        // page is known, each kept with its digits for the keys the
+        // line's definitions get, docs/spec-symbol-reads.md B4)
+        let fin = op == self.ops.finish
+            && (0..16).contains(&k)
+            && !self.closed.contains(&k)
+            && self.interp.is_none()
+            && self
+                .get(&format!("write:{k}"))?
+                .is_some_and(|x| x != ValueId::UNIT);
         let was = self.lines_sink_begin(Sink::Log);
+        let mut line_marks: Vec<(crate::defer::Sym, String, i32)> = Vec::new();
         let s = if marked {
             self.expand_late_marked(body)
+        } else if fin {
+            match self.expand_late_marked(body) {
+                Ok(t) if crate::defer::has_marks(&t) => {
+                    for (sym, pre) in crate::defer::marks_of(&t) {
+                        let d = crate::defer::force(self, sym)?;
+                        line_marks.push((sym, pre, d));
+                    }
+                    crate::defer::resolve_marked_run(self, &t)
+                }
+                r => r,
+            }
         } else {
             self.expand_late(body)
         };
@@ -2668,6 +2690,10 @@ impl Run<'_, '_> {
                 let mut r = self.interpret_written(&name, &text, true);
                 if crate::defer::has_marks(&text) && !matches!(r, Ok(Some(_)) if !self.interp_plain)
                 {
+                    for (sym, pre) in crate::defer::marks_of(&line) {
+                        let d = crate::defer::force(self, sym)?;
+                        line_marks.push((sym, pre, d));
+                    }
                     text = crate::defer::resolve_marked_run(self, &text)?;
                     line = crate::defer::resolve_marked_run(self, &line)?;
                     r = self.interpret_written(&name, &text, false);
@@ -2694,6 +2720,16 @@ impl Run<'_, '_> {
                 if let Some(made) = r
                     && self.interp_plain
                 {
+                    // (its definitions of names made with a symbol keyed
+                    // by it too, docs/spec-symbol-reads.md B4)
+                    let keys = crate::defer::sym_keys(v, made, &line_marks);
+                    let made = if keys.is_empty() {
+                        made
+                    } else {
+                        let mut ds = list_of(v, made);
+                        ds.extend(keys);
+                        v.list(ds)
+                    };
                     v.list(vec![v.str(&name), v.str(&line), made, self.interp_reads])
                 } else if let Some(made) = r {
                     self.muts += 1;
