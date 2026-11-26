@@ -35,7 +35,7 @@ import { WASP_PRESETS, stopsAt, waspColours, type WaspColours, type WaspLook } f
 import { REVIEW_CSS, Review, type ReviewHost } from "./review.ts";
 import { BLAME_CSS, Blame, type BlameHost } from "./blame.ts";
 import { CHANGES_BUTTON_CSS, Changes, DELETED_CSS, type ChangesHost, type ChangesPrefs } from "./changes.ts";
-import { MENU_CSS } from "./ctxmenu.ts";
+import { MENU_CSS, menuOpen } from "./ctxmenu.ts";
 import type { PageSel } from "./sync.ts";
 import { machineLine } from "./machine.ts";
 
@@ -2662,8 +2662,9 @@ export class Panel {
       "keydown",
       (e: Event) => {
         if (!(e instanceof KeyboardEvent) || e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
-        // (Changes' popover open: Esc is its own (a first end let go, the picker or the settings closed, then off))
-        if (e.key === "Escape" && this.changes?.open) return;
+        // (Changes' popover open: Esc is its own (a first end let go, the picker or the settings closed, then off);
+        // a menu open (a change's, a note's, on the pages): the menu's, the topmost thing open)
+        if (e.key === "Escape" && (this.changes?.open || menuOpen())) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
           /* (the list closed, else the highlights cleared) */
         } else if (e.key === "e" || e.key === "E" || e.key === "F8") this.problemStep(e.shiftKey ? -1 : 1);
