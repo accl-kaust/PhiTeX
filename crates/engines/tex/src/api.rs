@@ -10190,9 +10190,11 @@ impl Build {
             };
             // (places in `text`, made the file's bytes below)
             let (start, end) = found.unwrap_or((b, b));
-            // (a culprit on a line read before TeX's: the diagnostic's
-            // line is the culprit's, TeX's stays in the context)
-            let place_line = if start < ls {
+            // (a culprit on a line read before TeX's, or after the node's
+            // start where TeX read no line (its tokens run, a beamer
+            // frame's body): the diagnostic's line is the culprit's,
+            // TeX's stays in the context)
+            let place_line = if start < ls || start > le {
                 if file == docname {
                     doc_lines.partition_point(|&k| k <= start)
                 } else {
