@@ -547,7 +547,9 @@ fn same_ns(v: &Value, key: &str, kind: &str) -> bool {
 }
 
 /// Whether `v`'s watch is in this process's PID namespace (or says none):
-/// its pid is one this process can look up.
+/// its pid is one this process can look up (Unix's pids alone are looked
+/// up so).
+#[cfg(unix)]
 pub fn ours_to_see(v: &Value) -> bool {
     same_ns(v, "pidns", "pid")
 }

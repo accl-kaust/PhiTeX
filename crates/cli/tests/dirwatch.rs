@@ -263,6 +263,24 @@ fn id_of(v: &Value, name: &str) -> String {
         .to_owned()
 }
 
+/// A symbolic link at `at` to `to`, a folder's or a file's (Windows tells
+/// the two apart; Unix does not).
+fn link(to: &Path, at: &Path, dir: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = dir;
+        std::os::unix::fs::symlink(to, at)
+    }
+    #[cfg(windows)]
+    {
+        if dir {
+            std::os::windows::fs::symlink_dir(to, at)
+        } else {
+            std::os::windows::fs::symlink_file(to, at)
+        }
+    }
+}
+
 fn home(base: &Path) -> PathBuf {
     let h = base.join("home");
     std::fs::create_dir_all(&h).expect("a home");
@@ -294,10 +312,9 @@ fn a_folder_watch_never_leaves_its_folder() {
             ("secret.pdf", "%PDF-1.4 secret"),
         ],
     );
-    std::os::unix::fs::symlink(&outside, root.join("out")).expect("a link out");
-    std::os::unix::fs::symlink(outside.join("secret.pdf"), root.join("a/out.pdf"))
-        .expect("a file link out");
-    std::os::unix::fs::symlink(root.join("a"), root.join("in")).expect("a link in");
+    link(&outside, &root.join("out"), true).expect("a link out");
+    link(&outside.join("secret.pdf"), &root.join("a/out.pdf"), false).expect("a file link out");
+    link(&root.join("a"), &root.join("in"), true).expect("a link in");
     let w = Watch::start(&root, &home(&base), &[]);
     let mut ix = w.socket("ws");
     read_until(&mut ix, |v| v["event"] == "hello");
