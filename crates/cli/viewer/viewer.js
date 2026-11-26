@@ -10775,7 +10775,7 @@ var Panel = class {
     this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
-    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet())).observe(stage);
+    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet(), this.fitPages())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
@@ -11989,8 +11989,7 @@ var Panel = class {
     body.append(g);
     const MIN = 160;
     const max = () => Math.max(MIN, Math.floor(this.win.clientWidth / 2));
-    let fit = 0;
-    const refit = () => this.prefs.zoom === "fit" && !fit && (fit = requestAnimationFrame(() => (fit = 0, this.redraw())));
+    const refit = () => this.fitPages();
     const set = (w, keep = true) => {
       if (w === null) col.style.removeProperty("width");
       else col.style.width = `${Math.round(Math.min(max(), Math.max(MIN, w)))}px`;
@@ -12030,12 +12029,28 @@ var Panel = class {
       g.classList.add("drag");
       this.win.classList.add("resizing");
       const x0 = e.clientX, w0 = col.offsetWidth;
-      g.onpointermove = (m) => set(w0 + m.clientX - x0, false);
+      const st = this.$("#stage"), view = this.$("#viewer");
+      this.colDrag = { w0: st.clientWidth };
+      let want = w0, frame = 0;
+      const apply2 = () => {
+        frame = 0;
+        set(want, false);
+        if (this.prefs.zoom !== "fit" || !this.colDrag) return;
+        const k = Math.max(0.05, (st.clientWidth - 40) / Math.max(1, this.colDrag.w0 - 40));
+        view.style.transformOrigin = `50% ${st.scrollTop}px`;
+        view.style.transform = `scale(${k.toFixed(4)})`;
+      };
+      g.onpointermove = (m) => (want = w0 + m.clientX - x0, frame || (frame = requestAnimationFrame(apply2)));
       g.onpointerup = g.onpointercancel = () => {
         g.onpointermove = g.onpointerup = g.onpointercancel = null;
+        cancelAnimationFrame(frame);
         g.classList.remove("drag");
         this.win.classList.remove("resizing");
-        set(col.offsetWidth);
+        set(want);
+        view.style.transform = view.style.transformOrigin = "";
+        this.colDrag = null;
+        this.stageSize = null;
+        this.redraw();
       };
     };
     g.ondblclick = () => set(null);
@@ -13666,8 +13681,28 @@ var Panel = class {
     pre.textContent = text ?? "No log yet: the first build hasn't finished.";
   }
   redraw() {
+    this.laidScale = this.scale();
     this.viewer?.redraw();
     if (this.viewer) requestAnimationFrame(() => this.drawScrollMarks());
+  }
+  /** The zoom every page box was last laid out at (redraw). */
+  laidScale = 0;
+  /** A column's handle being dragged: the stage's width when it began (the pages shown scaled till it ends). */
+  colDrag = null;
+  fitFrame = 0;
+  /**
+   * The stage changed size (a column opened, closed or resized, the window): every page box laid
+   * out again at the one zoom it now gives, once a frame, when that zoom moved. A redraw made at
+   * once, before the stage's new size was read (a column closed), laid every box out at the old
+   * width; pages drawn after it took the new one: page 13 narrower and indented over page 14.
+   * Never during a column's drag: that is one redraw at its end.
+   */
+  fitPages() {
+    if (this.colDrag || this.fitFrame) return;
+    this.fitFrame = requestAnimationFrame(() => {
+      this.fitFrame = 0;
+      if (!this.colDrag && this.viewer?.pages && Math.abs(this.scale() - this.laidScale) > 1e-4) this.redraw();
+    });
   }
   /** The page box, for the page in view. */
   nav() {
