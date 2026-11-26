@@ -5719,7 +5719,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let (file, at, unit, seg, loc, owner) = p;
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
-        let e = v.list(vec![
+        let mut xs = vec![
             v.int(kind),
             v.str(msg),
             file,
@@ -5731,7 +5731,17 @@ impl<'c, 'a> Run<'c, 'a> {
             owner.map_or(ValueId::UNIT, |o| {
                 v.int(i64::from_ne_bytes(o.to_ne_bytes()))
             }),
-        ]);
+        ];
+        // (§370's name, the token just read, as the source spells it: its
+        // culprit where TeX read it from a token list, an argument or a
+        // beamer frame's body, lines above the line TeX shows,
+        // `crate::api`'s placement)
+        if msg == "Undefined control sequence" {
+            let mut name = String::new();
+            crate::print::sprint_cs(&mut name, self.cur.tok, i64::from(b'\\'));
+            xs.push(v.str(&name));
+        }
+        let e = v.list(xs);
         let s = v.seq_unit(e);
         self.contribute("diags", s);
     }

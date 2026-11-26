@@ -36,6 +36,46 @@ fn undefined_control_sequence() {
     assert!(d.help.is_some());
 }
 
+/// An undefined name in text a macro read whole as its argument (a
+/// beamer frame's body) is placed at its own spelling, lines above the
+/// line TeX shows (`l.5 \stop`, beamer's `l.175 \end{frame}`), its line
+/// read to its end or not; never at another command of that line, nor at
+/// the node's first line (the beamer deck's `\arwTHE` on line 165 was
+/// "lab3-session.tex:146:1", `{\darkslide` underlined as not defined).
+#[test]
+fn an_undefined_name_read_in_an_argument_is_at_its_spelling() {
+    for threads in [1, 4] {
+        for doc in [
+            "\\long\\def\\grab#1\\stop{#1}\n\\grab\nA \\undefinedfoo\\ B\nC\n\\stop\n\\bye\n",
+            // (its line read to its end: no line on the stack)
+            "\\long\\def\\grab#1\\stop{#1}\n\\grab\nA \\undefinedfoo\\ B\nC\n\\stop%\n\\bye\n",
+        ] {
+            let b = build(doc, |o| Options {
+                threads: Some(threads),
+                ..o
+            });
+            let ds = b.diagnostics();
+            show(&ds);
+            let d = ds
+                .iter()
+                .find(|d| d.message == "Undefined control sequence")
+                .expect("the error");
+            assert_eq!(
+                &doc[d.range.0..d.range.1],
+                "\\undefinedfoo",
+                "-j{threads} {doc:?}: {d:?}"
+            );
+            assert_eq!(d.line, 3, "-j{threads} {doc:?}: {d:?}");
+            if !doc.contains("\\stop%") {
+                assert!(
+                    d.context.starts_with("l.5 "),
+                    "-j{threads} {doc:?}: TeX's line: {d:?}"
+                );
+            }
+        }
+    }
+}
+
 /// An error in the document's own text after bytes past 127, on its line
 /// and the lines before ("é", "≤", Arabic), the text held as the CLI and
 /// the browser's core hold a file (a character a byte): its range is the
