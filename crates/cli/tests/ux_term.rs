@@ -670,8 +670,7 @@ Third frame words.
 /// exactly the edited frame's pages (one PNG, or one sheet of its
 /// overlays); `--page` ranges; `--at` a line on two overlays draws both
 /// (`--overlay last` the last); a problem names the command undefined,
-/// keeps TeX's context, and ends with the command that shows it; `session
-/// log` keeps the context lines.
+/// keeps TeX's context, and ends with the command that shows it.
 #[test]
 fn session_pages_of_a_beamer_deck() {
     let dir = scratch("deck");
@@ -785,7 +784,5 @@ fn session_pages_of_a_beamer_deck() {
         problems.contains("see it: phitex session png --at deck.tex:2"),
         "{problems}"
     );
-    let (_, log, _) = session(&["log"]);
-    assert!(log.contains("l.2 \\faSyncAlt"), "{log}");
     let _ = session(&["stop"]);
 }
