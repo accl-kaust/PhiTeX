@@ -10465,9 +10465,13 @@ var Panel = class {
   last = null;
   /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
   drewOnce = false;
-  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  /**
+   * The step an opening says first: the one now, else loading the engine, or, once it ran here, typesetting.
+   * (Packages fetched say their own step as they come, `packages`: a rebuild's opening said "Fetching packages"
+   * before any was asked for, in a watch with TeX Live's files too, which fetches none.)
+   */
   firstStep() {
-    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+    return this.stepNow || this.words.steps[this.drewOnce ? 2 : 0];
   }
   url = null;
   lastStatus = null;
