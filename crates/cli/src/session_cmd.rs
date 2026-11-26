@@ -1668,8 +1668,8 @@ fn next_line(v: &Value) -> Option<String> {
         .flatten()
         .find_map(|p| {
             let f = p["file"].as_str()?.trim_start_matches("./");
-            (p["severity"] == "error" && !f.is_empty())
-                .then(|| format!("{f}:{}", p["line"].as_u64()?))
+            let l = p["line"].as_u64()?;
+            (p["severity"] == "error" && !f.is_empty()).then(|| format!("{f}:{l}"))
         });
     if !ok {
         let n = v["errors"].as_u64().unwrap_or(0);
