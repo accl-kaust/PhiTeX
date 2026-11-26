@@ -247,6 +247,44 @@ pub fn index() -> Result<Arc<Index>, String> {
         .clone()
 }
 
+/// The packs being fetched in this process, by id. A [`Files`] asks
+/// each pack of its source once, but a process has more than one over
+/// the same package cache (a session's build and its "diff packs"
+/// thread, each its own): both asking a pack not kept yet fetched it
+/// twice (cli build_from_shelf's server asked 5 times, not 4, on mc
+/// 90978). The second now waits for the first's fetch and reads the pack
+/// it kept; a fetch that failed leaves the next to try its own.
+struct Fetching(String);
+
+static FETCHING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static FETCHED: std::sync::Condvar = std::sync::Condvar::new();
+
+impl Fetching {
+    /// Pack `id`'s turn: once no other thread of the process fetches it.
+    fn take(id: &str) -> Fetching {
+        let mut held = FETCHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while held.iter().any(|h| h == id) {
+            held = FETCHED
+                .wait(held)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        held.push(id.to_owned());
+        Fetching(id.to_owned())
+    }
+}
+
+impl Drop for Fetching {
+    fn drop(&mut self) {
+        FETCHING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|h| *h != self.0);
+        FETCHED.notify_all();
+    }
+}
+
 /// Packs from the package cache, else the server (and then kept): each
 /// checked by the files before use, kept only once checked.
 struct Packs {
@@ -256,6 +294,10 @@ struct Packs {
 impl PackSource for Packs {
     fn pack(&self, id: &str) -> Result<Vec<u8>, String> {
         let p = dir().join("h").join(format!("{id}.pack"));
+        // (one fetch of a pack at a time in the process: a second ask,
+        // from another Files over the same cache, waits and reads what
+        // the first kept)
+        let _turn = Fetching::take(id);
         if let Ok(b) = std::fs::read(&p) {
             HITS.fetch_add(1, Ordering::Relaxed);
             return Ok(b);
