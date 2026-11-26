@@ -432,6 +432,10 @@ struct State {
     /// or one seen): `textDocument/documentHighlight` no longer moves the
     /// pages, or each cursor move would be two forward searches.
     own_cursor: bool,
+    /// The client is one of PhiTeX's own plugins (`initializationOptions.
+    /// client`): it shows the viewer's address itself. Any other editor's
+    /// LSP client (vim-lsp, Helix, Kate) is shown it as a message.
+    plugin: bool,
     /// `shutdown` came: an `exit` after it is the session's proper end.
     shut_down: bool,
     /// The update notice `phitex/status` carries (the host's: native, the
@@ -552,6 +556,7 @@ impl Server {
             .unwrap_or(false);
         st.settings = Settings::of(&p["initializationOptions"]);
         st.own_cursor = p["initializationOptions"]["phitexCursor"] == true;
+        st.plugin = p["initializationOptions"]["client"].is_object();
         if let Some(r) = root {
             st.root = r;
         }
@@ -677,11 +682,20 @@ impl Server {
 
     /// The viewer is at `url`: logged, and opened by `phitex.openViewer`.
     pub fn viewer(&self, url: &str) {
-        lock(&self.st).viewer = Some(url.to_owned());
+        let plugin = {
+            let mut st = lock(&self.st);
+            st.viewer = Some(url.to_owned());
+            st.plugin
+        };
         self.log(
             3,
             &format!("phitex watch: the viewer is at {url} (phitex.openViewer opens it)"),
         );
+        // (an editor with no PhiTeX plugin has no command for it: the
+        // address shown, and where to find it again)
+        if !plugin {
+            self.show_message(3, &viewer_message(url));
+        }
     }
 
     /// The viewer's address, if there is one.
@@ -1589,6 +1603,14 @@ fn found(text: &str) -> Vec<Found> {
         }
     }
     out
+}
+
+/// The message an editor with no PhiTeX plugin is shown as the watch
+/// starts: the viewer's address, and how to find it again.
+pub fn viewer_message(url: &str) -> String {
+    format!(
+        "PhiTeX: the pages are at {url} (open it in a browser; `phitex session list` shows it again)"
+    )
 }
 
 /// A text's outline as LSP `DocumentSymbol`s (docs/spec-editor-protocol.md

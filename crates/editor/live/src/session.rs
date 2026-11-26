@@ -2697,6 +2697,12 @@ impl Session {
         if n == plain_name(&self.job.path.to_string_lossy()) {
             return self.built_text.as_deref().map(tex::bytes);
         }
+        // (an editor's unsaved buffer of it: the text the build read, not
+        // the disk's older one, where a problem typed since lies past its
+        // end and would lose its column)
+        if let Some(t) = buffered(&*self.host, &self.buffers, &n) {
+            return Some(tex::bytes(&t));
+        }
         self.host.read(Path::new(&n))
     }
 

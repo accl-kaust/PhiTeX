@@ -376,7 +376,11 @@ pub enum Key {
     Summary,
     Clear,
     Help,
+    /// q: quit, asking first whether to write the PDF (when nothing was
+    /// written and `watch-ask-write` is on).
     Quit,
+    /// Ctrl-C (and Ctrl-\): quit at once, nothing asked, nothing written.
+    Interrupt,
     /// Ctrl-Z: suspended, as a shell's job.
     Suspend,
     /// A key that means nothing here.
@@ -394,7 +398,8 @@ impl Key {
             's' | 'S' => Key::Summary,
             'c' | 'C' | '\x0c' => Key::Clear,
             'h' | 'H' | '?' => Key::Help,
-            'q' | 'Q' | '\x03' | '\x04' | '\x1c' => Key::Quit,
+            'q' | 'Q' | '\x04' => Key::Quit,
+            '\x03' | '\x1c' => Key::Interrupt,
             '\x1a' => Key::Suspend,
             // (escapes, spaces: nothing)
             c if c.is_control() || c == ' ' => return None,
@@ -417,7 +422,11 @@ pub const HELP: &[(&str, &str)] = &[
     ("s", "build stats, after every build (s again: off)"),
     ("c", "clear the screen"),
     ("h, ?", "these keys"),
-    ("q, Ctrl-C", "quit"),
+    (
+        "q",
+        "quit (asks whether to write the PDF here, if none was)",
+    ),
+    ("Ctrl-C", "quit at once: nothing asked, nothing written"),
     ("Ctrl-Z", "suspend (fg resumes)"),
 ];
 
@@ -428,7 +437,8 @@ mod tests {
     #[test]
     fn keys() {
         assert_eq!(Key::of('\n'), Some(Key::Rebuild));
-        assert_eq!(Key::of('\x03'), Some(Key::Quit));
+        assert_eq!(Key::of('\x03'), Some(Key::Interrupt));
+        assert_eq!(Key::of('q'), Some(Key::Quit));
         assert_eq!(Key::of('\x12'), Some(Key::CleanRebuild));
         assert_eq!(Key::of('x'), Some(Key::Other('x')));
         assert_eq!(Key::of('\x1b'), None);

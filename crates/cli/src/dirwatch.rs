@@ -52,7 +52,7 @@ use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -74,7 +74,10 @@ pub const HELP: &[(&str, &str)] = &[
         "↑ ↓",
         "highlight a document (the top line: every open document)",
     ),
-    ("Enter", "open the highlighted document in the browser"),
+    (
+        "Enter",
+        "open the highlighted document in the browser (started if it is not running)",
+    ),
     ("r", "build it again now"),
     ("Ctrl-R", "clean rebuild: start over from scratch"),
     ("x", "stop it: its session ends, its memory freed"),
@@ -536,6 +539,10 @@ struct State {
     /// The watch is quitting: no session starts any more (a tab cut
     /// joins again at once, and would start its document's anew).
     quitting: bool,
+    /// The folder's documents (`.tex` files with a `\documentclass`),
+    /// found once at the start: the terminal's tree lists them, so Enter
+    /// starts one with no browser first.
+    found: Vec<String>,
 }
 
 /// What wakes the watch's loop.
@@ -573,6 +580,8 @@ pub struct Shared {
     budget: u64,
     /// How long a document no tab shows keeps running (none: for ever).
     auto_stop: Option<Duration>,
+    /// The documents' "nothing written here" said (once a watch).
+    unwritten_said: AtomicBool,
 }
 
 impl Shared {
@@ -873,6 +882,19 @@ fn told(sh: &Shared, rel: &str, epoch: u64, v: &Value) {
                     }
                 }
                 "started" => d.build = "building",
+                // (a document's "nothing written here": the folder's,
+                // said once for all of them)
+                "unwritten" => {
+                    if !sh.unwritten_said.swap(true, Ordering::AcqRel) {
+                        let cols = crate::keys::width().unwrap_or(100);
+                        for l in crate::ui::wrap(
+                            &crate::watch::unwritten_banner("each document's PDF"),
+                            cols,
+                        ) {
+                            ui.line(&ui.st.dim(&l));
+                        }
+                    }
+                }
                 "queued" => d.queued = e["on"] == true,
                 "build" => {
                     d.build = if e["ok"] == true { "ok" } else { "errors" };
@@ -1696,6 +1718,39 @@ fn read_keys(tx: &mpsc::Sender<Ev>, raw: bool) {
 }
 
 /// The documents whose session runs.
+/// The terminal tree's documents, in its order: those opened this run,
+/// then the folder's others ([`State::found`]).
+fn listed(st: &State) -> Vec<String> {
+    let mut v: Vec<String> = st.docs.keys().cloned().collect();
+    v.extend(
+        st.found
+            .iter()
+            .filter(|r| !st.docs.contains_key(*r))
+            .cloned(),
+    );
+    v
+}
+
+/// The folder's documents for the terminal's tree: its `.tex` files with
+/// a `\documentclass` (each one's head read), at most [`FOUND_MAX`].
+fn documents(root: &Root) -> Vec<String> {
+    find_tex(root)
+        .into_iter()
+        .filter(|r| {
+            let Ok(f) = std::fs::File::open(root.path.join(r)) else {
+                return false;
+            };
+            let mut b = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut std::io::Read::take(f, 1 << 16), &mut b);
+            crate::config::is_document(&String::from_utf8_lossy(&b))
+        })
+        .take(FOUND_MAX)
+        .collect()
+}
+
+/// The folder's documents the terminal's tree lists, at most.
+const FOUND_MAX: usize = 30;
+
 fn running(st: &State) -> Vec<String> {
     st.docs
         .iter()
@@ -1707,11 +1762,14 @@ fn running(st: &State) -> Vec<String> {
 /// The documents of the terminal's tree: every one opened this run, in
 /// order, each with its state in words and whether it is well.
 fn rows(st: &State, now: SystemTime) -> Vec<(String, String, usize, Option<bool>)> {
-    st.docs
-        .iter()
-        .map(|(r, d)| {
-            let ok = if d.live() { d.ok } else { None };
-            (r.clone(), d.words(now), d.tabs.len(), ok)
+    listed(st)
+        .into_iter()
+        .map(|r| match st.docs.get(&r) {
+            Some(d) => {
+                let ok = if d.live() { d.ok } else { None };
+                (r, d.words(now), d.tabs.len(), ok)
+            }
+            None => (r, "not started · Enter starts it".to_owned(), 0, None),
         })
         .collect()
 }
@@ -1803,7 +1861,21 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
         ui: ui.clone(),
         budget: o.memory.unwrap_or_else(default_budget),
         auto_stop: o.auto_stop.unwrap_or(Some(AUTO_STOP)),
+        unwritten_said: AtomicBool::new(false),
     });
+    // (the folder's documents, for the terminal's tree: found on a thread
+    // of their own, a large folder's walk never in the way)
+    {
+        let s = sh.clone();
+        let _ = std::thread::Builder::new()
+            .name("phitex-dir-find".into())
+            .spawn(move || {
+                let found = documents(&s.root);
+                let mut st = lock(&s.st);
+                st.found = found;
+                s.changed(&mut st);
+            });
+    }
     {
         let s = sh.clone();
         std::thread::Builder::new()
@@ -1895,7 +1967,7 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
     loop {
         statuses(&sh, cursor, &shown_dir);
         let Ok(ev) = rx.recv() else { quit(&sh) };
-        let docs: Vec<String> = lock(&sh.st).docs.keys().cloned().collect();
+        let docs: Vec<String> = listed(&lock(&sh.st));
         cursor = cursor.min(docs.len());
         let highlighted = cursor.checked_sub(1).and_then(|k| docs.get(k)).cloned();
         let (k, doc) = match ev {
@@ -1925,7 +1997,7 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
             }
         };
         match k {
-            Key::Quit => quit(&sh),
+            Key::Quit | Key::Interrupt => quit(&sh),
             Key::Other('x' | 'X') => {
                 let mut s = lock(&sh.st);
                 let ts = targets(&s);
@@ -1950,7 +2022,7 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
                     ui.line(
                         match &doc {
                             Some(r) => {
-                                format!("phitex watch: {r} is not running (open it in the browser)")
+                                format!("phitex watch: {r} is not running (Enter starts it)")
                             }
                             None => "phitex watch: no document open (pick one in the browser)"
                                 .to_owned(),
@@ -1965,6 +2037,18 @@ pub fn main(dir: &Path, o: &Options, args: &[String], ui: &Ui) -> ! {
                 }
             }
             Key::Open => {
+                // (a document not running: started here, then shown; the
+                // browser need not be there for it to build)
+                let idle = doc.as_ref().filter(|r| {
+                    let st = lock(&sh.st);
+                    !st.docs.get(*r).is_some_and(Doc::live)
+                });
+                if let Some(r) = idle {
+                    lock(&sh.st).ids.insert(doc_id(r), r.clone());
+                    if let Err(e) = connect(&sh, r, true) {
+                        ui.error(&e);
+                    }
+                }
                 let target = doc
                     .as_ref()
                     .map(|r| format!("{}d/{}/?path={}", sh.url, doc_id(r), escape(r)));

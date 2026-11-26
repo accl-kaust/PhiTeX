@@ -131,6 +131,33 @@ pub fn width(s: &str) -> usize {
     plain(s).chars().count()
 }
 
+/// Plain text `s` cut into lines of at most `cols` columns at its spaces,
+/// never inside a word (a word longer than a line has one to itself); the
+/// lines after the first indented by two. A terminal that wrapped it
+/// itself would cut "-y" from ": write" at its edge.
+pub fn wrap(s: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(20);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for w in s.split(' ').filter(|w| !w.is_empty()) {
+        let indent = if out.is_empty() { 0 } else { 2 };
+        let room = cols.saturating_sub(indent);
+        if !line.is_empty() && width(&line) + 1 + width(w) > room {
+            out.push(format!("{}{line}", " ".repeat(indent)));
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(w);
+    }
+    if !line.is_empty() {
+        let indent = if out.is_empty() { 0 } else { 2 };
+        out.push(format!("{}{line}", " ".repeat(indent)));
+    }
+    out
+}
+
 /// `s` padded with spaces to `w` columns (on the left with `right`).
 pub fn pad(s: &str, w: usize, right: bool) -> String {
     let fill = " ".repeat(w.saturating_sub(width(s)));

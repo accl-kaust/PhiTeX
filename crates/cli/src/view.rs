@@ -173,7 +173,7 @@ pub(crate) fn doc_token(main: &std::path::Path) -> String {
     let Ok(c) = crate::cache::Cache::open(None) else {
         return token();
     };
-    let f = c.doc_dir(main).join("viewer-token");
+    let f = c.doc_dir(main).join(crate::cache::VIEWER_TOKEN);
     if let Ok(t) = std::fs::read_to_string(&f)
         && t.len() == 32
         && t.bytes().all(|b| b.is_ascii_hexdigit())

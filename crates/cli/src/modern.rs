@@ -50,12 +50,12 @@ a file not found, no TeX Live; 3 PhiTeX failed: the engine stopped, a
 file could not be written, the network (upgrade, Shelf). Standard error
 says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
 
-/// `phitex` and `phitex --help`'s first lines: the loop an agent (or
-/// anyone) edits a document in.
+/// `phitex` and `phitex --help`'s last section: the loop an agent edits a
+/// document in (a person reads the description and the commands first).
 const AGENTS: &str = "\
 For agents: phitex session start main.tex; edit; phitex session wait;
-phitex session problems; phitex session png --label <label>; phitex session stop
-In a sandbox that ends each command's processes: phitex build, then phitex png --label <label>";
+  phitex session problems; phitex session png --label <label>; phitex session stop
+  In a sandbox that ends each command's processes: phitex build, then phitex png --label <label>";
 
 /// `phitex build --help`'s last lines: the session, for builds again and
 /// again.
@@ -78,7 +78,9 @@ fn short_after_help() -> String {
         "Settings: phitex.toml (the project's), ~/.config/phitex/phitex.toml (yours; PHITEX_CONFIG: another file):
   {l}phitex config KEY VALUE{l:#}, e.g. {l}phitex config update-check on{l:#}; {l}phitex config --init{l:#} writes one with every setting
 Engine: picked from the document (xelatex for fontspec), or {l}--engine NAME{l:#}; LuaLaTeX not supported yet
-Every option: {l}phitex --help-all{l:#} · https://phitex.org"
+Every option: {l}phitex --help-all{l:#} · https://phitex.org
+
+{AGENTS}"
     )
 }
 
@@ -127,7 +129,10 @@ fn after_help() -> String {
 
 {h}TeX's own command line:{h:#}
   run phitex as `pdflatex`, `latex`, `pdftex`, `etex` or `tex` (a link to
-  it), or `phitex --compat=NAME …`: web2c's options, one run."
+  it), or `phitex --compat=NAME …`: web2c's options, one run.
+
+{h}Agents:{h:#}
+{AGENTS}"
     )
 }
 
@@ -160,7 +165,6 @@ pub fn version_text() -> &'static str {
 #[command(
     name = "phitex",
     bin_name = "phitex",
-    before_help = AGENTS,
     version = crate::version(),
     long_version = version_text(),
     about = "PhiTeX: LaTeX that updates as you type",
@@ -281,6 +285,12 @@ enum Sub {
     },
     /// What is new in this version
     News,
+    /// Check PhiTeX's setup: the program, TeX's files, the cache, the running watches
+    ///
+    /// For any editor (Emacs and Neovim have M-x phitex-doctor and
+    /// :PhiTeXDoctor) and for a bug report: it names files and folders,
+    /// never a document's text, and ends with where to open an issue.
+    Doctor,
     /// Shell completions: phitex completions bash > ~/.local/share/bash-completion/completions/phitex
     ///
     /// The script for SHELL on standard output. bash: into
@@ -348,11 +358,15 @@ enum Sub {
 #[derive(Args, Debug, Default)]
 struct Global {
     /// More detail: each pass, each warning, the cache (-vv: the engine's counters)
-    ///
-    /// Each pass over the document and why it ran, each warning's first
-    /// lines, a failure's whole message, the cache's use; -vv adds the
-    /// engine's own counters and tables
-    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    #[arg(
+        short,
+        long,
+        action = clap::ArgAction::Count,
+        global = true,
+        long_help = "More detail: each pass over the document and why it ran, each warning's \
+                     first lines, a failure's whole message, the cache's use; -vv adds the \
+                     engine's own counters and tables"
+    )]
     verbose: u8,
     /// Only problems and the result
     #[arg(short, long, global = true, conflicts_with = "verbose")]
@@ -396,10 +410,13 @@ struct BuildArgs {
     )]
     output_dir: Option<String>,
     /// pdflatex (default), xelatex, latex, pdftex, …
-    ///
-    /// pdflatex (default for LaTeX), latex, xelatex, pdftex (default
-    /// otherwise), xetex, etex, tex (lualatex is not supported yet)
-    #[arg(long, alias = "program", value_name = "NAME")]
+    #[arg(
+        long,
+        alias = "program",
+        value_name = "NAME",
+        long_help = "pdflatex (the default for LaTeX), latex, xelatex, pdftex (the default \
+                     otherwise), xetex, etex, tex (lualatex is not supported yet)"
+    )]
     engine: Option<String>,
     /// dvi or pdf (xdv: XeTeX's XDV file, not made a PDF)
     #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], hide_short_help = true)]
@@ -411,15 +428,29 @@ struct BuildArgs {
     #[arg(long, hide_short_help = true)]
     etex: bool,
     /// Threads (default: 1); the output is the same at any count
-    ///
-    /// The engine's threads (default: PHITEX_THREADS, else 1); the output
-    /// is the same at any count
-    #[arg(short = 'j', long = "jobs", alias = "threads", value_name = "N")]
+    #[arg(
+        short = 'j',
+        long = "jobs",
+        alias = "threads",
+        value_name = "N",
+        long_help = "The engine's threads (default: PHITEX_THREADS, else 1); the output is the \
+                     same at any count"
+    )]
     jobs: Option<usize>,
     /// Whether the engine runs steps ahead of their inputs: on those an
-    /// earlier run predicts (the default), never, or on any (not usable
-    /// yet). The output is the same either way.
-    #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], hide_short_help = true)]
+    /// earlier run predicts (the default), or never. The output is the
+    /// same either way.
+    #[arg(
+        long = "spec",
+        value_name = "WHEN",
+        value_parser = clap::builder::PossibleValuesParser::new([
+            clap::builder::PossibleValue::new("off"),
+            clap::builder::PossibleValue::new("predicted"),
+            // (on any step: the engine's experiment, not one to offer)
+            clap::builder::PossibleValue::new("all").hide(true),
+        ]),
+        hide_short_help = true
+    )]
     spec: Option<String>,
     /// A long piece's readers do not wait for it on the fields an earlier
     /// build learned it defines last before them (they do by default: kept
@@ -471,12 +502,19 @@ struct BuildArgs {
 #[derive(Args, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 struct WatchArgs {
-    /// watch: open the viewer
-    ///
-    /// watch: open the viewer in the browser (or start phitex.toml's
-    /// `viewer`, zathura or the like, on the output)
-    #[arg(long)]
+    /// watch: open the viewer in the browser (the default where there is a display)
+    #[arg(
+        long,
+        conflicts_with = "no_open",
+        long_help = "watch: open the viewer in the browser, or start your `viewer` setting \
+                     (zathura or the like) on the output. The default on a terminal with a \
+                     display (macOS, Windows, Linux with DISPLAY or WAYLAND_DISPLAY), but not \
+                     over SSH, with --lsp or --json; the viewer's address is printed either way"
+    )]
     open: bool,
+    /// watch: don't open the viewer (its address is printed: open it yourself)
+    #[arg(long)]
+    no_open: bool,
     /// watch: no live viewer (the PDF and its files are then written, as by --write)
     #[arg(long, hide_short_help = true)]
     no_view: bool,
@@ -550,6 +588,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    Doctor,
     Build,
     Watch,
     Clean,
@@ -669,6 +708,7 @@ impl Cli {
                 o.output_dir = output_dir;
             }
             Some(Sub::News) => o.command = Some(Command::News),
+            Some(Sub::Doctor) => o.command = Some(Command::Doctor),
             Some(Sub::Session { verb, session }) => {
                 o.command = Some(Command::Session);
                 o.session = Some((verb, session));
@@ -758,7 +798,6 @@ impl BuildArgs {
 impl WatchArgs {
     fn apply(self, o: &mut Options) {
         let w = self;
-        o.open = w.open;
         o.view = !w.no_view;
         o.write = w.write;
         o.diagnostics = w.diagnostics;
@@ -769,7 +808,48 @@ impl WatchArgs {
         o.editor = w.editor;
         o.memory = w.memory;
         o.auto_stop = w.auto_stop.map(|a| a.0);
+        o.open = w.open
+            || (!w.no_open
+                && opens_by_default(&Opening {
+                    lsp: o.lsp,
+                    json: o.json,
+                    terminal: std::io::IsTerminal::is_terminal(&std::io::stderr()),
+                    desktop: cfg!(any(windows, target_os = "macos")),
+                    var: &|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()),
+                }));
     }
+}
+
+/// What decides whether a watch opens its viewer unasked
+/// ([`opens_by_default`]).
+pub struct Opening<'a> {
+    /// `--lsp`: the editor opens it (its command, its key).
+    pub lsp: bool,
+    /// `--json`: a program reads the watch, no person at a desk.
+    pub json: bool,
+    /// Standard error is a terminal: a person started it there (not an
+    /// agent's `session start`, a folder watch's document, a script).
+    pub terminal: bool,
+    /// macOS or Windows: a desktop is there whenever a person is.
+    pub desktop: bool,
+    /// Whether an environment variable is set (and not empty).
+    pub var: &'a dyn Fn(&str) -> bool,
+}
+
+/// Whether a watch opens its viewer in the browser when neither `--open`
+/// nor `--no-open` says: where a person started it on a terminal with a
+/// display to open it on (macOS, Windows; elsewhere `DISPLAY` or
+/// `WAYLAND_DISPLAY`), never over SSH (the browser would open on the far
+/// machine, or fail), never for an editor (`--lsp`) or a program
+/// (`--json`). Its address is printed either way.
+pub fn opens_by_default(o: &Opening) -> bool {
+    if o.lsp || o.json || !o.terminal {
+        return false;
+    }
+    if (o.var)("SSH_CONNECTION") || (o.var)("SSH_TTY") {
+        return false;
+    }
+    o.desktop || (o.var)("DISPLAY") || (o.var)("WAYLAND_DISPLAY")
 }
 
 /// The command line's options (`args` after the program's name).
@@ -868,6 +948,9 @@ pub struct Target {
     /// What reading `phitex.toml` and `.latexmkrc` warned of (unknown
     /// keys, lines not applied).
     pub warnings: Vec<String>,
+    /// What the build says before it starts: the main file picked when
+    /// none was named, or the document a chapter named is part of.
+    pub notes: Vec<String>,
     /// The search paths a `.latexmkrc` set (the job's `inputs`).
     pub inputs: Vec<(String, String)>,
     /// The settings' files read, and those looked for and not there
@@ -1043,12 +1126,28 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
             })
         })
         .filter(|_| o.file.is_none() && cfg.main.is_none());
-    let mut file = o
-        .file
-        .clone()
-        .or_else(|| cfg.main.clone())
-        .or(from_rc)
-        .ok_or("no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned())?;
+    // (what the build says before it starts: the main file it picked)
+    let mut notes = Vec::new();
+    let named_file = o.file.clone().or_else(|| cfg.main.clone()).or(from_rc);
+    let given = o.file.is_some();
+    let mut file = match named_file {
+        Some(f) => f,
+        // (nothing names it: the one .tex file here with a \documentclass,
+        // as the editors pick it; several, named by the user)
+        None => {
+            let here = std::env::current_dir().map_err(|e| e.to_string())?;
+            let verb = match o.command {
+                Some(Command::Watch) => "watch",
+                Some(Command::Clean) => "clean",
+                _ => "build",
+            };
+            let f = pick_main(&here, verb)?;
+            notes.push(format!(
+                "no file named: building {f}, the one .tex file here with a \\documentclass"
+            ));
+            f
+        }
+    };
     // (the magic comments are in the first lines: the whole file is read
     // only when no engine is named and its text decides)
     let read = |f: &str, whole: bool| {
@@ -1090,6 +1189,30 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         main_read = read_at(&file);
         text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
+    } else if given && let Some(main) = main_of_part(&file, &text) {
+        // (a chapter named, no document of its own: the document that
+        // inputs it built, said; never the chapter alone as plain TeX)
+        let at = std::env::current_dir()
+            .ok()
+            .and_then(|d| d.canonicalize().ok())
+            .and_then(|d| main.strip_prefix(d).ok().map(Path::to_path_buf))
+            .unwrap_or_else(|| main.clone());
+        let shown = |p: &Path| {
+            p.file_name().map_or_else(
+                || p.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        };
+        notes.push(format!(
+            "{} is part of {}: building {}",
+            shown(Path::new(&file)),
+            shown(&main),
+            at.display()
+        ));
+        file = at.to_string_lossy().into_owned();
+        main_read = read_at(&file);
+        text = read(&file, false)?;
+        program = config::magic_comments(&text).0;
     }
     // (where the engine was named, for an error that says which to fix)
     let named = o
@@ -1236,10 +1359,64 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         threads: cfg.threads.filter(|&n| n > 0),
         files,
         warnings: [cfg.warnings, rc_warnings].concat(),
+        notes,
         inputs,
         config_files,
         main_read,
     })
+}
+
+/// The `.tex` files in `dir` with a `\documentclass`, sorted.
+pub(crate) fn documents_in(dir: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            n.ends_with(".tex")
+                && std::fs::read(dir.join(n))
+                    .is_ok_and(|b| config::is_document(&String::from_utf8_lossy(&b)))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The main file when nothing names one: the one `.tex` file in `dir`
+/// with a `\documentclass`. None or several: an error that says how to
+/// name it (`verb`: the command, `phitex VERB FILE`).
+fn pick_main(dir: &Path, verb: &str) -> Result<String, String> {
+    let mut found = documents_in(dir);
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(format!(
+            "no file named, and no .tex file here has a \\documentclass: name the main file \
+             (phitex {verb} paper.tex), or put `main = \"paper.tex\"` in a phitex.toml"
+        )),
+        _ => Err(format!(
+            "no file named, and {} .tex files here have a \\documentclass: {}. Name one: \
+             phitex {verb} {} (or put `main = \"{}\"` in a phitex.toml)",
+            found.len(),
+            found.join(", "),
+            found[0],
+            found[0]
+        )),
+    }
+}
+
+/// The document that inputs `file` when `file` (its text `text`) has no
+/// `\documentclass` of its own: a chapter `\include`d or `\input` by a
+/// `.tex` file beside it or above ([`crate::lsp::includer`]). None: a
+/// document of its own (or plain TeX no LaTeX document inputs).
+fn main_of_part(file: &str, text: &str) -> Option<PathBuf> {
+    if config::is_document(text) {
+        return None;
+    }
+    let p = [PathBuf::from(file), PathBuf::from(format!("{file}.tex"))]
+        .into_iter()
+        .find(|p| p.is_file())?;
+    crate::lsp::includer(&p)
 }
 
 /// A file's length and modification time (none: not there), as a watch
@@ -2107,7 +2284,7 @@ pub fn main(args: &[String]) -> ! {
     }
     let Some(command) = o.command else {
         ui.error(
-            "no command given: build, watch, clean, config, news or upgrade (`phitex --help`)",
+            "no command given: build, watch, clean, config, doctor, news or upgrade (`phitex --help`)",
         );
         std::process::exit(crate::EXIT_USAGE);
     };
@@ -2119,6 +2296,9 @@ pub fn main(args: &[String]) -> ! {
     if command == Command::News {
         crate::news::print(o.json);
         std::process::exit(0);
+    }
+    if command == Command::Doctor {
+        std::process::exit(crate::doctor::main(o.json));
     }
     if command == Command::Session
         && let Some((verb, pid)) = &o.session
@@ -2272,6 +2452,9 @@ pub fn main(args: &[String]) -> ! {
     {
         std::process::exit(code);
     }
+    for n in &t.notes {
+        ui.note(n);
+    }
     for w in &t.warnings {
         ui.warning(w);
     }
@@ -2281,7 +2464,9 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News | Command::Upgrade | Command::Config | Command::Session => unreachable!(),
+        Command::News | Command::Upgrade | Command::Config | Command::Session | Command::Doctor => {
+            unreachable!()
+        }
     }
 }
 

@@ -467,7 +467,7 @@ fn tex_files(dir: &Path) -> Vec<PathBuf> {
 /// `\documentclass` in `file`'s folder or one of the three above it (a
 /// project's folder holds no `phitex.toml` or `.git` above it), its names
 /// read from its own folder or the main file's. None: no file inputs it.
-fn includer(file: &Path) -> Option<PathBuf> {
+pub(crate) fn includer(file: &Path) -> Option<PathBuf> {
     let file = file.canonicalize().ok()?;
     let mut dirs = Vec::new();
     for d in file.ancestors().skip(1).take(4) {

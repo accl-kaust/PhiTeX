@@ -789,10 +789,30 @@ addEventListener("keydown", (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "p") return;
   e.preventDefault();
   e.stopImmediatePropagation();
-  // (a folder watch's document: quick open, Ctrl+P again in it prints)
+  // (a folder watch's document: Ctrl+P finds a document, as in an
+  // editor, and only that; its printing is the … menu's Print PDF)
   if (folderQuick) return folderQuick.toggle();
   void printPdf();
 }, { capture: true });
+// (Print PDF in the … menu, under Download PDF: a folder watch's document
+// has no other way to print, and any watch's is found there too)
+{
+  const PRINT_ICON = "M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z";
+  const root = document.querySelector("phitex-preview")?.shadowRoot;
+  const pdf = root?.querySelector<HTMLElement>("#x-pdf");
+  if (root && pdf && !root.querySelector("#x-print")) {
+    const b = pdf.cloneNode(true) as HTMLElement;
+    b.id = "x-print";
+    b.querySelector("path")?.setAttribute("d", PRINT_ICON);
+    for (const sp of b.querySelectorAll("span")) if (sp.textContent === "Download PDF") sp.textContent = "Print PDF";
+    b.onclick = () => {
+      // (the menu closed as its own button closes it)
+      root.querySelector<HTMLElement>("#b-more")?.click();
+      void printPdf();
+    };
+    pdf.after(b);
+  }
+}
 
 // ---- A folder watch's document (`phitex watch DIR`): its Files column and quick open ----
 // (served under the folder's address as d/ID/: the folder's file manager is at ../../ws)
@@ -805,7 +825,7 @@ let folderDoc: string | undefined;
   // (the watch's own keys in the keys' help, `?`: a folder's document has its Files and quick open)
   panel.addKeys([
     ...(m
-      ? ([["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] as [string, string][])
+      ? ([["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (print: the … menu's Print PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] as [string, string][])
       : ([["Ctrl+P", "print the PDF"]] as [string, string][])),
     ["`", "the terminal"],
   ]);
@@ -869,8 +889,7 @@ function folderMode(id: string): void {
   button.onclick = () => show(!on);
   close.onclick = () => show(false);
   const root = col.getRootNode() as ShadowRoot;
-  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host, link, "Ctrl+P again: print the PDF");
-  folderQuick.onAgain = () => void printPdf();
+  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host, link, "print: the … menu");
   let files: FileList | undefined;
   link.onHello = (h) => {
     if (!h.doc) return;

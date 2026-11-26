@@ -736,7 +736,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "update-channel",
         "stable",
-        "what phitex upgrade follows: stable or nightly (yours only)",
+        "what phitex upgrade follows: stable or nightly (default: the channel this phitex came from; yours only)",
     ),
     (
         "watch-write",
@@ -947,7 +947,13 @@ pub fn listed(key: Option<&str>, dir: &Path) -> Result<Listing, String> {
         .into_iter()
         .map(|&(k, default, what)| Row {
             key: k,
-            default,
+            // (the channel this phitex came from, not always "stable": a
+            // nightly install follows the nightly)
+            default: if k == "update-channel" {
+                crate::upgrade::installed_channel()
+            } else {
+                default
+            },
             what,
             user: value(&user, k),
             project: value(&project, k),
@@ -1428,6 +1434,24 @@ pub fn default_engine(text: &str) -> &'static str {
     } else {
         "pdftex"
     }
+}
+
+/// Whether `text` is a document of its own: a `\documentclass` (or
+/// LaTeX 2.09's `\documentstyle`), or a `\begin{document}` after a
+/// preamble it inputs, on a line not commented out before it. A chapter
+/// another file inputs has none.
+#[must_use]
+pub fn is_document(text: &str) -> bool {
+    let marks = ["\\documentclass", "\\documentstyle", "\\begin{document}"];
+    text.lines().any(|l| {
+        // (the line up to its comment: a `%` not escaped)
+        let b = l.as_bytes();
+        let end = (0..b.len())
+            .find(|&k| b[k] == b'%' && (k == 0 || b[k - 1] != b'\\'))
+            .unwrap_or(b.len());
+        let code = &l[..end];
+        marks.iter().any(|m| code.contains(m))
+    })
 }
 
 /// The packages that run only under XeTeX or LuaTeX (the engine checks'

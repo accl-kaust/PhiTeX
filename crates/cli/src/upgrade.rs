@@ -279,8 +279,28 @@ fn nightly() -> Result<Release, String> {
     })
 }
 
-/// What `phitex upgrade` follows: the user's `update-channel`, else what
-/// install.sh recorded (`PHITEX_CHANNEL=nightly`), else `stable`.
+/// The channel this phitex came from: what install.sh recorded
+/// (`PHITEX_CHANNEL=nightly`), else its own version (a nightly's is
+/// `1.0.5-nightly.…`), else `stable`. `update-channel`'s default.
+pub(crate) fn installed_channel() -> &'static str {
+    installed_channel_of(
+        install_record().and_then(|r| r["channel"].as_str().map(str::to_owned)),
+        crate::version(),
+    )
+}
+
+/// [`installed_channel`] of what install.sh recorded and the version.
+fn installed_channel_of(recorded: Option<String>, version: &str) -> &'static str {
+    match recorded.as_deref() {
+        Some("nightly") => "nightly",
+        Some("stable") => "stable",
+        _ if version.contains("-nightly") => "nightly",
+        _ => "stable",
+    }
+}
+
+/// What `phitex upgrade` follows: the user's `update-channel`, else the
+/// channel this phitex came from ([`installed_channel`]).
 fn channel() -> Result<&'static str, String> {
     let set = crate::config::user().ok().and_then(|c| c.update_channel);
     match set.as_deref() {
@@ -289,8 +309,7 @@ fn channel() -> Result<&'static str, String> {
         Some(other) => Err(format!(
             "update-channel is '{other}': it is \"stable\" or \"nightly\" (phitex config update-channel stable)"
         )),
-        None if install_record().is_some_and(|r| r["channel"] == "nightly") => Ok("nightly"),
-        None => Ok("stable"),
+        None => Ok(installed_channel()),
     }
 }
 
@@ -378,7 +397,7 @@ fn fetch(r: &Release, asset: &str, seen: impl FnMut(u64, Option<u64>)) -> Result
 /// phitex's only if the prefix it names is this binary's: another
 /// install's record (`PHITEX_PREFIX=/opt/x`, a second copy elsewhere)
 /// never makes this one look installed by the script, or nightly.
-fn install_record() -> Option<Value> {
+pub(crate) fn install_record() -> Option<Value> {
     let exe = std::env::current_exe().ok()?;
     let data = crate::dirs::phitex(crate::dirs::Kind::Data);
     record_for(&exe, data.as_deref(), |p| std::fs::read(p).ok())
@@ -821,6 +840,26 @@ mod tests {
         );
         // (a binary elsewhere: none)
         assert_eq!(rec("/usr/bin/phitex", Some("/home/v/data/phitex")), None);
+    }
+
+    /// `update-channel`'s default is the channel this phitex came from: a
+    /// nightly installed with no record (or a stable one's binary) says so
+    /// (`phitex config` said "stable" after a nightly install).
+    #[test]
+    fn the_installed_channel() {
+        assert_eq!(
+            installed_channel_of(None, "1.0.5-nightly.202611241458"),
+            "nightly"
+        );
+        assert_eq!(installed_channel_of(None, "1.0.2"), "stable");
+        assert_eq!(
+            installed_channel_of(Some("nightly".into()), "1.0.2"),
+            "nightly"
+        );
+        assert_eq!(
+            installed_channel_of(Some("stable".into()), "1.0.5-nightly.1"),
+            "stable"
+        );
     }
 
     /// The download's bar: its percent, 24 cells, the MB of the whole;
