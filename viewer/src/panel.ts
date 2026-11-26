@@ -4303,11 +4303,10 @@ export class Panel {
     const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
     // (the last page drawn: its time as a bar like the build's parts, the watch's probe and draw, the transfer, the decode)
     const strips = framePart(this.$("#stripsline").dataset.frame);
-    const starting = !this.built && !this.speed;
-    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1] as number)}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>${starting ? html`<button type="button" class="reportbtn copydbg">Copy debug info</button>` : ""}`);
-    // (before any build (a start under way, stuck or failed) the debug info is what there is to give:
-    // the host's start, its step and errors; Copy debug info here, where the status's click and a
-    // host's diagnostics button open it (once built, the timings, and Copy debug info in ⋯))
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1] as number)}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
+    // (Copy debug info always here, and in ⋯: a host that hides ⋯ (Overleaf) has this popover, from
+    // the status's click, or the problems' "Build timings…" where the status names errors, and a
+    // start under way, stuck or failed has nothing else to give)
     el.querySelector<HTMLButtonElement>(".copydbg")?.addEventListener("click", (e) => {
       e.stopPropagation();
       const b = e.currentTarget as HTMLButtonElement;

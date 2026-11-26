@@ -13881,8 +13881,7 @@ var Panel = class {
     const head = !l ? e2e !== void 0 ? ["Keystroke to page", e2e] : null : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
     const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    const starting = !this.built && !this.speed;
-    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1])}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips2}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>${starting ? html`<button type="button" class="reportbtn copydbg">Copy debug info</button>` : ""}`);
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1])}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips2}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
     el.querySelector(".copydbg")?.addEventListener("click", (e) => {
       e.stopPropagation();
       const b = e.currentTarget;
