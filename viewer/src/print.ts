@@ -557,10 +557,11 @@ header:active { cursor: grabbing; }
 .tip .new { display: inline-block; margin-right: 6px; padding: 0 7px; border-radius: var(--ph-pill); font-size: 11px; font-weight: 600; vertical-align: 1px;
   background: var(--ph-accent); color: var(--ph-accent-fg); }
 .tip h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
-/* (no margin beside the pages for the card: one line, its title and its buttons, the card on hover or focus) */
-.tip.compact:not(:hover):not(:focus-within) { width: auto; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 12px; }
-.tip.compact:not(:hover):not(:focus-within) h4 { margin: 0; white-space: nowrap; }
-.tip.compact:not(:hover):not(:focus-within) :is(.demo, p, .acts .n) { display: none; }
+/* (no margin beside the pages for the card: one line, its title and its buttons; the whole card on a click on its title,
+   never on a hover, which moved its buttons from under the pointer) */
+.tip.compact:not(.open) { width: auto; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 12px; }
+.tip.compact:not(.open) h4 { margin: 0; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.tip.compact:not(.open) :is(.demo, p, .acts .n) { display: none; }
 .tip p { margin: 0 0 10px; color: var(--ph-fg2); }
 .tip .acts { display: flex; align-items: center; gap: 8px; }
 .tip .acts .n { flex: 1; color: var(--ph-fg2); font-size: 12px; font-variant-numeric: tabular-nums; }

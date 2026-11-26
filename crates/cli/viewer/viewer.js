@@ -188,7 +188,7 @@ function plainError(d) {
   const ex = p?.excerpt ?? null;
   let message = d.message, hint = null, mark = null;
   if (/^Undefined control sequence/.test(message)) {
-    const cmd = ex ? commandAt(ex.text, ex.start + ex.len) : null;
+    const cmd = ex ? commandAt(ex.text, ex.start, ex.len) : null;
     if (cmd) message = `Undefined command ${cmd.name}`, mark = [cmd.at, cmd.name.length];
     else message = "Undefined command";
     hint = "Check its spelling, or load the package that defines it.";
@@ -213,13 +213,18 @@ function plainError(d) {
   }
   return r;
 }
-function commandAt(text, end) {
+function commandAt(text, start, len) {
   const chars = [...text];
-  const upto = chars.slice(0, Math.min(chars.length, Math.max(0, end))).join("");
-  const m = /\\(?:[A-Za-z@]+|.)\s*$/.exec(upto);
-  if (!m) return null;
-  const name = m[0].trimEnd();
-  return { name, at: [...upto.slice(0, m.index)].length };
+  const mark = chars.slice(start, start + len).join("");
+  const own = /^\\(?:[A-Za-z@]+|.)/.exec(mark);
+  if (own) return { name: own[0], at: start };
+  const upto = chars.slice(0, Math.min(chars.length, Math.max(0, start + len))).join("");
+  const all = [...upto.matchAll(/\\(?:[A-Za-z@]+|[^A-Za-z@\s])/g)];
+  const last = all[all.length - 1];
+  if (last && last.index + last[0].length >= upto.trimEnd().length - 1) return { name: last[0], at: [...upto.slice(0, last.index)].length };
+  const after = /\\[A-Za-z@]+/.exec(chars.slice(start + len).join(""));
+  if (after) return { name: after[0], at: start + len + [...chars.slice(start + len).join("").slice(0, after.index)].length };
+  return last ? { name: last[0], at: [...upto.slice(0, last.index)].length } : null;
 }
 function openBrace(text) {
   const chars = [...text];
@@ -3128,10 +3133,11 @@ header:active { cursor: grabbing; }
 .tip .new { display: inline-block; margin-right: 6px; padding: 0 7px; border-radius: var(--ph-pill); font-size: 11px; font-weight: 600; vertical-align: 1px;
   background: var(--ph-accent); color: var(--ph-accent-fg); }
 .tip h4 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
-/* (no margin beside the pages for the card: one line, its title and its buttons, the card on hover or focus) */
-.tip.compact:not(:hover):not(:focus-within) { width: auto; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 12px; }
-.tip.compact:not(:hover):not(:focus-within) h4 { margin: 0; white-space: nowrap; }
-.tip.compact:not(:hover):not(:focus-within) :is(.demo, p, .acts .n) { display: none; }
+/* (no margin beside the pages for the card: one line, its title and its buttons; the whole card on a click on its title,
+   never on a hover, which moved its buttons from under the pointer) */
+.tip.compact:not(.open) { width: auto; display: flex; align-items: center; gap: 10px; padding: 5px 8px 5px 12px; }
+.tip.compact:not(.open) h4 { margin: 0; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.tip.compact:not(.open) :is(.demo, p, .acts .n) { display: none; }
 .tip p { margin: 0 0 10px; color: var(--ph-fg2); }
 .tip .acts { display: flex; align-items: center; gap: 8px; }
 .tip .acts .n { flex: 1; color: var(--ph-fg2); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -13557,7 +13563,7 @@ var Panel = class {
     const cx = r.left + r.width / 2 - bar2.left;
     let left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
     const st = this.$("#stage").getBoundingClientRect(), slots = [...this.$("#viewer").querySelectorAll(".slot")].map((e) => e.getBoundingClientRect()).filter((p) => p.bottom > st.top && p.top < st.bottom && p.width > 0);
-    el.classList.remove("compact");
+    el.classList.remove("compact", "open");
     if (slots.length) {
       const pl = Math.min(...slots.map((p) => p.left)) - bar2.left, pr = Math.max(...slots.map((p) => p.right)) - bar2.left, sl = st.left - bar2.left, sr = st.right - bar2.left - 14;
       const over = left < pr && left + w > pl;
@@ -13593,6 +13599,7 @@ var Panel = class {
     this.tipCard(this.tipList, i);
     el.onclick = (e) => {
       e.stopPropagation();
+      if (el.classList.contains("compact") && e.target.closest("h4")) return void el.classList.toggle("open");
       const a = e.target.closest("[data-t]")?.dataset.t;
       if (a === "skip") this.seen(this.tipList.map((t2) => t2.id));
       if (a) this.tip(a === "next" ? i + 1 : -1);
@@ -14123,7 +14130,7 @@ var Panel = class {
     this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
-    this.$("#stage").classList.remove("stale");
+    if (this.lastStatus?.pages !== 0) this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);

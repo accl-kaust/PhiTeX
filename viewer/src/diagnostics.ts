@@ -272,7 +272,7 @@ function plainError<D extends Diagnostic>(d: D): D {
   const ex = p?.excerpt ?? null;
   let message = d.message, hint: string | null = null, mark: [number, number] | null = null;
   if (/^Undefined control sequence/.test(message)) {
-    const cmd = ex ? commandAt(ex.text, ex.start + ex.len) : null;
+    const cmd = ex ? commandAt(ex.text, ex.start, ex.len) : null;
     if (cmd) (message = `Undefined command ${cmd.name}`), (mark = [cmd.at, cmd.name.length]);
     else message = "Undefined command";
     hint = "Check its spelling, or load the package that defines it.";
@@ -298,14 +298,22 @@ function plainError<D extends Diagnostic>(d: D): D {
   return r;
 }
 
-/** The command ending at (or just before) character `end` of `text`: where TeX stopped reading it. */
-function commandAt(text: string, end: number): { name: string; at: number } | null {
+/**
+ * The undefined command in `text`: the culprit TeX marked ([start, start + len)) when it is one,
+ * else the last command before its end (TeX's top line ends at it), else the first after it.
+ */
+function commandAt(text: string, start: number, len: number): { name: string; at: number } | null {
   const chars = [...text];
-  const upto = chars.slice(0, Math.min(chars.length, Math.max(0, end))).join("");
-  const m = /\\(?:[A-Za-z@]+|.)\s*$/.exec(upto);
-  if (!m) return null;
-  const name = m[0].trimEnd();
-  return { name, at: [...upto.slice(0, m.index)].length };
+  const mark = chars.slice(start, start + len).join("");
+  const own = /^\\(?:[A-Za-z@]+|.)/.exec(mark);
+  if (own) return { name: own[0], at: start };
+  const upto = chars.slice(0, Math.min(chars.length, Math.max(0, start + len))).join("");
+  const all = [...upto.matchAll(/\\(?:[A-Za-z@]+|[^A-Za-z@\s])/g)];
+  const last = all[all.length - 1];
+  if (last && last.index! + last[0].length >= upto.trimEnd().length - 1) return { name: last[0], at: [...upto.slice(0, last.index)].length };
+  const after = /\\[A-Za-z@]+/.exec(chars.slice(start + len).join(""));
+  if (after) return { name: after[0], at: start + len + [...chars.slice(start + len).join("").slice(0, after.index)].length };
+  return last ? { name: last[0], at: [...upto.slice(0, last.index)].length } : null;
 }
 
 /** The last brace in `text` never closed, and the command it belongs to: "\section{Results". */

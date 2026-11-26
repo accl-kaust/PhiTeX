@@ -3961,14 +3961,14 @@ export class Panel {
     const cx = r.left + r.width / 2 - bar.left;
     let left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
     const st = this.$("#stage").getBoundingClientRect(), slots = [...this.$("#viewer").querySelectorAll<HTMLElement>(".slot")].map((e) => e.getBoundingClientRect()).filter((p) => p.bottom > st.top && p.top < st.bottom && p.width > 0);
-    el.classList.remove("compact");
+    el.classList.remove("compact", "open");
     if (slots.length) {
       const pl = Math.min(...slots.map((p) => p.left)) - bar.left, pr = Math.max(...slots.map((p) => p.right)) - bar.left, sl = st.left - bar.left, sr = st.right - bar.left - 14;
       const over = left < pr && left + w > pl;
       if (over && sr - pr >= w + 16 && (cx >= (pl + pr) / 2 || pl - sl < w + 16)) left = Math.min(sr - w - 8, Math.max(pr + 8, cx - w / 2));
       else if (over && pl - sl >= w + 16) left = Math.max(sl + 8, Math.min(pl - w - 8, cx - w / 2));
       // (no margin for it: one line under its control, over the page's top margin, never over what is on
-      // the page (a mark, a link); the whole card while the pointer or the focus is on it)
+      // the page (a mark, a link); the whole card when its title is clicked)
       else if (over) {
         el.classList.add("compact");
         const cw = el.offsetWidth;
@@ -4003,6 +4003,8 @@ export class Panel {
     this.tipCard(this.tipList, i);
     el.onclick = (e) => {
       e.stopPropagation();
+      // (a one-line tip: its title opens the whole card)
+      if (el.classList.contains("compact") && (e.target as HTMLElement).closest("h4")) return void el.classList.toggle("open");
       const a = (e.target as HTMLElement).closest<HTMLElement>("[data-t]")?.dataset.t;
       // (Skip ends the tour: every card of it seen, so none comes back unasked)
       if (a === "skip") this.seen(this.tipList.map((t) => t.id));
@@ -4610,7 +4612,9 @@ export class Panel {
     this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
-    this.$("#stage").classList.remove("stale");
+    // (a page of the last complete render drawn again (the pages laid out again at a new width, a sharper
+    // drawing) is no build's new page: the strip stays while the last build has none)
+    if (this.lastStatus?.pages !== 0) this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     // (a view with no layout yet: this page's slots, up to it)
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => (i === k && hash) || `?${i}`));
