@@ -2730,6 +2730,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             let main = (main_rel.clone(), s.source(&main_rel));
             let pdf = written.as_ref().map(|p| p.display().to_string());
             let why_built = why.to_owned();
+            let changed = r.out.pages_changed.clone();
             let _ = hub_tx.send(Box::new(move || {
                 let found: HashSet<String> = w
                     .paths
@@ -2767,6 +2768,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     diags,
                     pdf,
                     why: why_built,
+                    changed,
                 }
             }));
             status.set("");

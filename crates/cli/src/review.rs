@@ -489,6 +489,9 @@ pub struct BuildRec {
     /// Its place among the builds the hub was told of, from 1: a new
     /// session (a clean rebuild) numbers its builds from 1 again.
     pub seq: u64,
+    /// The pages (from 1) that differ from the build before's: what
+    /// `session png --changed` draws.
+    pub changed: Vec<usize>,
 }
 
 /// The files build `b` read that an editor holds now with other text
@@ -563,6 +566,8 @@ pub struct BuildFacts {
     /// Why it was built, as the watch says it ("main.tex changed",
     /// "asked: 41 inputs checked, 1 read again", "cold").
     pub why: String,
+    /// The pages (from 1) that differ from the build before's.
+    pub changed: Vec<usize>,
 }
 
 /// A hunk now: [`rt::Hunk`] in a file, named.
@@ -940,6 +945,7 @@ impl Hub {
             pdf: f.pdf,
             why: f.why,
             seq: st.builds.back().map_or(1, |b| b.seq + 1),
+            changed: f.changed,
         };
         if let Some(d) = f.diags {
             st.diags = (f.n, d);
@@ -1155,6 +1161,7 @@ impl Hub {
             "pages": b.map(|b| b.pages),
             "ms": b.map(|b| b.ms),
             "why": b.map(|b| b.why.clone()),
+            "changed": b.map(|b| b.changed.clone()),
             "pdf": b.and_then(|b| b.pdf.clone()),
             "viewer": st.viewer,
             "main": st.main,
@@ -3869,6 +3876,7 @@ mod tests {
             diags: Some(Vec::new()),
             pdf: None,
             why: String::new(),
+            changed: vec![1],
         }
     }
 

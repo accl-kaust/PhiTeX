@@ -646,3 +646,141 @@ fn session_wait_after_a_copy_in_place() {
     }
     let _ = session(&["stop"]);
 }
+
+/// A beamer deck of four pages: frame 1, frame 2's two overlays, frame 3.
+const DECK: &str = "\\documentclass{beamer}
+\\begin{document}
+\\begin{frame}{One}
+First frame words.
+\\end{frame}
+\\begin{frame}{Two}
+\\begin{itemize}
+\\item<1-> Overlay item alpha
+\\item<2-> Overlay item beta
+\\end{itemize}
+\\end{frame}
+\\begin{frame}{Three}
+Third frame words.
+\\end{frame}
+\\end{document}
+";
+
+/// `phitex session` on a beamer deck: `wait` and `status` end with the
+/// pages changed and the command that draws them; `png --changed` draws
+/// exactly the edited frame's pages (one PNG, or one sheet of its
+/// overlays); `--page` ranges; `--at` a line on two overlays draws both
+/// (`--overlay last` the last); a problem names the command undefined,
+/// keeps TeX's context, and ends with the command that shows it; `session
+/// log` keeps the context lines.
+#[test]
+fn session_pages_of_a_beamer_deck() {
+    let dir = scratch("deck");
+    std::fs::write(dir.join("deck.tex"), DECK).expect("the deck");
+    let session = |args: &[&str]| {
+        let mut all = vec!["session"];
+        all.extend_from_slice(args);
+        let out = run(&dir, &all);
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    let (code, _, err) = session(&["start", "deck.tex", "--timeout", "20m"]);
+    assert_eq!(code, Some(0), "{err}");
+    let edit = |from: &str, to: &str| {
+        let t = std::fs::read_to_string(dir.join("deck.tex")).expect("the deck");
+        assert!(t.contains(from), "{from}");
+        std::fs::write(dir.join("deck.tex"), t.replace(from, to)).expect("an edit");
+    };
+    // (frame 3 edited: page 4 alone)
+    edit("Third frame words.", "Third frame, other words.");
+    let (_, out, err) = session(&["wait", "--timeout", "300s"]);
+    assert!(
+        out.contains("ok · page 4 changed · see it: phitex session png --changed"),
+        "{out}{err}"
+    );
+    let (_, status, _) = session(&["status"]);
+    assert!(
+        status
+            .lines()
+            .last()
+            .is_some_and(|l| l.contains("page 4 changed")),
+        "{status}"
+    );
+    let (code, out, err) = session(&["png", "--changed"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.starts_with("page 4 (build"), "{out}");
+    assert!(out.contains("page-4-build"), "{out}");
+    // (no option: the same)
+    let (_, out2, _) = session(&["png"]);
+    assert!(out2.starts_with("page 4 (build"), "{out2}");
+    // (frame 2 edited: both its overlays, one sheet)
+    edit("\\begin{frame}{Two}", "\\begin{frame}{Two, renamed}");
+    let (_, out, err) = session(&["wait", "--timeout", "300s"]);
+    assert!(
+        out.contains("pages 2–3 changed · see them: phitex session png --changed"),
+        "{out}{err}"
+    );
+    let (code, out, err) = session(&["png", "--changed"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.starts_with("pages 2–3 on one sheet"), "{out}");
+    let png = out
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split(" (").next())
+        .expect("its path");
+    assert!(Path::new(png).is_file(), "{out}");
+    // (--page: ranges, and a page past the end refused)
+    let (_, out, _) = session(&["png", "--page", "1-3"]);
+    assert!(out.starts_with("pages 1–3 on one sheet"), "{out}");
+    let (_, out, _) = session(&["png", "--page", "4"]);
+    assert!(out.starts_with("page 4 (build"), "{out}");
+    let (code, _, err) = session(&["png", "--page", "9"]);
+    assert_ne!(code, Some(0));
+    assert!(err.contains("the document has 4 pages"), "{err}");
+    // (a line on both overlays: both drawn, or the last)
+    let line = DECK
+        .lines()
+        .position(|l| l.contains("alpha"))
+        .expect("the line")
+        + 1;
+    let at = format!("deck.tex:{line}");
+    let (code, out, err) = session(&["png", "--at", &at]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        out.contains(&format!("{at}: on pages 2–3 (overlays")),
+        "{out}"
+    );
+    let (code, out, err) = session(&["png", "--at", &at, "--overlay", "last"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains(&format!("{at}: page 3,")), "{out}");
+    // (a problem: the command named, TeX's context kept, where to look)
+    edit(
+        "Third frame, other words.",
+        "Third frame \\faSyncAlt{} words.",
+    );
+    let (_, out, _) = session(&["wait", "--timeout", "300s"]);
+    let line = std::fs::read_to_string(dir.join("deck.tex"))
+        .expect("the deck")
+        .lines()
+        .position(|l| l.contains("faSyncAlt"))
+        .expect("the line")
+        + 1;
+    assert!(
+        out.contains(&format!("see it: phitex session png --at deck.tex:{line}")),
+        "{out}"
+    );
+    let (_, problems, _) = session(&["problems"]);
+    assert!(
+        problems.contains("Undefined control sequence \\faSyncAlt"),
+        "{problems}"
+    );
+    assert!(problems.contains(&format!("| l.{line} ")), "{problems}");
+    assert!(
+        problems.contains(&format!("see it: phitex session png --at deck.tex:{line}")),
+        "{problems}"
+    );
+    let (_, log, _) = session(&["log"]);
+    assert!(
+        log.contains(&format!("l.{line} Third frame \\faSyncAlt")),
+        "{log}"
+    );
+    let _ = session(&["stop"]);
+}

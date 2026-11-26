@@ -52,6 +52,7 @@ mod review;
 mod review_text;
 mod session;
 mod session_cmd;
+mod sheet;
 mod shelf;
 mod shell;
 mod shot;

@@ -201,9 +201,16 @@ pub enum Verb {
     /// Your edits the user has not accepted yet, the verdicts and the
     /// comments on them
     Changes,
-    /// Draw what a label labels (a figure or table with its caption, a
-    /// subfigure, an equation, a heading), or what a source line made,
-    /// cropped, as a PNG: its path, page and box
+    /// Draw pages of the live build as PNG: those the last build changed
+    /// (the default), --page N-M, what a line made (--at FILE:LINE) or
+    /// what a label labels
+    ///
+    /// The live build, not the PDF on disk: while a watch runs, a PDF
+    /// file may be older than what the watch has built (`session pdf`
+    /// writes the live one). Several pages make one contact sheet, a grid
+    /// under their page numbers (at most 12; the rest said). A line a
+    /// beamer frame shows on several overlay pages draws them all on one
+    /// sheet (--overlay last: the last one alone).
     ///
     /// Waits for a build of the files as they are now (as `wait`), then
     /// draws from its exact PDF; no other program is run. What a label
@@ -221,10 +228,19 @@ pub enum Verb {
         /// LABEL` too
         #[arg(
             value_name = "LABEL",
-            required_unless_present_any = ["label", "at", "change"],
-            conflicts_with_all = ["label", "at", "change"]
+            conflicts_with_all = ["label", "at", "change", "changed", "page"]
         )]
         name: Option<String>,
+        /// The pages the last build changed (the default): one PNG, or one
+        /// sheet of several
+        #[arg(long, conflicts_with_all = ["label", "at", "change", "page"])]
+        changed: bool,
+        /// Pages N, N-M or a list (1-4,6), from 1, as `phitex png --page`
+        #[arg(long, value_name = "N", conflicts_with_all = ["label", "at", "change"])]
+        page: Option<String>,
+        /// With --at: of the overlay pages the line is on, only the last
+        #[arg(long, value_name = "WHICH", value_parser = ["last"], requires = "at")]
+        overlay: Option<String>,
         /// The label of what to draw (as LABEL)
         #[arg(
             long,
@@ -991,6 +1007,9 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     label,
                     at,
                     compare: Some(rev),
+                    changed: _,
+                    page: _,
+                    overlay: _,
                     change,
                     dpi,
                     out: to,
@@ -1033,9 +1052,66 @@ fn run(verb: &Verb, pid: Option<&str>, as_json: bool, st: Style, ui: &Ui) -> Res
                     context,
                     diff,
                     timeout,
+                    changed,
+                    page,
+                    overlay,
                 } => {
+                    let root = PathBuf::from(s["root"].as_str().unwrap_or("."));
+                    // (pages: --page, else --changed, the default)
+                    if *changed
+                        || page.is_some()
+                        || (name.is_none() && label.is_none() && at.is_none())
+                    {
+                        let v = draw_pages(
+                            &mut c,
+                            page.as_deref(),
+                            *dpi,
+                            to.as_deref(),
+                            &root,
+                            timeout.as_deref(),
+                        )?;
+                        if as_json {
+                            out(&v);
+                        } else {
+                            print_pages(&v);
+                        }
+                        return Ok(0);
+                    }
                     let what = What::of(label.as_deref().or(name.as_deref()), at.as_deref())?;
-                    let f = locate(&mut c, &s, &what, context.as_deref(), timeout.as_deref())?;
+                    let mut f = locate(&mut c, &s, &what, context.as_deref(), timeout.as_deref())?;
+                    // (a line on several pages, a beamer frame's overlays:
+                    // all of them on one sheet, or the last alone)
+                    if f.line_pages.len() > 1 && !*diff {
+                        if overlay.as_deref() == Some("last") {
+                            if let Some(&k) = f.line_pages.last() {
+                                f.page = k;
+                            }
+                        } else {
+                            let ks: Vec<usize> = f.line_pages.iter().map(|k| k + 1).collect();
+                            let mut v = sheet_of(
+                                &f.pdf,
+                                f.build,
+                                &ks,
+                                *dpi,
+                                to.as_deref(),
+                                &root,
+                                &what.slug(),
+                            )?;
+                            v["at"] = json!(what.said());
+                            if as_json {
+                                out(&v);
+                            } else {
+                                println!(
+                                    "{}: on pages {} (overlays, build {}); --overlay last draws the last alone",
+                                    what.said(),
+                                    crate::view::ranges(&ks),
+                                    f.build
+                                );
+                                print_pages(&v);
+                            }
+                            return Ok(0);
+                        }
+                    }
                     let v = draw(
                         &f,
                         &what,
@@ -1463,6 +1539,7 @@ fn compare_part(
             number: None,
             printed: None,
             approximate: false,
+            line_pages: Vec::new(),
         },
         what,
     ))
@@ -1516,12 +1593,31 @@ fn problem_line(p: &Value, st: Style) -> String {
     };
     let msg = p["message"].as_str().unwrap_or("");
     let sev = p["severity"].as_str().unwrap_or("");
+    // (TeX's context: the l.N line cut where TeX stopped, the rest under
+    // it, or a macro's expansion; an undefined command named from it)
+    let context: Vec<&str> = p["detail"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let named = undefined_name(msg, &context);
+    let msg = match &named {
+        Some(n) => format!("{msg} {n}"),
+        None => msg.to_owned(),
+    };
     let msg = match sev {
-        "error" => st.red(msg),
-        "warning" => st.yellow(msg),
-        _ => msg.to_owned(),
+        "error" => st.red(&msg),
+        "warning" => st.yellow(&msg),
+        _ => msg,
     };
     let mut out = format!("{place}{msg}");
+    if sev == "error" {
+        for l in &context {
+            out.push_str(&format!("\n  | {l}"));
+        }
+    }
     // (an error's help: what TeX or PhiTeX says to do, the engine to
     // name for a package's engine check)
     if sev == "error" {
@@ -1534,7 +1630,72 @@ fn problem_line(p: &Value, st: Style) -> String {
             out.push_str(&format!("\n  {}", st.dim(h)));
         }
     }
+    // (where to look: the page it is on, drawn)
+    if let (f, Some(l)) = (file, p["line"].as_u64())
+        && !f.is_empty()
+    {
+        out.push_str(&format!(
+            "\n  {}",
+            st.dim(&format!("see it: phitex session png --at {f}:{l}"))
+        ));
+    }
     out
+}
+
+/// The command an "Undefined control sequence" is of: the last control
+/// sequence on the top line of TeX's context (`l.3 Sync \faSyncAlt`),
+/// where TeX stopped reading.
+fn undefined_name(msg: &str, context: &[&str]) -> Option<String> {
+    if !msg.starts_with("Undefined control sequence") {
+        return None;
+    }
+    let top = context.first()?.trim_end();
+    let k = top.rfind('\\')?;
+    let name = &top[k..];
+    (name.len() > 1 && !name[1..].contains(char::is_whitespace)).then(|| name.to_owned())
+}
+
+/// The line `wait` and `status` end with: what the build changed and the
+/// command that shows it (`build 5 · ok · pages 25–26 changed · see them:
+/// phitex session png --changed`), or, with errors, the first error's
+/// place and the command that draws it.
+fn next_line(v: &Value) -> Option<String> {
+    let b = v["build"].as_u64()?;
+    let ok = v["ok"] != false;
+    let first_error = v["problems"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|p| {
+            let f = p["file"].as_str()?.trim_start_matches("./");
+            (p["severity"] == "error" && !f.is_empty())
+                .then(|| format!("{f}:{}", p["line"].as_u64()?))
+        });
+    if !ok {
+        let n = v["errors"].as_u64().unwrap_or(0);
+        let errs = format!("{n} error{}", if n == 1 { "" } else { "s" });
+        return Some(match first_error {
+            Some(at) => format!("build {b} · {errs} · see it: phitex session png --at {at}"),
+            None => format!("build {b} · {errs} · phitex session problems lists them"),
+        });
+    }
+    let changed: Vec<usize> = v["changed"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|k| usize::try_from(k.as_u64()?).ok())
+        .collect();
+    Some(match changed.len() {
+        0 => format!("build {b} · ok · no page changed · see one: phitex session png --page N"),
+        1 => format!(
+            "build {b} · ok · page {} changed · see it: phitex session png --changed",
+            changed[0]
+        ),
+        _ => format!(
+            "build {b} · ok · pages {} changed · see them: phitex session png --changed",
+            crate::view::ranges(&changed)
+        ),
+    })
 }
 
 /// The engine and the output folder the watch runs, and how each was
@@ -1722,6 +1883,9 @@ fn print_status(v: &Value, st: Style, waited: Option<f64>) {
     }
     for p in problems {
         println!("{}", problem_line(p, st));
+    }
+    if let Some(l) = next_line(v) {
+        println!("{l}");
     }
 }
 
@@ -2332,6 +2496,7 @@ fn look(
                 number: None,
                 printed: None,
                 approximate: false,
+                line_pages: Vec::new(),
             };
             let what = What::Label(format!("page-{k}"));
             let name = format!("page-{k}.png");
@@ -2612,6 +2777,9 @@ struct Found {
     /// Found from the label's PDF destination, its source not found: the
     /// part a guess around it.
     approximate: bool,
+    /// A source line's: every page (from 0) whose glyphs it made, in
+    /// order (a beamer frame's overlays); empty: not known, or a label.
+    line_pages: Vec<usize>,
 }
 
 /// `\newlabel{L}{{NUMBER}{PAGE}{TITLE}{ANCHOR}{…}}`'s groups.
@@ -2981,6 +3149,7 @@ fn locate(
             number,
             printed,
             approximate: true,
+            line_pages: Vec::new(),
         });
     }
     // (the element's words, as its source has them)
@@ -3078,6 +3247,26 @@ fn locate(
     // page for certain, where its words are few or a neighbour's too, as
     // a display's math is)
     let shot_names: Vec<String> = strs(&v["files"]);
+    // (a source line's every page: a beamer frame's overlays show it on
+    // each, built from the same bytes)
+    let mut line_pages: Vec<usize> = if matches!(what, What::Line(..)) {
+        v["pages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                let k = usize::try_from(p["page"].as_u64()?).ok()?;
+                page_codes(p)
+                    .iter()
+                    .any(|c| c.end > c.start && in_range_of(&shot_names, c))
+                    .then_some(k)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    line_pages.sort_unstable();
+    line_pages.dedup();
     let by_origins = v["pages"]
         .as_array()
         .into_iter()
@@ -3258,6 +3447,7 @@ fn locate(
         number,
         printed,
         approximate: false,
+        line_pages,
     })
 }
 
@@ -3276,6 +3466,190 @@ fn found_json(f: &Found, what: &What) -> Value {
 }
 
 /// `fig:x: page 3, 72.00 96.00 300.00 250.00 pt (Figure 2; build 7)`.
+/// `session png --changed` / `--page N-M`: the live build's pages (the
+/// last build's changed ones, or `pages`), drawn after a `wait` for a
+/// build of the files as they are: one page a PNG, several one sheet.
+fn draw_pages(
+    c: &mut Conn,
+    pages: Option<&str>,
+    dpi: u32,
+    to: Option<&str>,
+    root: &Path,
+    timeout: Option<&str>,
+) -> Result<Value, Failed> {
+    let t = match timeout {
+        Some(t) => duration(t).map_err(|e| Failed(EXIT_REFUSED, e))?,
+        None => Some(Duration::from_secs(60)),
+    };
+    let w = c.call(
+        "phitex/session/wait",
+        &json!({"timeout_ms": t.map_or(0, |d| d.as_millis())}),
+        t.map(|d| d + Duration::from_secs(30)),
+    )?;
+    if w["timed_out"] == true {
+        return Err(Failed(
+            EXIT_TIMEOUT,
+            "timed out: no build has read the files as they are now".into(),
+        ));
+    }
+    let build = w["build"].as_u64().unwrap_or(0);
+    let count = usize::try_from(w["pages"].as_u64().unwrap_or(0)).unwrap_or(0);
+    let ks: Vec<usize> = match pages {
+        Some(p) => page_list(p)?,
+        None => w["changed"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|k| usize::try_from(k.as_u64()?).ok())
+            .collect(),
+    };
+    if let Some(&k) = ks.iter().find(|&&k| k > count) {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!(
+                "--page {k}: the document has {count} page{}",
+                if count == 1 { "" } else { "s" }
+            ),
+        ));
+    }
+    if ks.is_empty() {
+        return Ok(json!({"build": build, "pages": [], "pngs": [],
+            "said": format!("build {build} changed no page: phitex session png --page N draws one")}));
+    }
+    if let Some(said) = crate::review::make_dir(root).map_err(|e| Failed(EXIT_REFUSED, e))? {
+        eprintln!("phitex: {said}");
+    }
+    // (the build's exact PDF, as `png --label` draws from)
+    let v = c.call(
+        "phitex/session/shot",
+        &json!({"dir": ".phitex/png/builds", "at": [], "pages": [], "label": null}),
+        Some(Duration::from_secs(600)),
+    )?;
+    let pdf = PathBuf::from(v["pdf"].as_str().unwrap_or(""));
+    let build = v["build"].as_u64().unwrap_or(build);
+    let slug = if pages.is_some() { "pages" } else { "changed" };
+    sheet_of(&pdf, build, &ks, dpi, to, root, slug)
+}
+
+/// Pages `ks` (from 1) of `pdf` (build `build`): one page drawn whole at
+/// `dpi`, several on one sheet ([`crate::sheet`], at most
+/// [`crate::sheet::MAX`]: the rest said); written to `to` or
+/// .phitex/png/NAME-buildN.png. `{build, pages, drawn, more, png, width,
+/// height}`.
+fn sheet_of(
+    pdf: &Path,
+    build: u64,
+    ks: &[usize],
+    dpi: u32,
+    to: Option<&str>,
+    root: &Path,
+    name: &str,
+) -> Result<Value, Failed> {
+    if !(10..=2400).contains(&dpi) {
+        return Err(Failed(
+            EXIT_REFUSED,
+            format!("--dpi {dpi}: from 10 to 2400"),
+        ));
+    }
+    let bytes: std::sync::Arc<[u8]> = std::fs::read(pdf)
+        .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", pdf.display())))?
+        .into();
+    let mut r = phitex_render::Renderer::new();
+    let drawn: Vec<usize> = ks.iter().copied().take(crate::sheet::MAX).collect();
+    let mut cells = Vec::new();
+    for &k in &drawn {
+        let (pw, ph, _) = r.marks(&bytes, k - 1).ok_or_else(|| {
+            Failed(
+                EXIT_REFUSED,
+                format!("page {k} of {} not read", pdf.display()),
+            )
+        })?;
+        // (one page at the dpi asked; on a sheet, each as wide as reads well)
+        let scale = if ks.len() == 1 {
+            f64::from(dpi) / 72.0
+        } else {
+            crate::sheet::CELL_W / pw.max(1.0)
+        };
+        let strip = r
+            .draw_part(&bytes, k - 1, [0.0, 0.0, pw, ph], scale)
+            .ok_or_else(|| {
+                Failed(
+                    EXIT_REFUSED,
+                    format!("page {k} of {} not drawn", pdf.display()),
+                )
+            })?;
+        cells.push((k, strip));
+    }
+    let (w, h, rgba) = if cells.len() == 1 {
+        let (_, s) = cells.remove(0);
+        (s.w, s.h, s.rgba)
+    } else {
+        crate::sheet::sheet(&cells)
+    };
+    let file = if drawn.len() == 1 {
+        format!("page-{}-build{build}.png", drawn[0])
+    } else {
+        format!(
+            "{name}-{}-build{build}.png",
+            crate::view::ranges(&drawn).replace(['–', ',', ' '], "_")
+        )
+    };
+    let path = match to {
+        Some(t) => std::env::current_dir().unwrap_or_default().join(t),
+        None => root.join(".phitex").join("png").join(file),
+    };
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)
+            .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", d.display())))?;
+    }
+    std::fs::write(&path, crate::shot::png(w, h, &rgba))
+        .map_err(|e| Failed(EXIT_REFUSED, format!("{}: {e}", path.display())))?;
+    Ok(json!({
+        "build": build,
+        "pages": drawn,
+        "more": ks.len() - drawn.len(),
+        "png": path.display().to_string(),
+        "width": w,
+        "height": h,
+        "sheet": drawn.len() > 1,
+    }))
+}
+
+/// `draw_pages`' answer: what was drawn and where.
+fn print_pages(v: &Value) {
+    if let Some(s) = v["said"].as_str() {
+        println!("{s}");
+        return;
+    }
+    let ks: Vec<usize> = v["pages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|k| usize::try_from(k.as_u64()?).ok())
+        .collect();
+    let more = v["more"].as_u64().unwrap_or(0);
+    let what = if ks.len() == 1 {
+        format!("page {}", ks[0])
+    } else {
+        format!("pages {} on one sheet", crate::view::ranges(&ks))
+    };
+    println!(
+        "{what} (build {}){}",
+        v["build"],
+        if more > 0 {
+            format!(", +{more} more not drawn (--page N-M draws them)")
+        } else {
+            String::new()
+        }
+    );
+    println!(
+        "{} ({}x{} px)",
+        v["png"].as_str().unwrap_or(""),
+        v["width"],
+        v["height"]
+    );
+}
+
 fn where_line(f: &Found, what: &What) -> String {
     let mut about = Vec::new();
     if let Some(n) = &f.number {

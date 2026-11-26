@@ -53,9 +53,11 @@ says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
 /// `phitex` and `phitex --help`'s last section: the loop an agent edits a
 /// document in (a person reads the description and the commands first).
 const AGENTS: &str = "\
-For agents: phitex session start main.tex; edit; phitex session wait;
-  phitex session problems; phitex session png --label <label>; phitex session stop
-  In a sandbox that ends each command's processes: phitex build, then phitex png --label <label>";
+For agents: phitex session start main.tex; edit; phitex session wait; then look at the pages:
+  phitex session png --changed | --page N | --at file:line | --label L
+  phitex session problems; phitex session stop. The PDF on disk may be older than the live
+  build while a watch runs: session png and session pdf are the live build.
+  In a sandbox that ends each command's processes: phitex build, then phitex png --page N";
 
 /// `phitex build --help`'s last lines: the session, for builds again and
 /// again.
@@ -64,8 +66,12 @@ Building again and again while editing? `phitex session start` keeps a watch run
 rebuild is incremental, `phitex session problems` lists the problems at file:line, `phitex
 session png LABEL` draws a figure, table or equation as a PNG.";
 
-/// `phitex session --help`'s last lines: which watch, and the engine.
+/// `phitex session --help`'s last lines: the pages, which watch, and the engine.
 const SESSION_AFTER_HELP: &str = "\
+The pages: phitex session png --changed (what the last build changed: `wait` and `status` end with
+this command), --page N-M, --at FILE:LINE, --label L. While a watch runs, a PDF file on disk may be
+older than its build: session png and session pdf are the live build.
+
 Any running `phitex watch` is one, also one started in your own terminal: the one whose folder
 holds the current directory (a sandboxed agent needs the sessions folder visible and the host's
 127.0.0.1; it is told which is missing). `start` and `status` say the engine and the output folder
