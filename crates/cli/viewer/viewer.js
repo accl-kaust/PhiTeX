@@ -4756,7 +4756,9 @@ function terminal(box, doc = "document.tex") {
     cmd = to;
     [...prompt.childNodes].filter((c) => c.nodeType === Node.TEXT_NODE).forEach((c) => c.remove());
     typed = done ? cmd.length : Math.min(typed, cmd.length);
-    prompt.insertBefore(document.createTextNode(cmd.slice(0, typed)), cursor);
+    const t = document.createTextNode(cmd.slice(0, typed));
+    if (cursor.parentNode === prompt) prompt.insertBefore(t, cursor);
+    else prompt.append(t);
   };
   let typed = 0, timer = 0;
   const key = () => {

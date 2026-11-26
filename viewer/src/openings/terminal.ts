@@ -50,7 +50,12 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
     cmd = to;
     [...prompt.childNodes].filter((c) => c.nodeType === Node.TEXT_NODE).forEach((c) => c.remove());
     typed = done ? cmd.length : Math.min(typed, cmd.length);
-    prompt.insertBefore(document.createTextNode(cmd.slice(0, typed)), cursor);
+    // (before the cursor while it is on the prompt's line; once the command is typed the cursor
+    // is on a later line, and the name told then went before a node the prompt no longer held:
+    // a NotFoundError thrown in the page)
+    const t = document.createTextNode(cmd.slice(0, typed));
+    if (cursor.parentNode === prompt) prompt.insertBefore(t, cursor);
+    else prompt.append(t);
   };
   let typed = 0, timer = 0;
   const key = () => {
