@@ -1382,6 +1382,21 @@ pub fn report(
     for w in &r.warnings {
         ui.warning(w);
     }
+    // (the engine's own checks, never the document's problems: -v)
+    if o.verbose > 0 || ui.verbose > 0 {
+        for d in r
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+        {
+            ui.line(&st.dim(&format!(
+                "  the engine's check: {}:{}: {}",
+                d.file.trim_start_matches("./"),
+                d.line,
+                d.message
+            )));
+        }
+    }
     // (the problems as `phitex session problems` has them: the engine's,
     // each at its file and line, one count for both)
     let problems = phitex_live::watch::diagnostics(s, r, &log.display().to_string());

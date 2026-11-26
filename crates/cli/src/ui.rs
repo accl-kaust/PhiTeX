@@ -1120,7 +1120,8 @@ impl Ui {
         if o.warnings > 0 {
             facts.push(st.yellow(&plural(o.warnings, "warning", "warnings")));
         }
-        if o.diagnostics > 0 {
+        // (the engine's own checks: ours to read, -v)
+        if o.diagnostics > 0 && self.verbose > 0 {
             facts.push(st.dim(&plural(o.diagnostics, "diagnostic", "diagnostics")));
         }
         let mut how = Vec::new();

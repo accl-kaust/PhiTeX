@@ -497,6 +497,12 @@ fn in_their_files(s: &Session, v: &mut [Value], log: &str) {
             continue;
         }
         let file = file.map_or_else(|| main.clone(), |f| f.trim_start_matches("./").to_owned());
+        // (in the main file, one the engine placed at a culprit of its
+        // first line, an overfull box there, is that line's; one at its
+        // first byte had no place)
+        if file == main && d["range"] != json!([0, 0]) {
+            continue;
+        }
         d["file"] = json!(file);
         d["line"] = Value::Null;
         d["range"] = json!([0, 0]);
@@ -623,7 +629,13 @@ fn items(s: &Session, r: &Report, log: &str) -> Vec<Value> {
     others(r, log)
 }
 
-/// The engine's diagnostics at their places, each a whole problem.
+/// The engine's diagnostics at their places, each a whole problem; the
+/// engine's own checks (`Severity::Diagnostic`: a hint's regime
+/// violated, an undeclared definition) are not the document's problems
+/// and are left out ([`crate::session::Report::engine_diagnostics`]
+/// counts them; `phitex build -v` lists them). Listed, the Diff's "hint
+/// regime violated: cs:phitexdifleadtype ..." reached a user as a
+/// warning of a line their file does not have.
 fn placed(s: &Session, ds: &[phitex_tex::Diagnostic]) -> Vec<Value> {
     {
         // (each file's text read once, not once a diagnostic: the main
@@ -633,17 +645,17 @@ fn placed(s: &Session, ds: &[phitex_tex::Diagnostic]) -> Vec<Value> {
             std::collections::HashMap::new();
         ds
             .iter()
+            .filter(|d| d.severity != phitex_tex::Severity::Diagnostic)
             .map(|d| {
                 let src = sources.entry(d.file.as_str()).or_insert_with(|| s.source(&d.file));
                 let p = crate::problems::from_diagnostic(d, src.as_deref(), false);
                 let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
                 let error = d.severity == phitex_tex::Severity::Error;
-                let engine = d.severity == phitex_tex::Severity::Diagnostic;
                 let excerpt = (!p.text.is_empty()).then(|| {
                     json!({"text": p.text, "start": chars(p.start), "len": chars(p.end).saturating_sub(chars(p.start))})
                 });
                 json!({
-                    "severity": if error { "error" } else if engine { "diagnostic" } else { "warning" },
+                    "severity": if error { "error" } else { "warning" },
                     "code": "tex",
                     "message": d.message,
                     "notes": p.label.iter().collect::<Vec<_>>(),
