@@ -1412,19 +1412,93 @@ fn latex_pictures_that_all_change_take_one_run() {
     assert!(out[0] == out[1], "-j8's PDF is not -j1's");
 }
 
+/// What [`latex_pictures_pending_while_their_paragraph_runs_ask_it_once`]'s
+/// picture hook sees and holds.
+#[derive(Default)]
+struct PicHold {
+    /// The pictures' hash: the one a run has a fifth picture of.
+    hash: std::sync::atomic::AtomicU64,
+    children: std::sync::atomic::AtomicU32,
+    /// The paragraph's runs past its last picture.
+    passed: std::sync::atomic::AtomicU32,
+    held: std::sync::atomic::AtomicBool,
+    /// Those runs when the second pass's first child came.
+    base: std::sync::Mutex<Option<u32>>,
+    released: std::sync::atomic::AtomicBool,
+}
+
+fn wait_until(secs: u64, until: &dyn Fn() -> bool) -> bool {
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_secs(secs) {
+        if until() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    false
+}
+
+impl PicHold {
+    fn event(&self, at: &str, h: u64, k: u32) {
+        use std::sync::atomic::Ordering::SeqCst;
+        if at == "begin" && k == 4 {
+            let _ = self.hash.compare_exchange(0, h, SeqCst, SeqCst);
+            if self.hash.load(SeqCst) == h {
+                self.passed.fetch_add(1, SeqCst);
+            }
+            return;
+        }
+        // (the first pass's five children run; the second pass's are held
+        // in their runs)
+        if at != "child"
+            || h == 0
+            || self.hash.load(SeqCst) != h
+            || self.children.fetch_add(1, SeqCst) < 5
+        {
+            return;
+        }
+        let (at, first) = {
+            let mut b = self
+                .base
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(x) = *b {
+                (x + 1, false)
+            } else {
+                let x = self.passed.load(SeqCst);
+                *b = Some(x);
+                (x, true)
+            }
+        };
+        if first {
+            // (the first goes once the paragraph has run past them and all
+            // five are in their runs)
+            if wait_until(20, &|| {
+                self.passed.load(SeqCst) > at && self.children.load(SeqCst) >= 10
+            }) {
+                self.held.store(true, SeqCst);
+            }
+            self.released.store(true, SeqCst);
+        } else {
+            // (the others stay in their runs until the first has gone and
+            // committed: the paragraph's next run past them, or three
+            // seconds)
+            wait_until(30, &|| self.released.load(SeqCst));
+            wait_until(3, &|| self.passed.load(SeqCst) > at);
+        }
+    }
+}
+
 /// [`latex_pictures_that_all_change_take_one_run`]'s document with five
-/// pictures, at -j8, where its paragraph's run in the second pass meets
-/// its pictures still to run: each picture's child, asked again by the
-/// label's number, is held (`set_pic_hook`) until the paragraph's run has
-/// passed the last picture's `\begin`. The pictures still ask their
-/// paragraph once at most: the interleaving behind that test's two
-/// failures at -j8 (gates 88045 and 91032: the paragraph asked once, a
-/// picture asked again by its view and the paragraph asked a second
-/// time).
+/// pictures, at -j8. The second pass's picture children are held in their
+/// runs (`set_pic_hook`); once the paragraph's run has passed its last
+/// picture, the first of them goes and commits while the others are
+/// still in their runs. The pictures ask their paragraph once: counted as
+/// run, the others let that commit ask it at once, and their own commits
+/// asked it again (that test's failures at -j8, gates 88045 and 91032).
 #[test]
 fn latex_pictures_pending_while_their_paragraph_runs_ask_it_once() {
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::Ordering;
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pics-pending");
     let _ = std::fs::create_dir_all(&dir);
     let pic = "\\begin{tikzpicture}\\foreach \\i in {1,...,12}{\\draw (\\i*0.3,0) circle (0.1);}\\node at (1,0.5) {seen \\lastref};\\end{tikzpicture}";
@@ -1432,84 +1506,9 @@ fn latex_pictures_pending_while_their_paragraph_runs_ask_it_once() {
         "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\usepackage{{refcount}}\n\\begin{{document}}\n\\xdef\\lastref{{\\getrefnumber{{last}}}}First words, a paragraph of its own.\n\nWords {pic} and {pic} then {pic} and {pic} and {pic} end the paragraph.\n\n\\section{{One}}\\section{{Two}}Last words.\\label{{last}}\n\\end{{document}}\n"
     );
     std::fs::write(dir.join("pending.tex"), &doc).expect("write");
-    // (the pictures' hash: the one a run has a fifth picture of)
-    let hash = Arc::new(AtomicU64::new(0));
-    let children = Arc::new(AtomicU32::new(0));
-    // (the paragraph's runs past its last picture)
-    let passed = Arc::new(AtomicU32::new(0));
-    let held = Arc::new(AtomicBool::new(false));
-    // (the paragraph's runs past its pictures when the second pass's first
-    // child came: every child of that pass waits for one more)
-    let base = Arc::new(Mutex::new(None::<u32>));
-    let released = Arc::new(AtomicBool::new(false));
-    {
-        let (hash, children, passed, held, base, released) = (
-            hash.clone(),
-            children.clone(),
-            passed.clone(),
-            held.clone(),
-            base.clone(),
-            released.clone(),
-        );
-        phitex_tex::set_pic_hook(Box::new(move |at, _node, h, k| {
-            if at == "begin" && k == 4 {
-                let _ = hash.compare_exchange(0, h, Ordering::SeqCst, Ordering::SeqCst);
-                if hash.load(Ordering::SeqCst) == h {
-                    passed.fetch_add(1, Ordering::SeqCst);
-                }
-                return;
-            }
-            if at != "child" || h == 0 || hash.load(Ordering::SeqCst) != h {
-                return;
-            }
-            // (the first pass's five children run; the second pass's are
-            // held in their runs)
-            if children.fetch_add(1, Ordering::SeqCst) < 5 {
-                return;
-            }
-            // (the first waits for the paragraph's run past them; the
-            // others for one more, or three seconds: still in their runs
-            // when the first commits, they are its siblings to come)
-            let (at, first) = {
-                let mut b = base
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match *b {
-                    Some(x) => (x + 1, false),
-                    None => {
-                        let x = passed.load(Ordering::SeqCst);
-                        *b = Some(x);
-                        (x, true)
-                    }
-                }
-            };
-            let wait = |secs: u64, until: &dyn Fn() -> bool| {
-                let t = std::time::Instant::now();
-                while t.elapsed() < std::time::Duration::from_secs(secs) {
-                    if until() {
-                        return true;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                false
-            };
-            if first {
-                // (once the paragraph has run past them and all five are
-                // in their runs)
-                if wait(20, &|| {
-                    passed.load(Ordering::SeqCst) > at && children.load(Ordering::SeqCst) >= 10
-                }) {
-                    held.store(true, Ordering::SeqCst);
-                }
-                released.store(true, Ordering::SeqCst);
-            } else {
-                // (in their runs until the first has gone and committed:
-                // the paragraph's next run past them, or three seconds)
-                wait(30, &|| released.load(Ordering::SeqCst));
-                wait(3, &|| passed.load(Ordering::SeqCst) > at);
-            }
-        }));
-    }
+    let st = std::sync::Arc::new(PicHold::default());
+    let hs = st.clone();
+    phitex_tex::set_pic_hook(Box::new(move |at, _node, h, k| hs.event(at, h, k)));
     let opts = Options {
         threads: Some(8),
         fixpoint: true,
@@ -1524,13 +1523,13 @@ fn latex_pictures_pending_while_their_paragraph_runs_ask_it_once() {
         .count();
     eprintln!(
         "pictures' children {}, the paragraph past them {} times, held {}, asked {asked}, pic runs {}",
-        children.load(Ordering::SeqCst),
-        passed.load(Ordering::SeqCst),
-        held.load(Ordering::SeqCst),
+        st.children.load(Ordering::SeqCst),
+        st.passed.load(Ordering::SeqCst),
+        st.held.load(Ordering::SeqCst),
         common::runs_of(&b, "pic")
     );
     assert!(
-        held.load(Ordering::SeqCst),
+        st.held.load(Ordering::SeqCst),
         "a picture's child was held while its paragraph ran: {:?}",
         b.stats.reruns
     );
