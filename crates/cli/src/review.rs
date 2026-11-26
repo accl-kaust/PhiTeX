@@ -3928,10 +3928,17 @@ mod tests {
         rebuilt(&h, &d, 3, &["main.tex"]);
         let v = w.join().expect("joined").expect("answered");
         assert_eq!(v["build"], 3);
-        // (the first text back: build 1 read it, at once)
+        // (the first text back (`cp orig.tex main.tex`): build 1 read it,
+        // but build 3 read other text since, so the build that reads it now
+        // is waited for, never build 1 at once)
         std::fs::write(d.join("main.tex"), DOC).expect("saved");
-        let v = h.wait(&json!({"timeout_ms": 5000})).expect("answered");
-        assert_eq!(v["build"], 1);
+        let h2 = h.clone();
+        let w = std::thread::spawn(move || h2.wait(&json!({"timeout_ms": 20000})));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!w.is_finished(), "answered with build 1");
+        rebuilt(&h, &d, 4, &["main.tex"]);
+        let v = w.join().expect("joined").expect("answered");
+        assert_eq!(v["build"], 4);
         // (a timeout says so)
         std::fs::write(d.join("main.tex"), DOC.replace("lazy", "busy")).expect("saved");
         let v = h.wait(&json!({"timeout_ms": 50})).expect("answered");
@@ -4005,18 +4012,31 @@ mod tests {
             .expect("answered");
         assert_eq!(v["build"], 3, "{v}");
         assert_eq!(v["sources"], json!([]), "{v}");
-        // (the editor's text back and built after: build 2 is superseded,
+        // (the editor's other text back and built after the disk's: `wait
+        // --disk` answers with build 3, superseded by the editor's build 4,
         // its warnings never made; said, not waited for)
         *lock(&buf) = Some(typed.clone());
-        std::fs::write(d.join("main.tex"), &typed).expect("saved");
-        built_from(&h, 4, &agents.replace("busy", "idle"), false);
+        built_from(&h, 4, &typed, false);
         let v = h
-            .wait(&json!({"warnings": true, "timeout_ms": 3000}))
+            .wait(&json!({"warnings": true, "disk": true, "timeout_ms": 3000}))
             .expect("answered");
-        assert_eq!(v["build"], 2, "{v}");
+        assert_eq!(v["build"], 3, "{v}");
         assert_ne!(v["timed_out"], true, "{v}");
         assert_eq!(v["superseded_by"], 4, "{v}");
         assert_eq!(v["warnings"], Value::Null, "{v}");
+        // (the disk put back to the editor's text, a build of other text
+        // after build 4: never build 4 again at once, the build that reads
+        // it is waited for)
+        *lock(&buf) = None;
+        std::fs::write(d.join("main.tex"), &typed).expect("saved");
+        built_from(&h, 5, &agents.replace("busy", "idle"), false);
+        let h2 = h.clone();
+        let w = std::thread::spawn(move || h2.wait(&json!({"timeout_ms": 20000})));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!w.is_finished(), "answered with an older build of the text");
+        built_from(&h, 6, &typed, false);
+        let v = w.join().expect("joined").expect("answered");
+        assert_eq!(v["build"], 6, "{v}");
     }
 
     /// The agent's change on disk while an editor holds other text: `wait`
