@@ -178,12 +178,23 @@ As built (2026-11-26):
   apart only where the file has a read-back point (`wpoint:`): a file no
   one reads back is never mixed (`\enddocument`'s 1345 `\babel@toc`
   lines to a `.toc` no one reads cost 1 s a round when told apart).
-- A text a run found to do more is taken to do more again, unread (the
-  same `\babel@aux` line on every page); taking it so is safe, the
-  skeleton then holding a line that might define. A line that defines is
-  interpreted each time: its read-back depends on the state where it is
-  written (a memo of those gave bibtopic's `\citation{*}` the read-back
-  of its first writing, and wrong citations).
+- A text any run found to do more is taken to do more by every run
+  after, unread (`run::more_seen`; the same `\babel@aux` lines on every
+  page and in every piece that switches the language, each interpreted
+  with its font loading once per run before: 11 G instructions, 3.3 %,
+  of the deck's clean build). Taking it so is safe, the skeleton then
+  holding a line that might define. Its entry says only that it does
+  more (no definitions made before it did), so a run's entries are the
+  same whether it interpreted its lines or found them: a memo whose
+  entries carried what the first run's interpretation made changed a
+  finisher's output with no change of its page, and the deck's edits
+  ran 2x the instructions. The skeleton is then the lines that do more
+  and the definition lines' checks are all where the file is read
+  (they were before for the deck: the closure added nothing). A line
+  that defines is interpreted each time: its read-back depends on the
+  state where it is written (a memo of those gave bibtopic's
+  `\citation{*}` the read-back of its first writing, and wrong
+  citations).
 - `\inputlineno` read by a line's interpretation: into the log (which
   the interpretation drops) it reads nothing; into anything else the
   line does more (its number where the file is read back is that file's
