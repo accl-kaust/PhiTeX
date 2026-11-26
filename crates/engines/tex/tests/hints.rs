@@ -299,3 +299,24 @@ fn a_stepped_over_outer_macro_is_still_forbidden() {
         "no outer error: {errors:?}"
     );
 }
+
+/// A macro whose body calls one that is defined only inside the groups
+/// another body opens (the Diff's `\phitexdifleadtype`, defined by
+/// `\phitexdifULset` in `\phitexdifuline`'s group): undefined where a
+/// paragraph that calls it begins, as in TeX. The hint relied on it as a
+/// definition and was void there ("hint regime violated: ... is undefined
+/// where the hint assumed a definition"); an undefined name defines
+/// nothing, so the bound holds.
+#[test]
+fn a_name_defined_only_inside_a_group_bounds_its_callers() {
+    let _g = lock();
+    let doc = "\\def\\set{\\def\\lead{\\hrule}}\n\
+               \\def\\mark#1{{\\set\\lead #1}}\n\n\
+               One \\mark{word}.\n\n\
+               Two \\mark{words}.\n\\bye\n";
+    let b = build(doc, false);
+    assert_eq!(hint_diags(&b), 0, "a hint violated");
+    assert_eq!(b.stats.regime_violations, 0);
+    let off = build(doc, true);
+    assert_eq!(b.output().0, off.output().0, "the hints changed the output");
+}

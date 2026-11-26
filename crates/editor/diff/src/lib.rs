@@ -1277,6 +1277,7 @@ mod tests {
     /// section: one change "Text" filed under "Results" was all of them.
     #[test]
     fn units_added_are_changes_each() {
+        use ChangeKind::Add;
         let d = run(
             "\\section{Introduction}\nHello world, and I\n",
             "\\section{Introduction}\nHello world, and I want more.\n\n\
@@ -1298,14 +1299,13 @@ mod tests {
                 )
             })
             .collect();
-        use ChangeKind::Add;
         assert_eq!(
             got,
             [
                 (Add, "Introduction", "want more.\n\nI can "),
                 (Add, "Introduction", "\\begin{equation}\nx"),
                 (Add, "Introduction", "\\begin{figure}[h]\n"),
-                (Add, "Results", "\\section{Results}\n"),
+                (Add, "Results", "\\section{Results}"),
                 (Add, "Results", "Table~\\ref{t} show"),
                 (Add, "Results", "\\begin{table}[h]\n\\"),
                 (Add, "Results", "\\bibliographystyle"),
