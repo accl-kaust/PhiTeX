@@ -66,11 +66,11 @@ fn text(b: &[u8]) -> String {
 }
 
 /// A plain TeX document (built with --ini --etex: no format to make).
-const TINY: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n";
+const TINY: &str = "\\pdfoutput=1 \\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n";
 
 /// One with a `\\documentclass` it defines: a document, as LaTeX's are
 /// found, built as plain TeX.
-const DOC: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\def\\documentclass{}\\documentclass\n\\font\\x=cmr10 \\x Hi\\end\n";
+const DOC: &str = "\\pdfoutput=1 \\catcode`\\{=1 \\catcode`\\}=2 \\def\\documentclass{}\\documentclass\n\\font\\x=cmr10 \\x Hi\\end\n";
 
 fn wait(child: &mut std::process::Child, secs: u64) -> Option<std::process::ExitStatus> {
     let end = Instant::now() + Duration::from_secs(secs);
@@ -154,26 +154,54 @@ fn help_for_a_person_first() {
     let first = short.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     assert!(first.starts_with("PhiTeX: "), "{short}");
     let agents = short.find("For agents:").expect("the agents' section");
-    assert!(short.find("Options:").is_some_and(|o| o < agents), "{short}");
+    assert!(
+        short.find("Options:").is_some_and(|o| o < agents),
+        "{short}"
+    );
     let all = text(&run(&dir, &["watch", "--help-all"]).stdout);
     for (short_help, long_help) in [
-        ("pdflatex (default), xelatex", "pdflatex (the default for LaTeX)"),
-        ("Threads (default: 1)", "The engine's threads (default: PHITEX_THREADS"),
-        ("More detail: each pass, each warning, the cache", "More detail: each pass over the document"),
-        ("open the viewer in the browser (the default where", "open the viewer in the browser, or start"),
+        (
+            "pdflatex (default), xelatex",
+            "pdflatex (the default for LaTeX)",
+        ),
+        (
+            "Threads (default: 1)",
+            "The engine's threads (default: PHITEX_THREADS",
+        ),
+        (
+            "More detail: each pass, each warning, the cache",
+            "More detail: each pass over the document",
+        ),
+        (
+            "open the viewer in the browser (the default where",
+            "open the viewer in the browser, or start",
+        ),
     ] {
         assert!(all.contains(long_help), "{long_help}:\n{all}");
-        assert!(!all.contains(short_help), "{short_help} beside its long help:\n{all}");
+        assert!(
+            !all.contains(short_help),
+            "{short_help} beside its long help:\n{all}"
+        );
     }
     assert!(!all.contains("not usable yet"), "{all}");
     assert!(!all.contains("predicted, all"), "{all}");
     assert!(all.contains("--no-open"), "{all}");
     let top = text(&run(&dir, &["--help-all"]).stdout);
-    assert!(top.contains("Agents:") && top.contains("For agents:"), "{top}");
+    assert!(
+        top.contains("Agents:") && top.contains("For agents:"),
+        "{top}"
+    );
     // (the hidden value still works, for whoever used it)
     std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
-    let out = run(&dir, &["build", "--ini", "--etex", "--spec", "all", "doc.tex"]);
-    assert!(!text(&out.stderr).contains("invalid value"), "{}", text(&out.stderr));
+    let out = run(
+        &dir,
+        &["build", "--ini", "--etex", "--spec", "all", "doc.tex"],
+    );
+    assert!(
+        !text(&out.stderr).contains("invalid value"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 /// A chapter named on the command line (no `\documentclass`, included by
@@ -187,7 +215,7 @@ fn a_chapter_builds_its_document() {
     // the document, as the editors find it)
     std::fs::write(
         dir.join("thesis.tex"),
-        "% \\documentclass: the main file\n\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x\n\\input{chapters/intro}\n\\end\n",
+        "% \\documentclass: the main file\n\\pdfoutput=1 \\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x\n\\input{chapters/intro}\n\\end\n",
     )
     .expect("the main file");
     std::fs::write(dir.join("chapters/intro.tex"), "Introduction.\n").expect("the chapter");
@@ -212,24 +240,21 @@ fn a_chapter_builds_its_document() {
 #[test]
 fn the_main_file_picked() {
     let dir = scratch("pick");
-    std::fs::write(
-        dir.join("paper.tex"),
-        format!("% \\documentclass\n{TINY}"),
-    )
-    .expect("the document");
+    std::fs::write(dir.join("paper.tex"), format!("% \\documentclass\n{TINY}"))
+        .expect("the document");
     std::fs::write(dir.join("part.tex"), "Words.\n").expect("a part");
     let out = run(&dir, &["build", "--ini", "--etex"]);
     let err = text(&out.stderr);
     // (a comment's \documentclass is no document: none found)
     assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("no .tex file here has a \\documentclass"), "{err}");
+    assert!(
+        err.contains("no .tex file here has a \\documentclass"),
+        "{err}"
+    );
     std::fs::write(dir.join("paper.tex"), DOC).expect("the document");
     let out = run(&dir, &["build", "--ini", "--etex"]);
     let err = text(&out.stderr);
-    assert!(
-        err.contains("no file named: building paper.tex"),
-        "{err}"
-    );
+    assert!(err.contains("no file named: building paper.tex"), "{err}");
     assert!(dir.join("paper.pdf").is_file(), "{err}");
     std::fs::write(dir.join("other.tex"), "\\documentclass{article}\n").expect("a second");
     for verb in ["build", "watch"] {
@@ -237,7 +262,8 @@ fn the_main_file_picked() {
         let err = text(&out.stderr);
         assert_eq!(out.status.code(), Some(2), "{err}");
         assert!(
-            err.contains("other.tex, paper.tex") && err.contains(&format!("phitex {verb} other.tex")),
+            err.contains("other.tex, paper.tex")
+                && err.contains(&format!("phitex {verb} other.tex")),
             "{err}"
         );
     }
@@ -251,20 +277,32 @@ fn ctrl_c_quits_at_once_q_asks() {
     std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
     let line = format!("{} watch --no-open --ini --etex doc.tex", bin().display());
     let mut t = Term::start(&dir, &line, &[], &[]);
-    t.until("clean build", 300);
+    t.until("1 page", 300);
     t.key(b"\x03");
-    assert!(wait(&mut t.child, 30).is_some(), "Ctrl-C did not end the watch:\n{}", t.said());
+    assert!(
+        wait(&mut t.child, 30).is_some(),
+        "Ctrl-C did not end the watch:\n{}",
+        t.said()
+    );
     let said = t.said();
     assert!(!said.contains("here?"), "Ctrl-C asked:\n{said}");
     assert!(!dir.join("doc.pdf").exists(), "Ctrl-C wrote the PDF");
     let mut t = Term::start(&dir, &line, &[], &[]);
-    t.until("clean build", 300);
+    t.until("1 page", 300);
     t.key(b"q");
     let said = t.until("write doc.pdf here?", 30);
     assert!(said.contains("w (or y): write doc.pdf here"), "{said}");
     t.key(b"w");
-    assert!(wait(&mut t.child, 60).is_some(), "w did not end the watch:\n{}", t.said());
-    assert!(dir.join("doc.pdf").is_file(), "w wrote no PDF:\n{}", t.said());
+    assert!(
+        wait(&mut t.child, 60).is_some(),
+        "w did not end the watch:\n{}",
+        t.said()
+    );
+    assert!(
+        dir.join("doc.pdf").is_file(),
+        "w wrote no PDF:\n{}",
+        t.said()
+    );
 }
 
 /// A watch on a terminal with a display opens its viewer; over SSH, with
@@ -276,22 +314,49 @@ fn the_viewer_opens_where_there_is_a_display() {
     std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
     let opened = dir.join("opened.txt");
     let browser = dir.join("browser.sh");
-    std::fs::write(&browser, format!("#!/bin/sh\necho \"$1\" >> {}\n", opened.display()))
-        .expect("a browser");
-    Command::new("chmod").arg("+x").arg(&browser).status().expect("chmod");
+    std::fs::write(
+        &browser,
+        format!("#!/bin/sh\necho \"$1\" >> {}\n", opened.display()),
+    )
+    .expect("a browser");
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&browser)
+        .status()
+        .expect("chmod");
     let b = browser.to_string_lossy().into_owned();
     let line = format!("{} watch --ini --etex doc.tex", bin().display());
     for (vars, unset, extra, opens) in [
-        (vec![("DISPLAY", ":0")], vec!["SSH_CONNECTION", "SSH_TTY", "WAYLAND_DISPLAY"], "", true),
-        (vec![("DISPLAY", ":0"), ("SSH_CONNECTION", "1 2 3 4")], vec!["SSH_TTY"], "", false),
-        (vec![("DISPLAY", ":0")], vec!["SSH_CONNECTION", "SSH_TTY"], " --no-open", false),
-        (vec![], vec!["DISPLAY", "WAYLAND_DISPLAY", "SSH_CONNECTION", "SSH_TTY"], "", false),
+        (
+            vec![("DISPLAY", ":0")],
+            vec!["SSH_CONNECTION", "SSH_TTY", "WAYLAND_DISPLAY"],
+            "",
+            true,
+        ),
+        (
+            vec![("DISPLAY", ":0"), ("SSH_CONNECTION", "1 2 3 4")],
+            vec!["SSH_TTY"],
+            "",
+            false,
+        ),
+        (
+            vec![("DISPLAY", ":0")],
+            vec!["SSH_CONNECTION", "SSH_TTY"],
+            " --no-open",
+            false,
+        ),
+        (
+            vec![],
+            vec!["DISPLAY", "WAYLAND_DISPLAY", "SSH_CONNECTION", "SSH_TTY"],
+            "",
+            false,
+        ),
     ] {
         let _ = std::fs::remove_file(&opened);
         let mut vars = vars;
         vars.push(("BROWSER", &b));
         let mut t = Term::start(&dir, &format!("{line}{extra}"), &vars, &unset);
-        let said = t.until("clean build", 300);
+        let said = t.until("1 page", 300);
         assert!(said.contains("http://127.0.0.1:"), "{said}");
         // (a browser the watch starts runs within its first seconds)
         std::thread::sleep(Duration::from_secs(5));
@@ -340,7 +405,10 @@ fn doctor_reports_the_setup() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let t = text(&out.stdout);
     assert!(t.starts_with("PhiTeX doctor"), "{t}");
-    assert!(t.contains("editor protocol") && t.contains("Running watches"), "{t}");
+    assert!(
+        t.contains("editor protocol") && t.contains("Running watches"),
+        "{t}"
+    );
     assert!(
         t.trim_end()
             .ends_with("https://github.com/accl-kaust/PhiTeX/issues/new/choose"),
@@ -403,7 +471,7 @@ fn lsp_viewer_address_and_columns() {
         let dir = scratch(if plugin { "lsp-plugin" } else { "lsp-plain" });
         std::fs::write(
             dir.join("main.tex"),
-            "% \\documentclass: the main file\n\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Main.\n\\input{ch}\n\\end\n",
+            "% \\documentclass: the main file\n\\pdfoutput=1 \\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Main.\n\\input{ch}\n\\end\n",
         )
         .expect("the main file");
         std::fs::write(dir.join("ch.tex"), "Chapter text.\n").expect("the chapter");
@@ -433,7 +501,10 @@ fn lsp_viewer_address_and_columns() {
                 "initializationOptions": opts,
             }}),
         );
-        lsp_send(&mut to, &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        lsp_send(
+            &mut to,
+            &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+        );
         let open = |to: &mut std::process::ChildStdin, name: &str, t: &str| {
             lsp_send(
                 to,
@@ -441,7 +512,11 @@ fn lsp_viewer_address_and_columns() {
                     "textDocument": {"uri": uri(&dir.join(name)), "languageId": "latex", "version": 0, "text": t}}}),
             );
         };
-        open(&mut to, "main.tex", &std::fs::read_to_string(dir.join("main.tex")).unwrap());
+        open(
+            &mut to,
+            "main.tex",
+            &std::fs::read_to_string(dir.join("main.tex")).unwrap(),
+        );
         let typed = "Chapter text, a mistake typed at its end: \\foo\n";
         open(&mut to, "ch.tex", typed);
         let col = typed.find("\\foo").expect("the mistake");
@@ -455,7 +530,10 @@ fn lsp_viewer_address_and_columns() {
                 .unwrap_or_else(|e| panic!("{e}: {seen:#?}"));
             seen.push(m.clone());
             if m.get("id").is_some() && m.get("method").is_some() {
-                lsp_send(&mut to, &json!({"jsonrpc": "2.0", "id": m["id"], "result": null}));
+                lsp_send(
+                    &mut to,
+                    &json!({"jsonrpc": "2.0", "id": m["id"], "result": null}),
+                );
             }
             if m["method"] == "window/showMessage"
                 && m["params"]["message"]
@@ -465,8 +543,12 @@ fn lsp_viewer_address_and_columns() {
                 shown = Some(m.clone());
             }
             if m["method"] == "textDocument/publishDiagnostics"
-                && m["params"]["uri"].as_str().is_some_and(|u| u.ends_with("/ch.tex"))
-                && let Some(d) = m["params"]["diagnostics"].as_array().and_then(|a| a.first())
+                && m["params"]["uri"]
+                    .as_str()
+                    .is_some_and(|u| u.ends_with("/ch.tex"))
+                && let Some(d) = m["params"]["diagnostics"]
+                    .as_array()
+                    .and_then(|a| a.first())
             {
                 placed = Some(d.clone());
             }
@@ -496,8 +578,14 @@ fn lsp_viewer_address_and_columns() {
                 "{t}"
             );
         }
-        lsp_send(&mut to, &json!({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": null}));
-        lsp_send(&mut to, &json!({"jsonrpc": "2.0", "method": "exit", "params": null}));
+        lsp_send(
+            &mut to,
+            &json!({"jsonrpc": "2.0", "id": 99, "method": "shutdown", "params": null}),
+        );
+        lsp_send(
+            &mut to,
+            &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+        );
         if wait(&mut child, 60).is_none() {
             let _ = child.kill();
         }
