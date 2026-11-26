@@ -1044,7 +1044,7 @@ impl<'a> Ctx<'a> {
         suffix: &str,
         then: PathId,
     ) -> Result<(Option<ValueId>, Field), Stop> {
-        self.derived_read(base, None, None, prefix, j, suffix, then)
+        self.derived_read(base, None, prefix, j, suffix, then)
     }
 
     /// [`Ctx::read_derived`] with the base's value the one reaching node
@@ -1063,39 +1063,13 @@ impl<'a> Ctx<'a> {
         suffix: &str,
         then: PathId,
     ) -> Result<(Option<ValueId>, Field), Stop> {
-        self.derived_read(base, Some(from), None, prefix, j, suffix, then)
+        self.derived_read(base, Some(from), prefix, j, suffix, then)
     }
 
-    /// [`Ctx::read_derived_from`] keyed by field `key` (docs/spec-symbol-reads.md
-    /// B4): where `key`'s value `[n, g]` says the name was field `g` when
-    /// its base gave `n`, and the base gives other digits now, field `g`
-    /// is read for the name. A name that moved with its base since it
-    /// was written (a picture's position, its picture numbered one more
-    /// after a picture inserted before it) is read where it was, as the
-    /// file that named it said; where the digits are the ones written
-    /// (a file read back as it was written: TeX's), the name. The key is
-    /// read through the derived path too: a change of it asks me again,
-    /// and stands where the answer is the same.
-    #[allow(clippy::too_many_arguments, reason = "a derived read's spec, keyed")]
-    pub fn read_derived_keyed(
-        &mut self,
-        base: Field,
-        from: NodeId,
-        key: Field,
-        prefix: &str,
-        j: i64,
-        suffix: &str,
-        then: PathId,
-    ) -> Result<(Option<ValueId>, Field), Stop> {
-        self.derived_read(base, Some(from), Some(key), prefix, j, suffix, then)
-    }
-
-    #[allow(clippy::too_many_arguments, reason = "a derived read's spec")]
     fn derived_read(
         &mut self,
         base: Field,
         from: Option<NodeId>,
-        key: Option<Field>,
         prefix: &str,
         j: i64,
         suffix: &str,
@@ -1108,9 +1082,6 @@ impl<'a> Ctx<'a> {
         let mut parts = vec![base.0, v.str(prefix), v.int(j), v.str(suffix)];
         if let Some(b) = from {
             parts.extend([node(b), node(at)]);
-            if let Some(k) = key {
-                parts.push(k.0);
-            }
         }
         let spec = v.list(parts);
         // (an overlay, `Ctx::read_before_placer_over`: the base and the
@@ -1123,12 +1094,7 @@ impl<'a> Ctx<'a> {
                 },
                 None => self.read(base)?,
             };
-            let mut g = read::derived_name(v, spec, b).ok_or_else(stop)?;
-            if let Some(k) = key
-                && let Some(g0) = read::key_redirect(v, self.read(k)?, read::derived_digits(v, spec, b))
-            {
-                g = g0;
-            }
+            let g = read::derived_name(v, spec, b).ok_or_else(stop)?;
             let x = self.read(g)?;
             return Ok((read::apply_path(self.eng, x, then), g));
         }
@@ -1147,23 +1113,7 @@ impl<'a> Ctx<'a> {
         self.note_source(rb.by);
         self.wait_for_settling(&rb)?;
         self.hold_at_frontier(base, b_at)?;
-        let mut g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
-        // (keyed: the key read where the named field is, and the field it
-        // says the name was taken for it where the base moved)
-        let mut ep_k = None;
-        if let Some(k) = key {
-            self.before_read(k);
-            ep_k = Some(self.ep);
-            let rk = reaching_at(self.eng, k, at, false).ok_or_else(stop)?;
-            self.note_source(rk.by);
-            self.wait_for_settling(&rk)?;
-            self.hold_at_frontier(k, at)?;
-            if read::alias_of(v, rk.value.unwrap_or(ValueId::UNIT)).is_none()
-                && let Some(g0) = read::key_redirect(v, rk.value, read::derived_digits(v, spec, rb.value))
-            {
-                g = g0;
-            }
-        }
+        let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
         self.before_read(g);
         let ep_g = self.ep;
         let rg = reaching_at(self.eng, g, at, false).ok_or_else(stop)?;
@@ -1179,22 +1129,13 @@ impl<'a> Ctx<'a> {
                 },
                 None => self.read(base)?,
             };
-            let mut g2 = read::derived_name(v, spec, b).ok_or_else(stop)?;
-            if let Some(k) = key
-                && let Some(g0) = read::key_redirect(v, self.read(k)?, read::derived_digits(v, spec, b))
-            {
-                g2 = g0;
-            }
+            let g2 = read::derived_name(v, spec, b).ok_or_else(stop)?;
             let x = self.read(g2)?;
             return Ok((read::apply_path(self.eng, x, then), g2));
         }
         let x = read::through_at(self.eng, rg, p, at, false);
         self.ep = ep_base;
         self.record(ReadKind::Field { f: base, at: b_anchor }, p, x);
-        if let (Some(k), Some(e)) = (key, ep_k) {
-            self.ep = e;
-            self.record(ReadKind::Field { f: k, at: anchor }, p, x);
-        }
         self.ep = ep_g;
         self.record(ReadKind::Field { f: g, at: anchor }, p, x);
         Ok((x, g))

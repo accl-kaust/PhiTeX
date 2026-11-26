@@ -739,14 +739,6 @@ impl Operation for ReadBack {
             }
             cx.define_with(f, kv[1], Locality::Global);
         }
-        // (a mixed fold's symbol keys, `define_mixed`)
-        if mixed && let Some(keys) = lb_read(cx, v.field(&format!("{MIXED_SYMS}{key}")))? {
-            for e in list_of(v, keys) {
-                if let [f, x] = list_of(v, e)[..] {
-                    cx.define_with(Field(f), x, Locality::Global);
-                }
-            }
-        }
         Ok(out)
     }
 }
@@ -1371,27 +1363,10 @@ fn define_mixed(cx: &mut Ctx<'_>, name: &str, m: Option<&crate::api::Mixed>) {
     // reads the file back mixed, `ReadBack`; else here)
     define_traced(cx, v.field(&format!("wmtext:{name}")), v.str(&m.defs_text));
     define_traced(cx, v.field(&format!("wmfold:{name}")), v.bool(m.fold));
-    if m.fold {
-        // (the keys of names made with a symbol, which the fold's text,
-        // its digits resolved, does not make: defined by the child as
-        // the lines gave them, docs/spec-symbol-reads.md B4)
-        let keys: Vec<ValueId> = m
-            .defs
-            .iter()
-            .filter(|(f, _)| f.contains("\u{10FFFE}k"))
-            .filter_map(|(f, x)| {
-                let xs = list_of(v, *x);
-                xs.first().map(|&x| v.list(vec![v.str(f), x]))
-            })
-            .collect();
-        define_traced(cx, v.field(&format!("{MIXED_SYMS}{name}")), v.list(keys));
-    } else {
+    if !m.fold {
         define_fields(cx, name, &m.defs, None, "wmkeys");
     }
 }
-
-/// The prefix of a mixed fold's symbol keys ([`define_mixed`]).
-pub(crate) const MIXED_SYMS: &str = "wmsym:";
 
 /// The prefix of a mixed file's markers of the fields its defining lines
 /// read ([`define_mixed`]).
@@ -1580,7 +1555,6 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
         v.field(&format!("wmtext:{name}")),
         v.field(&format!("wmfold:{name}")),
         v.field(&format!("wmreads:{name}")),
-        v.field(&format!("{MIXED_SYMS}{name}")),
         mk,
     ]);
     if let Some(reads) = lb_read(cx, v.field(&format!("wmreads:{name}")))? {
