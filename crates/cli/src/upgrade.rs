@@ -369,11 +369,45 @@ fn fetch(r: &Release, asset: &str, seen: impl FnMut(u64, Option<u64>)) -> Result
         .ok_or_else(|| format!("{asset} has no phitex binary"))
 }
 
-/// Where install.sh says it installed (`$XDG_DATA_HOME/phitex/install.json`;
-/// install.ps1: `%LOCALAPPDATA%\phitex\install.json`, [`crate::dirs`]).
+/// This phitex's install record, the one made by the script that put
+/// this very file where it is: install.sh's beside its prefix
+/// (`PREFIX/share/phitex/install.json`, the binary in `PREFIX/bin`), else
+/// the user's data folder's (`$XDG_DATA_HOME/phitex/install.json`, as
+/// install.sh wrote it before; install.ps1's
+/// `%LOCALAPPDATA%\phitex\install.json`, [`crate::dirs`]). Either is this
+/// phitex's only if the prefix it names is this binary's: another
+/// install's record (`PHITEX_PREFIX=/opt/x`, a second copy elsewhere)
+/// never makes this one look installed by the script, or nightly.
 fn install_record() -> Option<Value> {
-    let d = crate::dirs::phitex(crate::dirs::Kind::Data)?;
-    serde_json::from_slice(&std::fs::read(d.join("install.json")).ok()?).ok()
+    let exe = std::env::current_exe().ok()?;
+    let data = crate::dirs::phitex(crate::dirs::Kind::Data);
+    record_for(&exe, data.as_deref(), |p| std::fs::read(p).ok())
+}
+
+/// [`install_record`] for the binary `exe`, the data folder `data`, the files as `read` reads them.
+fn record_for(
+    exe: &Path,
+    data: Option<&Path>,
+    read: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> Option<Value> {
+    let same = |a: &Path, b: &Path| {
+        a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    };
+    // (the folders the binary may be the prefix's: `PREFIX/bin/phitex` (install.sh), `PREFIX\phitex.exe` (install.ps1))
+    let dir = exe.parent()?;
+    let prefixes: Vec<&Path> = [Some(dir), dir.parent()].into_iter().flatten().collect();
+    let beside = dir
+        .parent()
+        .map(|p| p.join("share").join("phitex").join("install.json"));
+    [beside, data.map(|d| d.join("install.json"))]
+        .into_iter()
+        .flatten()
+        .filter_map(|f| serde_json::from_slice::<Value>(&read(&f)?).ok())
+        .find(|r| {
+            r["prefix"]
+                .as_str()
+                .is_some_and(|p| prefixes.iter().any(|q| same(Path::new(p), q)))
+        })
 }
 
 /// `bytes` as the executable `exe`, by rename from beside it.
@@ -737,6 +771,57 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An install's record is its own: beside its prefix, or the data
+    /// folder's naming its prefix; another prefix's is not this one's.
+    #[test]
+    fn install_records_are_keyed_by_prefix() {
+        let files = std::collections::HashMap::from([
+            (
+                "/opt/x/share/phitex/install.json",
+                r#"{"method": "script", "prefix": "/opt/x", "channel": "stable"}"#,
+            ),
+            (
+                "/home/u/.local/share/phitex/install.json",
+                r#"{"method": "script", "prefix": "/opt/x", "channel": "stable"}"#,
+            ),
+            (
+                "/home/v/data/phitex/install.json",
+                r#"{"method": "script", "prefix": "/home/v/.local", "channel": "nightly"}"#,
+            ),
+            (
+                "/w/data/install.json",
+                r#"{"method": "script", "prefix": "/w/Programs/phitex", "channel": "stable"}"#,
+            ),
+        ]);
+        let read = |p: &Path| files.get(p.to_str()?).map(|s| s.as_bytes().to_vec());
+        let rec = |exe: &str, data: Option<&str>| {
+            record_for(Path::new(exe), data.map(Path::new), read)
+                .map(|r| r["channel"].as_str().unwrap_or("").to_owned())
+        };
+        // (beside its prefix)
+        assert_eq!(rec("/opt/x/bin/phitex", None).as_deref(), Some("stable"));
+        // (the default prefix's copy, whose data folder holds /opt/x's record (an older install.sh's): not its)
+        assert_eq!(
+            rec(
+                "/home/u/.local/bin/phitex",
+                Some("/home/u/.local/share/phitex")
+            ),
+            None
+        );
+        // (the data folder's, naming this prefix (an older install.sh's, XDG_DATA_HOME set))
+        assert_eq!(
+            rec("/home/v/.local/bin/phitex", Some("/home/v/data/phitex")).as_deref(),
+            Some("nightly")
+        );
+        // (install.ps1's: the binary directly in its prefix)
+        assert_eq!(
+            rec("/w/Programs/phitex/phitex.exe", Some("/w/data")).as_deref(),
+            Some("stable")
+        );
+        // (a binary elsewhere: none)
+        assert_eq!(rec("/usr/bin/phitex", Some("/home/v/data/phitex")), None);
+    }
 
     /// The download's bar: its percent, 24 cells, the MB of the whole;
     /// the bytes alone when the server gave no length.

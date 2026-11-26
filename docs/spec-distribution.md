@@ -131,8 +131,13 @@ and macos), `phitex-<arch>-windows.zip` (x86_64 and aarch64, holding `phitex.exe
 1. picks the target (x86_64/aarch64, linux/macos);
 2. downloads the tarball, `SHA256SUMS` and `SHA256SUMS.minisig`;
 3. verifies the signature against the public key in the script;
-4. installs to `~/.local/bin/phitex` and writes `~/.local/share/phitex/install.json`
-   (`{"method": "script", "version": ...}`).
+4. installs to `PREFIX/bin/phitex` (`PHITEX_PREFIX`, default `~/.local`) and
+   writes its record beside it, `PREFIX/share/phitex/install.json`
+   (`{"method": "script", "prefix": ..., "asset": ..., "channel": ...}`):
+   one record per prefix, so a second install never overwrites another's.
+   `phitex upgrade` takes the record beside its own prefix, else the data
+   folder's (an older install.sh's, install.ps1's), and only one that
+   names its own prefix.
 
 **Install on Windows:** `irm https://phitex.org/install.ps1 | iex` in
 PowerShell (5.1 or 7). The script (`scripts/install.ps1`) does what

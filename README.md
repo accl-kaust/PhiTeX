@@ -43,8 +43,8 @@ Change a word and only what it touches is rebuilt. A 60-page paper in ⟨~5 ms�
 </td>
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/exact-dark.png"><img src="assets/readme/exact.png" alt="Exactly as {pdf,Xe}LaTeX" width="100%"></picture><br>
-<b>Exactly as {pdf,Xe}LaTeX</b><br>
-Byte for byte, from a clean build or after a thousand edits. Nothing changes but the wait. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
+<b>Exactly as pdfLaTeX</b><br>
+The PDF pdfLaTeX makes, byte for byte, from a clean build or after a thousand edits. Nothing changes but the wait. XeLaTeX output is <i>experimental</i>: most documents match, the rest are listed on <a href="https://phitex.org/measured.html">phitex.org</a>. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
 </td>
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/editors-dark.png"><img src="assets/readme/editors.png" alt="Any editor, Overleaf included" width="100%"></picture><br>
@@ -92,6 +92,14 @@ irm https://phitex.org/install.ps1 | iex
 phitex watch paper.tex
 ```
 <!-- TODO(link): install.sh needs the first GitHub release; until then, build from source below -->
+
+The script puts `phitex` in `~/.local/bin`. `PHITEX_PREFIX=/opt/phitex`
+installs into another prefix (`/opt/phitex/bin`), and
+`PHITEX_CHANNEL=nightly` takes the nightly build, which `phitex upgrade`
+then follows (`curl -fsSL https://phitex.org/install.sh | PHITEX_CHANNEL=nightly sh`).
+If `~/.local/bin` is not on your `PATH`, `export PATH="$HOME/.local/bin:$PATH"`
+makes `phitex` work in this terminal at once; add that line to
+`~/.profile` for new ones.
 
 `phitex watch` builds your document, opens it live in your browser, and
 rebuilds on every save. Double-click the page to jump to the source.
