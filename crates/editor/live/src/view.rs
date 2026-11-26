@@ -10,7 +10,8 @@
 //!   "json":…}` ([`Viewer::answer`]). Ops: `open`, `status`, `pages`,
 //!   `diagnostics`, `console` (the messages so far), `rebuild`, `frame`
 //!   (a page as strips, [`Viewer::frame`]; their pixels are
-//!   [`Viewer::strips`]), `text` (every page's, for finding), `outline`,
+//!   [`Viewer::strips`]), `text` (every page's, for finding), `outline`
+//!   (the PDF's bookmarks, else the `.toc`'s entries, [`crate::toc`]),
 //!   `source` (a
 //!   double-click's or an error's place: the host shows it,
 //!   [`Viewer::on_goto`]), and the editor's buffer: `set_file {file, text}`
@@ -184,6 +185,10 @@ pub enum Ask {
         x: u32,
         y: u32,
     },
+    /// The document's outline from its `.toc` wanted (the `outline` op of
+    /// a PDF with none of its own: [`crate::toc`]), made by the session's
+    /// owner and given back with [`Viewer::put_outline`].
+    Outline,
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
@@ -323,6 +328,9 @@ struct Pages {
     placed: std::collections::HashMap<(String, usize), Vec<usize>>,
     /// The `cites` answers made for this build, by page and point.
     cites: std::collections::HashMap<(usize, u32, u32), Value>,
+    /// The outline made from the `.toc` for this build, when asked
+    /// ([`Ask::Outline`]).
+    outline: Option<Value>,
 }
 
 /// A viewer's state and its requests' answers.
@@ -1073,6 +1081,18 @@ impl Viewer {
         lock(&self.pages).placed.insert((file, at), pages);
     }
 
+    /// The outline made from the `.toc` ([`crate::toc`]), when asked
+    /// ([`Ask::Outline`]), for the `outline` op.
+    pub fn put_outline(&self, items: Value) {
+        lock(&self.pages).outline = Some(items);
+    }
+
+    /// The pages in the PDF shown (0: none, or not read).
+    pub fn page_count(&self) -> usize {
+        let Some(pdf) = self.pdf() else { return 0 };
+        lock(&self.strips).pages(&pdf).unwrap_or(0)
+    }
+
     /// The citation at a point of a page, made when asked
     /// ([`Ask::Cites`]), for the `cites` op: `{"cites": [...]}`, or
     /// `{"cites": null}` (no citation there).
@@ -1253,6 +1273,7 @@ impl Viewer {
         pages.origins.clone_from(&b.origins);
         pages.placed.clear();
         pages.cites.clear();
+        pages.outline = None;
         pages.made = b
             .origins
             .as_ref()
@@ -1446,7 +1467,26 @@ impl Viewer {
                 }
             }
             "text" => ok(json!({"pages": s.text_json()})),
-            "outline" => ok(json!({"items": s.outline_json()})),
+            // (the PDF's own outline, hyperref's bookmarks, exact; else the
+            // `.toc`'s, made when asked by the session's owner: the viewer
+            // asks again, as for `origins`)
+            "outline" => {
+                let items = s.outline_json();
+                let shown = lock(&s.diff).shown;
+                let made = lock(&s.pages).outline.clone();
+                if items.as_array().is_some_and(|a| !a.is_empty()) || shown {
+                    ok(json!({"items": items}))
+                } else if let Some(made) = made {
+                    ok(json!({"items": made}))
+                } else if s.pdf().is_none() {
+                    ok(json!({"items": []}))
+                } else {
+                    if !lock(&s.asks).contains(&Ask::Outline) {
+                        s.ask(Ask::Outline);
+                    }
+                    ok(json!({"pending": true}))
+                }
+            }
             // (the transcript of the last build if it is made, else asked
             // for: the viewer asks again)
             "log" => {

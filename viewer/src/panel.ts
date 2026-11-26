@@ -2404,7 +2404,6 @@ export class Panel {
     return !!this.contents && this.win.classList.contains("side-on");
   }
 
-  /** The document's outline (its PDF's bookmarks), from the host after each build. */
   /** The session's citation lookup (PreviewSink.citesBy: the engine's `cites` op), the viewer's for its citation cards. */
   private citesAsk?: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>;
   citesBy(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void {
@@ -2417,6 +2416,7 @@ export class Panel {
     this.zoomAsk = ask;
   }
 
+  /** The document's outline (its PDF's bookmarks, else its .toc's entries), from the host after each build. */
   outline(items: Entry[]): void {
     this.contents?.set(items);
     this.contentsAt();
@@ -2431,7 +2431,7 @@ export class Panel {
     if (was !== none && this.win.classList.contains("side-on") && this.prefs.zoom === "fit") this.redraw();
     const label = this.$("#x-contents").querySelector("span:not(.sub)");
     if (label) label.textContent = none ? "Contents (none)" : "Contents";
-    this.$("#x-contents").title = none ? "This PDF has no outline: hyperref makes one from the sections" : "";
+    this.$("#x-contents").title = none ? "The document has no sections" : "";
   }
 
   /** The contents shown or hidden, the user's choice: kept (this browser's, and the host's with the panel's prefs). */

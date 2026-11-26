@@ -60,6 +60,7 @@ pub mod progress;
 pub mod session;
 pub mod synctex;
 pub mod tex;
+pub mod toc;
 pub mod view;
 pub mod warnings;
 pub mod watch;

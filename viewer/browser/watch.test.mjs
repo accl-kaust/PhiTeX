@@ -1260,6 +1260,80 @@ test("the column's handle dragged over a 120-page document holds the frame rate 
   await w.stop();
 });
 
+/**
+ * The contents' entries and a jump: the column open at 1300 x 850, its titles once `last` is
+ * among them; entry `title` clicked, the page it names in view and the heading's line (the text
+ * layer's, `heading` a pattern of it) near the view's top.
+ */
+async function contentsJump(t, last, title, heading) {
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
+  if (!(await t.q(`$(".win").classList.contains("side-on")`))) await t.click("#b-side");
+  await t.until(`$("#side").offsetWidth > 100 && $$(".phx-outline .phx-t").some((a) => a.textContent === ${JSON.stringify(last)})`, "the contents beside the pages", 60000);
+  assert.equal(await t.q(`$(".win").classList.contains("side-empty")`), false, "the column shown, not empty");
+  const titles = await t.q(`$$(".phx-outline .phx-t").map((a) => a.textContent)`);
+  const row = await t.q(`(() => { const a = $$(".phx-outline .phx-t").find((a) => a.textContent === ${JSON.stringify(title)}); a.scrollIntoView({ block: "center" }); return +a.closest(".phx-row").querySelector(".phx-p").textContent; })()`);
+  // (the pages' layout at rest first: the column coming in or the resize fits the pages to the
+  // narrower stage a moment later, and a jump made before it is scrolled by as much after)
+  let was = null;
+  for (let same = 0, end = Date.now() + 20000; same < 2; await sleep(200)) {
+    assert.ok(Date.now() < end, "the pages' layout at rest");
+    const now = await t.q(`(() => { const b = $$("#viewer .slot").at(-1)?.getBoundingClientRect(); return b ? [b.width, b.height, $("#stage").scrollHeight].map(Math.round).join() : null; })()`);
+    same = now && now === was ? same + 1 : 0;
+    was = now;
+  }
+  await t.click(`.phx-outline li[data-i="${titles.indexOf(title)}"] > .phx-row .phx-t`);
+  await t.until(`+$("#pgin").value === ${row}`, `page ${row} in view, the entry's`, 10000);
+  // (the heading's line on that page, near the view's top: the entry's place, not the page's top)
+  const at = await t.until(
+    `(() => { const s = $$("#viewer .slot")[${row - 1}]; const l = s?.querySelector(".phx-text"); if (!l || l.matches("[data-pending], [data-hold]")) return null; const x = [...l.querySelectorAll("text")].find((x) => ${heading}.test(x.textContent)); if (!x) return null; const b = x.getBoundingClientRect(), v = $("#stage").getBoundingClientRect(); return { top: b.top - v.top, page: s.getBoundingClientRect().top - v.top }; })()`,
+    "the heading's line on the page",
+    10000,
+  );
+  return { titles, row, at };
+}
+
+/** The `.phx-row` page number of the contents' entry titled `title`. */
+const entryPage = (title) => `+$$(".phx-outline li").find((li) => li.querySelector(":scope > .phx-row .phx-t").textContent === ${JSON.stringify(title)})?.querySelector(".phx-p")?.textContent`;
+
+test("the contents without hyperref: every section and subsection from the document's own table of contents entries, nested, each a click away from its heading's page and place; with \\tableofcontents the entries land on the headings, not on the contents page (the user: a 120-section paper without hyperref had no Contents)", async () => {
+  // (each section's text its own: the pages' glyphs are placed in the sources by their text)
+  const sections = Array.from({ length: 40 }, (_, i) => `\\section{Topic ${i + 1}}\n${prose(12, i + 1)}${i === 6 ? "\n\\subsection{A detail}\nMore words." : ""}`).join("\n\n");
+  const bib = "\\begin{thebibliography}{1}\\bibitem{k} D. Knuth. 1984.\\end{thebibliography}";
+  const { w, t } = await open({ "main.tex": doc(`${sections}\n${bib}`) });
+  await waitBuild(w, 1);
+  const { titles, row, at } = await contentsJump(t, "40 Topic 40", "20 Topic 20", /^\s*20\s*Topic 20\s*$/);
+  assert.equal(titles.length, 41, `every section and the subsection: ${titles.join(" | ")}`);
+  assert.ok(row > 3, `the 20th section well into the document (page ${row})`);
+  assert.ok(at.top >= 0 && at.top < 120, `the heading near the view's top (${Math.round(at.top)} px)`);
+  assert.ok(at.top - at.page > 30, "the place on the page, not its top");
+  // (the subsection nested under its section)
+  assert.equal(await t.q(`$$(".phx-outline li").find((li) => li.querySelector(":scope > .phx-row .phx-t").textContent === "7 Topic 7").querySelector(":scope > ul .phx-t")?.textContent`), "7.1 A detail");
+  // (a \tableofcontents first: its lines show the titles too, from the .toc; the entries still go to the headings)
+  w.write("main.tex", doc(`\\tableofcontents\n\\newpage\n${sections}\n${bib}`));
+  await waitBuild(w, 2, 120000);
+  await t.until(`${entryPage("2 Topic 2")} > 1`, "the entries again, past the contents page", 60000);
+  const again = await contentsJump(t, "40 Topic 40", "2 Topic 2", /^\s*2\s*Topic 2\s*$/);
+  assert.ok(again.row >= 2, `section 2 on its page after the contents (page ${again.row})`);
+  assert.ok(again.at.top >= 0 && again.at.top < 120, `its heading near the view's top (${Math.round(again.at.top)} px)`);
+  assert.deepEqual(t.errors, []);
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});
+
+test("the contents with hyperref are its bookmarks, as before: their titles (unnumbered, as hyperref makes them), pages and places", async () => {
+  const sections = Array.from({ length: 12 }, (_, i) => `\\section{Topic ${i + 1}}\n${prose(12, i + 1).replace(/~?\\cite\{k\}/g, "")}`).join("\n\n");
+  const { w, t } = await open({ "main.tex": doc(sections, "\\usepackage{hyperref}\n") });
+  await waitBuild(w, 1);
+  const { titles, row, at } = await contentsJump(t, "Topic 12", "Topic 10", /^\s*10\s*Topic 10\s*$/);
+  // (hyperref's titles, unnumbered: its bookmarks, not the .toc's entries)
+  assert.deepEqual(titles, Array.from({ length: 12 }, (_, i) => `Topic ${i + 1}`));
+  assert.ok(row > 1, `the 10th section past the first page (page ${row})`);
+  assert.ok(at.top >= 0 && at.top < 120, `the heading near the view's top (${Math.round(at.top)} px)`);
+  assert.deepEqual(t.errors, []);
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});
+
 test("the contents' open or closed is the user's: a narrow panel (a drawer) starts with them closed and never opens them by itself; opened there, kept open when it widens; closed, kept closed after a resize and a reload (the user: Contents opened itself again when the window narrowed)", async () => {
   const sections = Array.from({ length: 3 }, (_, i) => `\\section{Part ${i + 1}}\nSome words of part ${i + 1}.`).join("\n");
   const size = (width) => t.send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });

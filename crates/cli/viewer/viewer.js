@@ -3704,7 +3704,7 @@ var Outline = class {
     this.flat = [];
     this.marked = null;
     if (!items.length) {
-      this.el.innerHTML = `<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>`;
+      this.el.innerHTML = `<p class="phx-none">No contents: the document has no sections.</p>`;
       return;
     }
     const list = (es, path, depth) => html`<ul>${es.map((e) => {
@@ -12197,7 +12197,6 @@ var Panel = class {
   outlineWanted() {
     return !!this.contents && this.win.classList.contains("side-on");
   }
-  /** The document's outline (its PDF's bookmarks), from the host after each build. */
   /** The session's citation lookup (PreviewSink.citesBy: the engine's `cites` op), the viewer's for its citation cards. */
   citesAsk;
   citesBy(ask2) {
@@ -12208,6 +12207,7 @@ var Panel = class {
   zoomBy(ask2) {
     this.zoomAsk = ask2;
   }
+  /** The document's outline (its PDF's bookmarks, else its .toc's entries), from the host after each build. */
   outline(items) {
     this.contents?.set(items);
     this.contentsAt();
@@ -12220,7 +12220,7 @@ var Panel = class {
     if (was !== none && this.win.classList.contains("side-on") && this.prefs.zoom === "fit") this.redraw();
     const label = this.$("#x-contents").querySelector("span:not(.sub)");
     if (label) label.textContent = none ? "Contents (none)" : "Contents";
-    this.$("#x-contents").title = none ? "This PDF has no outline: hyperref makes one from the sections" : "";
+    this.$("#x-contents").title = none ? "The document has no sections" : "";
   }
   /** The contents shown or hidden, the user's choice: kept (this browser's, and the host's with the panel's prefs). */
   side(on = !this.win.classList.contains("side-on")) {
@@ -16652,17 +16652,22 @@ var PreviewSession = class {
     const r = await this.core.request({ op: "diagnostics" });
     if (r.ok) this.onWatch({ event: "diagnostics", items: r.json?.items ?? [] });
   }
-  /** The document's outline asked for now and given to the view (it shows the contents). */
+  /**
+   * The document's outline asked for now and given to the view (it shows the contents): the
+   * PDF's bookmarks, else the entries of its `.toc`, which the core makes when asked (the
+   * answer "pending" asked again; given up once a newer build's outline is asked).
+   */
   async outline() {
     if (!this.sink.outline) return;
-    const r = await this.core.request({ op: "outline" });
-    if (r.ok) this.sink.outline(r.json?.items ?? []);
+    const gen = ++this.outlineGen;
+    const r = await this.untilMade({ op: "outline" }, () => gen !== this.outlineGen).catch(() => null);
+    if (r?.ok && !r.json?.pending && gen === this.outlineGen) this.sink.outline(r.json?.items ?? []);
   }
+  outlineGen = 0;
   /** After a build: the outline, only while the view shows it (else asked when it does). */
   async watchOutline() {
     if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
-    const r = await this.core.request({ op: "outline" });
-    if (r.ok) this.sink.outline(r.json?.items ?? []);
+    await this.outline();
   }
   onWatch(e) {
     switch (e.event) {

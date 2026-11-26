@@ -156,6 +156,13 @@ impl Edits {
                 }
                 return Applied::Nothing;
             }
+            // (the outline from the `.toc`, when asked: a PDF without one)
+            Ask::Outline => {
+                if let Some(v) = viewer {
+                    v.put_outline(s.outline(v.page_count()));
+                }
+                return Applied::Nothing;
+            }
             // (a page's origins, made for that page alone, when asked)
             Ask::Origins(k) => {
                 if let Some(v) = viewer {

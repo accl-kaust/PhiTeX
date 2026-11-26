@@ -443,6 +443,9 @@ impl Report {
 pub struct Reads {
     origins: Option<Arc<phitex_tex::OriginsCapture>>,
     aux: String,
+    /// The build's table of contents' entries, as its `.aux` files hold
+    /// them ([`crate::toc::from_aux`]; empty: none).
+    toc: String,
 }
 
 impl Reads {
@@ -488,6 +491,30 @@ impl Reads {
             crate::cites::bibnumbers(&self.aux),
         )
     }
+
+    /// [`Session::outline`] of the build this was taken of.
+    #[must_use]
+    pub fn outline(&self, pages: usize) -> serde_json::Value {
+        outline_of(
+            &self.toc,
+            self.origins.as_ref().map(|c| c.snapshot()),
+            pages,
+        )
+    }
+}
+
+/// The outline of the table of contents' entries `toc`
+/// ([`crate::toc::outline`]): placed on
+/// the pages of `snap` where the build kept their origins.
+fn outline_of(
+    toc: &str,
+    snap: Option<phitex_tex::OriginsSnapshot>,
+    pages: usize,
+) -> serde_json::Value {
+    if toc.is_empty() {
+        return serde_json::Value::Array(Vec::new());
+    }
+    crate::toc::outline(toc, &snap.unwrap_or_default(), pages)
 }
 
 /// What the builds read ([`Session::watched`]).
@@ -2837,19 +2864,65 @@ impl Session {
     pub fn reads(&self) -> Option<Reads> {
         let b = self.build.as_ref()?;
         let origins = (self.job.origins || self.job.synctex).then(|| Arc::new(b.origins_capture()));
-        let name = format!("{}.aux", self.job.jobname);
-        let aux = b
-            .files_shared()
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, t)| t.clone())
+        Some(Reads {
+            origins,
+            aux: self.written("aux"),
+            toc: self.toc(),
+        })
+    }
+
+    /// The table of contents' entries the build wrote to its `.aux` files
+    /// ([`crate::toc::from_aux`]).
+    fn toc(&self) -> String {
+        let files = self.build.as_ref().map(Build::files_shared);
+        let file = |name: &str| -> Option<String> {
+            let bare = name.trim_start_matches("./");
+            files
+                .as_ref()?
+                .iter()
+                .find(|(n, _)| n.trim_start_matches("./") == bare)
+                .map(|(_, t)| t.clone())
+                .or_else(|| {
+                    self.sink
+                        .get(bare)
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                })
+        };
+        crate::toc::from_aux(&self.written("aux"), &file)
+    }
+
+    /// The text of `JOB.ext` as the build wrote it, at its fixed point,
+    /// else as the output directory has it (empty: none).
+    fn written(&self, ext: &str) -> String {
+        let name = format!("{}.{ext}", self.job.jobname);
+        self.build
+            .as_ref()
+            .and_then(|b| {
+                b.files_shared()
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, t)| t.clone())
+            })
             .or_else(|| {
                 self.sink
                     .get(&name)
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
             })
-            .unwrap_or_default();
-        Some(Reads { origins, aux })
+            .unwrap_or_default()
+    }
+
+    /// The document's outline from its table of contents' entries
+    /// ([`crate::toc`]): the viewer's entries, each placed where the pages
+    /// show its heading (`pages`: the PDF's); none without an entry.
+    #[must_use]
+    pub fn outline(&self, pages: usize) -> serde_json::Value {
+        let toc = self.toc();
+        let snap = self
+            .build
+            .as_ref()
+            .filter(|_| !toc.is_empty() && (self.job.origins || self.job.synctex))
+            .map(phitex_tex::Build::origins_snapshot);
+        outline_of(&toc, snap, pages)
     }
 
     /// Page `k`'s glyph origins (0 the first), made for that page alone
