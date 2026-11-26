@@ -41,7 +41,7 @@ async function reloaded(t) {
   await t.send("Page.reload");
   await t.until(`!window.__phxOld && document.readyState !== "loading"`, "the reloaded document", 30000);
 }
-const builds = (w) => (w.out.match(/^(ok|failed|✓|✗):?\s+\d+/gm) ?? []).length;
+const builds = (w) => (w.out.match(/^(ok|failed|no output|✓|✗|⚠):?\s+\d+/gm) ?? []).length;
 const waitBuild = async (w, n, ms = 60000) => {
   const end = Date.now() + ms;
   while (builds(w) < n) {
@@ -82,6 +82,8 @@ test("a page that is ready is never dimmed by a build: one that ships none, a ne
   // (a build that ships no page: the last pages as they are, a strip saying so)
   w.write("main.tex", doc(""));
   await waitBuild(w, 2);
+  // (pdflatex's "No pages of output.": no error, no output, never an ok)
+  assert.match(w.out, /^no output:\s+2\s/m);
   await t.until(`$("#stage").classList.contains("stale")`, "the strip: the last complete render");
   assert.match(await t.q(`$("#banner").textContent`), /^This build shipped no page: showing the last complete render\./, "the strip: the cause first, then what is shown");
   assert.deepEqual(await t.q(CRISP), CRISP_IS, "the last pages after a build that shipped none");
@@ -1203,6 +1205,53 @@ test("links work with a real mouse at a zoom under 100% (Fit at about 71%): a \\
   await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: ref[0], y: ref[1], button: "left", buttons: 0, clickCount: 1 });
   await t.until(`$("#stage").scrollTop > ${top0} + 200`, `the click jumped at ${zoom}`, 5000);
   await t.until(`!!$(".pback") && !$(".pback").hidden`, "Back offered after the jump", 5000);
+  assert.deepEqual(t.errors, []);
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});
+
+test("the column's handle dragged over a 120-page document holds the frame rate (no main-thread task over 50 ms, the pages laid out once, at its end); then the column closed, every page box at Page width is as wide as the others, scrolled through the whole document (the user: a 113-page deck crawled; page 13 narrower and indented over page 14)", async () => {
+  const pages = Array.from({ length: 120 }, (_, i) => `${i % 10 === 0 ? `\\section{Part ${i / 10 + 1}}\n` : ""}Page ${i + 1} of the long document.\\newpage`).join("\n");
+  const { w, t } = await open({ "main.tex": doc(pages, "\\usepackage{hyperref}\n") });
+  await waitBuild(w, 1);
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
+  // (at Page width, the user's)
+  await t.click("#b-zoom");
+  await t.click(`[data-zoom="fit"]`);
+  if (!(await t.q(`$(".win").classList.contains("side-on")`))) await t.click("#b-side");
+  await t.until(`$("#side").offsetWidth > 100 && /Part 12/.test($("#side").textContent) && +$("#pgn").textContent >= 120`, "the contents and the 120 pages", 60000);
+  await t.until(`!$(".grip").hidden && Math.abs($(".grip").getBoundingClientRect().left + $(".grip").offsetWidth / 2 - $("#side").getBoundingClientRect().right) < 2`, "the handle on the column's edge", 5000);
+  await sleep(500);
+  const g = await t.q(`(() => { const r = $(".grip").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  const ev = await t.trace(async () => {
+    await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: g[0], y: g[1] });
+    await t.send("Input.dispatchMouseEvent", { type: "mousePressed", x: g[0], y: g[1], button: "left", buttons: 1, clickCount: 1 });
+    for (let i = 1; i <= 90; i++) {
+      await t.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: g[0] + 200 * Math.sin((i / 90) * Math.PI), y: g[1], button: "left", buttons: 1 });
+      await sleep(16);
+    }
+    await t.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: g[0] + 60, y: g[1], button: "left", buttons: 0, clickCount: 1 });
+    await sleep(300);
+  });
+  const run = ev.filter((e) => e.ph === "X" && (e.name === "RunTask" || e.name === "ThreadControllerImpl::RunTask"));
+  const pid = ev.find((e) => e.name === "EventDispatch")?.pid;
+  const long = run.filter((e) => e.pid === pid && e.dur > 50000).map((e) => +(e.dur / 1000).toFixed(1));
+  assert.deepEqual(long, [], `no main-thread task over 50 ms through the drag: ${JSON.stringify(long)}`);
+  // (the column closed: every page box at Page width the same width, the whole document scrolled through)
+  await t.click("#b-side");
+  await t.until(`!$(".win").classList.contains("side-on")`, "the column closed", 5000);
+  const widths = new Set();
+  for (let k = 0; k < 120; k += 7) {
+    await t.q(`$("#stage").scrollTop = $$("#viewer .slot")[${k}].offsetTop`);
+    await sleep(120);
+    for (const x of await t.q(`$$("#viewer .slot").map((s) => Math.round(s.getBoundingClientRect().width))`)) widths.add(x);
+  }
+  await sleep(500);
+  for (const x of await t.q(`$$("#viewer .slot").map((s) => Math.round(s.getBoundingClientRect().width))`)) widths.add(x);
+  assert.equal(widths.size, 1, `every page box one width at Page width: ${[...widths].join(", ")}`);
+  // (Page width: the stage's width less its margins, as it is now, the column closed)
+  const sw = await t.q(`$("#stage").clientWidth`), pw = [...widths][0];
+  assert.ok(pw <= sw && pw >= sw - 60, `the page as wide as the stage gives (${pw} in ${sw})`);
   assert.deepEqual(t.errors, []);
   await t.send("Emulation.clearDeviceMetricsOverride", {});
   await w.stop();

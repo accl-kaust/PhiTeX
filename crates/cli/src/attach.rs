@@ -407,13 +407,124 @@ pub fn gone(v: &Value) -> bool {
         .as_u64()
         .and_then(|p| u16::try_from(p).ok());
     match port {
-        Some(port) if same_net(v) => TcpStream::connect_timeout(
+        Some(port) if same_net(v) => refused(port),
+        _ => false,
+    }
+}
+
+/// Whether a connection to 127.0.0.1:`port` is refused: nobody listens
+/// there.
+#[cfg(not(windows))]
+fn refused(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(300),
+    )
+    .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused)
+}
+
+/// Windows: whether a connection to 127.0.0.1:`port` is refused. Windows
+/// answers a refusal (a reset) to a connection's SYN by sending the SYN
+/// again, twice, before it says the connection was refused: one to two
+/// seconds for a closed port of its own host,
+/// where a wait of 300 ms ended in a timeout and the port was taken as
+/// listened on (the discovery file of a watch gone was never removed).
+/// The socket is asked to send its SYN once (`SIO_TCP_INITIAL_RTO`, no
+/// SYN retransmissions): the reset is the answer, at once. Where Windows
+/// does not take the option, the connection as std makes it.
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "a socket's SYN retransmissions: Winsock's WSAIoctl, which std does not give"
+)]
+fn refused(port: u16) -> bool {
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, IN_ADDR, IN_ADDR_0, INVALID_SOCKET, IPPROTO_TCP, SIO_TCP_INITIAL_RTO, SOCK_STREAM,
+        SOCKADDR, SOCKADDR_IN, SOCKET_ERROR, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS,
+        TCP_INITIAL_RTO_PARAMETERS, WSA_FLAG_NO_HANDLE_INHERIT, WSACleanup, WSADATA,
+        WSAECONNREFUSED, WSAGetLastError, WSAIoctl, WSASocketW, WSAStartup, closesocket, connect,
+    };
+    let std_way = || {
+        TcpStream::connect_timeout(
             &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
             Duration::from_millis(300),
         )
-        .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused),
-        _ => false,
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused)
+    };
+    // SAFETY: WSADATA is plain data, all zeroes a valid value; WSAStartup
+    // fills it (Winsock 2.2), counted: WSACleanup below undoes this call
+    // alone.
+    let mut data: WSADATA = unsafe { std::mem::zeroed() };
+    if unsafe { WSAStartup(0x0202, &raw mut data) } != 0 {
+        return std_way();
     }
+    // SAFETY: plain values; INVALID_SOCKET is its failure.
+    let s = unsafe {
+        WSASocketW(
+            i32::from(AF_INET),
+            SOCK_STREAM,
+            IPPROTO_TCP,
+            std::ptr::null(),
+            0,
+            WSA_FLAG_NO_HANDLE_INHERIT,
+        )
+    };
+    let answer = if s == INVALID_SOCKET {
+        None
+    } else {
+        // (the SDK's `(UCHAR) -2`, windows-sys's u16 0xfffe; the RTT
+        // unspecified, `(USHORT) -1`: the system's)
+        let p = TCP_INITIAL_RTO_PARAMETERS {
+            Rtt: u16::MAX,
+            MaxSynRetransmissions: TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS.to_le_bytes()[0],
+        };
+        let mut n = 0u32;
+        // SAFETY: `s` is an open socket, `p` the option's input of its
+        // size; no output, no overlapped call.
+        let set = unsafe {
+            WSAIoctl(
+                s,
+                SIO_TCP_INITIAL_RTO,
+                (&raw const p).cast(),
+                u32::try_from(size_of::<TCP_INITIAL_RTO_PARAMETERS>()).unwrap_or(0),
+                std::ptr::null_mut(),
+                0,
+                &raw mut n,
+                std::ptr::null_mut(),
+                None,
+            )
+        } == 0;
+        set.then(|| {
+            let a = SOCKADDR_IN {
+                sin_family: AF_INET,
+                sin_port: port.to_be(),
+                sin_addr: IN_ADDR {
+                    S_un: IN_ADDR_0 {
+                        S_addr: u32::from(Ipv4Addr::LOCALHOST).to_be(),
+                    },
+                },
+                sin_zero: [0; 8],
+            };
+            // SAFETY: `a` is an IPv4 address of its size; a blocking
+            // connect on the socket, its error read right after it.
+            let r = unsafe {
+                connect(
+                    s,
+                    (&raw const a).cast::<SOCKADDR>(),
+                    i32::try_from(size_of::<SOCKADDR_IN>()).unwrap_or(0),
+                )
+            };
+            // SAFETY: the calling thread's last error, right after the call.
+            r == SOCKET_ERROR && unsafe { WSAGetLastError() } == WSAECONNREFUSED
+        })
+    };
+    if s != INVALID_SOCKET {
+        // SAFETY: `s` is open and closed once, here.
+        unsafe { closesocket(s) };
+    }
+    // SAFETY: this call's WSAStartup's count taken back.
+    unsafe { WSACleanup() };
+    answer.unwrap_or_else(std_way)
 }
 
 /// [`gone`] as a request waiting on the watch looks at it, often: by its

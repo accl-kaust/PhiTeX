@@ -89,9 +89,9 @@ test("Page colours: presets and Custom recolour the pages by a filter, Dark PDF 
   assert.equal(await pdfHash(), pdf0, "the PDF as typeset, not recoloured");
   // (a rebuild: nothing of it touched, no filter written again)
   await t.q(`(() => { globalThis.__themeMuts = 0; const n = () => globalThis.__themeMuts++; new MutationObserver(n).observe($("svg.phx-theme"), { subtree: true, attributes: true, childList: true }); new MutationObserver(n).observe($(".win"), { attributes: true, attributeFilter: ["class", "style"] }); return 1; })()`);
-  const n = (w.out.match(/^(ok|failed|✓|✗):?\s+\d+/gm) ?? []).length;
+  const n = (w.out.match(/^(ok|failed|no output|✓|✗|⚠):?\s+\d+/gm) ?? []).length;
   writeFileSync(join(dir, "main.tex"), text.replace("A line of text", "A changed line of text"));
-  for (const end = Date.now() + 120000; (w.out.match(/^(ok|failed|✓|✗):?\s+\d+/gm) ?? []).length <= n; await sleep(50)) if (Date.now() > end) throw new Error(`no rebuild: ${w.out}`);
+  for (const end = Date.now() + 120000; (w.out.match(/^(ok|failed|no output|✓|✗|⚠):?\s+\d+/gm) ?? []).length <= n; await sleep(50)) if (Date.now() > end) throw new Error(`no rebuild: ${w.out}`);
   await sleep(2500);
   assert.equal(await t.q(`globalThis.__themeMuts`), 0, "a rebuild writes nothing of the colours");
   // (narrow: Settings' Page colours whole at 700 px)

@@ -1076,6 +1076,14 @@ struct Here {
     out: Arc<Mutex<Option<session::WayOut>>>,
 }
 
+/// What a watch says it writes: nothing beside the document (the line
+/// it starts with; a folder watch's, once for all its documents).
+pub fn unwritten_banner(pdf: &str) -> String {
+    format!(
+        "files: nothing written here while watching, the pages are in the viewer (a PDF viewer on {pdf} won't update); --write or `phitex config watch-write on` writes the PDF and its .synctex.gz after each build; q asks whether to write it once"
+    )
+}
+
 fn help(ui: &Ui) {
     for (k, what) in keys::HELP {
         ui.line(&format!("  {}  {what}", ui.st.bold(&format!("{k:>9}"))));
@@ -1129,7 +1137,7 @@ impl Here {
             // but the files written left as every way out leaves them: a
             // write in flight finished, none begun after, the PDF file
             // the exact one of what it holds, not its update sections)
-            Key::Quit if busy => {
+            Key::Quit | Key::Interrupt if busy => {
                 ui.finish();
                 keys::restore();
                 ui.line(&ui.st.dim("stopped while working"));
@@ -1263,6 +1271,14 @@ struct Last {
     /// viewer's "first page"), no change's: a build that changed nothing
     /// keeps it, said as such, not as the time of a change.
     screen_first: bool,
+    /// How the first page's time was measured ([`first_page`]): its words.
+    screen_word: &'static str,
+    /// When the clean build began, on the watch's clock: the first page's
+    /// time is from it, as the build's own is.
+    began: Option<Instant>,
+    /// A viewer showed the pages as the clean build ended (one opened
+    /// later is timed by itself: from its tab's opening).
+    viewer_by_end: bool,
     /// Every change's time from its save to the screen, for the quit
     /// line.
     screens: Vec<Duration>,
@@ -1275,6 +1291,28 @@ struct Last {
     /// after every build, not only when asked.
     pin_summary: bool,
     pin_warnings: bool,
+}
+
+/// The clean build's first page on the screen: its time on the watch's
+/// clock, from the build's start as the build's own time is (none: the
+/// viewer's own, from its tab's opening), and its words. `since`: the time
+/// since the clean build began; `wall`: that build's time, if it ended;
+/// `viewer_by_end`: a tab showed the pages as it ended. A page shown before
+/// the build ended is its first page; after it, the time it reached the
+/// screen (never a "first page" longer than the whole build); a tab opened
+/// after the build is timed from its opening.
+fn first_page(
+    since: Option<Duration>,
+    wall: Option<Duration>,
+    viewer_by_end: bool,
+) -> (Option<Duration>, &'static str) {
+    match (since, wall) {
+        (Some(d), None) => (Some(d), "first page"),
+        (Some(d), Some(w)) if viewer_by_end => {
+            (Some(d), if d <= w { "first page" } else { "on screen at" })
+        }
+        _ => (None, "tab opened to page in"),
+    }
 }
 
 /// The status line's word for warnings left for when the editing pauses.
@@ -1719,10 +1757,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         ui.line(&format!("{}: {n}", st.yellow("note")));
     }
     if !writing && !ui.quiet && !on_stdio {
-        ui.line(&st.dim(&format!(
-            "files: nothing written here while watching, the pages are in the viewer (a PDF viewer on {}.pdf won't update); --write or `phitex config watch-write on` writes the PDF and its .synctex.gz after each build",
-            job.jobname
-        )));
+        if ui.relay {
+            // (a folder watch's document: its folder watch says it once,
+            // for all of them)
+            ui.event(&json!({"event": "unwritten"}));
+        } else {
+            for l in crate::ui::wrap(
+                &unwritten_banner(&format!("{}.pdf", job.jobname)),
+                keys::width().unwrap_or(100),
+            ) {
+                ui.line(&st.dim(&l));
+            }
+        }
     }
     // (a watch's readers guess past a long piece rather than wait on its
     // learned fields: an edit reruns it with the same values, and readers
@@ -1895,7 +1941,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         st.dim("viewer"),
                         st.cyan(v.url()),
                         st.dim(if on_stdio {
-                            "(phitex.openViewer opens it)"
+                            "(open it in a browser; the editor's phitex.openViewer opens it too)"
                         } else {
                             "(o opens it)"
                         })
@@ -2200,10 +2246,21 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             let yes = o.no_confirm
                 || {
                     asking.store(true, Ordering::Relaxed);
-                    // (how not to be asked again: said once, above the question)
-                    ui.line(&st.dim(
-                    "phitex config watch-write on: write after every build · phitex config watch-ask-write off: never ask, write nothing · -y: write, unasked",
-                ));
+                    // (the keys, then how not to be asked again: said above
+                    // the question, cut at words to the terminal's width)
+                    let cols = keys::width().unwrap_or(100);
+                    let hints = [
+                        format!(
+                            "w (or y): write {}.pdf here and quit · n, Enter: quit, nothing written · c: keep watching · Ctrl-C: quit",
+                            s.job.jobname
+                        ),
+                        "not asked again: phitex config watch-write on (write after every build) · phitex config watch-ask-write off (never write) · -y (write, unasked)".to_owned(),
+                    ];
+                    for h in &hints {
+                        for l in crate::ui::wrap(h, cols) {
+                            ui.line(&st.dim(&l));
+                        }
+                    }
                     // (the cursor after the question, where the key is typed; the
                     // key said after it and the line ended, so what follows, the
                     // files written or the shell's prompt, starts a line)
@@ -2213,12 +2270,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         ""
                     };
                     ui.ask(&format!(
-                        "write {}.pdf{synctex} here? [y/N, c: keep watching]",
+                        "write {}.pdf{synctex} here? [w/N, c: keep watching]",
                         s.job.jobname
                     ));
                     let answer = loop {
                         match rx.recv() {
-                            Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some('y'),
+                            Ok((_, Event::Key(Key::Other('y' | 'Y') | Key::Warnings))) => {
+                                break Some('y');
+                            }
                             // (c: the quit taken back, the watch goes on)
                             Ok((_, Event::Key(Key::Clear))) => break Some('c'),
                             Ok((_, Event::Key(_))) => break Some('n'),
@@ -2253,7 +2312,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         Err(e) => ui.error(&format!("{e}")),
                     }
                 }
-                match s.write(&r, true) {
+                match s.write(&r, r.pages() > 0) {
                     Ok(w) => {
                         for (p, _) in &w.files {
                             ui.line(&st.dim(&format!("wrote {}", p.display())));
@@ -2307,7 +2366,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             parts.push(b.clone());
             if let Some(d) = l.screen {
                 parts.push(if l.screen_first {
-                    format!("⚡ first page {}", ms(d))
+                    format!("⚡ {} {}", l.screen_word, ms(d))
                 } else {
                     format!("⚡ {} to the screen", ms(d))
                 });
@@ -2380,7 +2439,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 t.elapsed()
             );
         }
-        last.borrow_mut().builds = builds;
+        {
+            let mut l = last.borrow_mut();
+            l.builds = builds;
+            if builds == 1 {
+                l.began = Some(Instant::now());
+            }
+        }
         status.take();
         building.store(true, Ordering::Relaxed);
         told.store(false, Ordering::Relaxed);
@@ -2494,13 +2559,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // knows them as the watch's own)
         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
         // (every build writes the output pdfTeX would for its input, errors
-        // or not: the pages shipped; none when nothing was shipped)
+        // or not: the pages shipped; none when nothing was shipped, the
+        // last file kept, never pdfTeX's file of no bytes)
         // (an engine failure, `Report::internal`: nothing written, the
         // last good build's files kept)
         let written = match if r.internal.is_some() || !writing {
             Err(String::new())
         } else {
-            s.write(&r, true)
+            s.write(&r, r.pages() > 0)
         } {
             Ok(w) => {
                 let ours = &mut *mine;
@@ -2664,6 +2730,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             let main = (main_rel.clone(), s.source(&main_rel));
             let pdf = written.as_ref().map(|p| p.display().to_string());
             let why_built = why.to_owned();
+            let changed = r.out.pages_changed.clone();
             let _ = hub_tx.send(Box::new(move || {
                 let found: HashSet<String> = w
                     .paths
@@ -2701,6 +2768,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     diags,
                     pdf,
                     why: why_built,
+                    changed,
                 }
             }));
             status.set("");
@@ -2802,7 +2870,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         let cold = last.borrow().cold;
         match cold {
             None if !failed => {
-                last.borrow_mut().cold = Some(r.wall);
+                let mut l = last.borrow_mut();
+                l.cold = Some(r.wall);
+                l.viewer_by_end = l.viewers > 0;
+                drop(l);
                 crate::star::built(&main_file, ui, on_stdio);
             }
             Some(c) if !failed && !noop => {
@@ -2827,8 +2898,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if warnings == 1 { "" } else { "s" }
             )));
         }
+        // (no page: no output, never a ✓)
         let mark = if failed {
             st.red(st.sym("✗", "failed:"))
+        } else if r.pages() == 0 {
+            st.yellow(st.sym("⚠", "no output:"))
         } else {
             st.green(st.sym("✓", "ok:"))
         };
@@ -3475,6 +3549,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 Event::Key(k) => match k {
                     Key::Quit => quit(ui, &mut s, Some(&mut rx)),
+                    // (Ctrl-C: out at once, nothing asked, nothing written)
+                    Key::Interrupt => quit(ui, &mut s, None),
                     // (taken by the key reader itself: `keys::suspend`)
                     Key::Suspend => {}
                     Key::Rebuild => {
@@ -3901,9 +3977,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         match applied {
                             Applied::Painted(us) => {
                                 let mut l = last.borrow_mut();
-                                let d = Duration::from_micros(us);
-                                l.screen = Some(d);
+                                let mut d = Duration::from_micros(us);
                                 l.screen_first = l.builds <= 1;
+                                if l.screen_first {
+                                    let (on_clock, word) = first_page(
+                                        l.began.map(|b| b.elapsed()),
+                                        l.cold,
+                                        l.viewer_by_end,
+                                    );
+                                    d = on_clock.unwrap_or(d);
+                                    l.screen_word = word;
+                                }
+                                l.screen = Some(d);
                                 l.screens.push(d);
                                 ui.event(&json!({
                                     "event": "screen",
@@ -4297,6 +4382,49 @@ fn build_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first page's time and the build's are on one clock: a page shown
+    /// after a 2.80 s build is "on screen at 2.84 s", never a "first page"
+    /// longer than the build; a tab opened later is timed by itself.
+    #[test]
+    fn first_page_on_the_builds_clock() {
+        let ms = Duration::from_millis;
+        assert_eq!(
+            first_page(Some(ms(900)), None, false),
+            (Some(ms(900)), "first page")
+        );
+        assert_eq!(
+            first_page(Some(ms(1200)), Some(ms(2800)), true),
+            (Some(ms(1200)), "first page")
+        );
+        assert_eq!(
+            first_page(Some(ms(2840)), Some(ms(2800)), true),
+            (Some(ms(2840)), "on screen at")
+        );
+        assert_eq!(
+            first_page(Some(ms(60_000)), Some(ms(2800)), false),
+            (None, "tab opened to page in")
+        );
+    }
+
+    /// The quit question's hints are cut at words, never inside one
+    /// ("-y\n: write"), each line within the terminal's width.
+    #[test]
+    fn hints_wrap_at_words() {
+        let h = "not asked again: phitex config watch-write on (write after every build) · phitex config watch-ask-write off (never write) · -y (write, unasked)";
+        for cols in [40, 80, 120] {
+            let lines = crate::ui::wrap(h, cols);
+            assert!(
+                lines.iter().all(|l| crate::ui::width(l) <= cols),
+                "{cols}: {lines:?}"
+            );
+            assert_eq!(
+                lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" "),
+                h,
+                "{cols}"
+            );
+        }
+    }
 
     /// A file's canonical name is the same while it is removed (a save's
     /// moment between the old file and the new): through a folder's

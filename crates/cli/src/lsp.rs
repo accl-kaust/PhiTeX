@@ -140,6 +140,10 @@ struct Watch {
     main: Mutex<Option<String>>,
     /// The last diagnostics, for a client that attaches later.
     diags: Mutex<Vec<Value>>,
+    /// The last build's pages' hashes, TeX's history and its time, for a
+    /// client that attaches later: its status the watch's as it is
+    /// ("ready", "failed"), not "starting" until the next build.
+    last: Mutex<Option<(Vec<u64>, i32, f64)>>,
     /// The next attached client's id.
     next: AtomicU64,
 }
@@ -236,6 +240,7 @@ impl Watch {
             writers: Mutex::default(),
             main: Mutex::new(None),
             diags: Mutex::default(),
+            last: Mutex::new(None),
             next: AtomicU64::new(1),
         })
     }
@@ -467,7 +472,7 @@ fn tex_files(dir: &Path) -> Vec<PathBuf> {
 /// `\documentclass` in `file`'s folder or one of the three above it (a
 /// project's folder holds no `phitex.toml` or `.git` above it), its names
 /// read from its own folder or the main file's. None: no file inputs it.
-fn includer(file: &Path) -> Option<PathBuf> {
+pub(crate) fn includer(file: &Path) -> Option<PathBuf> {
     let file = file.canonicalize().ok()?;
     let mut dirs = Vec::new();
     for d in file.ancestors().skip(1).take(4) {
@@ -913,6 +918,7 @@ impl Lsp {
         if let Some(d) = &b.diagnostics {
             d.clone_into(&mut lock(&self.watch.diags));
         }
+        *lock(&self.watch.last) = Some((b.hashes.clone(), b.history, b.ms));
         for (_, s) in self.watch.servers() {
             s.built(b);
         }
@@ -1085,7 +1091,22 @@ fn attached(watch: &Arc<Watch>, first: &Value, mut input: impl BufRead, out: std
         server.viewer(&url);
     }
     let diags = lock(&watch.diags).clone();
-    server.diagnostics(&diags);
+    // (the last build's state and problems, as an editor there all along
+    // has them: its status line right at once)
+    match lock(&watch.last).clone() {
+        Some((hashes, history, ms)) => server.built(&Built {
+            pdf: None,
+            hashes,
+            history,
+            ms,
+            diagnostics: Some(diags),
+            since_ms: None,
+            origins: None,
+            changed: None,
+            parts: serde_json::Map::new(),
+        }),
+        None => server.diagnostics(&diags),
+    }
     lock(&watch.servers).push((id, server.clone()));
     while let Some(m) = read(&mut input) {
         if !server.handle(&m) {

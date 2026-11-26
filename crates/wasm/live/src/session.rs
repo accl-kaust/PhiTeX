@@ -244,11 +244,13 @@ pub(crate) fn set_index(tsv: &[u8], release: &[u8], table: &[u8], bundled: &str)
     0
 }
 
-/// Opens a document: JSON `{main, text, engine?, threads?, ini?, shell?}`
-/// (`text`: the main file's text, as an editor holds it; `engine`: the
-/// program, pdflatex by default, latex, xelatex, pdftex, tex...; `ini`:
-/// the text is the whole job, no format; `shell`: the host runs
-/// `\write18`'s allowed commands, else they are refused). The project's
+/// Opens a document: JSON `{main, text, engine?, threads?, ini?, shell?,
+/// date?}` (`text`: the main file's text, as an editor holds it;
+/// `engine`: the program, pdflatex by default, latex, xelatex, pdftex,
+/// tex...; `ini`: the text is the whole job, no format; `shell`: the host
+/// runs `\write18`'s allowed commands, else they are refused; `date`: the
+/// job's local date and time as seconds whose UTC fields they are, 0 for
+/// TeX Live's `SOURCE_DATE_EPOCH=0`, else now in UTC). The project's
 /// other files are given before (`ph_provide`). Answered at once (0; 1:
 /// not JSON; 2: no session thread; 3: an engine not known, why in the
 /// answer's bytes); the session thread builds and tells its events. A
@@ -305,7 +307,18 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         shell: shell.then(|| Arc::clone(shell_hook()) as Arc<dyn phitex_tex::ShellHook>),
     });
     let sink = Arc::new(live::Memory::default());
-    let mut job = job(&main, engine, ini, threads);
+    // (the job's date, `\today`'s and the PDF's: the host's `date`, in
+    // seconds whose UTC fields are its local date and time (a browser's
+    // `Date`: TeX Live's clock is the local time), or 0 for fixed bytes;
+    // else now, in UTC. Taken once, at the open: every build of the
+    // session has the same, as a watch's. It was 0 always, and every
+    // title page said "January 1, 1970", the Diff's too)
+    let date = req["date"].as_i64().unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0))
+    });
+    let mut job = job(&main, engine, ini, threads, date);
     if let Some(on) = rc.synctex {
         job.synctex = on;
     }
@@ -514,7 +527,13 @@ fn latexmk(req: &Value) -> Latexmk {
 }
 
 /// The job a document is opened with: the watch's, its outputs in memory.
-fn job(main: &str, engine: phitex_live::tex::Engine, ini: bool, threads: Option<usize>) -> Job {
+fn job(
+    main: &str,
+    engine: phitex_live::tex::Engine,
+    ini: bool,
+    threads: Option<usize>,
+    date: i64,
+) -> Job {
     Job {
         engine,
         ini,
@@ -532,8 +551,7 @@ fn job(main: &str, engine: phitex_live::tex::Engine, ini: bool, threads: Option<
         origins: true,
         recorder: false,
         shell_escape: false,
-        // (as SOURCE_DATE_EPOCH=0: the same bytes every build)
-        pdf_date: 0,
+        pdf_date: date,
         // (the files read back, .aux and .toc, to their fixpoint, as the
         // watch runs them)
         fixpoint: true,

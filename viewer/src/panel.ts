@@ -610,9 +610,13 @@ export class Panel {
   private last: PageImage | null = null;
   /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
   private drewOnce = false;
-  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  /**
+   * The step an opening says first: the one now, else loading the engine, or, once it ran here, typesetting.
+   * (Packages fetched say their own step as they come, `packages`: a rebuild's opening said "Fetching packages"
+   * before any was asked for, in a watch with TeX Live's files too, which fetches none.)
+   */
   private firstStep(): string {
-    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+    return this.stepNow || this.words.steps[this.drewOnce ? 2 : 0];
   }
   private url: string | null = null;
   private lastStatus: Status | null = null;
@@ -979,7 +983,7 @@ export class Panel {
     // window's when the contents' column comes or goes (opened, its first outline) and when
     // the tips' room is made or given back; fitted with the window's only, the sheet stayed
     // where the pages were, under the column or past the stage's edge)
-    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks(), this.fitSheet(), this.bylinePlace())).observe(stage);
+    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks(), this.fitSheet(), this.fitPages(), this.bylinePlace())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : undefined;
@@ -2525,8 +2529,8 @@ export class Panel {
     body.append(g);
     const MIN = 160;
     const max = () => Math.max(MIN, Math.floor(this.win.clientWidth / 2));
-    let fit = 0;
-    const refit = () => this.prefs.zoom === "fit" && !fit && (fit = requestAnimationFrame(() => ((fit = 0), this.redraw())));
+    // (the pages laid out again by the stage's observer (fitPages), once a frame; during a drag, not at all)
+    const refit = () => this.fitPages();
     const set = (w: number | null, keep = true) => {
       if (w === null) col.style.removeProperty("width");
       else col.style.width = `${Math.round(Math.min(max(), Math.max(MIN, w)))}px`;
@@ -2570,12 +2574,30 @@ export class Panel {
       g.classList.add("drag");
       this.win.classList.add("resizing");
       const x0 = e.clientX, w0 = col.offsetWidth;
-      g.onpointermove = (m) => set(w0 + m.clientX - x0, false);
+      // (while it moves: the column's width and the pages scaled as a picture, by CSS, once a frame; laid out
+      // and drawn again once, at its end (a 113-page deck laid out and drawn again at every move crawled))
+      const st = this.$("#stage"), view = this.$("#viewer");
+      this.colDrag = { w0: st.clientWidth };
+      let want = w0, frame = 0;
+      const apply = () => {
+        frame = 0;
+        set(want, false);
+        if (this.prefs.zoom !== "fit" || !this.colDrag) return;
+        const k = Math.max(0.05, (st.clientWidth - 40) / Math.max(1, this.colDrag.w0 - 40));
+        view.style.transformOrigin = `50% ${st.scrollTop}px`;
+        view.style.transform = `scale(${k.toFixed(4)})`;
+      };
+      g.onpointermove = (m) => ((want = w0 + m.clientX - x0), frame || (frame = requestAnimationFrame(apply)));
       g.onpointerup = g.onpointercancel = () => {
         g.onpointermove = g.onpointerup = g.onpointercancel = null;
+        cancelAnimationFrame(frame);
         g.classList.remove("drag");
         this.win.classList.remove("resizing");
-        set(col.offsetWidth);
+        set(want);
+        view.style.transform = view.style.transformOrigin = "";
+        this.colDrag = null;
+        this.stageSize = null;
+        this.redraw();
       };
     };
     g.ondblclick = () => set(null);
@@ -4464,9 +4486,30 @@ export class Panel {
   }
 
   private redraw(): void {
+    this.laidScale = this.scale();
     this.viewer?.redraw();
     // (the pages' heights changed with the zoom: the marks along the scroll with them)
     if (this.viewer) requestAnimationFrame(() => this.drawScrollMarks());
+  }
+
+  /** The zoom every page box was last laid out at (redraw). */
+  private laidScale = 0;
+  /** A column's handle being dragged: the stage's width when it began (the pages shown scaled till it ends). */
+  private colDrag: { w0: number } | null = null;
+  private fitFrame = 0;
+  /**
+   * The stage changed size (a column opened, closed or resized, the window): every page box laid
+   * out again at the one zoom it now gives, once a frame, when that zoom moved. A redraw made at
+   * once, before the stage's new size was read (a column closed), laid every box out at the old
+   * width; pages drawn after it took the new one: page 13 narrower and indented over page 14.
+   * Never during a column's drag: that is one redraw at its end.
+   */
+  private fitPages(): void {
+    if (this.colDrag || this.fitFrame) return;
+    this.fitFrame = requestAnimationFrame(() => {
+      this.fitFrame = 0;
+      if (!this.colDrag && this.viewer?.pages && Math.abs(this.scale() - this.laidScale) > 1e-4) this.redraw();
+    });
   }
 
   /** The page box, for the page in view. */

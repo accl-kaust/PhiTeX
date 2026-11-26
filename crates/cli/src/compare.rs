@@ -484,7 +484,7 @@ impl Compare {
         self.session.flush_records();
         let ok = r.out.errors.is_empty();
         if self.write
-            && let Ok(w) = self.session.write(&r, ok)
+            && let Ok(w) = self.session.write(&r, ok && r.pages() > 0)
         {
             self.wrote = w.files;
         }

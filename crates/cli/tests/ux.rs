@@ -447,6 +447,92 @@ fn watch_outlives_the_end_of_its_input() {
     wait(&mut child, 60);
 }
 
+/// A build that ships no page has no output: never a ✓ ("finished:"),
+/// and never a PDF file of no bytes over the last one (pdfTeX leaves one
+/// where a read-time write opened it, `\immediate\pdfobj`, hyperref's
+/// open action; the terminal tester's `phitex build` and `watch` said
+/// "✓ 0 pages" and left `main.pdf` empty); one with an error says
+/// "failed:" and exits 1, the last PDF file kept as well. A watch keeps
+/// it the same way.
+#[test]
+fn no_page_is_no_output_and_keeps_the_last_pdf() {
+    let dir = scratch("no-page");
+    let good = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\shipout\\hbox{}\\end\n";
+    let empty = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\immediate\\pdfobj{1}\\end\n";
+    let runaway = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \\pdfoutput=1\n\\long\\def\\a#1{}\\a{one\ntwo\n";
+    let pdf = dir.join("doc.pdf");
+    let read = || std::fs::read(&pdf).unwrap_or_default();
+    std::fs::write(dir.join("doc.tex"), good).expect("the document");
+    let out = run(&dir, &["build", "--ini", "--etex", "doc.tex"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let before = read();
+    assert!(before.starts_with(b"%PDF"), "a page, a PDF file");
+    std::fs::write(dir.join("doc.tex"), empty).expect("no page");
+    let out = run(&dir, &["build", "--ini", "--etex", "doc.tex"]);
+    let err = text(&out.stderr);
+    assert!(out.status.success(), "no error, pdfTeX's status: {err}");
+    assert!(
+        err.contains("no output:") && !err.contains("finished:"),
+        "no page, no ✓: {err}"
+    );
+    assert_eq!(read(), before, "the last PDF file kept: {err}");
+    std::fs::write(dir.join("doc.tex"), runaway).expect("an open brace");
+    let out = run(&dir, &["build", "--ini", "--etex", "doc.tex"]);
+    let err = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("failed:") && err.contains("File ended while scanning use of \\a"),
+        "{err}"
+    );
+    assert_eq!(read(), before, "the last PDF file kept: {err}");
+    // (a watch: the same, each build's file kept or written)
+    std::fs::write(dir.join("doc.tex"), good).expect("the document");
+    let _ = std::fs::remove_file(&pdf);
+    let mut child = phitex(&dir)
+        .args(["watch", "--json", "--no-view", "--ini", "--etex", "doc.tex"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("phitex watch runs");
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    let so = child.stdout.take().expect("its output");
+    std::thread::spawn(move || {
+        for l in BufReader::new(so).lines().map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str(&l) {
+                let _ = tx.send(v);
+            }
+        }
+    });
+    let build = |n: u64| {
+        let end = Instant::now() + Duration::from_secs(300);
+        loop {
+            let v = rx
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|e| panic!("no build {n}: {e}"));
+            if v["event"] == "build" && v["build"] == n {
+                return v;
+            }
+        }
+    };
+    let b = build(1);
+    let first = read();
+    assert!(first.starts_with(b"%PDF"), "{b}");
+    std::fs::write(dir.join("doc.tex"), empty).expect("no page");
+    let b = build(2);
+    assert_eq!(b["pages"], 0, "{b}");
+    assert_eq!(read(), first, "the watch kept the last PDF file: {b}");
+    std::fs::write(dir.join("doc.tex"), runaway).expect("an open brace");
+    let b = build(3);
+    assert_eq!(b["ok"], false, "{b}");
+    assert_eq!(read(), first, "the watch kept the last PDF file: {b}");
+    Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill");
+    wait(&mut child, 60);
+}
+
 /// `phitex config` is a command's answer: its listing on standard
 /// output, nothing on standard error; `--json` one JSON object, the
 /// value that holds and where it comes from; `news --json` one JSON line.
@@ -860,8 +946,9 @@ fn compat_terminal_is_pdflatexs() {
     }
 }
 
-/// `phitex` and `phitex --help` open with the loop an agent edits in
-/// (three agents that knew only `phitex` never found `session`), the
+/// `phitex` and `phitex --help` lead with what `PhiTeX` is, for a person;
+/// the loop an agent edits in is a section at their end (three agents
+/// that knew only `phitex` never found `session`: it stays there), the
 /// command list says what `session` gives, and `build --help` points to it
 /// for builds again and again.
 #[test]
@@ -870,11 +957,13 @@ fn help_shows_the_agents_loop() {
     for args in [&[][..], &["--help"][..]] {
         let out = run(&dir, args);
         let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
-        let top: Vec<&str> = all.lines().take(4).collect();
+        let first = all.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        assert!(first.starts_with("PhiTeX: "), "{args:?}: {all}");
+        let agents = all
+            .find("For agents: phitex session start main.tex; edit; phitex session wait;")
+            .unwrap_or_else(|| panic!("{args:?}: {all}"));
         assert!(
-            top.iter().any(|l| l.starts_with(
-                "For agents: phitex session start main.tex; edit; phitex session wait;"
-            )),
+            all.find("Commands:").is_some_and(|c| c < agents),
             "{args:?}: {all}"
         );
         assert!(

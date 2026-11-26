@@ -131,6 +131,33 @@ pub fn width(s: &str) -> usize {
     plain(s).chars().count()
 }
 
+/// Plain text `s` cut into lines of at most `cols` columns at its spaces,
+/// never inside a word (a word longer than a line has one to itself); the
+/// lines after the first indented by two. A terminal that wrapped it
+/// itself would cut "-y" from ": write" at its edge.
+pub fn wrap(s: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(20);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for w in s.split(' ').filter(|w| !w.is_empty()) {
+        let indent = if out.is_empty() { 0 } else { 2 };
+        let room = cols.saturating_sub(indent);
+        if !line.is_empty() && width(&line) + 1 + width(w) > room {
+            out.push(format!("{}{line}", " ".repeat(indent)));
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(w);
+    }
+    if !line.is_empty() {
+        let indent = if out.is_empty() { 0 } else { 2 };
+        out.push(format!("{}{line}", " ".repeat(indent)));
+    }
+    out
+}
+
 /// `s` padded with spaces to `w` columns (on the left with `right`).
 pub fn pad(s: &str, w: usize, right: bool) -> String {
     let fill = " ".repeat(w.saturating_sub(width(s)));
@@ -169,7 +196,24 @@ struct Tap {
 /// not the terminal's (an `eprintln!`), its keys lines on standard input.
 pub const RELAY: &str = "PHITEX_WATCH_RELAY";
 
+/// A folder watch's session: "1" when the folder watch draws in colour
+/// (the build's tree it relays is coloured as the terminal's).
+pub const RELAY_COLOR: &str = "PHITEX_WATCH_RELAY_COLOR";
+
+/// A folder watch's session: the columns its build's tree is drawn in.
+pub const RELAY_WIDTH: &str = "PHITEX_WATCH_RELAY_WIDTH";
+
 impl Tap {
+    /// `v` to the folder watch alone (a session's build tree, drawn
+    /// there), never the viewer's console.
+    fn relay_only(&mut self, v: Value) {
+        if self.relay {
+            let mut o = std::io::stdout().lock();
+            let _ = writeln!(o, "{v}");
+            let _ = o.flush();
+        }
+    }
+
     fn tell(&mut self, v: Value) {
         if self.relay {
             let mut o = std::io::stdout().lock();
@@ -247,7 +291,35 @@ impl Bottom {
 
 /// The watch's status line at width `w`: its mark, its text, and the
 /// keys at the right end when there is room.
+/// The first character of a bottom line drawn as it is, indented under
+/// the line above, with no mark of its own ([`Ui::statuses`]: a folder
+/// watch's document's build lines).
+pub const NESTED: char = '\u{1}';
+
+/// [`idle_line`] without colours, for a test elsewhere.
+#[cfg(test)]
+pub fn idle_line_for_test(t: &str, w: usize) -> String {
+    idle_line(
+        Style {
+            color: false,
+            tty: false,
+        },
+        t,
+        None,
+        "",
+        w,
+    )
+}
+
 fn idle_line(st: Style, t: &str, ok: Option<bool>, keys: &str, w: usize) -> String {
+    if let Some(raw) = t.strip_prefix(NESTED) {
+        // (its colours kept when it fits; cut as plain text when not)
+        return if width(raw) + 4 <= w {
+            format!("    {raw}")
+        } else {
+            format!("    {}", clip(&plain(raw), w.saturating_sub(4)))
+        };
+    }
     let mark = match ok {
         Some(true) => st.green("●"),
         Some(false) => st.red("●"),
@@ -1021,6 +1093,14 @@ impl Ui {
         let stop = Arc::new(AtomicBool::new(false));
         // (the line drawn on a terminal; told to the viewer every second)
         let draw = self.st.tty && !self.json;
+        // (a folder watch's session: the same lines, the build's tree,
+        // relayed for the folder watch to draw under the document, in the
+        // colours it asks for, `RELAY_COLOR`)
+        let relay = lock(&self.tap).relay;
+        let relay_st = Style {
+            color: std::env::var_os(RELAY_COLOR).is_some_and(|v| v == "1"),
+            tty: false,
+        };
         let (bottom, tap, stopping) = (self.bottom.clone(), self.tap.clone(), stop.clone());
         let st = self.st;
         let t0 = Instant::now();
@@ -1041,8 +1121,9 @@ impl Ui {
                     lock(&pages).observe(p.evaluation(), p.page(), live.pages_before, t0.elapsed());
                 }
                 let text = status_line(&what, &status, t0.elapsed(), load.now);
-                if draw {
-                    let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
+                // (the spinner and the build's tree: one renderer, the
+                // terminal's and a folder watch's alike)
+                let draw_lines = |st: Style, w: usize| {
                     let tick = TICKS[k % TICKS.len()];
                     let elapsed = t0.elapsed();
                     let mut lines = vec![format!(
@@ -1064,9 +1145,22 @@ impl Ui {
                         );
                         lines.extend(tree(st, &status, tick, load.now, w, &lock(&pages)));
                     }
+                    lines
+                };
+                if draw {
+                    let w = crate::keys::width().unwrap_or(80).saturating_sub(1);
+                    let lines = draw_lines(st, w);
                     let mut b = lock(&bottom);
                     b.spin = lines;
                     redraw(&mut std::io::stderr().lock(), &mut b);
+                }
+                if relay && k.is_multiple_of(3) {
+                    let w: usize = std::env::var(RELAY_WIDTH)
+                        .ok()
+                        .and_then(|w| w.parse().ok())
+                        .unwrap_or(100);
+                    lock(&tap)
+                        .relay_only(json!({"kind": "tree", "lines": draw_lines(relay_st, w)}));
                 }
                 if k % 12 == 11 {
                     lock(&tap).tell(json!({"kind": "busy", "text": text}));
@@ -1120,7 +1214,8 @@ impl Ui {
         if o.warnings > 0 {
             facts.push(st.yellow(&plural(o.warnings, "warning", "warnings")));
         }
-        if o.diagnostics > 0 {
+        // (the engine's own checks: ours to read, -v)
+        if o.diagnostics > 0 && self.verbose > 0 {
             facts.push(st.dim(&plural(o.diagnostics, "diagnostic", "diagnostics")));
         }
         let mut how = Vec::new();
@@ -1137,8 +1232,11 @@ impl Ui {
             Some(p) => st.bold(&p.display().to_string()),
             None => st.bold(o.file),
         };
+        // (no page: no output, never a ✓, whatever the errors)
         let mark = if o.errors > 0 {
             st.red(st.sym("✗", "failed:"))
+        } else if o.pages == 0 {
+            st.yellow(st.sym("⚠", "no output:"))
         } else {
             st.green(st.sym("✓", "finished:"))
         };
@@ -1184,7 +1282,11 @@ impl Spin {
                 redraw(&mut std::io::stderr().lock(), &mut b);
             }
         }
-        lock(&self.tap).tell(json!({"kind": "busy", "text": ""}));
+        let mut t = lock(&self.tap);
+        if t.relay {
+            t.relay_only(json!({"kind": "tree", "lines": []}));
+        }
+        t.tell(json!({"kind": "busy", "text": ""}));
     }
 }
 

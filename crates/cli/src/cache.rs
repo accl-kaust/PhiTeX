@@ -101,6 +101,35 @@ struct Entry {
     used: SystemTime,
 }
 
+/// The file in a document's cache folder that keeps its viewer's token
+/// (`view::doc_token`): kept when the cache is cleared, so the viewer's
+/// address stays the same.
+pub const VIEWER_TOKEN: &str = "viewer-token";
+
+/// Folder `d` removed with all it holds but the [`VIEWER_TOKEN`] files
+/// (and the folders that lead to them).
+fn remove_but_tokens(d: &Path) -> io::Result<()> {
+    let mut kept = false;
+    for e in std::fs::read_dir(d)? {
+        let e = e?;
+        let p = e.path();
+        let t = e.file_type()?;
+        if t.is_dir() {
+            remove_but_tokens(&p)?;
+            // (a folder left holds a token)
+            kept |= p.exists();
+        } else if e.file_name() == VIEWER_TOKEN {
+            kept = true;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    if !kept {
+        std::fs::remove_dir(d)?;
+    }
+    Ok(())
+}
+
 impl Cache {
     /// The cache at [`tex::cache_dir`], its limit `PHITEX_CACHE_LIMIT`,
     /// else `configured`, else [`DEFAULT_LIMIT`].
@@ -346,14 +375,16 @@ impl Cache {
         freed
     }
 
-    /// Removes directory `d` of the cache; the bytes it held.
+    /// Removes directory `d` of the cache, but for the documents' viewer
+    /// tokens ([`VIEWER_TOKEN`]: a tab left open on a document's address
+    /// keeps working after `phitex clean`); the bytes it held.
     fn remove(&self, d: &Path) -> io::Result<u64> {
         let held = Cache {
             dir: d.to_path_buf(),
             limit: self.limit,
         }
         .usage();
-        match std::fs::remove_dir_all(d) {
+        match remove_but_tokens(d) {
             Ok(()) => Ok(held),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
             Err(e) => Err(e),
@@ -544,6 +575,33 @@ mod tests {
         assert_eq!(c.usage(), 20);
         assert_eq!(c.clear_all().unwrap(), 20);
         assert_eq!(c.usage(), 0);
+    }
+
+    /// `phitex clean` (and `--all`) keep a document's viewer token: the
+    /// viewer's address, and the tabs open on it, outlive the clean.
+    #[test]
+    fn clean_keeps_the_viewer_token() {
+        let c = Cache {
+            dir: scratch("token"),
+            limit: 1 << 20,
+        };
+        let doc = c.doc_dir(Path::new("/x/paper.tex"));
+        std::fs::create_dir_all(doc.join("graph")).unwrap();
+        std::fs::write(doc.join(VIEWER_TOKEN), "0123456789abcdef0123456789abcdef").unwrap();
+        std::fs::write(doc.join("state"), [1; 4]).unwrap();
+        std::fs::write(doc.join("graph").join("g"), [1; 4]).unwrap();
+        c.clear_doc(Path::new("/x/paper.tex")).unwrap();
+        assert!(
+            doc.join(VIEWER_TOKEN).is_file(),
+            "the token went with the clean"
+        );
+        assert!(!doc.join("state").exists() && !doc.join("graph").exists());
+        c.clear_all().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(doc.join(VIEWER_TOKEN)).unwrap(),
+            "0123456789abcdef0123456789abcdef"
+        );
+        let _ = std::fs::remove_dir_all(&c.dir);
     }
 
     #[test]

@@ -10465,9 +10465,13 @@ var Panel = class {
   last = null;
   /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
   drewOnce = false;
-  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  /**
+   * The step an opening says first: the one now, else loading the engine, or, once it ran here, typesetting.
+   * (Packages fetched say their own step as they come, `packages`: a rebuild's opening said "Fetching packages"
+   * before any was asked for, in a watch with TeX Live's files too, which fetches none.)
+   */
   firstStep() {
-    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+    return this.stepNow || this.words.steps[this.drewOnce ? 2 : 0];
   }
   url = null;
   lastStatus = null;
@@ -10771,7 +10775,7 @@ var Panel = class {
     this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
-    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet())).observe(stage);
+    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet(), this.fitPages())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
@@ -11985,8 +11989,7 @@ var Panel = class {
     body.append(g);
     const MIN = 160;
     const max = () => Math.max(MIN, Math.floor(this.win.clientWidth / 2));
-    let fit = 0;
-    const refit = () => this.prefs.zoom === "fit" && !fit && (fit = requestAnimationFrame(() => (fit = 0, this.redraw())));
+    const refit = () => this.fitPages();
     const set = (w, keep = true) => {
       if (w === null) col.style.removeProperty("width");
       else col.style.width = `${Math.round(Math.min(max(), Math.max(MIN, w)))}px`;
@@ -12026,12 +12029,28 @@ var Panel = class {
       g.classList.add("drag");
       this.win.classList.add("resizing");
       const x0 = e.clientX, w0 = col.offsetWidth;
-      g.onpointermove = (m) => set(w0 + m.clientX - x0, false);
+      const st = this.$("#stage"), view = this.$("#viewer");
+      this.colDrag = { w0: st.clientWidth };
+      let want = w0, frame = 0;
+      const apply2 = () => {
+        frame = 0;
+        set(want, false);
+        if (this.prefs.zoom !== "fit" || !this.colDrag) return;
+        const k = Math.max(0.05, (st.clientWidth - 40) / Math.max(1, this.colDrag.w0 - 40));
+        view.style.transformOrigin = `50% ${st.scrollTop}px`;
+        view.style.transform = `scale(${k.toFixed(4)})`;
+      };
+      g.onpointermove = (m) => (want = w0 + m.clientX - x0, frame || (frame = requestAnimationFrame(apply2)));
       g.onpointerup = g.onpointercancel = () => {
         g.onpointermove = g.onpointerup = g.onpointercancel = null;
+        cancelAnimationFrame(frame);
         g.classList.remove("drag");
         this.win.classList.remove("resizing");
-        set(col.offsetWidth);
+        set(want);
+        view.style.transform = view.style.transformOrigin = "";
+        this.colDrag = null;
+        this.stageSize = null;
+        this.redraw();
       };
     };
     g.ondblclick = () => set(null);
@@ -13662,8 +13681,28 @@ var Panel = class {
     pre.textContent = text ?? "No log yet: the first build hasn't finished.";
   }
   redraw() {
+    this.laidScale = this.scale();
     this.viewer?.redraw();
     if (this.viewer) requestAnimationFrame(() => this.drawScrollMarks());
+  }
+  /** The zoom every page box was last laid out at (redraw). */
+  laidScale = 0;
+  /** A column's handle being dragged: the stage's width when it began (the pages shown scaled till it ends). */
+  colDrag = null;
+  fitFrame = 0;
+  /**
+   * The stage changed size (a column opened, closed or resized, the window): every page box laid
+   * out again at the one zoom it now gives, once a frame, when that zoom moved. A redraw made at
+   * once, before the stage's new size was read (a column closed), laid every box out at the old
+   * width; pages drawn after it took the new one: page 13 narrower and indented over page 14.
+   * Never during a column's drag: that is one redraw at its end.
+   */
+  fitPages() {
+    if (this.colDrag || this.fitFrame) return;
+    this.fitFrame = requestAnimationFrame(() => {
+      this.fitFrame = 0;
+      if (!this.colDrag && this.viewer?.pages && Math.abs(this.scale() - this.laidScale) > 1e-4) this.redraw();
+    });
   }
   /** The page box, for the page in view. */
   nav() {
@@ -17243,13 +17282,29 @@ addEventListener("keydown", (e) => {
   if (folderQuick) return folderQuick.toggle();
   void printPdf();
 }, { capture: true });
+{
+  const PRINT_ICON = "M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z";
+  const root = document.querySelector("phitex-preview")?.shadowRoot;
+  const pdf = root?.querySelector("#x-pdf");
+  if (root && pdf && !root.querySelector("#x-print")) {
+    const b = pdf.cloneNode(true);
+    b.id = "x-print";
+    b.querySelector("path")?.setAttribute("d", PRINT_ICON);
+    for (const sp of b.querySelectorAll("span")) if (sp.textContent === "Download PDF") sp.textContent = "Print PDF";
+    b.onclick = () => {
+      root.querySelector("#b-more")?.click();
+      void printPdf();
+    };
+    pdf.after(b);
+  }
+}
 var folderQuick;
 var folderDoc;
 {
   const m = /\/d\/([0-9a-f]{12})\/$/.exec(location.pathname);
   if (m) folderMode(m[1]);
   panel.addKeys([
-    ...m ? [["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (again: print the PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] : [["Ctrl+P", "print the PDF"]],
+    ...m ? [["b", "the Files column: switch documents"], ["Ctrl+P", "find a document by name (print: the \u2026 menu's Print PDF)"], ["x (terminal)", "stop the highlighted document (or Stop in the folder's Running list)"]] : [["Ctrl+P", "print the PDF"]],
     ["`", "the terminal"]
   ]);
 }
@@ -17309,8 +17364,7 @@ function folderMode(id) {
   button.onclick = () => show(!on);
   close.onclick = () => show(false);
   const root = col.getRootNode();
-  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host2, link, "Ctrl+P again: print the PDF");
-  folderQuick.onAgain = () => void printPdf();
+  folderQuick = new QuickOpen(root.querySelector(".win") ?? root, host2, link, "print: the \u2026 menu");
   let files;
   link.onHello = (h) => {
     if (!h.doc) return;

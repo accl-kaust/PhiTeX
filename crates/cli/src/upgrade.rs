@@ -279,8 +279,28 @@ fn nightly() -> Result<Release, String> {
     })
 }
 
-/// What `phitex upgrade` follows: the user's `update-channel`, else what
-/// install.sh recorded (`PHITEX_CHANNEL=nightly`), else `stable`.
+/// The channel this phitex came from: what install.sh recorded
+/// (`PHITEX_CHANNEL=nightly`), else its own version (a nightly's is
+/// `1.0.5-nightly.…`), else `stable`. `update-channel`'s default.
+pub(crate) fn installed_channel() -> &'static str {
+    installed_channel_of(
+        install_record().and_then(|r| r["channel"].as_str().map(str::to_owned)),
+        crate::version(),
+    )
+}
+
+/// [`installed_channel`] of what install.sh recorded and the version.
+fn installed_channel_of(recorded: Option<String>, version: &str) -> &'static str {
+    match recorded.as_deref() {
+        Some("nightly") => "nightly",
+        Some("stable") => "stable",
+        _ if version.contains("-nightly") => "nightly",
+        _ => "stable",
+    }
+}
+
+/// What `phitex upgrade` follows: the user's `update-channel`, else the
+/// channel this phitex came from ([`installed_channel`]).
 fn channel() -> Result<&'static str, String> {
     let set = crate::config::user().ok().and_then(|c| c.update_channel);
     match set.as_deref() {
@@ -289,8 +309,7 @@ fn channel() -> Result<&'static str, String> {
         Some(other) => Err(format!(
             "update-channel is '{other}': it is \"stable\" or \"nightly\" (phitex config update-channel stable)"
         )),
-        None if install_record().is_some_and(|r| r["channel"] == "nightly") => Ok("nightly"),
-        None => Ok("stable"),
+        None => Ok(installed_channel()),
     }
 }
 
@@ -369,11 +388,45 @@ fn fetch(r: &Release, asset: &str, seen: impl FnMut(u64, Option<u64>)) -> Result
         .ok_or_else(|| format!("{asset} has no phitex binary"))
 }
 
-/// Where install.sh says it installed (`$XDG_DATA_HOME/phitex/install.json`;
-/// install.ps1: `%LOCALAPPDATA%\phitex\install.json`, [`crate::dirs`]).
-fn install_record() -> Option<Value> {
-    let d = crate::dirs::phitex(crate::dirs::Kind::Data)?;
-    serde_json::from_slice(&std::fs::read(d.join("install.json")).ok()?).ok()
+/// This phitex's install record, the one made by the script that put
+/// this very file where it is: install.sh's beside its prefix
+/// (`PREFIX/share/phitex/install.json`, the binary in `PREFIX/bin`), else
+/// the user's data folder's (`$XDG_DATA_HOME/phitex/install.json`, as
+/// install.sh wrote it before; install.ps1's
+/// `%LOCALAPPDATA%\phitex\install.json`, [`crate::dirs`]). Either is this
+/// phitex's only if the prefix it names is this binary's: another
+/// install's record (`PHITEX_PREFIX=/opt/x`, a second copy elsewhere)
+/// never makes this one look installed by the script, or nightly.
+pub(crate) fn install_record() -> Option<Value> {
+    let exe = std::env::current_exe().ok()?;
+    let data = crate::dirs::phitex(crate::dirs::Kind::Data);
+    record_for(&exe, data.as_deref(), |p| std::fs::read(p).ok())
+}
+
+/// [`install_record`] for the binary `exe`, the data folder `data`, the files as `read` reads them.
+fn record_for(
+    exe: &Path,
+    data: Option<&Path>,
+    read: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> Option<Value> {
+    let same = |a: &Path, b: &Path| {
+        a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+    };
+    // (the folders the binary may be the prefix's: `PREFIX/bin/phitex` (install.sh), `PREFIX\phitex.exe` (install.ps1))
+    let dir = exe.parent()?;
+    let prefixes: Vec<&Path> = [Some(dir), dir.parent()].into_iter().flatten().collect();
+    let beside = dir
+        .parent()
+        .map(|p| p.join("share").join("phitex").join("install.json"));
+    [beside, data.map(|d| d.join("install.json"))]
+        .into_iter()
+        .flatten()
+        .filter_map(|f| serde_json::from_slice::<Value>(&read(&f)?).ok())
+        .find(|r| {
+            r["prefix"]
+                .as_str()
+                .is_some_and(|p| prefixes.iter().any(|q| same(Path::new(p), q)))
+        })
 }
 
 /// `bytes` as the executable `exe`, by rename from beside it.
@@ -737,6 +790,77 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An install's record is its own: beside its prefix, or the data
+    /// folder's naming its prefix; another prefix's is not this one's.
+    #[test]
+    fn install_records_are_keyed_by_prefix() {
+        let files = std::collections::HashMap::from([
+            (
+                "/opt/x/share/phitex/install.json",
+                r#"{"method": "script", "prefix": "/opt/x", "channel": "stable"}"#,
+            ),
+            (
+                "/home/u/.local/share/phitex/install.json",
+                r#"{"method": "script", "prefix": "/opt/x", "channel": "stable"}"#,
+            ),
+            (
+                "/home/v/data/phitex/install.json",
+                r#"{"method": "script", "prefix": "/home/v/.local", "channel": "nightly"}"#,
+            ),
+            (
+                "/w/data/install.json",
+                r#"{"method": "script", "prefix": "/w/Programs/phitex", "channel": "stable"}"#,
+            ),
+        ]);
+        let read = |p: &Path| files.get(p.to_str()?).map(|s| s.as_bytes().to_vec());
+        let rec = |exe: &str, data: Option<&str>| {
+            record_for(Path::new(exe), data.map(Path::new), read)
+                .map(|r| r["channel"].as_str().unwrap_or("").to_owned())
+        };
+        // (beside its prefix)
+        assert_eq!(rec("/opt/x/bin/phitex", None).as_deref(), Some("stable"));
+        // (the default prefix's copy, whose data folder holds /opt/x's record (an older install.sh's): not its)
+        assert_eq!(
+            rec(
+                "/home/u/.local/bin/phitex",
+                Some("/home/u/.local/share/phitex")
+            ),
+            None
+        );
+        // (the data folder's, naming this prefix (an older install.sh's, XDG_DATA_HOME set))
+        assert_eq!(
+            rec("/home/v/.local/bin/phitex", Some("/home/v/data/phitex")).as_deref(),
+            Some("nightly")
+        );
+        // (install.ps1's: the binary directly in its prefix)
+        assert_eq!(
+            rec("/w/Programs/phitex/phitex.exe", Some("/w/data")).as_deref(),
+            Some("stable")
+        );
+        // (a binary elsewhere: none)
+        assert_eq!(rec("/usr/bin/phitex", Some("/home/v/data/phitex")), None);
+    }
+
+    /// `update-channel`'s default is the channel this phitex came from: a
+    /// nightly installed with no record (or a stable one's binary) says so
+    /// (`phitex config` said "stable" after a nightly install).
+    #[test]
+    fn the_installed_channel() {
+        assert_eq!(
+            installed_channel_of(None, "1.0.5-nightly.202611241458"),
+            "nightly"
+        );
+        assert_eq!(installed_channel_of(None, "1.0.2"), "stable");
+        assert_eq!(
+            installed_channel_of(Some("nightly".into()), "1.0.2"),
+            "nightly"
+        );
+        assert_eq!(
+            installed_channel_of(Some("stable".into()), "1.0.5-nightly.1"),
+            "stable"
+        );
+    }
 
     /// The download's bar: its percent, 24 cells, the MB of the whole;
     /// the bytes alone when the server gave no length.
