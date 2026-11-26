@@ -2671,6 +2671,13 @@ impl Run<'_, '_> {
                     .is_none_or(|x| x == ValueId::UNIT))
             .then(|| (name.clone(), line.clone()));
             let e = if more.as_ref().is_some_and(crate::run::more_seen) {
+                // (as the run that interpreted it: the file's later lines
+                // in this run told apart only where it has a read-back
+                // point)
+                self.muts += 1;
+                if !self.text_written.contains(&name) {
+                    self.text_written.push(name.clone());
+                }
                 crate::api::more_entry(v, &name, &line)
             } else if per_field {
                 // (a text the stream's earlier lines left open goes on
