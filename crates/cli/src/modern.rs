@@ -2474,6 +2474,55 @@ pub fn main(args: &[String]) -> ! {
 mod tests {
     use super::*;
 
+    /// A watch opens its viewer where a person started it on a terminal
+    /// with a display; never over SSH, for an editor or a program.
+    #[test]
+    fn the_viewer_opens_by_default() {
+        let at = |vars: &[&str], lsp: bool, json: bool, terminal: bool, desktop: bool| {
+            let has = |k: &str| vars.contains(&k);
+            opens_by_default(&Opening {
+                lsp,
+                json,
+                terminal,
+                desktop,
+                var: &has,
+            })
+        };
+        assert!(at(&["DISPLAY"], false, false, true, false));
+        assert!(at(&["WAYLAND_DISPLAY"], false, false, true, false));
+        assert!(at(&[], false, false, true, true), "macOS, Windows");
+        assert!(!at(&[], false, false, true, false), "no display");
+        assert!(!at(
+            &["DISPLAY", "SSH_CONNECTION"],
+            false,
+            false,
+            true,
+            false
+        ));
+        assert!(!at(&["SSH_TTY"], false, false, true, true));
+        assert!(!at(&["DISPLAY"], true, false, true, false), "--lsp");
+        assert!(!at(&["DISPLAY"], false, true, true, false), "--json");
+        assert!(!at(&["DISPLAY"], false, false, false, false), "no terminal");
+        // (--open and --no-open say it outright)
+        let o = parse(&v(&["watch", "--no-open", "x.tex"])).unwrap();
+        assert!(!o.open);
+        let o = parse(&v(&["watch", "--open", "x.tex"])).unwrap();
+        assert!(o.open);
+        assert!(parse(&v(&["watch", "--open", "--no-open", "x.tex"])).is_err());
+    }
+
+    /// A chapter is no document of its own; a commented-out class is none.
+    #[test]
+    fn documents_and_chapters() {
+        assert!(config::is_document("\\documentclass{article}\n"));
+        assert!(config::is_document(
+            "\\input{preamble}\n\\begin{document}\n"
+        ));
+        assert!(!config::is_document("\\chapter{Intro}\nText.\n"));
+        assert!(!config::is_document("% \\documentclass{article}\n"));
+        assert!(config::is_document("50\\% done \\documentclass{article}\n"));
+    }
+
     /// `build`'s check line names the environment a layout warning is in
     /// by its label: a table's, not its tabular's (which has none); an
     /// equation's; a float's around a figure inside it that has its own.

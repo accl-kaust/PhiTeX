@@ -2200,6 +2200,24 @@ mod tests {
         );
     }
 
+    /// The terminal's tree lists the folder's documents before any is
+    /// opened, after those that were, each once: Enter starts one.
+    #[test]
+    fn the_tree_lists_the_folders_documents() {
+        let mut st = State {
+            found: vec!["a/main.tex".into(), "b/talk.tex".into()],
+            ..State::default()
+        };
+        st.docs.insert("b/talk.tex".into(), Doc::new());
+        let r = rows(&st, SystemTime::now());
+        let names: Vec<&str> = r.iter().map(|x| x.0.as_str()).collect();
+        assert_eq!(names, ["b/talk.tex", "a/main.tex"]);
+        assert_eq!(r[1].1, "not started · Enter starts it");
+        assert_eq!(listed(&st), ["b/talk.tex", "a/main.tex"]);
+        let t = tree_lines(".", &r, 0);
+        assert!(t[0].0.contains("↑↓ highlight, Enter open"), "{t:?}");
+    }
+
     /// A document's state in words, as the strip and the tree say it.
     #[test]
     fn a_documents_words() {

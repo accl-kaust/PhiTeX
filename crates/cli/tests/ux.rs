@@ -946,8 +946,9 @@ fn compat_terminal_is_pdflatexs() {
     }
 }
 
-/// `phitex` and `phitex --help` open with the loop an agent edits in
-/// (three agents that knew only `phitex` never found `session`), the
+/// `phitex` and `phitex --help` lead with what PhiTeX is, for a person;
+/// the loop an agent edits in is a section at their end (three agents
+/// that knew only `phitex` never found `session`: it stays there), the
 /// command list says what `session` gives, and `build --help` points to it
 /// for builds again and again.
 #[test]
@@ -956,11 +957,13 @@ fn help_shows_the_agents_loop() {
     for args in [&[][..], &["--help"][..]] {
         let out = run(&dir, args);
         let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
-        let top: Vec<&str> = all.lines().take(4).collect();
+        let first = all.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        assert!(first.starts_with("PhiTeX: "), "{args:?}: {all}");
+        let agents = all
+            .find("For agents: phitex session start main.tex; edit; phitex session wait;")
+            .unwrap_or_else(|| panic!("{args:?}: {all}"));
         assert!(
-            top.iter().any(|l| l.starts_with(
-                "For agents: phitex session start main.tex; edit; phitex session wait;"
-            )),
+            all.find("Commands:").is_some_and(|c| c < agents),
             "{args:?}: {all}"
         );
         assert!(
