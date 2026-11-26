@@ -2349,6 +2349,7 @@ export class Panel {
     this.win.classList.add("has-side");
     this.$(".body").prepend(el);
     this.$("#b-side").before(button);
+    this.grip(el, "phitex.files.w");
     return (on) => {
       el.hidden = !on;
       button.setAttribute("aria-pressed", String(on));
@@ -2356,6 +2357,86 @@ export class Panel {
     };
   }
 
+  /**
+   * A column beside the pages (the contents, a folder watch's Files) made resizable: a handle on
+   * its inner edge, dragged (a col-resize cursor, a line on hover), ← and → when it has the focus,
+   * a double-click back to the column's own width. From 160 px to half the panel; the width kept
+   * in this browser under `key`. The pages fitted to the width left as it moves (the stage's
+   * ResizeObserver refits the opening's sheet with it).
+   */
+  private grip(col: HTMLElement, key: string): void {
+    const g = document.createElement("div");
+    g.className = "grip";
+    g.tabIndex = 0;
+    g.title = "Drag to resize (double-click: the default width)";
+    g.setAttribute("role", "separator");
+    g.setAttribute("aria-orientation", "vertical");
+    g.setAttribute("aria-label", `Resize ${col.getAttribute("aria-label") ?? "the column"}`);
+    const body = this.$(".body");
+    body.append(g);
+    const MIN = 160;
+    const max = () => Math.max(MIN, Math.floor(this.win.clientWidth / 2));
+    let fit = 0;
+    const refit = () => this.prefs.zoom === "fit" && !fit && (fit = requestAnimationFrame(() => ((fit = 0), this.redraw())));
+    const set = (w: number | null, keep = true) => {
+      if (w === null) col.style.removeProperty("width");
+      else col.style.width = `${Math.round(Math.min(max(), Math.max(MIN, w)))}px`;
+      g.setAttribute("aria-valuenow", String(col.offsetWidth));
+      if (keep)
+        try {
+          if (w === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, String(parseInt(col.style.width)));
+        } catch {
+          /* (not kept) */
+        }
+      place();
+      refit();
+    };
+    // (on the column's edge wherever the column is: beside the pages, or over them, a narrow panel's drawer)
+    const place = () => {
+      const on = col.offsetWidth > 0 && getComputedStyle(col).display !== "none";
+      g.hidden = !on;
+      if (!on) return;
+      // (a panel made narrower: the column kept to half of it, the width asked for kept)
+      if (parseInt(col.style.width) > max()) col.style.width = `${max()}px`;
+      const c = col.getBoundingClientRect(), b = body.getBoundingClientRect();
+      g.style.left = `${c.right - b.left}px`;
+      g.style.top = `${c.top - b.top}px`;
+      g.style.height = `${c.height}px`;
+      g.setAttribute("aria-valuemin", String(MIN));
+      g.setAttribute("aria-valuemax", String(max()));
+    };
+    new ResizeObserver(place).observe(col);
+    new ResizeObserver(place).observe(body);
+    try {
+      const kept = Number(localStorage.getItem(key));
+      if (kept > 0) col.style.width = `${Math.max(MIN, kept)}px`;
+    } catch {
+      /* (the column's own width) */
+    }
+    g.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      g.setPointerCapture(e.pointerId);
+      g.classList.add("drag");
+      this.win.classList.add("resizing");
+      const x0 = e.clientX, w0 = col.offsetWidth;
+      g.onpointermove = (m) => set(w0 + m.clientX - x0, false);
+      g.onpointerup = g.onpointercancel = () => {
+        g.onpointermove = g.onpointerup = g.onpointercancel = null;
+        g.classList.remove("drag");
+        this.win.classList.remove("resizing");
+        set(col.offsetWidth);
+      };
+    };
+    g.ondblclick = () => set(null);
+    g.onkeydown = (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      e.stopPropagation();
+      set(col.offsetWidth + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 64 : 16));
+    };
+  }
 
   /** Keys of the host's own, listed after the viewer's in the keys' help (`?`). */
   addKeys(rows: [string, string][]): void {
@@ -2395,6 +2476,7 @@ export class Panel {
       this.sideOn(on);
       // (no outline until one arrives: no empty column while the first build runs)
       this.noOutline(true);
+      this.grip(this.$("#side"), "phitex.side.w");
     }
     if (!opts.keys) return;
     const help = this.$("#keyhelp");

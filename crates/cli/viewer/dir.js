@@ -1300,6 +1300,12 @@ header:active { cursor: grabbing; }
 .side { display: none; flex: none; width: 240px; overflow: auto; background: var(--ph-bar); border-right: 1px solid var(--ph-border); color: var(--ph-fg); }
 .win.side-on .side { display: block; }
 .win.side-on.side-empty .side { display: none; }
+/* (a column's handle on its inner edge: dragged, or \u2190 \u2192 with the focus; a line on hover) */
+.grip { position: absolute; z-index: 7; width: 9px; margin-left: -5px; cursor: col-resize; touch-action: none; outline: none; }
+.grip[hidden] { display: none; }
+.grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 3px; background: var(--ph-accent); opacity: 0; transition: opacity .15s .1s; }
+.grip:hover::after, .grip.drag::after, .grip:focus-visible::after { opacity: .8; }
+.win.resizing, .win.resizing * { cursor: col-resize !important; user-select: none; }
 @container (max-width: 560px) { .win.side-on .side { position: absolute; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgb(0 0 0 / 20%); } }
 .stage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--ph-stage); text-align: center; overscroll-behavior: contain; will-change: scroll-position; }
 .win.docked .stage { overflow-y: scroll; }

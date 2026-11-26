@@ -1112,3 +1112,33 @@ test("the opening's sheet is whole in the pages' visible box and centred in it: 
   assert.ok(!(await t.q(`$("#opening").hidden`)), "the opening still playing");
   await t.send("Emulation.clearDeviceMetricsOverride", {});
 });
+
+test("the contents' column is resized by its handle: a drag widens it and the pages' box narrows by as much; the width is kept after a reload; ← on the handle narrows it, a double-click puts its own width back (the user: a resizable column)", async () => {
+  const sections = Array.from({ length: 3 }, (_, i) => `\\section{Part ${i + 1}}\nSome words of part ${i + 1}.`).join("\n");
+  const { w, t } = await open({ "main.tex": doc(sections, "\\usepackage{hyperref}\n") });
+  await t.send("Emulation.setDeviceMetricsOverride", { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
+  if (!(await t.q(`$(".win").classList.contains("side-on")`))) await t.click("#b-side");
+  await t.until(`$("#side").offsetWidth > 100 && /Part 3/.test($("#side").textContent)`, "the contents beside the pages", 30000);
+  const sizes = () => t.q(`[$("#side").offsetWidth, $("#stage").clientWidth]`);
+  const [c0, s0] = await sizes();
+  const g = await t.q(`(() => { const r = $(".grip").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  await t.drag(g[0], g[1], g[0] + 120, g[1]);
+  await t.until(`$("#side").offsetWidth >= ${c0 + 110}`, "the column wider", 5000);
+  const [c1, s1] = await sizes();
+  assert.ok(Math.abs(c1 - c0 - 120) <= 2, `the column 120 px wider (${c0} to ${c1})`);
+  assert.ok(Math.abs(s0 - s1 - (c1 - c0)) <= 2, `the pages' box narrower by as much (${s0} to ${s1})`);
+  // (kept after a reload)
+  await t.send("Page.reload");
+  await t.until(`+$("#pgn")?.textContent > 0 && $("#side")?.offsetWidth > 100`, "the pages and the column again", 60000);
+  assert.ok(Math.abs((await t.q(`$("#side").offsetWidth`)) - c1) <= 2, "the width kept after a reload");
+  // (the keyboard: ← narrows by 16 px; a double-click, the column's own width)
+  await t.q(`$(".grip").focus()`);
+  await t.key("ArrowLeft", "ArrowLeft", 37);
+  assert.ok(Math.abs((await t.q(`$("#side").offsetWidth`)) - (c1 - 16)) <= 2, "← on the handle: 16 px narrower");
+  await t.mouse(...(await t.q(`(() => { const r = $(".grip").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`)), 2);
+  await t.until(`Math.abs($("#side").offsetWidth - ${c0}) <= 2`, "a double-click: the default width", 5000);
+  if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-column-resize.png"));
+  assert.deepEqual(t.errors, []);
+  await t.send("Emulation.clearDeviceMetricsOverride", {});
+  await w.stop();
+});

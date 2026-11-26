@@ -2738,6 +2738,12 @@ header:active { cursor: grabbing; }
 .side { display: none; flex: none; width: 240px; overflow: auto; background: var(--ph-bar); border-right: 1px solid var(--ph-border); color: var(--ph-fg); }
 .win.side-on .side { display: block; }
 .win.side-on.side-empty .side { display: none; }
+/* (a column's handle on its inner edge: dragged, or \u2190 \u2192 with the focus; a line on hover) */
+.grip { position: absolute; z-index: 7; width: 9px; margin-left: -5px; cursor: col-resize; touch-action: none; outline: none; }
+.grip[hidden] { display: none; }
+.grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 3px; background: var(--ph-accent); opacity: 0; transition: opacity .15s .1s; }
+.grip:hover::after, .grip.drag::after, .grip:focus-visible::after { opacity: .8; }
+.win.resizing, .win.resizing * { cursor: col-resize !important; user-select: none; }
 @container (max-width: 560px) { .win.side-on .side { position: absolute; inset: 0 auto 0 0; z-index: 5; box-shadow: 4px 0 16px rgb(0 0 0 / 20%); } }
 .stage { position: relative; flex: 1; min-height: 0; overflow: auto; background: var(--ph-stage); text-align: center; overscroll-behavior: contain; will-change: scroll-position; }
 .win.docked .stage { overflow-y: scroll; }
@@ -10765,7 +10771,7 @@ var Panel = class {
     this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
-    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks())).observe(stage);
+    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks(), this.fitSheet())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
@@ -11656,20 +11662,30 @@ var Panel = class {
   }
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
   animSince = 0;
-  /** The sheet as the first page will be: an A4 page, whole in the stage, where the viewer puts page 1. */
+  /**
+   * The sheet as the first page will be: a page whole in the pages' visible box, where the viewer
+   * puts page 1. The box is the stage's own, as it is laid out now (beside the contents' column,
+   * under the tips' room, its scrollbar out), in the coordinates of .body, which the sheet is
+   * placed in; the stage's offsetLeft and offsetTop are its .stagebox's, which the contents'
+   * column moves: the sheet was put the column's width left of the pages, partly under it.
+   */
   fitSheet() {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
+    const st = this.$("#stage"), s = st.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+    const view = { x: s.left - b.left + st.clientLeft, y: s.top - b.top + st.clientTop, w: st.clientWidth, h: st.clientHeight };
+    const put = (x, y, w2, h2) => Object.assign(el.style, { left: `${x}px`, top: `${y}px`, width: `${w2}px`, height: `${h2}px` });
+    let tall = 297 / 210;
     const slot = this.$("#viewer").querySelector(".slot");
     if (slot && slot.offsetWidth > 40) {
-      const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
-      return void Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      const r = slot.getBoundingClientRect(), x = r.left - b.left, y = r.top - b.top;
+      if (x >= view.x - 1 && y >= view.y - 1 && x + r.width <= view.x + view.w + 1 && y + r.height <= view.y + view.h + 1) return void put(x, y, r.width, r.height);
+      tall = r.height / r.width;
     }
-    const st = this.$("#stage");
-    const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
-    let h = room.h, w = h * 210 / 297;
-    if (w > room.w) w = room.w, h = w * 297 / 210;
-    Object.assign(el.style, { left: `${st.offsetLeft + (st.clientWidth - w) / 2}px`, top: `${st.offsetTop + 12}px`, width: `${w}px`, height: `${h}px` });
+    const room = { w: Math.max(1, view.w - 24), h: Math.max(1, view.h - 24) };
+    let h = room.h, w = h / tall;
+    if (w > room.w) w = room.w, h = w * tall;
+    put(view.x + (view.w - w) / 2, view.y + 12, w, h);
   }
   /**
    * The first page is in: the sheet eases to the page's box (its height
@@ -11943,10 +11959,87 @@ var Panel = class {
     this.win.classList.add("has-side");
     this.$(".body").prepend(el);
     this.$("#b-side").before(button);
+    this.grip(el, "phitex.files.w");
     return (on) => {
       el.hidden = !on;
       button.setAttribute("aria-pressed", String(on));
       if (this.prefs.zoom === "fit") this.redraw();
+    };
+  }
+  /**
+   * A column beside the pages (the contents, a folder watch's Files) made resizable: a handle on
+   * its inner edge, dragged (a col-resize cursor, a line on hover), ← and → when it has the focus,
+   * a double-click back to the column's own width. From 160 px to half the panel; the width kept
+   * in this browser under `key`. The pages fitted to the width left as it moves (the stage's
+   * ResizeObserver refits the opening's sheet with it).
+   */
+  grip(col, key) {
+    const g = document.createElement("div");
+    g.className = "grip";
+    g.tabIndex = 0;
+    g.title = "Drag to resize (double-click: the default width)";
+    g.setAttribute("role", "separator");
+    g.setAttribute("aria-orientation", "vertical");
+    g.setAttribute("aria-label", `Resize ${col.getAttribute("aria-label") ?? "the column"}`);
+    const body = this.$(".body");
+    body.append(g);
+    const MIN = 160;
+    const max = () => Math.max(MIN, Math.floor(this.win.clientWidth / 2));
+    let fit = 0;
+    const refit = () => this.prefs.zoom === "fit" && !fit && (fit = requestAnimationFrame(() => (fit = 0, this.redraw())));
+    const set = (w, keep = true) => {
+      if (w === null) col.style.removeProperty("width");
+      else col.style.width = `${Math.round(Math.min(max(), Math.max(MIN, w)))}px`;
+      g.setAttribute("aria-valuenow", String(col.offsetWidth));
+      if (keep)
+        try {
+          if (w === null) localStorage.removeItem(key);
+          else localStorage.setItem(key, String(parseInt(col.style.width)));
+        } catch {
+        }
+      place4();
+      refit();
+    };
+    const place4 = () => {
+      const on = col.offsetWidth > 0 && getComputedStyle(col).display !== "none";
+      g.hidden = !on;
+      if (!on) return;
+      if (parseInt(col.style.width) > max()) col.style.width = `${max()}px`;
+      const c = col.getBoundingClientRect(), b = body.getBoundingClientRect();
+      g.style.left = `${c.right - b.left}px`;
+      g.style.top = `${c.top - b.top}px`;
+      g.style.height = `${c.height}px`;
+      g.setAttribute("aria-valuemin", String(MIN));
+      g.setAttribute("aria-valuemax", String(max()));
+    };
+    new ResizeObserver(place4).observe(col);
+    new ResizeObserver(place4).observe(body);
+    try {
+      const kept = Number(localStorage.getItem(key));
+      if (kept > 0) col.style.width = `${Math.max(MIN, kept)}px`;
+    } catch {
+    }
+    g.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      g.setPointerCapture(e.pointerId);
+      g.classList.add("drag");
+      this.win.classList.add("resizing");
+      const x0 = e.clientX, w0 = col.offsetWidth;
+      g.onpointermove = (m) => set(w0 + m.clientX - x0, false);
+      g.onpointerup = g.onpointercancel = () => {
+        g.onpointermove = g.onpointerup = g.onpointercancel = null;
+        g.classList.remove("drag");
+        this.win.classList.remove("resizing");
+        set(col.offsetWidth);
+      };
+    };
+    g.ondblclick = () => set(null);
+    g.onkeydown = (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      e.stopPropagation();
+      set(col.offsetWidth + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 64 : 16));
     };
   }
   /** Keys of the host's own, listed after the viewer's in the keys' help (`?`). */
@@ -11982,6 +12075,7 @@ var Panel = class {
       }
       this.sideOn(on);
       this.noOutline(true);
+      this.grip(this.$("#side"), "phitex.side.w");
     }
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
