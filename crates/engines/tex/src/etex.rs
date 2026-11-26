@@ -1128,6 +1128,10 @@ pub(crate) fn the_toks(r: &mut Run<'_, '_>) -> R<Vec<Tok>> {
 /// The end-of-file marker of a pseudo file.
 const EOF_PSEUDO: &str = "\u{10FFFE}eofp";
 
+/// The end of a mixed read-back's skeleton (`Run::mixed_begin`): an
+/// `\input` file's end, then `Run::mixed_end`.
+pub(crate) const EOF_MIXED: &str = "\u{10FFFE}eofM";
+
 /// `\scantokens` (`pseudo_start`, pdfTeX §1766–§1771): the token list
 /// shown as a string, cut into lines at `\newlinechar`, read as a file.
 fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
@@ -1197,6 +1201,9 @@ pub(crate) fn end_of_file(r: &mut Run<'_, '_>, marker: &str) -> R<()> {
     }
     // §362: `end_file_reading; check_outer_validity`
     r.file_ended()?;
+    if base == EOF_MIXED {
+        r.mixed_end()?;
+    }
     Ok(())
 }
 

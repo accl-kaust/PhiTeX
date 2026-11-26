@@ -2622,12 +2622,35 @@ impl Run<'_, '_> {
             // the file one read back as its text (`UNIT` in their place)
             // (a line written while a line is interpreted goes nowhere:
             // not interpreted in turn)
+            // (every line is told apart, one that defines or one that
+            // does more: a file one of whose lines does more is read back
+            // as its text, and mixed at its first read-back point,
+            // docs/spec-symbol-reads.md §2. Each where it is written: a
+            // line's read-back depends on the state there. A text this run
+            // found to do more before does more again ([`Run::more_memo`]):
+            // read as text, a line that defines is read as TeX reads it,
+            // and a mixed read-back checks what its parts share where it
+            // is read. A memo of the lines that define gave bibtopic's
+            // `\citation{*}` the read-back of its first writing. After a
+            // line of this run that did more, only a file with a read-back
+            // point, which may read back mixed there: `\enddocument`'s
+            // 1345 `\babel@toc` lines to a `.toc` no one reads took 1 s
+            // more)
             let per_field = self.interp.is_none()
-                && self.reads_back_per_field(&name)
                 && self
                     .get(&format!("{}{name}", crate::run::REREAD))?
-                    .is_none();
-            let e = if per_field {
+                    .is_none()
+                && (!self.text_written.contains(&name) || self.read_point_of(&name)?.is_some());
+            let more = (per_field
+                && !crate::defer::has_marks(&line)
+                && self
+                    .get(&format!("write:pend:{k}"))?
+                    .is_none_or(|x| x == ValueId::UNIT))
+            .then(|| (name.clone(), line.clone()));
+            let seen = more.as_ref().and_then(|m| self.more_memo.get(m).copied());
+            let e = if let Some((made, reads)) = seen {
+                crate::api::more_entry(v, &name, &line, made, reads)
+            } else if per_field {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
                 let mut text = match self.take_wpending(k)? {
@@ -2672,10 +2695,15 @@ impl Run<'_, '_> {
                     && self.interp_plain
                 {
                     v.list(vec![v.str(&name), v.str(&line), made, self.interp_reads])
-                } else if r.is_some() {
+                } else if let Some(made) = r {
                     self.muts += 1;
-                    self.text_written.push(name.clone());
-                    v.list(vec![v.str(&name), v.str(&line), ValueId::UNIT])
+                    if !self.text_written.contains(&name) {
+                        self.text_written.push(name.clone());
+                    }
+                    if let Some(m) = more {
+                        self.more_memo.insert(m, (made, self.interp_reads));
+                    }
+                    crate::api::more_entry(v, &name, &line, made, self.interp_reads)
                 } else {
                     self.set(&format!("write:pend:{k}"), v.str(&text), true);
                     v.list(vec![v.str(&name), v.str(&line)])
@@ -2683,7 +2711,7 @@ impl Run<'_, '_> {
             } else {
                 if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && self.interp.is_none() {
                     eprintln!(
-                        "aux-trace: {name} line {line:?} not interpreted in node {}: an earlier line of this run did more than define",
+                        "aux-trace: {name} line {line:?} not interpreted in node {}: an earlier line of this run did more than define, and the file has no read-back point",
                         self.cx.node().raw()
                     );
                 }
@@ -3382,6 +3410,20 @@ impl Run<'_, '_> {
     /// the nodes before it began (the `lines` accumulator: per file, so
     /// no other file's lines count) and those this node began.
     pub(crate) fn input_line_no(&mut self) -> R<i32> {
+        // (a written line interpreted where it is written,
+        // `Run::interpret_line`: where its file is read back it is that
+        // file's line, not known here. Into the log, which the
+        // interpretation drops, it goes nowhere; into anything else, the
+        // line is read back as its text. Read here, the line of the page
+        // that wrote it: every finisher writing a `\babel@aux` line ran
+        // again on an edit above its page, through the font loading's
+        // log messages)
+        if self.interp.is_some() {
+            if self.lt.sink != Some(Sink::Log) {
+                self.interp_lineno = true;
+            }
+            return Ok(0);
+        }
         let n = match self.file_line_here() {
             Some(crate::run::FileLine::Known(n)) => n,
             Some(crate::run::FileLine::Piece(name, own)) => {

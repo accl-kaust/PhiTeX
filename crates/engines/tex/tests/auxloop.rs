@@ -700,3 +700,64 @@ List: \lst.
         }
     }
 }
+
+/// A file one of whose lines does more than define (it typesets) is read
+/// back mixed (docs/spec-symbol-reads.md §2): that line read where the
+/// file is read, the defining lines per field. An edit changing a
+/// defining line no run reads at the read-back point leaves the reader
+/// standing; the run that uses the definition runs again. Read as its
+/// text, the reader read every line and ran again on any (babel's
+/// `\babel@aux` lines made a beamer deck's `\begin{document}` and its
+/// 1535-line `.aux` run again on every frame inserted).
+#[test]
+fn a_file_with_a_line_that_does_more_reads_its_other_lines_per_field() {
+    let doc = |v: &str| {
+        format!(
+            r"\def\va{{}}\def\vb{{}}
+\def\start{{\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi
+  Before: \va.\par}}
+\start
+
+Text between.
+
+Later: \vb.\par
+\immediate\openout1=\jobname.aux
+\immediate\write1{{\noexpand\gdef\noexpand\va{{A}}}}
+\immediate\write1{{qqq}}
+\immediate\write1{{\noexpand\gdef\noexpand\vb{{{v}}}}}
+\bye
+"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./m.tex", "m", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &doc("BBB"));
+        b.edit(&doc("CCC"));
+        let r: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect();
+        let cold = common::build(opts(), Some(&common::plain()), &doc("CCC"));
+        let (dvi, _) = b.output();
+        let d = common::first_difference(&dvi, &cold.output().0);
+        assert!(d.is_none(), "-j{threads}: edit differs from cold: {d:?}");
+        let has = |w: &[u8]| dvi.windows(w.len()).any(|x| x == w);
+        assert!(
+            has(b"qqq") && has(b"CCC") && has(b"A"),
+            "-j{threads}: {}",
+            String::from_utf8_lossy(&dvi)
+        );
+        assert!(
+            !r.iter()
+                .any(|x| x.starts_with("exec") && x.contains("\\start")),
+            "-j{threads}: the reader of the file ran again on a line it does not read: {r:?}"
+        );
+    }
+}

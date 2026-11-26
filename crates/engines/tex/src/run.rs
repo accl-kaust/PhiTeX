@@ -365,6 +365,9 @@ pub(crate) struct FileRest {
     /// Its text read from its units or its cut ([`Run::load_written`]):
     /// an empty text read is a file at its end, not one still to read.
     loaded: bool,
+    /// A mixed read-back's skeleton ([`Run::mixed_begin`]): each line's
+    /// start checked ([`Run::mixed_line`]).
+    pub mixed: bool,
 }
 
 impl FileRest {
@@ -396,6 +399,7 @@ impl FileRest {
             sliceable: false,
             cut: None,
             loaded: false,
+            mixed: false,
         }
     }
 
@@ -700,6 +704,45 @@ pub(crate) struct RbChild {
     pub answered: Vec<Loc>,
 }
 
+/// A mixed read-back under way (docs/spec-symbol-reads.md §2,
+/// [`Run::mixed_begin`]): the file's skeleton is being read, its
+/// defining lines' keys through the read-back child ([`Run::rb`]), and
+/// what the run was before the skeleton, to read the file as its text
+/// instead where the two parts do not commute ([`Run::mixed_end`]).
+pub(crate) struct MixedRead {
+    /// The file's key.
+    pub key: String,
+    /// The file's name ([`FileRest::written`]; its units' order read
+    /// only if the mixed read-back is given up).
+    pub name: ValueId,
+    /// The child's local keys: defined after the skeleton.
+    pub locals: Vec<(String, ValueId)>,
+    /// The keys the run reads directly (integer registers, boxes): made
+    /// by the run after the skeleton, `[name, value, global]`.
+    pub direct: Vec<(String, ValueId, bool)>,
+    /// The table before the skeleton: a copy, or `None` where a
+    /// checkpoint keeps its changes ([`crate::state::State::checkpoint`]).
+    pub st: Option<crate::state::State>,
+    pub stamp: u64,
+    pub gids: u32,
+    pub nc: usize,
+    pub nk: usize,
+    pub nest_len: usize,
+    pub conds: Vec<u8>,
+    pub codes: Vec<i32>,
+    pub cur: Cur,
+    pub effect: Effect,
+    pub aopen: i64,
+    #[allow(clippy::type_complexity)]
+    pub reg_kept: (
+        phitex_defuse::FxHashMap<Loc, u32>,
+        phitex_defuse::FxHashMap<Loc, i32>,
+    ),
+    /// A skeleton line touched a key, or a line ended inside a group, a
+    /// conditional, an alignment or a scan.
+    pub broken: bool,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     /// Encodings through the worker's cache at this run's values epoch
@@ -925,6 +968,8 @@ pub(crate) struct Run<'c, 'a> {
     /// point on, a name the run has not held is looked up in the child's
     /// output first ([`Run::rb_check`]).
     pub rb: Option<RbChild>,
+    /// A mixed read-back's skeleton being read ([`MixedRead`]).
+    pub mixed: Option<Box<MixedRead>>,
     /// Global appends to parameterless macros of characters whose value
     /// before the run it has not read: `\\xdef\\x{\\x...}`
     /// (microtype's `\\MT@font@list`), each the location and the tokens
@@ -1109,6 +1154,10 @@ pub(crate) struct Run<'c, 'a> {
     /// The interpreted text ran out inside a command: it needs the next
     /// line written to its stream ([`Run::interpret_line`]).
     pub interp_short: bool,
+    /// The line [`Run::interpret_line`] interprets read `\inputlineno`
+    /// into more than the log: its number where the file is read back is
+    /// not known here, so the line is read back as text.
+    pub interp_lineno: bool,
     /// The read-back fields the line [`Run::interpret_line`] interpreted
     /// last read, by name, sorted: a file whose line reads a field an
     /// earlier line of it defines is read back as its text
@@ -1143,8 +1192,16 @@ pub(crate) struct Run<'c, 'a> {
     /// node, left no group or conditional open. A file every line of
     /// which only defines is read back per field ([`Run::read_back`]).
     pub interp_plain: bool,
-    /// The files this run wrote a line of that does more than define:
-    /// read back as text, their next lines not interpreted.
+    /// The lines this run wrote that did more than define, by file and
+    /// text (`Run::write_out`): what they defined and read until they
+    /// did. The same text written again is taken to do more, unread: a
+    /// file one of whose lines does more is read as its text, or mixed
+    /// with what its parts share checked where it is read
+    /// ([`Run::mixed_end`]).
+    pub more_memo: phitex_defuse::FxHashMap<(String, String), (ValueId, ValueId)>,
+    /// The files a line this run wrote did more than define in
+    /// (`Run::write_out`): their later lines are told apart only where
+    /// the file has a read-back point.
     pub text_written: Vec<String>,
     /// The files the job writes whose round-one read-back this run made
     /// from the text the client gave for them ([`Run::seed_written`]).
@@ -1467,6 +1524,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_ok: false,
             defer_hit: None,
             rb: None,
+            mixed: None,
             appending: Vec::new(),
             csname_defer: None,
             class_member: crate::FxHashMap::default(),
@@ -1526,6 +1584,7 @@ impl<'c, 'a> Run<'c, 'a> {
             muts: 0,
             interp: None,
             interp_short: false,
+            interp_lineno: false,
             interp_reads: ValueId::NIL,
             interp_first: Vec::new(),
             interp_param: phitex_defuse::FxHashSet::default(),
@@ -1536,6 +1595,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_errs: Vec::new(),
             runaway_due: None,
             interp_plain: false,
+            more_memo: phitex_defuse::FxHashMap::default(),
             text_written: Vec::new(),
             seeded: Vec::new(),
             cont_lines: Vec::new(),
@@ -3087,7 +3147,28 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.get(&format!("wopen:{key}"))?.is_some() || self.read_cut(key)?.is_some() {
             return Ok(true);
         }
+        // (a file the job writes read back as its text: whether it has a
+        // unit, read as that alone, not which units)
+        if let Some(there) = self.written_text_there(key)? {
+            return Ok(there);
+        }
         Ok(self.file_lazy(key)?.is_some())
+    }
+
+    /// Whether `key`, a file the job writes and reads back as its text
+    /// ([`Run::file_lazy`]'s `[path, UNIT, order]`, not open for writing
+    /// here), is there: its units' order not empty, read as that alone;
+    /// `None` for any other file.
+    fn written_text_there(&mut self, key: &str) -> R<Option<bool>> {
+        let w = self.keyed(crate::fields::Fam::Wfile, key);
+        let k = self.keyed(crate::fields::Fam::Wkeys, key);
+        if !self.lb_known(key, k)? || !self.lb_known(key, w)? {
+            return Ok(None);
+        }
+        if self.tool_output(key)?.is_some() || self.per_field_known(key, k)? {
+            return Ok(None);
+        }
+        Ok(Some(self.keys_nonempty(w)?))
     }
 
     /// Font file `name` as the font side finds it (a TFM, a VF, a map,
@@ -3140,6 +3221,50 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(self.seeded(key).is_some_and(|s| s.keys != mark) && !self.tool_makes(key)?);
         }
         Ok(self.per_field_known(key, k)? && !self.tool_makes(key)?)
+    }
+
+    /// Whether `key` is a file the job writes, read back as its text,
+    /// that may read back mixed ([`Run::mixed_begin`]): [`Run::file_lazy`]
+    /// would give `[path, UNIT, order]`, and its skeleton is defined. Its
+    /// units' order is not read: a line that moved asks nothing of a
+    /// reader that reads the file mixed ([`Run::written_order`]).
+    pub(crate) fn mixed_file(&mut self, key: &str) -> R<bool> {
+        let v = self.v;
+        if crate::exec::obs_flag!("PHITEX_NO_MIXED") || self.get(&format!("wopen:{key}"))?.is_some()
+        {
+            return Ok(false);
+        }
+        if self.written_text_there(key)? != Some(true) {
+            return Ok(false);
+        }
+        // (set, `UNIT` where the file is not mixed: read as that alone)
+        let p = self.cx.path(&[phitex_defuse::Step::Eq(ValueId::UNIT)]);
+        Ok(self
+            .cx
+            .read_final_path(v.field(&format!("wskel:{key}")), p)?
+            .and_then(|x| v.as_bool(x))
+            == Some(false))
+    }
+
+    /// File `key` as `\input` opens it: `(true, [path, UNIT])` for one
+    /// that may read back mixed ([`Run::mixed_file`], its units' order
+    /// not read), else `(false, `[`Run::read_file_lazy`]`)`.
+    pub(crate) fn input_file(&mut self, key: &str) -> R<(bool, Option<ValueId>)> {
+        if self.mixed_file(key)? {
+            let v = self.v;
+            return Ok((
+                true,
+                Some(v.list(vec![v.str(&format!("./{key}")), ValueId::UNIT])),
+            ));
+        }
+        Ok((false, self.read_file_lazy(key)?))
+    }
+
+    /// The units' order of `key`, a file [`Run::mixed_file`] found (a
+    /// mixed read-back not made, or given up).
+    pub(crate) fn written_order(&mut self, key: &str) -> R<ValueId> {
+        let w = self.keyed(crate::fields::Fam::Wfile, key);
+        Ok(self.lb(w)?.unwrap_or(ValueId::UNIT))
     }
 
     /// [`Run::file`], a file the job writes as `[path, UNIT, order]`
@@ -3746,18 +3871,6 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(self.lb_known(name, w)? || self.lb_known(name, k)? || self.seeded(name).is_some())
     }
 
-    /// Whether the lines this run writes to `name` are interpreted as
-    /// they are written ([`Run::interpret_line`]): a file is read back per
-    /// field while every line written to it only defines, which a line is
-    /// guessed to do until this run wrote one that does more. The guess
-    /// is the first round's too, before any file node declared the file's
-    /// loop-backs: the definitions go with the lines, the file node
-    /// publishes them, and the next round reads them, as TeX's next run
-    /// reads the file this one wrote.
-    pub(crate) fn reads_back_per_field(&self, name: &str) -> bool {
-        !self.text_written.iter().any(|n| n == name)
-    }
-
     /// Whether `name`'s read-back is per field this round: its `wkeys:`
     /// loop-back declared and not marked as read back as text
     /// ([`crate::api::text_mark`]). The key set read, its value bound.
@@ -3784,7 +3897,8 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(self.cx.read_final_path(k, p)?.and_then(|x| v.as_bool(x)) == Some(false))
     }
 
-    /// Whether loop-back key set `k` has a key, read as that alone.
+    /// Whether loop-back list `k` (a key set, a units' order) is not
+    /// empty, read as that alone.
     fn keys_nonempty(&mut self, k: Field) -> R<bool> {
         let v = self.v;
         let p = self
@@ -4102,8 +4216,10 @@ impl<'c, 'a> Run<'c, 'a> {
             let cx = &*self.cx;
             let ops = &self.ops;
             Some(
-                crate::ops::readback_output(v, ops, epoch, key, &mut |f| Ok(cx.peek_final(f)))
-                    .map_err(Halt::Stop)?,
+                crate::ops::readback_output(v, ops, epoch, key, false, &mut |f| {
+                    Ok(cx.peek_final(f))
+                })
+                .map_err(Halt::Stop)?,
             )
         } else {
             None
@@ -4164,6 +4280,363 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         Ok(true)
+    }
+
+    /// A mixed read-back of file `key` at its first read-back point
+    /// (docs/spec-symbol-reads.md §2): where its file node gave it a
+    /// skeleton (`ops::define_mixed`), the read-back child placed for its
+    /// defining lines' keys, and the skeleton read as the file's text,
+    /// what the run is now kept ([`MixedRead`]). Where the run holds a
+    /// key already, or the child answers none, false: the file is read as
+    /// its text. Conditions as [`Run::rb_read_back`]'s.
+    pub(crate) fn mixed_begin(&mut self, key: &str, name: ValueId) -> R<bool> {
+        let op = self.cx.op();
+        if self.rb.is_some()
+            || self.mixed.is_some()
+            || self.interp.is_some()
+            || self.rec_load
+            || !self.doc
+            || !(op == self.ops.exec || op == self.ops.resume)
+            || crate::exec::obs_flag!("PHITEX_NO_RB_CHILD")
+            || crate::exec::obs_flag!("PHITEX_NO_MIXED")
+            || self.get(&format!("{REREAD}{key}"))?.is_some()
+            || self.get(&format!("wread:{key}"))?.is_some()
+        {
+            return Ok(false);
+        }
+        let v = self.v;
+        let Some(skel) = self
+            .lb(v.field(&format!("wskel:{key}")))?
+            .filter(|&x| x != ValueId::UNIT)
+        else {
+            return Ok(false);
+        };
+        let me = self.cx.node().raw();
+        let i = self.cx.child(
+            self.ops.readback,
+            vec![
+                v.str(key),
+                v.int(i64::from_ne_bytes(me.to_ne_bytes())),
+                v.int(1),
+            ],
+        );
+        let guess =
+            if self.cx.placed_output_peek(i).is_none() {
+                let epoch = self.cx.values_epoch();
+                let cx = &*self.cx;
+                let ops = &self.ops;
+                Some(
+                    crate::ops::readback_output(v, ops, epoch, key, true, &mut |f| {
+                        Ok(cx.peek_final(f))
+                    })
+                    .map_err(Halt::Stop)?,
+                )
+            } else {
+                None
+            };
+        let p = self.cx.path(&[phitex_defuse::Step::Index(0)]);
+        let flags = self.cx.placed_output_path_or(i, p, |_| guess);
+        if flags.is_none_or(|x| int_of(v, x) != 0) {
+            // (the child defines nothing: read as its text)
+            return Ok(false);
+        }
+        self.rb = Some(RbChild {
+            key: key.to_owned(),
+            i,
+            guess,
+            checked: phitex_defuse::FxHashSet::default(),
+            answered: Vec::new(),
+        });
+        let (locals, direct) = self.mixed_lists(i, guess);
+        if self.mixed_holds_key(key, &locals, &direct) {
+            self.mixed_off(key);
+            return Ok(false);
+        }
+        if crate::exec::obs_flag!("PHITEX_MIXED_TRACE") {
+            eprintln!(
+                "mixed: {key} in node {}: locals {:?} direct {:?}",
+                self.cx.node().raw(),
+                locals
+                    .iter()
+                    .map(|(n, x)| format!("{n}={:x}", x.raw()))
+                    .collect::<Vec<_>>(),
+                direct
+                    .iter()
+                    .map(|(n, x, _)| format!("{n}={}", v.render(*x)))
+                    .collect::<Vec<_>>()
+            );
+        }
+        self.note_read_point();
+        self.mark_read_point(key)?;
+        self.note_read_back(key)?;
+        self.mixed = Some(self.mixed_save(key, name, locals, direct));
+        let text = crate::defer::resolve_marked_run(self, &str_of(v, skel))?;
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "read-back: {key} in node {} at command {} (mixed, skeleton {} bytes)",
+                self.cx.node().raw(),
+                self.cmds,
+                text.len()
+            );
+        }
+        self.push_toks([Tok::cs(crate::etex::EOF_MIXED)]);
+        let mut f = FileRest::new(v, v.str(&text), 0, name);
+        f.mixed = true;
+        self.input.push_file(f);
+        Ok(true)
+    }
+
+    /// What the run is before a mixed read-back's skeleton
+    /// ([`MixedRead`]), its table kept as it changes.
+    fn mixed_save(
+        &mut self,
+        key: &str,
+        name: ValueId,
+        locals: Vec<(String, ValueId)>,
+        direct: Vec<(String, ValueId, bool)>,
+    ) -> Box<MixedRead> {
+        self.flush_bulk_codes();
+        let st = (!self.st.checkpoint()).then(|| self.st.clone());
+        Box::new(MixedRead {
+            key: key.to_owned(),
+            name,
+            locals,
+            direct,
+            st,
+            stamp: self.st.stamp(),
+            gids: self.st.gid_mark(),
+            nc: self.contribs.len(),
+            nk: self.kids.len(),
+            nest_len: self.nest.len(),
+            conds: self.conds.clone(),
+            codes: self.if_codes.clone(),
+            cur: self.cur,
+            effect: self.effect,
+            aopen: self.aopen,
+            reg_kept: (self.reg_first_def.clone(), self.reg_loaded_base.clone()),
+            broken: false,
+        })
+    }
+
+    /// The mixed read-back child `i`'s local keys and the keys read
+    /// directly (`ops::ReadBack`'s output, its third and fourth parts).
+    #[allow(
+        clippy::type_complexity,
+        reason = "the child's two lists as it gives them"
+    )]
+    fn mixed_lists(
+        &mut self,
+        i: usize,
+        guess: Option<ValueId>,
+    ) -> (Vec<(String, ValueId)>, Vec<(String, ValueId, bool)>) {
+        let v = self.v;
+        let p = self.cx.path(&[phitex_defuse::Step::Index(2)]);
+        let locals = self
+            .cx
+            .placed_output_path_or(i, p, |_| guess)
+            .map(|x| list_of(v, x))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| match list_of(v, e)[..] {
+                [n, x] => Some((str_of(v, n), x)),
+                _ => None,
+            })
+            .collect();
+        let p = self.cx.path(&[phitex_defuse::Step::Index(3)]);
+        let direct = self
+            .cx
+            .placed_output_path_or(i, p, |_| guess)
+            .map(|x| list_of(v, x))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| match list_of(v, e)[..] {
+                [n, x, g] => Some((str_of(v, n), x, int_of(v, g) != 0)),
+                _ => None,
+            })
+            .collect();
+        (locals, direct)
+    }
+
+    /// Whether the run holds a key of mixed file `key` already: read
+    /// before the skeleton, as TeX may have read it after its line, the
+    /// file is read as its text. Each held location is checked
+    /// ([`RbChild::checked`]).
+    fn mixed_holds_key(
+        &mut self,
+        key: &str,
+        locals: &[(String, ValueId)],
+        direct: &[(String, ValueId, bool)],
+    ) -> bool {
+        let v = self.v;
+        let mut held: Vec<Loc> = self.st.held_locs().collect();
+        held.sort_unstable();
+        held.dedup();
+        let mut holds_key = false;
+        for l in held {
+            if let Some(rb) = &mut self.rb {
+                rb.checked.insert(l);
+            }
+            let f = self.loc_field(l);
+            let name = crate::val::field_name(v, f);
+            if locals.iter().any(|(n, _)| *n == name)
+                || direct.iter().any(|(n, ..)| *n == name)
+                || (crate::ops::rb_answers(&name) && self.rb_key(f.0).is_some())
+            {
+                if crate::exec::obs_flag!("PHITEX_AUX_TRACE")
+                    || crate::exec::obs_flag!("PHITEX_MIXED_TRACE")
+                {
+                    eprintln!(
+                        "aux-trace: mixed read-back of {key} in node {}: {name} held before it",
+                        self.cx.node().raw()
+                    );
+                }
+                holds_key = true;
+            }
+        }
+        holds_key
+    }
+
+    /// A line of a mixed read-back's skeleton begins ([`MixedRead`]): the
+    /// line before it ended with the run's groups, conditionals,
+    /// alignments and scan as the skeleton began, where a defining line
+    /// between them is read as TeX reads it; else the file is read as its
+    /// text ([`Run::mixed_end`]).
+    pub(crate) fn mixed_line(&mut self) {
+        let Some(m) = &self.mixed else { return };
+        let balanced = self.nest.len() == m.nest_len
+            && self.conds == m.conds
+            && self.aopen == m.aopen
+            && self.scanner.is_none();
+        if !balanced && let Some(m) = &mut self.mixed {
+            if !m.broken && crate::exec::obs_flag!("PHITEX_MIXED_TRACE") {
+                eprintln!("mixed: skeleton line unbalanced");
+            }
+            m.broken = true;
+        }
+    }
+
+    /// A mixed read-back's skeleton ended ([`MixedRead`]): where no
+    /// skeleton line touched a key, each line ended balanced, and nothing
+    /// the skeleton defined is read by a defining line (`wmreads:`) or is
+    /// a category code (the defining lines were read under the codes of
+    /// the read-back point), the two parts commute: the local keys are
+    /// defined here, the global ones by the child or at their first use
+    /// ([`Run::rb_check`]). Else the run goes back to what it was before
+    /// the skeleton and reads the file as its text, its child told to
+    /// define nothing (`ops::MIXED_OFF`).
+    pub(crate) fn mixed_end(&mut self) -> R<()> {
+        self.mixed_line();
+        let Some(m) = self.mixed.take() else {
+            return Ok(());
+        };
+        let v = self.v;
+        let why = self.mixed_broken(&m)?;
+        let broken = why.is_some();
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE")
+            || crate::exec::obs_flag!("PHITEX_MIXED_TRACE")
+        {
+            eprintln!(
+                "aux-trace: mixed read-back of {} in node {}: {}",
+                m.key,
+                self.cx.node().raw(),
+                why.map_or_else(|| "kept".to_owned(), |w| format!("read as its text ({w})"))
+            );
+        }
+        if !broken {
+            // (the table's changes no longer kept: the skeleton stands)
+            if m.st.is_none() {
+                self.st.take_undo();
+            }
+            for (name, x) in &m.locals {
+                self.read_back_pre(&m.key, name, *x)?;
+                self.set(name, *x, false);
+            }
+            for (name, x, g) in &m.direct {
+                self.read_back_pre(&m.key, name, *x)?;
+                self.set(name, *x, *g);
+            }
+            return Ok(());
+        }
+        // (the run as it was before the skeleton: its table, lists,
+        // contributions and placements; the reads it made stay)
+        let m = *m;
+        match m.st {
+            Some(st) => {
+                let u = self.st.take_undo();
+                self.st = st;
+                self.st.set_undo(u);
+            }
+            None => self.st.rollback(),
+        }
+        (self.reg_first_def, self.reg_loaded_base) = m.reg_kept;
+        self.muts += 1;
+        self.contribs.truncate(m.nc);
+        self.left_memo = None;
+        self.kids.truncate(m.nk);
+        self.nest.truncate(m.nest_len);
+        self.conds = m.conds;
+        self.if_codes = m.codes;
+        self.cur = m.cur;
+        self.effect = m.effect;
+        self.aopen = m.aopen;
+        self.kind_memo = None;
+        self.rb = None;
+        self.mixed_off(&m.key);
+        let order = self.written_order(&m.key)?;
+        self.push_toks([Tok::cs("\u{10FFFE}eof")]);
+        self.input.push_file(FileRest::written(v, order, m.name));
+        Ok(())
+    }
+
+    /// Why mixed read-back `m`'s two parts do not commute
+    /// ([`Run::mixed_end`]); `None` where they do.
+    fn mixed_broken(&mut self, m: &MixedRead) -> R<Option<String>> {
+        if m.broken {
+            return Ok(Some("a line unbalanced, or a key touched".to_owned()));
+        }
+        let v = self.v;
+        // (each field the skeleton defined asked of the defining lines'
+        // reads alone, `ops::MIXED_READ`: a line read or dropped elsewhere
+        // asks this run nothing)
+        for l in self.st.defined_locs_since(m.stamp, m.gids) {
+            let name = crate::val::field_name(v, self.loc_field(l));
+            if name.starts_with("cat:") {
+                return Ok(Some(name));
+            }
+            let looked = format!("{}{name}", crate::api::PARAM_LOOK);
+            for r in [name, looked] {
+                let f = crate::ops::mixed_read_field(v, &m.key, &r);
+                if self.lb_present(f)? {
+                    return Ok(Some(format!("defining lines read {r}")));
+                }
+            }
+        }
+        for (name, _) in &m.locals {
+            let l = self.loc_of(v.field(name));
+            if self.rb.as_ref().is_some_and(|rb| rb.checked.contains(&l)) {
+                return Ok(Some(format!("local {name} touched")));
+            }
+        }
+        // (a key read directly, held by nothing before the skeleton: read
+        // or defined since, it was touched)
+        for (name, ..) in &m.direct {
+            let l = self.loc_of(v.field(name));
+            if self.st.is_loaded(l) || self.st.defined_after(l, m.stamp) {
+                return Ok(Some(format!("direct {name} touched")));
+            }
+        }
+        Ok(None)
+    }
+
+    /// A mixed read-back of file `key` given up: its child defines
+    /// nothing (`ops::MIXED_OFF`, read after this run).
+    fn mixed_off(&mut self, key: &str) {
+        self.rb = None;
+        self.set(
+            &format!("{}{key}", crate::ops::MIXED_OFF),
+            self.v.int(1),
+            true,
+        );
     }
 
     /// A meaning look-up's first touch of location `loc` in the run: a
@@ -4656,6 +5129,18 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(val) = self.rb_key(f.0) else {
             return Ok(());
         };
+        // (a mixed read-back's skeleton touching a key: the two parts
+        // do not commute, the file is read as its text, `Run::mixed_end`)
+        if let Some(m) = &mut self.mixed {
+            if !m.broken && crate::exec::obs_flag!("PHITEX_MIXED_TRACE") {
+                eprintln!(
+                    "mixed: skeleton touched key {}",
+                    crate::val::field_name(v, f)
+                );
+            }
+            m.broken = true;
+            return Ok(());
+        }
         let key = self
             .rb
             .as_ref()
@@ -4997,6 +5482,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let mut res = Ok(());
         self.interp_short = false;
+        self.interp_lineno = false;
         self.interp_nested.clear();
         let scanner = self.scanner.take();
         while self.has_input() {
@@ -5043,6 +5529,7 @@ impl<'c, 'a> Run<'c, 'a> {
             && self.nest.len() == nest_len + 1
             && self.nest.last().is_some_and(|l| l.list.is_empty())
             && self.conds == conds
+            && !std::mem::take(&mut self.interp_lineno)
             && !line_keeps_box(v, &made);
         if !self.interp_plain && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             self.trace_more_than_define(res.is_ok(), (nc, nk, nest_len), &conds);

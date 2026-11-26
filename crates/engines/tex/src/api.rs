@@ -5138,6 +5138,258 @@ pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String
     (out, folds)
 }
 
+/// A written line whose read-back does more than define, as
+/// [`crate::run::Run::write_out`] found it: `[name, line, UNIT, 1, made,
+/// reads]`, what it defined and read up to the command that did more
+/// (`[name, line, UNIT]` is a line not interpreted).
+pub(crate) fn more_entry(
+    v: &Values,
+    name: &str,
+    line: &str,
+    made: ValueId,
+    reads: ValueId,
+) -> ValueId {
+    v.list(vec![
+        v.str(name),
+        v.str(line),
+        ValueId::UNIT,
+        v.int(1),
+        made,
+        reads,
+    ])
+}
+
+/// A job-written file read back as its text (a line of it does more than
+/// define) whose every line was told apart where it was written: read
+/// back mixed at its first read-back point (docs/spec-symbol-reads.md
+/// §2). Its skeleton is the lines that do more and every defining line
+/// that defines what one of them defines or reads, or reads what one of
+/// them defines, closed over again (a field the skeleton and a line share
+/// orders them); the other defining lines are read back per field: their
+/// definitions merged, and what they read.
+#[derive(Default)]
+pub(crate) struct Mixed {
+    /// The skeleton's lines, in order.
+    pub skeleton: String,
+    /// The other lines, in order: a fold's text.
+    pub defs_text: String,
+    /// Their definitions, each field once with its last value
+    /// ([`merge_defs`]).
+    pub defs: Vec<(String, ValueId)>,
+    /// The fields they read (`PARAM_LOOK`-tagged where only looked at
+    /// for `#`).
+    pub reads: Vec<ValueId>,
+    /// One of them reads what one before it defines: their definitions
+    /// are their text's read at once (`ops::ReadBack`).
+    pub fold: bool,
+}
+
+/// A written line as [`written_mixed`] takes it: its text, whether it
+/// does more than define, its definitions (as made), their fields, and
+/// the fields it read (bare: a `PARAM_LOOK` tag taken off) and as read.
+struct MixLine {
+    text: ValueId,
+    more: bool,
+    made: ValueId,
+    defs: Vec<ValueId>,
+    reads: Vec<ValueId>,
+    tagged: Vec<ValueId>,
+}
+
+/// The files of `texts` (read back as their text) that read back mixed
+/// ([`Mixed`]): each line of theirs interpreted where it was written,
+/// none needing the next one, the file opened once; lines after its
+/// close dropped, as its text drops them ([`stream_texts`]).
+pub(crate) fn written_mixed(
+    v: &Values,
+    streams: Option<ValueId>,
+    texts: &[String],
+) -> Vec<(String, Mixed)> {
+    let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
+    // (per file: its lines so far, whether it may be mixed, whether it is
+    // closed)
+    let mut files: Vec<(String, Vec<MixLine>, bool, bool)> = Vec::new();
+    let mut bare: FxHashMap<ValueId, ValueId> = FxHashMap::default();
+    let mut line_of = |text: ValueId, more: bool, made: ValueId, rs: ValueId| {
+        let tagged = list_of(v, rs);
+        let reads = tagged
+            .iter()
+            .map(|&r| {
+                *bare.entry(r).or_insert_with(|| {
+                    v.with_str(r, |s| s.strip_prefix(PARAM_LOOK).map(|n| v.str(n)))
+                        .flatten()
+                        .unwrap_or(r)
+                })
+            })
+            .collect();
+        let defs = list_of(v, made)
+            .iter()
+            .filter_map(|&d| v.with_list(d, |xs| xs.first().copied()).flatten())
+            .collect();
+        MixLine {
+            text,
+            more,
+            made,
+            defs,
+            reads,
+            tagged,
+        }
+    };
+    for e in doc_order(v, &streams) {
+        if is_cand_marker(v, e) {
+            continue;
+        }
+        let xs = list_of(v, stream_entry(v, e));
+        let Some(&n) = xs.first() else { continue };
+        if v.with_str(n, |s| texts.iter().any(|t| t == s)) != Some(true) {
+            continue;
+        }
+        let k = if let Some(k) = files
+            .iter()
+            .position(|f| v.with_str(n, |s| f.0 == s) == Some(true))
+        {
+            k
+        } else {
+            files.push((str_of(v, n), Vec::new(), false, false));
+            files.len() - 1
+        };
+        let (_, lines, refused, closed) = &mut files[k];
+        if xs
+            .get(2)
+            .is_some_and(|&c| v.as_str(c).as_deref() == Some("close"))
+        {
+            *closed = true;
+            continue;
+        }
+        let Some(&line) = xs.get(1) else {
+            // (opened again: its text begins again)
+            if *closed || !lines.is_empty() {
+                mixed_refused(v, e, "opened again");
+                *refused = true;
+            }
+            continue;
+        };
+        if *closed {
+            continue;
+        }
+        let ml = match xs[..] {
+            // (a line that does more, with what it defined and read until
+            // it did)
+            [_, _, made, more, partial, rs]
+                if made == ValueId::UNIT && v.as_int(more) == Some(1) =>
+            {
+                line_of(line, true, partial, rs)
+            }
+            // (a defining line)
+            [_, _, made, rs] if made != ValueId::UNIT => line_of(line, false, made, rs),
+            // (a line not interpreted, or one needing the next)
+            _ => {
+                mixed_refused(v, e, "a line not told apart");
+                *refused = true;
+                continue;
+            }
+        };
+        lines.push(ml);
+    }
+    // (a file with no line left to read per field: its skeleton is its
+    // text, read as such)
+    files
+        .into_iter()
+        .filter(|f| !f.2)
+        .map(|(n, lines, ..)| (n, mixed_of(v, &lines)))
+        .filter(|(_, m)| !m.defs_text.is_empty())
+        .collect()
+}
+
+/// [`written_mixed`]'s split of one file's lines: the skeleton closed
+/// over the fields it shares with a defining line (a definition against
+/// a definition or a read; reads alone order nothing), the rest per field.
+fn mixed_of(v: &Values, lines: &[MixLine]) -> Mixed {
+    let mut skel: Vec<bool> = lines.iter().map(|l| l.more).collect();
+    let mut sdefs: phitex_defuse::FxHashSet<ValueId> = phitex_defuse::FxHashSet::default();
+    let mut sreads: phitex_defuse::FxHashSet<ValueId> = phitex_defuse::FxHashSet::default();
+    for l in lines.iter().filter(|l| l.more) {
+        sdefs.extend(l.defs.iter().copied());
+        sreads.extend(l.reads.iter().copied());
+    }
+    loop {
+        let mut grew = false;
+        for (i, l) in lines.iter().enumerate() {
+            if skel[i] {
+                continue;
+            }
+            let shares = l
+                .defs
+                .iter()
+                .any(|d| sdefs.contains(d) || sreads.contains(d))
+                || l.reads.iter().any(|r| sdefs.contains(r));
+            if shares {
+                skel[i] = true;
+                sdefs.extend(l.defs.iter().copied());
+                sreads.extend(l.reads.iter().copied());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut m = Mixed::default();
+    let mut defined: phitex_defuse::FxHashSet<ValueId> = phitex_defuse::FxHashSet::default();
+    let mut looked: phitex_defuse::FxHashSet<ValueId> = phitex_defuse::FxHashSet::default();
+    let mut reads: phitex_defuse::FxHashSet<ValueId> = phitex_defuse::FxHashSet::default();
+    for (i, l) in lines.iter().enumerate() {
+        let text = str_of(v, l.text);
+        if skel[i] {
+            m.skeleton.push_str(&text);
+            continue;
+        }
+        m.defs_text.push_str(&text);
+        for (&r, &t) in l.reads.iter().zip(&l.tagged) {
+            let seen = if r == t {
+                defined.contains(&r)
+            } else {
+                looked.contains(&r)
+            };
+            if seen {
+                m.fold = true;
+            }
+            reads.insert(t);
+        }
+        for d in list_of(v, l.made) {
+            if let [f, x, _] = list_of(v, d).as_slice() {
+                let looked_at = match crate::val::Mean::decode(v, Some(*x)) {
+                    crate::val::Mean::Prim(_, c, _) | crate::val::Mean::Char(c, _) => {
+                        c == crate::val::cmd::MAC_PARAM
+                            || c == crate::val::cmd::IF_TEST
+                            || c == crate::val::cmd::FI_OR_ELSE
+                    }
+                    crate::val::Mean::Macro(x) => x.flags & 2 != 0,
+                    _ => false,
+                };
+                if looked_at {
+                    looked.insert(*f);
+                }
+                defined.insert(*f);
+            }
+        }
+        merge_defs(v, &mut m.defs, l.made);
+    }
+    m.reads = reads.into_iter().collect();
+    m
+}
+
+/// (observe, `PHITEX_AUX_TRACE`) Why a file is not read back mixed
+/// ([`written_mixed`]): the entry and the reason.
+fn mixed_refused(v: &Values, e: ValueId, why: &str) {
+    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+        eprintln!(
+            "aux-trace: not mixed: {why}: {}",
+            v.render(e).chars().take(160).collect::<String>()
+        );
+    }
+}
+
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
 const FORMAT_HINT: &str = "A\x1eformat: the whole text, run once\x1e";
 

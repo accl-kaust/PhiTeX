@@ -96,5 +96,37 @@ inline, as today. Later read-backs (`\enddocument`'s, which writes the
 `.toc`/`.nav` lines) read the text inline, as today.
 
 Cost: each written line of such a file is interpreted where it is
-written (today the lines after the first that does more are not); a
+written (before, the lines after the first that did more were not); a
 skeleton line's interpretation stops at its first command that does more.
+
+As built (2026-11-26):
+
+- After a line of its run that did more, a run tells the later lines
+  apart only where the file has a read-back point (`wpoint:`): a file no
+  one reads back is never mixed (`\enddocument`'s 1345 `\babel@toc`
+  lines to a `.toc` no one reads cost 1 s a round when told apart).
+- A text a run found to do more is taken to do more again, unread (the
+  same `\babel@aux` line on every page); taking it so is safe, the
+  skeleton then holding a line that might define. A line that defines is
+  interpreted each time: its read-back depends on the state where it is
+  written (a memo of those gave bibtopic's `\citation{*}` the read-back
+  of its first writing, and wrong citations).
+- `\inputlineno` read by a line's interpretation: into the log (which
+  the interpretation drops) it reads nothing; into anything else the
+  line does more (its number where the file is read back is that file's
+  line, not known where it is written).
+- A file with no defining line left outside its skeleton is not mixed.
+- The skeleton and the defining lines' text are resolved
+  (§2.7 marks) in the file's node, as the whole text is.
+- Where the reader reads a key a skeleton line defines (`\@abspage@last`,
+  `HyPL@Labels` at the beamer deck's `\begin{document}`), it runs again
+  on that key, as it reads it: an inserted frame changes both.
+
+Measured on the deck's frame insert (-j1, n11): `\begin{document}`
+runs once in the edit's round before and after (it reads
+`\@abspage@last`, which the insert changes); its rerun before was the
+`.aux` text's, now the key's. B4 (read-back keyed by symbol) is not
+built: the remember pictures still run again on the positions their
+shifted numbers name until the second round; making the derived
+definition (`pos@pgfid<S>`) read back by symbol needs the engine to
+define a derived name's field at a place, which it has not.

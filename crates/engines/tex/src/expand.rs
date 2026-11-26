@@ -130,9 +130,7 @@ impl Run<'_, '_> {
                     // (a derived name's symbol kept: not expanded, its
                     // digits are not needed, docs/spec-symbol-reads.md B3)
                     let was = self.scanner.take();
-                    self.d_ok = true;
-                    self.get_token_stored();
-                    self.d_ok = false;
+                    self.get_token_stored_d();
                     self.scanner = was;
                     self.ck()?;
                     let t = self.cur.tok;
@@ -1991,13 +1989,16 @@ impl Run<'_, '_> {
             self.input.push_file(f);
             return Ok(());
         }
-        let Some(x) = self.read_file_lazy(&key)? else {
+        // (a file that may read back mixed: its units' order read only
+        // where it is read as its text, `Run::mixed_file`)
+        let (mixed, x) = self.input_file(&key)?;
+        let Some(x) = x else {
             // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
             // job ends
             self.log_bare("I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         };
-        let xs = crate::val::list_of(self.v, x);
+        let mut xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
             self.log_bare("I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
@@ -2011,6 +2012,15 @@ impl Run<'_, '_> {
         let text = xs[1];
         let path = str_of(self.v, xs[0]);
         self.log("open", &path)?;
+        // (a file the job writes read back as its text, mixed at its first
+        // read-back point: its skeleton read here, its other lines per
+        // field, docs/spec-symbol-reads.md §2)
+        if mixed {
+            if self.mixed_begin(&key, xs[0])? {
+                return Ok(());
+            }
+            xs.push(self.written_order(&key)?);
+        }
         self.push_toks([Tok::cs("\u{10FFFE}eof")]);
         // (a file the job writes: its units, read where a run reads its
         // lines, a piece each where it slices, `Run::doc_file_regions`)

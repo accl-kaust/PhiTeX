@@ -689,16 +689,38 @@ impl Operation for ReadBack {
         let args = cx.args().to_vec();
         let v = cx.values();
         let o = ops(&self.0);
-        let [key, parent] = args[..] else {
-            return Ok(v.list(vec![v.int(1), v.list(vec![])]));
+        let (key, parent, mixed) = match args[..] {
+            [key, parent] => (key, parent, false),
+            [key, parent, m] => (key, parent, int_of(v, m) != 0),
+            _ => return Ok(v.list(vec![v.int(1), v.list(vec![])])),
         };
         let key = str_of(v, key);
         let parent =
             phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, parent).to_ne_bytes()));
         let epoch = cx.values_epoch();
-        let out = readback_output(v, o, epoch, &key, &mut |f| lb_read(cx, f))?;
+        let out = if mixed
+            && lb_read(cx, v.field(&format!("wmfold:{key}")))?.and_then(|x| v.as_bool(x))
+                == Some(true)
+        {
+            mixed_fold_output(cx, o, &key)?
+        } else {
+            readback_output(v, o, epoch, &key, mixed, &mut |f| lb_read(cx, f))?
+        };
         let xs = list_of(v, out);
         if int_of(v, xs[0]) != 0 {
+            return Ok(out);
+        }
+        // (a mixed read-back the reading run gave up for its text: it
+        // defines every key itself, and this none, `Run::mixed_end`. The
+        // output stays what the run read deciding that)
+        if mixed
+            && let phitex_defuse::FieldAt::Def(x, Some(by)) = cx.read_at(
+                v.field(&format!("{MIXED_OFF}{key}")),
+                phitex_defuse::At::AfterOwn(parent),
+            )?
+            && by == parent
+            && int_of(v, x) != 0
+        {
             return Ok(out);
         }
         // (the global keys: the local ones the reading run makes itself
@@ -721,6 +743,56 @@ impl Operation for ReadBack {
     }
 }
 
+/// A mixed file's defining lines that read what one before them
+/// defines ([`define_mixed`]): their text read at once from the file's
+/// read-back point by a run of the child's own (as [`fold_node`] reads a
+/// fold), its definitions the output [`readback_output`] makes of a key
+/// set's; flags 1 where the text does more than define.
+fn mixed_fold_output(cx: &mut Ctx<'_>, o: &Ops, key: &str) -> Result<ValueId, Stop> {
+    let v = cx.values();
+    let refused = || {
+        v.list(vec![
+            v.int(1),
+            v.list(vec![]),
+            v.list(vec![]),
+            v.list(vec![]),
+        ])
+    };
+    let Some(text) =
+        lb_read(cx, v.field(&format!("wmtext:{key}")))?.filter(|&x| x != ValueId::UNIT)
+    else {
+        return Ok(refused());
+    };
+    let text = str_of(v, text);
+    let made = {
+        let mut r = Run::new(cx, o);
+        r.interpret_fold(key, &text)
+    };
+    let ds = match made {
+        Ok((ds, false)) => ds,
+        Err(Halt::Stop(s)) => return Err(s),
+        Ok((_, true)) | Err(_) => return Ok(refused()),
+    };
+    let (mut out, mut local, mut direct) = (Vec::new(), Vec::new(), Vec::new());
+    for (name, x) in ds {
+        if x == ValueId::UNIT || name.starts_with("rberr:") {
+            return Ok(refused());
+        }
+        match list_of(v, x)[..] {
+            [val, g] if !rb_answers(&name) => direct.push(v.list(vec![v.str(&name), val, g])),
+            [val, g] if int_of(v, g) != 0 => out.push(v.list(vec![v.str(&name), val])),
+            [val, _] => local.push(v.list(vec![v.str(&name), val])),
+            _ => return Ok(refused()),
+        }
+    }
+    Ok(v.list(vec![v.int(0), v.list(out), v.list(local), v.list(direct)]))
+}
+
+/// The field a reading run defines where it gave up a mixed read-back
+/// of a file (`<MIXED_OFF><file>`, `Run::mixed_end`): that file's child
+/// defines nothing.
+pub(crate) const MIXED_OFF: &str = "wmixoff:";
+
 /// Whether a read-back child answers for key `name`: a location the
 /// reading run reads only through `Run::load_slow` and the meaning
 /// look-ups (`Run::rb_check`): not an integer register, which a symbol
@@ -739,6 +811,7 @@ pub(crate) fn readback_output(
     o: &Ops,
     epoch: u64,
     key: &str,
+    mixed: bool,
     lb: &mut dyn FnMut(Field) -> Result<Option<ValueId>, Stop>,
 ) -> Result<ValueId, Stop> {
     let refused = |v: &Values, why: &str| {
@@ -747,8 +820,13 @@ pub(crate) fn readback_output(
         }
         v.list(vec![v.int(1), v.list(vec![]), v.list(vec![])])
     };
-    let k = o.fields.keyed(v, epoch, crate::fields::Fam::Wkeys, key);
-    let Some(keys) = lb(k)? else {
+    // (a mixed file's defining lines: their own key set, `define_mixed`)
+    let k = if mixed {
+        v.field(&format!("wmkeys:{key}"))
+    } else {
+        o.fields.keyed(v, epoch, crate::fields::Fam::Wkeys, key)
+    };
+    let Some(keys) = lb(k)?.filter(|&x| !mixed || x != ValueId::UNIT) else {
         return Ok(refused(v, "no key set"));
     };
     if keys == crate::api::text_mark(v) {
@@ -756,6 +834,10 @@ pub(crate) fn readback_output(
     }
     let mut out = Vec::new();
     let mut local = Vec::new();
+    // (a mixed file's keys the run reads directly, an integer register
+    // or a box: `[name, value, global]`, made by the run itself after its
+    // skeleton, `Run::mixed_end`)
+    let mut direct = Vec::new();
     for k in list_of(v, keys) {
         let k = str_of(v, k);
         if k == crate::api::WRITTEN_KEY {
@@ -763,7 +845,7 @@ pub(crate) fn readback_output(
         }
         let id = crate::api::wdef_id(key, &k);
         let name = crate::api::wdef_field(&id).to_owned();
-        if !rb_answers(&name) {
+        if !rb_answers(&name) && !mixed {
             return Ok(refused(v, &name));
         }
         let wd = o.fields.keyed(v, epoch, crate::fields::Fam::Wdef, &id);
@@ -771,12 +853,17 @@ pub(crate) fn readback_output(
             continue;
         };
         match list_of(v, x)[..] {
+            [val, g] if !rb_answers(&name) => direct.push(v.list(vec![v.str(&name), val, g])),
             [val, g] if int_of(v, g) != 0 => out.push(v.list(vec![v.str(&name), val])),
             [val, _] => local.push(v.list(vec![v.str(&name), val])),
             _ => return Ok(refused(v, &format!("{name}: no [value, global]"))),
         }
     }
-    Ok(v.list(vec![v.int(0), v.list(out), v.list(local)]))
+    let mut xs = vec![v.int(0), v.list(out), v.list(local)];
+    if mixed {
+        xs.push(v.list(direct));
+    }
+    Ok(v.list(xs))
 }
 
 /// Definitions made by a group's end for outside it: `[[name, value,
@@ -1082,14 +1169,20 @@ fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
     Ok(ValueId::UNIT)
 }
 
+/// [`stream_of`]'s answer: a written file's text, its read-back's
+/// definitions, how it is read back and its mixed read-back.
+type StreamOf = (
+    Option<String>,
+    Option<WrittenDefs>,
+    ReadKind,
+    Option<crate::api::Mixed>,
+);
+
 /// A written file's text, its read-back's definitions and whether it is
 /// read back as its text (a line of it did more than define,
 /// [`crate::api::written_as_text`]), from its stream's accumulator alone
 /// ([`crate::run::stream_bucket`]).
-fn stream_of(
-    cx: &mut Ctx<'_>,
-    name: &str,
-) -> Result<(Option<String>, Option<WrittenDefs>, ReadKind), Stop> {
+fn stream_of(cx: &mut Ctx<'_>, name: &str) -> Result<StreamOf, Stop> {
     let v = cx.values();
     let acc = cx.fold(crate::run::stream_bucket(v, name), None, None)?;
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -1123,7 +1216,24 @@ fn stream_of(
     } else {
         ReadKind::Fields
     };
-    Ok((text, defs, kind))
+    // (a file read back as its text whose every line was told apart:
+    // read back mixed at its first read-back point,
+    // docs/spec-symbol-reads.md §2)
+    let mut mixed = if kind == ReadKind::Text && !crate::exec::obs_flag!("PHITEX_NO_MIXED") {
+        crate::api::written_mixed(v, Some(acc), &[name.to_owned()])
+            .into_iter()
+            .next()
+            .map(|(_, m)| m)
+    } else {
+        None
+    };
+    // (its texts' symbols resolved here too, as the whole text's: a
+    // mark names its piece, which another round numbers otherwise)
+    if let Some(m) = &mut mixed {
+        m.skeleton = crate::defer::resolve_marked_cx(cx, &m.skeleton)?;
+        m.defs_text = crate::defer::resolve_marked_cx(cx, &m.defs_text)?;
+    }
+    Ok((text, defs, kind, mixed))
 }
 
 /// How a written file is read back ([`crate::api::written_kinds`]).
@@ -1155,7 +1265,7 @@ fn file_node(
     let v = cx.values();
     let wt = crate::tools::text_field(v, name);
     let t0 = std::time::Instant::now();
-    let (text, ds, kind) = stream_of(cx, name)?;
+    let (text, ds, kind, mixed) = stream_of(cx, name)?;
     let as_text = kind == ReadKind::Text;
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -1190,6 +1300,7 @@ fn file_node(
     // (the text not an argument: the child stays the same node as the
     // text changes, its definitions compared one by one)
     if kind == ReadKind::Fold && text.is_some() {
+        define_mixed(cx, name, None);
         let op = cx.op();
         cx.child(op, vec![v.str(name), v.int(1)]);
         return Ok(Some(tv));
@@ -1198,17 +1309,88 @@ fn file_node(
     // as its text once one does more, `wkeys:` then marked so)
     if as_text {
         define_as_text(cx, name, text, defs_lock);
+        define_mixed(cx, name, mixed.as_ref());
     } else {
-        define_fields(cx, name, ds.as_deref().unwrap_or_default(), text.as_deref());
+        define_fields(
+            cx,
+            name,
+            ds.as_deref().unwrap_or_default(),
+            text.as_deref(),
+            "wkeys",
+        );
+        define_mixed(cx, name, None);
     }
     Ok(Some(tv))
 }
 
-/// A written file read back per field: its key set (`wkeys:`) and each
-/// key's definition (`wdef:`) from its definitions `ds`.
-fn define_fields(cx: &mut Ctx<'_>, name: &str, ds: &[(String, ValueId)], text: Option<&str>) {
+/// A file read back as its text, mixed at its first read-back point
+/// (`m`, [`crate::api::Mixed`], docs/spec-symbol-reads.md §2): its
+/// skeleton (`wskel:<name>`, the lines that do more), what its defining
+/// lines read (`wmreads:<name>`), and their definitions per field, key
+/// set `wmkeys:<name>` and each key's `wdef:` (a fold's from its child,
+/// `[name, 2]`, reading their text `wmtext:<name>`). Not mixed: the
+/// skeleton unset (`UNIT`).
+fn define_mixed(cx: &mut Ctx<'_>, name: &str, m: Option<&crate::api::Mixed>) {
     let v = cx.values();
-    let k = v.field(&format!("wkeys:{name}"));
+    let sk = v.field(&format!("wskel:{name}"));
+    let Some(m) = m else {
+        define_traced(cx, sk, ValueId::UNIT);
+        return;
+    };
+    if crate::exec::obs_flag!("PHITEX_MIXED_TRACE") {
+        eprintln!(
+            "mixed: {name}: skeleton {} bytes, defining lines {} bytes, {} keys, fold {}, {} reads",
+            m.skeleton.len(),
+            m.defs_text.len(),
+            m.defs.len(),
+            m.fold,
+            m.reads.len()
+        );
+    }
+    // (what the defining lines read, a field each: the reader asks for
+    // those its skeleton defined, `Run::mixed_end`)
+    for &r in &m.reads {
+        define_traced(cx, mixed_read_field(v, name, &str_of(v, r)), v.int(1));
+    }
+    // (their list, for `keep_file`)
+    define_traced(
+        cx,
+        v.field(&format!("wmreads:{name}")),
+        v.list(m.reads.clone()),
+    );
+    define_traced(cx, sk, v.str(&m.skeleton));
+    // (a fold's definitions made by the read-back child, where a reader
+    // reads the file back mixed, `ReadBack`; else here)
+    define_traced(cx, v.field(&format!("wmtext:{name}")), v.str(&m.defs_text));
+    define_traced(cx, v.field(&format!("wmfold:{name}")), v.bool(m.fold));
+    if !m.fold {
+        define_fields(cx, name, &m.defs, None, "wmkeys");
+    }
+}
+
+/// The prefix of a mixed file's markers of the fields its defining lines
+/// read ([`define_mixed`]).
+pub(crate) const MIXED_READ: &str = "wmread:";
+
+/// The marker of field `read` read by a defining line of mixed file
+/// `file` ([`MIXED_READ`]; the file named in it, as a read's name may
+/// hold `\1`).
+pub(crate) fn mixed_read_field(v: &Values, file: &str, read: &str) -> Field {
+    v.field(&format!("{MIXED_READ}{file}\u{2}{read}"))
+}
+
+/// A written file read back per field: its key set (`<keys>:<name>`,
+/// `wkeys` or a mixed file's `wmkeys`) and each key's definition
+/// (`wdef:`) from its definitions `ds`.
+fn define_fields(
+    cx: &mut Ctx<'_>,
+    name: &str,
+    ds: &[(String, ValueId)],
+    text: Option<&str>,
+    keys: &str,
+) {
+    let v = cx.values();
+    let k = v.field(&format!("{keys}:{name}"));
     // (the file exists, whatever its lines define; a nested file's
     // key names that file)
     let keys = crate::api::key_set(v, name, ds);
@@ -1331,7 +1513,7 @@ pub(crate) fn fold_node(cx: &mut Ctx<'_>, o: &Ops, name: &str) -> Result<ValueId
         );
     }
     match ok {
-        Some(ds) => define_fields(cx, name, &ds, Some(&text)),
+        Some(ds) => define_fields(cx, name, &ds, Some(&text), "wkeys"),
         None => define_as_text(cx, name, Some(text), &o.defs),
     }
     Ok(ValueId::UNIT)
@@ -1365,9 +1547,25 @@ fn keep_file(cx: &mut Ctx<'_>, name: &str) -> Result<ValueId, Stop> {
         v.field(&format!("{WSAME}:{name}")),
         crate::tools::lines_field(v, name),
     ];
-    if let Some(keys) = lb_read(cx, k)?
-        && keys != crate::api::text_mark(v)
-    {
+    // (a mixed file's too, `define_mixed`: its skeleton, its defining
+    // lines' text, reads and key set)
+    let mk = v.field(&format!("wmkeys:{name}"));
+    fields.extend([
+        v.field(&format!("wskel:{name}")),
+        v.field(&format!("wmtext:{name}")),
+        v.field(&format!("wmfold:{name}")),
+        v.field(&format!("wmreads:{name}")),
+        mk,
+    ]);
+    if let Some(reads) = lb_read(cx, v.field(&format!("wmreads:{name}")))? {
+        for r in list_of(v, reads) {
+            fields.push(mixed_read_field(v, name, &str_of(v, r)));
+        }
+    }
+    for keys in [lb_read(cx, k)?, lb_read(cx, mk)?].into_iter().flatten() {
+        if keys == crate::api::text_mark(v) {
+            continue;
+        }
         for key in list_of(v, keys) {
             let key = str_of(v, key);
             if key == crate::api::WRITTEN_KEY {
