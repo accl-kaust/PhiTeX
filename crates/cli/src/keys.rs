@@ -346,6 +346,24 @@ pub fn width() -> Option<usize> {
     None
 }
 
+/// The rows of the terminal on standard error.
+pub fn height() -> Option<usize> {
+    #[cfg(unix)]
+    if let Ok(w) = rustix::termios::tcgetwinsize(std::io::stderr())
+        && w.ws_row > 0
+    {
+        return Some(usize::from(w.ws_row));
+    }
+    #[cfg(windows)]
+    if std::io::stderr().is_terminal()
+        && let Ok((_, h)) = crossterm::terminal::size()
+        && h > 0
+    {
+        return Some(usize::from(h));
+    }
+    None
+}
+
 /// This process's CPU time so far (all its threads) and resident memory
 /// (Linux: `/proc/self/stat`; elsewhere none).
 pub fn usage() -> Option<(std::time::Duration, u64)> {

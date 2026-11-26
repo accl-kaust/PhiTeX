@@ -434,6 +434,12 @@ struct Doc {
     /// that ends finds it changed and does nothing).
     stops_at: Option<SystemTime>,
     idle: u64,
+    /// While it builds: its build's lines (the spinner and its tree, as
+    /// its session draws them, [`crate::ui::RELAY`]); empty between builds.
+    tree: Vec<String>,
+    /// Its last printed lines (the build's result, its problems): the
+    /// tree's lines under it between builds.
+    recent: std::collections::VecDeque<String>,
 }
 
 impl Doc {
@@ -455,6 +461,8 @@ impl Doc {
             last_error: None,
             stops_at: None,
             idle: 0,
+            tree: Vec::new(),
+            recent: std::collections::VecDeque::new(),
         }
     }
 
@@ -817,6 +825,18 @@ fn spawn(sh: &Arc<Shared>, rel: &str, epoch: u64) -> std::io::Result<Running> {
         .arg(&arg)
         .args(["--port", "0"])
         .env(crate::ui::RELAY, "1")
+        .env(
+            crate::ui::RELAY_COLOR,
+            if sh.ui.st.color { "1" } else { "0" },
+        )
+        .env(
+            crate::ui::RELAY_WIDTH,
+            crate::keys::width()
+                .unwrap_or(100)
+                .saturating_sub(6)
+                .max(40)
+                .to_string(),
+        )
         .env(crate::watch::TURNS, &sh.turns)
         .current_dir(&dir)
         .stdin(Stdio::piped())
@@ -872,7 +892,29 @@ fn told(sh: &Shared, rel: &str, epoch: u64, v: &Value) {
         return;
     }
     let mut measure = false;
+    let keep = |d: &mut Doc, l: String| {
+        if l.trim().is_empty() {
+            return;
+        }
+        d.recent.push_back(l);
+        while d.recent.len() > 12 {
+            d.recent.pop_front();
+        }
+    };
     match v["kind"].as_str().unwrap_or("") {
+        // (its build's lines: the terminal's tree drawn again, the pages
+        // told nothing)
+        "tree" => {
+            d.tree = v["lines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l.as_str().map(str::to_owned))
+                .collect();
+            drop(st);
+            let _ = lock(&sh.tx).send(Ev::Changed);
+            return;
+        }
         "event" => {
             let e = &v["event"];
             match e["event"].as_str().unwrap_or("") {
@@ -927,11 +969,20 @@ fn told(sh: &Shared, rel: &str, epoch: u64, v: &Value) {
         "busy" => text.clone_into(&mut d.busy),
         "error" => {
             d.last_error = Some(text.to_owned());
+            keep(d, format!("{}: {text}", ui.st.red("error")));
             ui.error(&format!("{rel}: {text}"));
         }
-        "warning" => ui.warning(&format!("{rel}: {text}")),
+        "warning" => {
+            keep(d, format!("{}: {text}", ui.st.yellow("warning")));
+            ui.warning(&format!("{rel}: {text}"));
+        }
         "note" => ui.note(&format!("{rel}: {text}")),
-        "line" => ui.line(&format!("{} {text}", ui.st.cyan(&format!("{rel}:")))),
+        "line" => {
+            for l in text.lines() {
+                keep(d, l.to_owned());
+            }
+            ui.line(&format!("{} {text}", ui.st.cyan(&format!("{rel}:"))));
+        }
         _ => return,
     }
     sh.changed(&mut st);
@@ -1799,6 +1850,8 @@ fn tree_lines(
     shown_dir: &str,
     docs: &[(String, String, usize, Option<bool>)],
     cursor: usize,
+    nested: &[Vec<String>],
+    max: usize,
 ) -> Vec<(String, Option<bool>)> {
     let open = docs.iter().filter(|d| d.1 != "stopped").count();
     let mark = |k: usize| if k == cursor { "▸" } else { " " };
@@ -1817,7 +1870,24 @@ fn tree_lines(
     };
     let mut out = vec![(head, None)];
     let width = docs.iter().map(|d| d.0.chars().count()).max().unwrap_or(0);
-    for (k, (r, words, tabs, ok)) in docs.iter().enumerate() {
+    // (the lines under the documents, as many as the terminal has room
+    // for: the highlighted one's first, then each other's in order)
+    let max = max.max(2);
+    let shown_docs = docs.len().min(max - 1);
+    let mut room = max - 1 - shown_docs;
+    let mut take = vec![0usize; docs.len()];
+    let hl = cursor.checked_sub(1).filter(|&h| h < shown_docs);
+    if let Some(h) = hl {
+        take[h] = nested.get(h).map_or(0, Vec::len).min(room);
+        room -= take[h];
+    }
+    for (k, t) in take.iter_mut().enumerate().take(shown_docs) {
+        if Some(k) != hl {
+            *t = nested.get(k).map_or(0, Vec::len).min(room);
+            room -= *t;
+        }
+    }
+    for (k, (r, words, tabs, ok)) in docs.iter().enumerate().take(shown_docs) {
         let tabs = match tabs {
             0 => String::new(),
             1 => " · 1 tab".to_owned(),
@@ -1825,13 +1895,60 @@ fn tree_lines(
         };
         let pad = " ".repeat(width - r.chars().count());
         out.push((format!("{} {r}{pad}  {words}{tabs}", mark(k + 1)), *ok));
+        for l in nested.get(k).into_iter().flatten().take(take[k]) {
+            out.push((format!("{}{l}", crate::ui::NESTED), None));
+        }
+    }
+    if shown_docs < docs.len() {
+        // (the last line says how many more, not one of them)
+        out.pop();
+        out.push((format!("  … {} more", docs.len() - shown_docs + 1), None));
     }
     out
 }
 
+/// The lines under document `d` in the terminal's tree: while it builds,
+/// its build's own lines (the spinner and the tree a single file's watch
+/// draws); else its last lines (the result, its errors); `highlighted`:
+/// up to six, else the build's first two or the last one.
+fn nested_of(d: &Doc, highlighted: bool) -> Vec<String> {
+    if !d.live() {
+        return Vec::new();
+    }
+    if !d.tree.is_empty() {
+        let n = if highlighted { 6 } else { 2 };
+        return d.tree.iter().take(n).cloned().collect();
+    }
+    let n = if highlighted { 6 } else { 1 };
+    let skip = d.recent.len().saturating_sub(n);
+    d.recent.iter().skip(skip).cloned().collect()
+}
+
 /// The status lines drawn (in place, below what is printed).
 fn statuses(sh: &Shared, cursor: usize, shown_dir: &str) {
-    let lines = tree_lines(shown_dir, &rows(&lock(&sh.st), SystemTime::now()), cursor);
+    let st = lock(&sh.st);
+    let order = listed(&st);
+    let nested: Vec<Vec<String>> = order
+        .iter()
+        .enumerate()
+        .map(|(k, r)| {
+            st.docs
+                .get(r)
+                .map(|d| nested_of(d, cursor == k + 1))
+                .unwrap_or_default()
+        })
+        .collect();
+    // (the terminal's height less a line for the cursor: never more lines
+    // than it has, the older lines scrolled away above)
+    let max = crate::keys::height().unwrap_or(40).saturating_sub(1);
+    let lines = tree_lines(
+        shown_dir,
+        &rows(&st, SystemTime::now()),
+        cursor,
+        &nested,
+        max,
+    );
+    drop(st);
     sh.ui.statuses(&lines);
 }
 
@@ -2193,7 +2310,7 @@ mod tests {
             ),
             ("d.tex".to_owned(), "stopped".to_owned(), 0, None),
         ];
-        let t = tree_lines(".", &rows, 2);
+        let t = tree_lines(".", &rows, 2, &[], usize::MAX);
         let lines: Vec<&str> = t.iter().map(|l| l.0.as_str()).collect();
         assert_eq!(
             lines,
@@ -2208,12 +2325,12 @@ mod tests {
         assert_eq!(t[2].1, Some(false));
         assert_eq!(t[4].1, None);
         assert!(
-            tree_lines(".", &rows, 0)[0]
+            tree_lines(".", &rows, 0, &[], usize::MAX)[0]
                 .0
                 .starts_with("▸. · 3 open · keys act on all")
         );
         assert_eq!(
-            tree_lines(".", &[], 0)[0].0,
+            tree_lines(".", &[], 0, &[], usize::MAX)[0].0,
             ". · no document open yet: pick one in the browser"
         );
     }
@@ -2232,8 +2349,97 @@ mod tests {
         assert_eq!(names, ["b/talk.tex", "a/main.tex"]);
         assert_eq!(r[1].1, "not started · Enter starts it");
         assert_eq!(listed(&st), ["b/talk.tex", "a/main.tex"]);
-        let t = tree_lines(".", &r, 0);
+        let t = tree_lines(".", &r, 0, &[], usize::MAX);
         assert!(t[0].0.contains("↑↓ highlight, Enter open"), "{t:?}");
+    }
+
+    /// Under each running document, its build's lines as a single file's
+    /// watch draws them: the one building shows its spinner and tree, the
+    /// one that failed its result and error; the highlighted one up to six
+    /// lines, the others fewer; never more lines than the terminal has.
+    #[test]
+    fn each_documents_build_under_it() {
+        let running = || Running {
+            stdin: None,
+            pid: 0,
+            epoch: 0,
+            url: None,
+            stopping: false,
+        };
+        let mut a = Doc::new();
+        a.run = Some(running());
+        a.build = "building";
+        a.tree = vec![
+            "⠋ a/main.tex: build 2 (a/main.tex:3)        3.2 s".to_owned(),
+            "  └─ ⠋ typesetting page 21 of ~86".to_owned(),
+            "       making the format (once per PhiTeX update)".to_owned(),
+        ];
+        let mut b = Doc::new();
+        b.run = Some(running());
+        b.build = "errors";
+        b.errors = 1;
+        for l in [
+            "PhiTeX 1.0.4  b/talk.tex → b/talk.pdf",
+            "✗  1  clean build  1 error",
+            "error: Undefined control sequence \\arwTHE",
+            " = note: at talk.tex:165",
+        ] {
+            b.recent.push_back(l.to_owned());
+        }
+        let docs = [
+            ("a/main.tex".to_owned(), a.words(SystemTime::now()), 1, None),
+            (
+                "b/talk.tex".to_owned(),
+                b.words(SystemTime::now()),
+                0,
+                Some(false),
+            ),
+        ];
+        // (a highlighted: its three lines; b: its last line)
+        let nested = vec![nested_of(&a, true), nested_of(&b, false)];
+        let t = tree_lines(".", &docs, 1, &nested, 40);
+        let lines: Vec<String> = t
+            .iter()
+            .map(|l| l.0.replace(crate::ui::NESTED, "|"))
+            .collect();
+        assert_eq!(lines.len(), 1 + 2 + 3 + 1, "{lines:#?}");
+        assert!(
+            lines[1].contains("a/main.tex") && lines[1].contains("Building…"),
+            "{lines:#?}"
+        );
+        assert!(lines[2].starts_with("|⠋ a/main.tex: build 2"), "{lines:#?}");
+        assert!(
+            lines[3].contains("typesetting page 21 of ~86"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[5].contains("b/talk.tex") && lines[5].contains("1 error"),
+            "{lines:#?}"
+        );
+        assert_eq!(lines[6], "| = note: at talk.tex:165", "{lines:#?}");
+        // (b highlighted: its last lines, the error's among them)
+        let nested = vec![nested_of(&a, false), nested_of(&b, true)];
+        let t = tree_lines(".", &docs, 2, &nested, 40);
+        let all: Vec<String> = t.iter().map(|l| l.0.clone()).collect();
+        assert!(
+            all.iter().any(|l| l.contains("Undefined control sequence")),
+            "{all:#?}"
+        );
+        assert_eq!(all.len(), 1 + 2 + 2 + 4, "{all:#?}");
+        // (a terminal of six rows: the highlighted document's lines first)
+        let t = tree_lines(".", &docs, 2, &nested, 6);
+        assert_eq!(t.len(), 6, "{t:#?}");
+        assert!(
+            t.iter().any(|l| l.0.contains("Undefined control sequence")),
+            "{t:#?}"
+        );
+        // (a stopped document: its line alone)
+        let mut c = Doc::new();
+        c.recent.push_back("✓  1  clean build".to_owned());
+        assert!(nested_of(&c, true).is_empty());
+        // (the line drawn as it is under its document, no mark)
+        let l = crate::ui::idle_line_for_test(&format!("{}x", crate::ui::NESTED), 80);
+        assert_eq!(l, "    x");
     }
 
     /// A document's state in words, as the strip and the tree say it.
