@@ -1129,6 +1129,8 @@ test("the contents' column is resized by its handle: a drag widens it and the pa
   await t.send("Emulation.setDeviceMetricsOverride", { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
   if (!(await t.q(`$(".win").classList.contains("side-on")`))) await t.click("#b-side");
   await t.until(`$("#side").offsetWidth > 100 && /Part 3/.test($("#side").textContent)`, "the contents beside the pages", 30000);
+  // (the handle on the column's edge: placed by an observer, a frame after the column shows; grabbed before it, the drag missed it)
+  await t.until(`!$(".grip").hidden && Math.abs($(".grip").getBoundingClientRect().left + $(".grip").offsetWidth / 2 - $("#side").getBoundingClientRect().right) < 2`, "the handle on the column's edge", 5000);
   const sizes = () => t.q(`[$("#side").offsetWidth, $("#stage").clientWidth]`);
   const [c0, s0] = await sizes();
   const g = await t.q(`(() => { const r = $(".grip").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
