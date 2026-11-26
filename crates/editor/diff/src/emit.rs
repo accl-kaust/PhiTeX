@@ -1708,18 +1708,19 @@ fn units(toks: &[Tok], src: &str) -> Vec<std::ops::Range<usize>> {
             _ => out.push((i..i + 1, u)),
         }
     }
-    // (a unit with nothing of its own on the page (a `\\clearpage` an
-    // `\\include` makes, a `\\label`, white space): the next one's, else
+    // (a unit with nothing of its own on the page (a `\clearpage` an
+    // `\include` makes, a `\label`, white space): the next one's, else
     // the one before's)
-    let shown = |r: &std::ops::Range<usize>| {
-        toks[r.clone()]
-            .iter()
-            .any(|t| !matches!(t.kind, Kind::Ws | Kind::Par | Kind::Comment | Kind::Unsafe))
+    let shown = |r: &std::ops::Range<usize>, u: Unit| {
+        matches!(u, Unit::Alone | Unit::Bib)
+            || toks[r.clone()]
+                .iter()
+                .any(|t| !matches!(t.kind, Kind::Ws | Kind::Par | Kind::Comment | Kind::Unsafe))
     };
     let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
     let mut lead: Option<usize> = None;
-    for (r, _) in out {
-        if !shown(&r) {
+    for (r, u) in out {
+        if !shown(&r, u) {
             lead.get_or_insert(r.start);
             continue;
         }
