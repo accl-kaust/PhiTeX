@@ -1222,8 +1222,10 @@ test("the contents' column is resized by its handle: a drag widens it and the pa
   await t.send("Emulation.setDeviceMetricsOverride", { width: 1300, height: 850, deviceScaleFactor: 1, mobile: false });
   if (!(await t.q(`$(".win").classList.contains("side-on")`))) await t.click("#b-side");
   await t.until(`$("#side").offsetWidth > 100 && /Part 3/.test($("#side").textContent)`, "the contents beside the pages", 30000);
-  // (the handle on the column's edge: placed by an observer, a frame after the column shows; grabbed before it, the drag missed it)
-  await t.until(`!$(".grip").hidden && Math.abs($(".grip").getBoundingClientRect().left + $(".grip").offsetWidth / 2 - $("#side").getBoundingClientRect().right) < 2`, "the handle on the column's edge", 5000);
+  // (the handle on the column's edge: placed, and shown, by an observer a frame after the column shows; grabbed before it, the
+  // drag missed it; focused before it, hidden still, the focus stayed where it was and ← went to the pages)
+  const onEdge = () => t.until(`!$(".grip").hidden && Math.abs($(".grip").getBoundingClientRect().left + $(".grip").offsetWidth / 2 - $("#side").getBoundingClientRect().right) < 2`, "the handle on the column's edge", 5000);
+  await onEdge();
   const sizes = () => t.q(`[$("#side").offsetWidth, $("#stage").clientWidth]`);
   const [c0, s0] = await sizes();
   const g = await t.q(`(() => { const r = $(".grip").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
@@ -1236,10 +1238,13 @@ test("the contents' column is resized by its handle: a drag widens it and the pa
   await reloaded(t);
   await t.until(`+$("#pgn")?.textContent > 0 && $("#side")?.offsetWidth > 100`, "the pages and the column again", 60000);
   assert.ok(Math.abs((await t.q(`$("#side").offsetWidth`)) - c1) <= 2, "the width kept after a reload");
-  // (the keyboard: ← narrows by 16 px; a double-click, the column's own width)
+  // (the keyboard: ← narrows by 16 px; a double-click, the column's own width. The handle shown first: the column came back
+  // empty, so the handle hidden, and was shown with the contents a frame before the observer shows the handle)
+  await onEdge();
   await t.q(`$(".grip").focus()`);
   await t.key("ArrowLeft", "ArrowLeft", 37);
-  assert.ok(Math.abs((await t.q(`$("#side").offsetWidth`)) - (c1 - 16)) <= 2, "← on the handle: 16 px narrower");
+  const [c2, focus] = await t.q(`[$("#side").offsetWidth, ($("phitex-preview")?.shadowRoot?.activeElement ?? document.activeElement)?.className]`);
+  assert.ok(Math.abs(c2 - (c1 - 16)) <= 2, `← on the handle: 16 px narrower: ${c2} px, from ${c1} (the focus on "${focus}")`);
   await t.mouse(...(await t.q(`(() => { const r = $(".grip").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`)), 2);
   await t.until(`Math.abs($("#side").offsetWidth - ${c0}) <= 2`, "a double-click: the default width", 5000);
   if (process.env.PHITEX_SHOTS) await t.shot(join(process.env.PHITEX_SHOTS, "watch-column-resize.png"));
