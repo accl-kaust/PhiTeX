@@ -383,6 +383,21 @@ fn trace() -> bool {
     crate::exec::obs_flag!("PHITEX_PIC_TRACE")
 }
 
+/// A test's hook into pictures ([`set_pic_hook`]), called with the point
+/// ("begin": a run at a picture's `\begin`, the picture's place `k` among
+/// the run's pictures of its text; "child": a picture's child about to
+/// run, `k` 0), the node and the body's text hash.
+pub type PicHook = Box<dyn Fn(&'static str, u64, u64, u32) + Send + Sync>;
+
+static PIC_HOOK: std::sync::OnceLock<PicHook> = std::sync::OnceLock::new();
+
+/// Sets the hook pictures call at their points ([`PicHook`]): for tests
+/// that hold a picture's child while its paragraph runs.
+#[doc(hidden)]
+pub fn set_pic_hook(h: PicHook) {
+    let _ = PIC_HOOK.set(h);
+}
+
 impl Run<'_, '_> {
     /// At `\begin` read by the command loop: whether the picture's body
     /// was taken from the input and the child's output put in its place
@@ -461,6 +476,9 @@ impl Run<'_, '_> {
         // (the field's name: the body's text and its place among this
         // run's pictures of that text, never the run's position)
         let k = self.pic_mark_k(hash);
+        if let Some(h) = PIC_HOOK.get() {
+            h("begin", node, hash, k);
+        }
         let field = v.field(&format!("pic:{hash:x}:{k}"));
         let locals = self.pic_locals();
         // (the parent's view the child has run on: this run's, where my
@@ -1766,6 +1784,13 @@ impl Operation for Pic {
         let _nt = crate::exec::NodeTimer::new("pic", cx.node().raw());
         let _busy = crate::exec::Busy::new(&ops(&self.0).watch, 1, cx.node().raw());
         let args = cx.args().to_vec();
+        if let Some(h) = PIC_HOOK.get() {
+            let hash = args
+                .get(3)
+                .and_then(|&x| cx.values().as_int(x))
+                .map_or(0, |x| u64::from_ne_bytes(x.to_ne_bytes()));
+            h("child", cx.node().raw(), hash, 0);
+        }
         let o = ops(&self.0);
         let t0 = std::time::Instant::now();
         let out = run_node(cx, o, |r| r.pic_run(&args));

@@ -3642,15 +3642,28 @@ fn waited_holds(eng: &Engine, child: NodeId, looked: Option<u32>) -> bool {
 }
 
 /// Whether a placement of `parent` other than `child` that its last run
-/// read or waits for is to run again (asked, not run since).
+/// read or waits for is to run again (asked, not run since), or is in a
+/// run that has not begun its commit (`Node::committing`, set at the
+/// commit's start and cleared only once the run has ended): that commit
+/// is still to come, and it pays the debt ([`settle_owed`]). Taken as run,
+/// a picture's child in its run let a sibling's commit ask the paragraph,
+/// and its own commit asked again: one paragraph run per picture
+/// (`latex_pictures_pending_while_their_paragraph_runs_ask_it_once`,
+/// `latex_pictures_that_all_change_take_one_run` at -j8).
 fn placements_pending(eng: &Engine, parent: &Node, child: NodeId) -> bool {
     let Some(r) = parent.run_record() else {
         return false;
     };
     let pending = |j: usize| {
-        r.placed
-            .get(j)
-            .is_some_and(|&c| c != child && matches!(eng.node(c).state(), State::Dirty | State::RunningDirty))
+        r.placed.get(j).is_some_and(|&c| {
+            let cn = eng.node(c);
+            c != child
+                && match cn.state() {
+                    State::Dirty | State::RunningDirty => true,
+                    State::Running => !cn.committing.load(Ordering::SeqCst),
+                    _ => false,
+                }
+        })
     };
     r.waits.iter().any(|&j| pending(j))
         || r.reads.of_no_field().any(|rd| match *rd.kind() {
@@ -3687,7 +3700,9 @@ fn ask_placer(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: NodeI
         //   next run's X and D come after L, and D sees S). Not pending,
         //   this commit takes the debt back (`swap`) and asks now.
         // Both: one `swap` or `store(false)` takes the debt, and an ask
-        // made twice merges (`mark_stale`).)
+        // made twice merges (`mark_stale`). A placement in its run is
+        // pending until its commit begins: X is then the SeqCst store of
+        // its `committing` at that start, before its own `settle_owed`.)
         parent.owed_ask.store(true, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
         if placements_pending(eng, parent, child) || !parent.owed_ask.swap(false, Ordering::SeqCst) {

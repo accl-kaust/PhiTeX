@@ -14,10 +14,10 @@ done
 for i in $(seq "$N"); do
   [ "$i" = 1 ] || [ -s ../../../picloop/o.txt ] || break
   "$L" "$T" --nocapture > ../../../picloop/o.txt 2>&1
-  grep -a "^-j8" ../../../picloop/o.txt | head -1 | sed "s/(pictures moved).*asked/asked/" >> ../../../picloop/j8.txt
+  grep -a "^-j8\|^pictures" ../../../picloop/o.txt | head -1 | sed "s/(pictures moved).*asked/asked/" >> ../../../picloop/j8.txt
   if grep -q "test result: FAILED" ../../../picloop/o.txt; then cp ../../../picloop/o.txt ../../../picloop/fail-$i.txt; fi
 done
 touch ../../../picloop/stop; wait
 echo "runs $N failed $(ls ../../../picloop | grep -c fail-)"
 sort ../../../picloop/j8.txt | uniq -c | sort -rn | head -20
-for f in ../../../picloop/fail-*; do [ -e "$f" ] || continue; echo "== $f"; grep -a "^-j\|panicked" -A1 "$f" | cut -c1-6000; done
+for f in ../../../picloop/fail-*; do [ -e "$f" ] || continue; echo "== $f"; grep -a "^-j\|^pictures\|panicked" -A1 "$f" | cut -c1-6000; grep -a "^pic: " "$f" | tail -400; done
